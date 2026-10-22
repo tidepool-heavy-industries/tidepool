@@ -1679,8 +1679,16 @@ pub(super) struct CurrentNativeSources<'a> {
 }
 
 impl<'a> CurrentNativeSources<'a> {
-    pub(super) fn target(&self) -> super::resident::NativeSourceCustody {
-        self.source.for_current_target(self.products.target())
+    pub(super) fn target(
+        &self,
+        selection: &Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+    ) -> Result<super::resident::NativeSourceCustody, super::prepared::PreparedRuntimeError> {
+        self.products
+            .validate_source_target(selection)
+            .map_err(|error| {
+                super::prepared::PreparedRuntimeError::NativeSourceEvidence(Box::new(error))
+            })?;
+        Ok(self.source.for_current_target(self.products.target()))
     }
 
     pub(super) fn package(

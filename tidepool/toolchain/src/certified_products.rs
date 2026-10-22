@@ -124,7 +124,7 @@ pub struct AcceptedGlobal {
 
 /// Ordered observations of one actual prepared target. Authentication preserves
 /// nominal owners; selecting executable occurrences belongs to native admission.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct AuthenticatedTargetImports {
     target: Arc<PreparedProgram>,
     owners: Arc<[ReceiptImportOwner]>,
@@ -376,11 +376,11 @@ pub(crate) struct BoundPackageSelection {
 enum BoundPackageSelectionState {
     Ordinary {
         target: String,
-        program: BoundPackageProgram,
+        imports: AuthenticatedTargetImports,
         links: Arc<PackageLinks>,
     },
     Item {
-        program: BoundPackageProgram,
+        imports: AuthenticatedTargetImports,
         links: Arc<PackageLinks>,
         selection: PackageSelection,
     },
@@ -391,20 +391,19 @@ enum BoundPackageSelectionState {
 
 impl BoundPackageSelection {
     pub(crate) fn ordinary(
-        links: &PackageLinks,
-        target: &str,
-        program: BoundPackageProgram,
+        target: crate::artifacts::invocation_output::CapturedOrdinaryTarget,
     ) -> CertResult<Self> {
-        if links.target_roots(target).is_none() {
+        let (target, links, imports) = target.into_parts();
+        if links.target_roots(&target).is_none() {
             return Err(CertificationError::Receipt(
                 "ordinary package selection lacks its exact target",
             ));
         }
         Ok(Self {
             mode: BoundPackageSelectionState::Ordinary {
-                target: target.to_owned(),
-                program,
-                links: Arc::new(links.clone()),
+                target,
+                imports,
+                links,
             },
         })
     }
@@ -413,6 +412,8 @@ impl BoundPackageSelection {
         links: &PackageLinks,
         selection: &PackageSelection,
         program: BoundPackageProgram,
+        accepted: &[AcceptedGlobal],
+        operation: &InventoryOperation,
     ) -> CertResult<Self> {
         if selection.stage_id() != links.stage_id()
             || selection.program_sha256() != program.sha256()
@@ -450,7 +451,11 @@ impl BoundPackageSelection {
         }
         Ok(Self {
             mode: BoundPackageSelectionState::Item {
-                program,
+                imports: AuthenticatedTargetImports::issue(
+                    program.prepared(),
+                    accepted,
+                    operation,
+                )?,
                 links: Arc::new(links.clone()),
                 selection: selection.clone(),
             },
@@ -527,8 +532,16 @@ impl BoundPackageSelection {
 
     pub(crate) fn prepared_program(&self) -> Option<&Arc<PreparedProgram>> {
         match &self.mode {
-            BoundPackageSelectionState::Ordinary { program, .. }
-            | BoundPackageSelectionState::Item { program, .. } => Some(program.prepared()),
+            BoundPackageSelectionState::Ordinary { imports, .. }
+            | BoundPackageSelectionState::Item { imports, .. } => Some(imports.target()),
+            BoundPackageSelectionState::HomeOrFixture { .. } => None,
+        }
+    }
+
+    pub(crate) fn authenticated_imports(&self) -> Option<&AuthenticatedTargetImports> {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { imports, .. }
+            | BoundPackageSelectionState::Item { imports, .. } => Some(imports),
             BoundPackageSelectionState::HomeOrFixture { .. } => None,
         }
     }
@@ -557,31 +570,6 @@ pub struct CertifiedReceipt {
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     pub finalization: FinalizationEnvelope,
     pub source_recipe: WorkerExecutionSource,
-}
-
-impl CertifiedReceipt {
-    pub(crate) fn ordinary_package_selection(
-        &self,
-        target: &str,
-        program: BoundPackageProgram,
-    ) -> CertResult<BoundPackageSelection> {
-        if !self.targets.contains_key(target) {
-            return Err(CertificationError::Receipt(
-                "ordinary package selection lacks its exact target",
-            ));
-        }
-        BoundPackageSelection::ordinary(&self.package_links, target, program)
-    }
-}
-
-impl SegmentItemReceipt {
-    pub(crate) fn package_selection(
-        &self,
-        stage: &CertifiedReceipt,
-        program: BoundPackageProgram,
-    ) -> CertResult<BoundPackageSelection> {
-        BoundPackageSelection::item(&stage.package_links, &self.selection, program)
-    }
 }
 
 /// Untrusted worker result until the original product admission authenticates
@@ -35518,6 +35506,7 @@ None,
             )])),
             products: Arc::from([]),
         };
+        let operation = InventoryOperation::new(Default::default());
         let program = Arc::new(testing::prepare(testing::wire_program()).unwrap());
         let program_binding =
             BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
@@ -35528,36 +35517,64 @@ None,
             target_roots: vec![PackageLink::Local { occurrence: 0 }],
             home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
         };
-        assert!(
-            BoundPackageSelection::item(&stage, &selection, program_binding.clone()).is_ok()
-        );
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &selection,
+            program_binding.clone(),
+            &[],
+            &operation
+        )
+        .is_ok());
         let mut wrong_program = selection.clone();
         wrong_program.program_sha256 = [2; 32];
-        assert!(
-            BoundPackageSelection::item(&stage, &wrong_program, program_binding.clone()).is_err()
-        );
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &wrong_program,
+            program_binding.clone(),
+            &[],
+            &operation
+        )
+        .is_err());
         let mut crossed_stage = selection.clone();
         crossed_stage.stage_id = [3; 32];
-        assert!(
-            BoundPackageSelection::item(&stage, &crossed_stage, program_binding.clone()).is_err()
-        );
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &crossed_stage,
+            program_binding.clone(),
+            &[],
+            &operation
+        )
+        .is_err());
         let mut crossed_target = selection.clone();
         crossed_target.target = "other".into();
-        assert!(
-            BoundPackageSelection::item(&stage, &crossed_target, program_binding).is_err()
-        );
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &crossed_target,
+            program_binding,
+            &[],
+            &operation
+        )
+        .is_err());
         let mut crossed_roots = selection.clone();
         crossed_roots.target_roots = vec![PackageLink::Local { occurrence: 1 }];
-        let crossed_program =
-            BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
-        assert!(BoundPackageSelection::item(&stage, &crossed_roots, crossed_program).is_err());
+        let crossed_program = BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &crossed_roots,
+            crossed_program,
+            &[],
+            &operation
+        )
+        .is_err());
         let mut crossed_home = selection;
         crossed_home.home_roots.values_mut().next().unwrap()[0] =
             PackageLink::Local { occurrence: 0 };
         assert!(BoundPackageSelection::item(
             &stage,
             &crossed_home,
-            BoundPackageProgram::fixture(program, [1; 32])
+            BoundPackageProgram::fixture(program, [1; 32]),
+            &[],
+            &operation,
         )
         .is_err());
     }

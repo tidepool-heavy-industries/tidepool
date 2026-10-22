@@ -650,7 +650,7 @@ impl NativeInstallationSources {
         current: &super::super::turn::CurrentNativeSources<'_>,
     ) -> Result<Self, PreparedRuntimeError> {
         Ok(Self {
-            target: current.target(),
+            target: current.target(&plan.selection)?,
             programs: plan
                 .programs
                 .iter()

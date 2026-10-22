@@ -289,7 +289,10 @@ pub(crate) struct CapturedNativeOutput<'a> {
 
 enum NativeOutputOwner<'a> {
     World(&'a crate::compiler_world::CheckedWorldCellProgram),
-    Finite(&'a FiniteNativeOutput),
+    Finite(
+        &'a FiniteNativeOutput,
+        &'a certified_products::CertifiedReceipt,
+    ),
 }
 
 struct FiniteNativeOutput {
@@ -301,6 +304,26 @@ struct FiniteNativeOutput {
     files: BTreeMap<PathBuf, Arc<[u8]>>,
 }
 
+/// A named ordinary target closed by the completed output that owns both its
+/// writer bytes and receipt. No raw program/manifest pairing can issue this.
+pub(crate) struct CapturedOrdinaryTarget {
+    target: String,
+    links: Arc<certified_products::PackageLinks>,
+    imports: certified_products::AuthenticatedTargetImports,
+}
+
+impl CapturedOrdinaryTarget {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        Arc<certified_products::PackageLinks>,
+        certified_products::AuthenticatedTargetImports,
+    ) {
+        (self.target, self.links, self.imports)
+    }
+}
+
 impl<'a> CapturedNativeOutput<'a> {
     pub(crate) fn from_world(program: &'a crate::compiler_world::CheckedWorldCellProgram) -> Self {
         Self {
@@ -308,38 +331,71 @@ impl<'a> CapturedNativeOutput<'a> {
         }
     }
 
+    pub(crate) fn ordinary_package_selection(
+        &self,
+        target: &str,
+        program: &crate::prepared_artifact::BoundPackageProgram,
+    ) -> Result<certified_products::BoundPackageSelection, CompileError> {
+        let NativeOutputOwner::Finite(_, receipt) = &self.owner else {
+            return Err(CompileError::ExtractFailed(
+                "ordinary target lacks its completed finite output".into(),
+            ));
+        };
+        let name = crate::prepared_artifact::prepared_artifact_name(target);
+        if self.bytes(Path::new(&name))?.as_ref() != program.bytes() {
+            return Err(CompileError::ExtractFailed(
+                "ordinary target differs from its named completed output".into(),
+            ));
+        }
+        let accepted = receipt.targets.get(target).ok_or_else(|| {
+            CompileError::ExtractFailed("ordinary receipt lacks its named target".into())
+        })?;
+        let imports = certified_products::AuthenticatedTargetImports::issue(
+            program.prepared(),
+            accepted,
+            self.operation(),
+        )
+        .map_err(compiler_evidence_failure)?;
+        certified_products::BoundPackageSelection::ordinary(CapturedOrdinaryTarget {
+            target: target.to_owned(),
+            links: Arc::new(receipt.package_links.clone()),
+            imports,
+        })
+        .map_err(compiler_evidence_failure)
+    }
+
     pub(crate) fn directory(&self) -> &Path {
         match &self.owner {
             NativeOutputOwner::World(program) => program.directory().path(),
-            NativeOutputOwner::Finite(output) => &output.issuing_root,
+            NativeOutputOwner::Finite(output, _) => &output.issuing_root,
         }
     }
 
     pub(crate) fn physical_directory(&self) -> &Path {
         match &self.owner {
             NativeOutputOwner::World(program) => program.directory().path(),
-            NativeOutputOwner::Finite(output) => &output.root,
+            NativeOutputOwner::Finite(output, _) => &output.root,
         }
     }
 
     pub(crate) fn producer_sha256(&self) -> &[u8; 32] {
         match &self.owner {
             NativeOutputOwner::World(program) => program.producer_sha256(),
-            NativeOutputOwner::Finite(output) => &output.producer,
+            NativeOutputOwner::Finite(output, _) => &output.producer,
         }
     }
 
     pub(crate) fn profile_sha256(&self) -> &[u8; 32] {
         match &self.owner {
             NativeOutputOwner::World(program) => program.logical().profile_sha256(),
-            NativeOutputOwner::Finite(output) => &output.profile,
+            NativeOutputOwner::Finite(output, _) => &output.profile,
         }
     }
 
     pub(crate) fn operation(&self) -> &Arc<InventoryOperation> {
         match &self.owner {
             NativeOutputOwner::World(program) => &program.validation().inventory,
-            NativeOutputOwner::Finite(output) => &output.operation,
+            NativeOutputOwner::Finite(output, _) => &output.operation,
         }
     }
 
@@ -392,7 +448,7 @@ impl<'a> CapturedNativeOutput<'a> {
             NativeOutputOwner::World(program) => {
                 crate::checked_cell::world_output_bytes(program, relative)
             }
-            NativeOutputOwner::Finite(output) => output
+            NativeOutputOwner::Finite(output, _) => output
                 .files
                 .get(relative)
                 .ok_or_else(|| CompileError::MissingOutput(output.root.join(relative))),
@@ -433,7 +489,7 @@ impl<P> CompletedNativeOutputBundle<P> {
 
     pub(super) fn native_output(&self) -> CapturedNativeOutput<'_> {
         CapturedNativeOutput {
-            owner: NativeOutputOwner::Finite(&self.output),
+            owner: NativeOutputOwner::Finite(&self.output, &self.receipt),
         }
     }
 }
@@ -1053,6 +1109,44 @@ mod tests {
                     .complete()
                     .unwrap();
                 let owner = captured.native_output();
+                let prepared_bytes = owner.bytes(Path::new("__prepared.prepared.cbor")).unwrap();
+                let artifact = crate::prepared_artifact::PreparedArtifact::parse(
+                    prepared_bytes.to_vec(),
+                    tidepool_repr::execution_schema::DecodeLimits::default(),
+                )
+                .unwrap();
+                let selected = owner
+                    .ordinary_package_selection("__prepared", &artifact.bind_package_program())
+                    .expect("named physical target closes its receipt and prepared owner");
+                assert!(Arc::ptr_eq(
+                    selected.prepared_program().unwrap(),
+                    artifact.prepared_shared(),
+                ));
+                assert!(owner
+                    .ordinary_package_selection("other", &artifact.bind_package_program(),)
+                    .is_err());
+                // The replacement keeps the exact same global signature list;
+                // successful import authentication alone cannot pair its code
+                // with another named target's package selections.
+                let mut crossed =
+                    tidepool_test_data::prepared::wire_from_prepared(artifact.prepared());
+                let binding = match &mut crossed.bindings[0] {
+                    tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
+                    tidepool_repr::execution_schema::Group::Recursive(bindings) => &mut bindings[0],
+                };
+                binding.identity.occurrence.push_str("Crossed");
+                let crossed = crate::prepared_artifact::PreparedArtifact::parse(
+                    tidepool_test_data::prepared_encode::encode_wire_program(&crossed),
+                    tidepool_repr::execution_schema::DecodeLimits::default(),
+                )
+                .unwrap();
+                assert_eq!(crossed.prepared().globals(), artifact.prepared().globals());
+                assert!(
+                    owner
+                        .ordinary_package_selection("__prepared", &crossed.bind_package_program(),)
+                        .is_err(),
+                    "equal import signatures cannot replace the physical named target"
+                );
                 let mut validation =
                     crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
                         Arc::clone(owner.operation()),

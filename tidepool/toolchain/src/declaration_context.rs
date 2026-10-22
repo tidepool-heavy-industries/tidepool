@@ -16170,7 +16170,14 @@ fn certify_artifact_view_groups(
     }
     // Borrow the opaque selected row from its issuing owner. Revalidating the
     // scoped links below does not grant permission to issue a replacement row.
-    let mut shared_rows = issued_rows.cloned().unwrap_or_default();
+    validation.inventory.reserve::<(
+        crate::artifact_inventory::NativeGroupBinding,
+        Arc<IssuedSelectedNativeGroup>,
+    )>(selected_bindings.len()).map_err(|error| compiler_evidence_failure(error.into()))?;
+    let mut shared_rows = selected_bindings.iter().filter_map(|binding| {
+        issued_rows.and_then(|rows| rows.get(binding))
+            .map(|row| (*binding, Arc::clone(row)))
+    }).collect::<BTreeMap<_, _>>();
     let mut inherit_row = |binding, row: &Arc<IssuedSelectedNativeGroup>| {
         if let Some(previous) = shared_rows.get(&binding) {
             if !previous.product().same_issuance(row.product())

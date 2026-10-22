@@ -1,7 +1,7 @@
 //! Versioned prepared-execution artifact contract shared by the extractor
 //! writer, compile cache, and native consumers.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tidepool_repr::execution_schema::{
     link_program, parse_program, Architecture, DecodeLimits, Endianness, LinkError, LinkedProgram,
@@ -54,13 +54,20 @@ pub struct PreparedArtifact {
 /// Wire identity paired with the exact prepared owner admitted from those bytes.
 #[derive(Clone, Debug)]
 pub(crate) struct BoundPackageProgram {
-    sha256: [u8; 32],
+    bytes: Arc<Vec<u8>>,
+    sha256: Arc<OnceLock<[u8; 32]>>,
     prepared: Arc<PreparedProgram>,
 }
 
 impl BoundPackageProgram {
     pub(crate) fn sha256(&self) -> &[u8; 32] {
-        &self.sha256
+        use sha2::{Digest, Sha256};
+        self.sha256
+            .get_or_init(|| Sha256::digest(&*self.bytes).into())
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     pub(crate) fn prepared(&self) -> &Arc<PreparedProgram> {
@@ -69,7 +76,11 @@ impl BoundPackageProgram {
 
     #[cfg(test)]
     pub(crate) fn fixture(prepared: Arc<PreparedProgram>, sha256: [u8; 32]) -> Self {
-        Self { sha256, prepared }
+        Self {
+            bytes: Arc::new(Vec::new()),
+            sha256: Arc::new(OnceLock::from(sha256)),
+            prepared,
+        }
     }
 }
 
@@ -106,9 +117,9 @@ impl PreparedArtifact {
     }
 
     pub(crate) fn bind_package_program(&self) -> BoundPackageProgram {
-        use sha2::{Digest, Sha256};
         BoundPackageProgram {
-            sha256: Sha256::digest(&*self.bytes).into(),
+            bytes: Arc::clone(&self.bytes),
+            sha256: Arc::new(OnceLock::new()),
             prepared: Arc::clone(&self.prepared),
         }
     }
@@ -125,9 +136,9 @@ impl PreparedArtifact {
                 "package program bytes and prepared owner differ".into(),
             ));
         }
-        use sha2::{Digest, Sha256};
         Ok(BoundPackageProgram {
-            sha256: Sha256::digest(&*bytes).into(),
+            bytes,
+            sha256: Arc::new(OnceLock::new()),
             prepared,
         })
     }

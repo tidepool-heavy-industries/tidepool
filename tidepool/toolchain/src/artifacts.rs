@@ -994,13 +994,14 @@ pub fn prepare_world_cell_program(
                         segment.originals.package_links(),
                         &item_selection,
                         package_program.clone(),
+                        &globals,
+                        &validation.inventory,
                     )
                     .map_err(compiler_evidence_failure)?,
                     segment
                         .product_admission()
                         .compiler_inputs()
                         .compiler_source_support(),
-                    &globals,
                     &segment_package_availability(&segment.originals, &packages),
                     Some(&segment.originals),
                     Some(entry),
@@ -3616,13 +3617,10 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
-    /// Consume this target's source receipt without reconstructing membership
-    /// from code custody or another target's equal linkage completion.
-    pub fn physical_current_for<'s>(
+    pub fn validate_source_target(
         &self,
-        selection: &'s Arc<crate::artifact_inventory::CompletedNativeSelection>,
-        selected: &crate::artifact_inventory::CompletedNativeSourceRow,
-    ) -> Result<Option<PhysicalCurrentNativeGroup<'s>>, CompileError> {
+        selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
+    ) -> Result<(), CompileError> {
         let own = self.completed_selection().ok_or_else(|| {
             CompileError::ExtractFailed("native target lacks its completed source selection".into())
         })?;
@@ -3633,6 +3631,17 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
                 "native source receipt belongs to another prepared target".into(),
             ));
         }
+        Ok(())
+    }
+
+    /// Consume this target's source receipt without reconstructing membership
+    /// from code custody or another target's equal linkage completion.
+    pub fn physical_current_for<'s>(
+        &self,
+        selection: &'s Arc<crate::artifact_inventory::CompletedNativeSelection>,
+        selected: &crate::artifact_inventory::CompletedNativeSourceRow,
+    ) -> Result<Option<PhysicalCurrentNativeGroup<'s>>, CompileError> {
+        self.validate_source_target(selection)?;
         match selection.source_association(selected.binding()) {
             Some(crate::artifact_inventory::SelectedNativeSourceAssociation::Current(group)) => {
                 if !group.same_issuance(selected.product()) {
@@ -4335,18 +4344,12 @@ fn seal_turn_outputs_with_validation(
                 originals.package_links(),
                 selection,
                 program.clone(),
+                accepted,
+                &validation.inventory,
             )
             .map_err(compiler_evidence_failure)?
         }
-        (None, None) => crate::certified_products::BoundPackageSelection::ordinary(
-            &ordinary_receipt
-                .as_ref()
-                .expect("ordinary receipt")
-                .package_links,
-            target,
-            program.clone(),
-        )
-        .map_err(compiler_evidence_failure)?,
+        (None, None) => physical_native_output.ordinary_package_selection(target, program)?,
         _ => {
             return Err(CompileError::ExtractFailed(
                 "native target has an incoherent package selection mode".into(),
@@ -4359,7 +4362,6 @@ fn seal_turn_outputs_with_validation(
         &package_products,
         package_selection,
         inherited_support,
-        accepted,
         &package_catalog,
         segment_originals,
         typed_entry,
@@ -4575,7 +4577,6 @@ fn admit_native_target_products(
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
     package_selection: certified_products::BoundPackageSelection,
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
-    accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
@@ -4597,12 +4598,12 @@ fn admit_native_target_products(
             .physical_cohort()?,
     };
     let target_admission_start = Instant::now();
-    let observed = certified_products::AuthenticatedTargetImports::issue(
-        prepared,
-        accepted,
-        &validation.inventory,
-    )
-    .map_err(compiler_evidence_failure)?;
+    let observed = package_selection
+        .authenticated_imports()
+        .ok_or_else(|| {
+            CompileError::ExtractFailed("native target lacks its authenticated imports".into())
+        })?
+        .clone();
     let selected_target = match segment_originals {
         Some(originals) => {
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
@@ -6455,12 +6456,12 @@ fn compile_invocation_inner(
                 CompileError::ExtractFailed("target product receipt missing".into())
             })?;
             if valid_evidence.is_some() {
-                let observed = certified_products::AuthenticatedTargetImports::issue(
-                    target.prepared.prepared_shared(),
-                    accepted,
-                    &validation.inventory,
-                )
-                .map_err(compiler_evidence_failure)?;
+                let package_selection = native_output
+                    .ordinary_package_selection(name, &target.prepared.bind_package_program())?;
+                let observed = package_selection
+                    .authenticated_imports()
+                    .expect("closed ordinary imports")
+                    .clone();
                 let selected_target = physical.inventory().select_native_target(
                     physical_inputs.physical_cohort()?,
                     &certified.source_selection,
@@ -6492,12 +6493,6 @@ fn compile_invocation_inner(
                         target.prepared.prepared_shared(),
                         &package_closure,
                         &mut validation,
-                    )
-                    .map_err(compiler_evidence_failure)?;
-                let package_selection = receipt
-                    .ordinary_package_selection(
-                        name,
-                        target.prepared.bind_package_program(),
                     )
                     .map_err(compiler_evidence_failure)?;
                 let native_inputs = selected_target
