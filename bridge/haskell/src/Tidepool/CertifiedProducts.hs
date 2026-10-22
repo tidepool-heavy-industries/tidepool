@@ -577,10 +577,22 @@ encodeCertifiedOriginalProducts
   -> [(String, WireProgram)]
   -> DependencyEvidence -> BS.ByteString -> BS.ByteString
   -> IO (Either String (BS.ByteString, Map.Map (String,String) String, TargetCertificationContext))
-encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes = do
-  fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
-    encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty emptyPackageLinkIndex Map.empty kind retained emittedSeals reconciled env sourceRecipe
-      interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
+encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env sourceRecipe interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes =
+  let targetNames = map (T.pack . fst) targets
+      -- This DATA-only path owns no package code occurrences. Its actual targets
+      -- still belong to the stage; PackageOwner witnesses must find a real link.
+      packageIndex
+        | Set.size (Set.fromList targetNames) /= length targetNames =
+            Left "package projections repeat a target"
+        | otherwise = issuePackageLinkIndex []
+            (Map.fromList [(target,Map.empty) | target <- targetNames])
+            (Map.fromList [(target,[]) | target <- targetNames])
+            Map.empty Set.empty Map.empty []
+  in case packageIndex of
+    Left reason -> pure (Left reason)
+    Right issued -> fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
+      encodeCertifiedOriginalProductsWithCapture Nothing Nothing Nothing [] Map.empty issued Map.empty kind retained emittedSeals reconciled env sourceRecipe
+        interfaces finalized cached exact fresh targets evidence productBytes evidenceBytes
 
 -- Prior facts come from this same issuer's completed stage. They add imported
 -- group coordinates and retained type seals, never newly emitted module rows.

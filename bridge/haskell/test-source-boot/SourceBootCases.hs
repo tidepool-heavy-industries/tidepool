@@ -2987,6 +2987,22 @@ originalPackageProjection = withScratch $ \work -> do
   coldCertificate <- certifyProjectedProducts work "cold" original coldProducts [] env >>= either fail pure
   originalOnly <- certifyProjectedProducts work "original-only" original sourceProducts [] env >>= either fail pure
   mixed <- certifyProjectedProducts work "mixed" original sourceProducts [("target",target)] env >>= either fail pure
+  missingOccurrence <- case [globalIdentity global | global <- programGlobals target
+      , globalIdentity global `Set.member` packageSet
+      , isJust (globalRequiredGeneration global)] of
+    identity : _ -> pure identity
+    [] -> fail "actual target lacks a retained package global for occurrence refusal"
+  let unissuedTarget = target {programGlobals =
+        [if globalIdentity global == missingOccurrence
+          then global {globalRequiredGeneration=Nothing} else global
+        | global <- programGlobals target]}
+  requireUserError "DATA target without a package occurrence"
+    ("target package import lacks its occurrence: " ++ show missingOccurrence) $
+    certifyProjectedProducts work "unissued-target-package" original sourceProducts [("target",unissuedTarget)] env
+  certifyProjectedProducts work "duplicate-target" original sourceProducts
+    [("target",target),("target",target)] env >>= \case
+      Left "package projections repeat a target" -> pure ()
+      other -> fail ("DATA target duplicate was not refused before issuance: " ++ show other)
   let packageOwner = \case CodecPackageOwner {} -> True; _ -> False
       retainedOwner = \case CodecRetainedOwner {} -> True; _ -> False
   coldOwners <- certificateOwners coldCertificate
