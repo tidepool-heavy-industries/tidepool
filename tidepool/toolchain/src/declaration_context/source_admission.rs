@@ -49,7 +49,7 @@ impl std::error::Error for SourceAdmissionFailure {}
 
 /// Consumed compiler adjacency carries no lexical permission. Its construction
 /// is private to an already authenticated source receipt.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompilerDependencies {
     adjacency: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
 }
@@ -58,7 +58,9 @@ impl CompilerDependencies {
     pub(super) fn merge<'a>(
         admissions: impl IntoIterator<Item = &'a ExactSourceAdmission>,
     ) -> Result<Self, CompileError> {
-        let mut result = Self::default();
+        let mut result = Self {
+            adjacency: BTreeMap::new(),
+        };
         for admission in admissions {
             for (owner, edges) in admission.compiler_dependencies().adjacency() {
                 charge_owner(&admission.claims.operation, owner, 1)?;
