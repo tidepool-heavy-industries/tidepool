@@ -3,9 +3,9 @@
 **Implementation active; G2 unqualified.** Integration branch
 `root/g2-final-20261021`, checkout
 `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-The current code candidate is `e43985078b`: unified native occupancy, nominal
-prior-Source validation and both executed fixture-premise repairs are integrated.
-Joined compilation and execution of this tranche remain pending.
+The current code repair is `facfdc8ade`, with completion-slot diagnostics in
+`2520a897bb`. The prior candidate `cd12aef513` compiled all 13 affected consumers
+but failed both endpoint histories. These new changes remain unexecuted.
 Root owns integration and publication to `github`; `origin` is local replication.
 
 [NEXT-WAVE](NEXT-WAVE.md) owns the accepted design and assignments;
@@ -27,16 +27,20 @@ controls acceptance. No frozen bundle or Persona delivery is qualified.
 
 ## Latest executed evidence
 
-At diagnostic checkpoint `daee0908dd`, Text1 failed at stage 1: the actual Original
-matched its physical issuer, but the receiving namespace had no selected entry.
-This established the nominal-versus-selected distinction repaired above.
-SourceBoot selected-home1 failed because its fixture omitted the real carrier's
-HOME dependency seal; the paired-output leaf passed 1/1. Prior-HOME1 failed before
-its assertions because generated scaffolding imported Display from an uncaptured
-source cohort. These are not passing evidence for the repaired candidate.
+At `cd12aef513`, all 13 affected consumers compiled. Text1 executed 1/1 and
+failed during stage-1 HOME certificate issuance (`home source metadata owner`),
+after prior-issuer validation. The repair carries normalized exact nominal members
+into a certificate-only index rather than reconstructing them from executable
+source groups. It does not add native availability.
 
-Rust process/compiler cleanup was confirmed. Text diagnostics remain incomplete;
-the first-demand compiler stderr retained the concrete missing-module error.
+Acknowledgement1 executed 1/1 and failed at final publication after both A items
+committed: `native completion changed an exact HOME slot`. B is tracing the
+retained completion owner across physical reuse. A filtered diagnostic records
+the first differing ordered import and exact binding; the mismatch remains a
+refusal. The next run must establish the actual competing identities.
+
+Both failed process/compiler cleanups were confirmed. Earlier fixture repairs
+and new component controls still require execution on the joined candidate.
 Exact commands, counts, build IDs, reports and source identities are retained in
 `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
 Do not combine results from different revisions into a qualified suite.
@@ -49,7 +53,8 @@ Do not combine results from different revisions into a qualified suite.
   representation fixtures do not establish this production boundary.
 - D: independently accepted obsolete sibling API deletion `f23600df8f`, now
   integrated as `e43985078b`; migrated refusal/lifetime tests await execution.
-- A/B/T: implementations integrated; available for joined failure repairs.
+- B: acknowledgement completion-owner diagnosis and bounded repair.
+- T: qualification guide integrated; no duplicate exploratory restart needed.
 - Root: critical failure investigation, concrete review, integration and delivery.
 
 Broader ordinary G2 cohorts, matched bundle and fresh Persona remain unqualified.
@@ -67,10 +72,12 @@ untouched. No historical WIP patch is an automatic merge candidate.
 
 ## Delivery
 
-Coherent compile -> acknowledgement1 and Text/Display1 complete histories ->
-ordinary ownership/reload/recovery cohorts -> one matched fast-dev frozen bundle
+Coherent compile -> acknowledgement1 and Text/Display1 complete histories plus
+representative ownership/cleanup controls -> one matched fast-dev frozen bundle
 -> catalog and prepared-child smoke -> four approved Persona cases and two
 release contracts -> actual Persona spec/tools/rendered memory -> bounded real
 DeepSeek smoke -> fresh user session preserving authored files and memory.
+Broader G2 cohorts continue after explicitly exploratory launch; G2 stays
+unqualified until they pass on the matched candidate.
 Full crash/cold/fork/callback matrices, M1-M3/performance and release/main
 convergence remain G3; this is a G2 development candidate.

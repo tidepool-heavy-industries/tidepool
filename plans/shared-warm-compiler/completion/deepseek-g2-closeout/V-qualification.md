@@ -106,8 +106,10 @@ cold/cutoff/private/reload selectors from actual targets and command manifests.
    absent-body representation controls do not prove nominal metadata survives
    without an executable own offer. Missing declared inputs are failures.
 5. **Final delivery:** reconcile the complete evidence against the exact frozen
-   source/profile/compiler/assets contract. Start fresh user conversation state
-   while preserving authored files and memory. Report a live URL only after
+   source/profile/compiler/assets contract. Preserve the exploratory conversation
+   when its exact bundle remains accepted; qualification alone needs no restart.
+   A changed bundle requires an explicit rollout preserving authored files and
+   memory. Report a live URL only after
    service readiness is observed. Keep exploratory, G2-qualified and deployed
    status distinct.
 
