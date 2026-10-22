@@ -183,12 +183,20 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         "Data.List.sort retains its three ordered package roots: {package_roots:?}"
     );
     assert!(
-        package_roots.iter().any(|owner| owner.ends_with("OldList")),
-        "the item keeps its sort implementation: {package_roots:?}"
-    );
-    assert!(
-        package_roots.iter().all(|owner| owner.ends_with("Resume")),
-        "the exact roots retain their issued package owner: {package_roots:?}"
+        selection
+            .target_imports()
+            .iter()
+            .any(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding,
+                    ..
+                } => binding.product().code().globals().iter().any(|global| {
+                    global.identity.module == "Data.List"
+                        && global.identity.occurrence == "sort"
+                }),
+                _ => false,
+            }),
+        "the item keeps its exact Data.List.sort implementation: {package_roots:?}"
     );
 
     let execution = first.items()[0]
