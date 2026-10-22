@@ -315,8 +315,13 @@ impl BoundPackageSelection {
                 }
                 Ok(Arc::clone(original_packages))
             }
-            BoundPackageSelectionState::Ordinary { target, links, .. } => {
-                if links
+            BoundPackageSelectionState::Ordinary {
+                target,
+                home_contracts,
+                ..
+            } => {
+                if home_contracts
+                    .manifest
                     .original_use_roots
                     .keys()
                     .any(|key| &key.target == target)

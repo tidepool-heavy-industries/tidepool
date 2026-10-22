@@ -4333,7 +4333,9 @@ fn seal_turn_outputs_with_validation(
         .unwrap_or(&no_inherited_inputs);
     let package_selection = match (segment_originals, item_selection.as_ref()) {
         (Some(_), Some(selection)) => selection.clone(),
-        (None, None) => physical_native_output.ordinary_package_selection(target, program)?,
+        (None, None) => {
+            physical_native_output.ordinary_package_selection(target, program, &certified)?
+        }
         _ => {
             return Err(CompileError::ExtractFailed(
                 "native target has an incoherent package selection mode".into(),
@@ -6332,6 +6334,7 @@ fn compile_invocation_inner(
                 ));
             }
             certified_products::CertifiedProducts {
+                home_contracts: None,
                 original_inputs: None,
                 groups: certified_products::IssuedGroupCandidates::empty(),
                 recovery_products: Arc::from([]),
@@ -6433,11 +6436,12 @@ fn compile_invocation_inner(
                 CompileError::ExtractFailed("target product receipt missing".into())
             })?;
             if valid_evidence.is_some() {
-                let package_selection = native_output
-                    .ordinary_package_selection(name, &target.prepared.bind_package_program())?;
-                let observed = package_selection
-                    .authenticated_imports()
-                    .clone();
+                let package_selection = native_output.ordinary_package_selection(
+                    name,
+                    &target.prepared.bind_package_program(),
+                    &certified,
+                )?;
+                let observed = package_selection.authenticated_imports().clone();
                 let selected_target = physical.inventory().select_native_target(
                     physical_inputs.physical_cohort()?,
                     &certified.source_selection,
@@ -9996,6 +10000,7 @@ mod module_product_tests {
             sha256: selected.sha256,
         };
         let certified = certified_products::CertifiedProducts {
+            home_contracts: None,
             groups: certified_products::IssuedGroupCandidates::empty(),
             recovery_products: Arc::from(compiled.recovery_products.clone()),
             module_interfaces: Arc::from([]),

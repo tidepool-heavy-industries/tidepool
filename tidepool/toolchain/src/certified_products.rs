@@ -385,186 +385,173 @@ enum BoundPackageSelectionState {
     Ordinary {
         target: String,
         imports: AuthenticatedTargetImports,
-        links: Arc<PackageLinks>,
+        home_contracts: Arc<ValidatedHomeContracts>,
     },
     Item {
+        target: String,
         imports: AuthenticatedTargetImports,
-        links: Arc<PackageLinks>,
-        selection: PackageSelection,
+        home_contracts: Arc<ValidatedHomeContracts>,
         original_packages: Arc<CheckedOriginalPackageAssociations>,
-        prior_program_products:
-            Arc<[Arc<crate::declaration_context::CompletedNativeProductAvailability>]>,
     },
 }
 
-/// Only an explicit target HOME contract is classified here. A retained product
-/// can also be reached through an Original use or held completion without HOME.
-/// Empty contracts carry prior membership; native demand still needs its own offer.
-pub(crate) enum PackageHomeSourceOrigin {
-    NoContract,
-    CurrentContract,
-    PriorProgramContract,
+/// Authenticate physical HOME membership and ordered package owner/interface
+/// obligations once, including unused annotations. Concrete package exports are
+/// resolved only for selected demand; this proof grants no native availability.
+/// The immutable manifest owns the only ordered package-link table.
+pub(crate) struct ValidatedHomeContracts {
+    manifest: Arc<PackageLinks>,
+    operation: Arc<InventoryOperation>,
+    memberships: Box<[(PackageHomeRootKey, HomeMembership)]>,
+    prior_products: Arc<[Arc<crate::declaration_context::CompletedNativeProductAvailability>]>,
+}
+
+impl std::fmt::Debug for ValidatedHomeContracts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedHomeContracts")
+            .field("stage_id", &self.manifest.stage_id)
+            .field("annotations", &self.memberships.len())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+enum HomeMembership {
+    CurrentReceipt {
+        original: crate::artifact_inventory::ArtifactId,
+    },
+    PriorProgram {
+        product_index: usize,
+    },
+}
+
+/// An annotation applicable to an already issued physical source row. This
+/// borrowed view neither selects a native group nor grants source availability.
+pub(crate) struct ApplicableHomeContract<'a> {
+    links: &'a [PackageLink],
+}
+impl ApplicableHomeContract<'_> {
+    pub(crate) fn links(&self) -> &[PackageLink] {
+        self.links
+    }
+}
+
+impl ValidatedHomeContracts {
+    fn issue(
+        receipt: &CertifiedReceipt,
+        source_selection: &CertifiedSourceSelection,
+        current_groups: &IssuedGroupCandidates,
+        operation: &Arc<InventoryOperation>,
+    ) -> CertResult<Arc<Self>> {
+        operation.reserve::<(PackageHomeRootKey, HomeMembership)>(
+            receipt.package_links.home_roots.len(),
+        )?;
+        let mut memberships = Vec::with_capacity(receipt.package_links.home_roots.len());
+        for (key, roots) in receipt.package_links.home_roots.iter() {
+            crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
+            if !receipt.package_links.target_roots.contains_key(&key.target) {
+                return Err(CertificationError::Mismatch(
+                    "HOME annotation names an undeclared target",
+                ));
+            }
+            operation.charge(receipt.modules.len())?;
+            let current = receipt
+                .modules
+                .iter()
+                .any(|module| module.unit == key.unit && module.module == key.module);
+            let membership = if current {
+                operation.charge(source_selection.modules.len())?;
+                let native = source_selection
+                    .modules
+                    .iter()
+                    .find(|((unit, module), _)| unit == &key.unit && module == &key.module)
+                    .and_then(|(_, selected)| selected.native())
+                    .ok_or(CertificationError::Mismatch(
+                        "HOME current Original membership",
+                    ))?;
+                let mut group = None;
+                for candidate in current_groups.iter() {
+                    operation.charge(1)?;
+                    if candidate.owner() == &native.owner
+                        && candidate.group().original_ordinal() == key.original_ordinal
+                    {
+                        group = Some(candidate);
+                        break;
+                    }
+                }
+                let group = group.ok_or(CertificationError::Mismatch(
+                    "HOME current physical ordinal",
+                ))?;
+                let original = native.original_artifact_id()?;
+                if current_groups.artifact(group) != original {
+                    return Err(CertificationError::Mismatch(
+                        "HOME current physical artifact",
+                    ));
+                }
+                check_ordered_home_package_links(
+                    group.imports().iter(),
+                    roots,
+                    &receipt.package_links.occurrences,
+                )?;
+                HomeMembership::CurrentReceipt { original }
+            } else {
+                let (product_index, product) = source_selection
+                    .prior_program_products
+                    .iter()
+                    .enumerate()
+                    .find(|(_, product)| {
+                        let owner = product.row().original_owner();
+                        owner.unit == key.unit && owner.module == key.module
+                    })
+                    .ok_or(CertificationError::Mismatch(
+                        "prior HOME lacks its exact program issuer",
+                    ))?;
+                check_prior_home_package_links(
+                    product,
+                    key.original_ordinal,
+                    roots,
+                    &receipt.package_links.occurrences,
+                )?;
+                HomeMembership::PriorProgram { product_index }
+            };
+            operation.charge(
+                key.target
+                    .len()
+                    .saturating_add(key.unit.len())
+                    .saturating_add(key.module.len()),
+            )?;
+            memberships.push((key.clone(), membership));
+        }
+        Ok(Arc::new(Self {
+            manifest: Arc::new(receipt.package_links.clone()),
+            operation: Arc::clone(operation),
+            memberships: memberships.into_boxed_slice(),
+            prior_products: Arc::clone(&source_selection.prior_program_products),
+        }))
+    }
+
+    pub(crate) fn require_captured_manifest(
+        &self,
+        operation: &Arc<InventoryOperation>,
+        manifest: &PackageLinks,
+    ) -> CertResult<()> {
+        if !Arc::ptr_eq(operation, &self.operation)
+            || manifest.stage_id() != self.manifest.stage_id()
+        {
+            return Err(CertificationError::Mismatch(
+                "HOME contracts belong to another output operation or stage",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl BoundPackageSelection {
-    pub(crate) fn home_source_origin(
-        &self,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-        owner: &CachedHomeOwner,
-        operation: &InventoryOperation,
-    ) -> CertResult<PackageHomeSourceOrigin> {
-        if self
-            .home_roots(&owner.unit, &owner.module, binding.original_ordinal)
-            .is_none()
-        {
-            return Ok(PackageHomeSourceOrigin::NoContract);
-        }
-        let BoundPackageSelectionState::Item {
-            prior_program_products,
-            ..
-        } = &self.mode
-        else {
-            return Ok(PackageHomeSourceOrigin::CurrentContract);
-        };
-        let Some(product) = prior_program_products.iter().find(|product| {
-            let produced = product.row().original_owner();
-            produced.unit == owner.unit && produced.module == owner.module
-        }) else {
-            return Ok(PackageHomeSourceOrigin::CurrentContract);
-        };
-        if product.row().original_owner() != owner
-            || product.row().original_artifact_id() != binding.binding.artifact()
-        {
-            return Err(CertificationError::Mismatch(
-                "HOME source differs from its prior program issuer",
-            ));
-        }
-        let chosen = product
-            .choose_own_group(
-                crate::artifact_inventory::NativeGroupKey {
-                    artifact: binding.binding.artifact(),
-                    original_ordinal: binding.original_ordinal,
-                },
-                operation,
-            )
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
-            .ok_or(CertificationError::Mismatch(
-                "prior HOME source lacks its own offered group",
-            ))?;
-        if chosen.binding() != binding {
-            return Err(CertificationError::Mismatch(
-                "prior HOME source has another exact group issuer",
-            ));
-        }
-        Ok(PackageHomeSourceOrigin::PriorProgramContract)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn assert_prior_home_contract_controls(
-        &self,
-        operation: &InventoryOperation,
-    ) -> usize {
-        let BoundPackageSelectionState::Item {
-            prior_program_products,
-            selection,
-            links,
-            ..
-        } = &self.mode
-        else {
-            return 0;
-        };
-        for key in selection.home_roots.keys() {
-            let Some(product) = prior_program_products.iter().find(|product| {
-                let owner = product.row().original_owner();
-                owner.unit == key.unit && owner.module == key.module
-            }) else {
-                continue;
-            };
-            let group_key = crate::artifact_inventory::NativeGroupKey {
-                artifact: product.row().original_artifact_id(),
-                original_ordinal: key.original_ordinal,
-            };
-            let Some(binding) = product.groups(group_key).next() else {
-                continue;
-            };
-            let owner = product.row().original_owner();
-            assert!(matches!(
-                self.home_source_origin(binding, owner, operation).unwrap(),
-                PackageHomeSourceOrigin::PriorProgramContract
-            ));
-            let mut without = self.clone();
-            {
-                let BoundPackageSelectionState::Item {
-                    selection: changed, ..
-                } = &mut without.mode
-                else {
-                    unreachable!()
-                };
-                changed.home_roots.remove(key);
-                assert!(
-                    check_item_package_selection(links, changed, selection.program_sha256())
-                        .is_err()
-                );
-            }
-            assert!(matches!(without.home_source_origin(binding, owner, operation).unwrap(), PackageHomeSourceOrigin::NoContract),
-                "retained same-product Source evidence must not force an Original-use or held row into HOME");
-            let mut wrong_owner = owner.clone();
-            wrong_owner.module_version.0[0] ^= 1;
-            assert!(matches!(
-                self.home_source_origin(binding, &wrong_owner, operation),
-                Err(CertificationError::Mismatch(
-                    "HOME source differs from its prior program issuer"
-                ))
-            ));
-            let mut wrong_binding = serde_json::to_value(binding).unwrap();
-            let scope = wrong_binding["binding"]["selection"]
-                .as_array_mut()
-                .unwrap();
-            let first = scope[0].as_u64().unwrap();
-            scope[0] = serde_json::Value::from(first ^ 1);
-            let wrong_binding = serde_json::from_value(wrong_binding).unwrap();
-            assert!(matches!(
-                self.home_source_origin(wrong_binding, owner, operation),
-                Err(CertificationError::Mismatch(
-                    "prior HOME source has another exact group issuer"
-                ))
-            ));
-            let mut absent = self.clone();
-            let BoundPackageSelectionState::Item {
-                selection: changed, ..
-            } = &mut absent.mode
-            else {
-                unreachable!()
-            };
-            let mut absent_key = key.clone();
-            absent_key.original_ordinal = u32::MAX;
-            changed.home_roots.insert(absent_key, Vec::new());
-            let absent_binding = crate::artifact_inventory::NativeGroupBinding {
-                original_ordinal: u32::MAX,
-                ..binding
-            };
-            assert!(matches!(
-                absent.home_source_origin(absent_binding, owner, operation),
-                Err(CertificationError::Mismatch(
-                    "prior HOME source lacks its own offered group"
-                ))
-            ));
-            let mut wrong_stage = selection.clone();
-            wrong_stage.stage_id[0] ^= 1;
-            assert!(
-                check_item_package_selection(links, &wrong_stage, selection.program_sha256())
-                    .is_err()
-            );
-            eprintln!("actual prior HOME contract controls: accepted 1, same-product NoContract 1, crossed item 1, wrong owner 1, wrong issuer 1, absent ordinal 1, wrong stage 1");
-            return 1;
-        }
-        0
-    }
-
     pub(crate) fn ordinary(
         target: crate::artifacts::invocation_output::CapturedOrdinaryTarget,
     ) -> CertResult<Self> {
-        let (target, links, imports) = target.into_parts();
+        let (target, home_contracts, imports) = target.into_parts();
+        let links = &home_contracts.manifest;
         if links.target_roots(&target).is_none() {
             return Err(CertificationError::Receipt(
                 "ordinary package selection lacks its exact target",
@@ -583,72 +570,97 @@ impl BoundPackageSelection {
             mode: BoundPackageSelectionState::Ordinary {
                 target,
                 imports,
-                links,
+                home_contracts,
             },
         })
     }
 
-    pub(crate) fn occurrences(&self) -> &[PackageOccurrenceRow] {
+    fn contracts(&self) -> &Arc<ValidatedHomeContracts> {
         match &self.mode {
-            BoundPackageSelectionState::Ordinary { links, .. }
-            | BoundPackageSelectionState::Item { links, .. } => &links.occurrences,
+            BoundPackageSelectionState::Ordinary { home_contracts, .. }
+            | BoundPackageSelectionState::Item { home_contracts, .. } => home_contracts,
         }
+    }
+
+    fn target_name(&self) -> &str {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { target, .. }
+            | BoundPackageSelectionState::Item { target, .. } => target,
+        }
+    }
+
+    pub(crate) fn require_output_operation(
+        &self,
+        operation: &Arc<InventoryOperation>,
+    ) -> CertResult<()> {
+        if !Arc::ptr_eq(operation, &self.contracts().operation) {
+            return Err(CertificationError::Mismatch(
+                "HOME contracts belong to another output operation",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn applicable_home_contract<'a>(
+        &'a self,
+        row: &crate::artifacts::ResolvedNativeSourceProduct<'_>,
+    ) -> CertResult<Option<ApplicableHomeContract<'a>>> {
+        let contracts = self.contracts();
+        let owner = row.group().owner();
+        let binding = row.binding();
+        let coordinate = (
+            self.target_name(),
+            owner.unit.as_str(),
+            owner.module.as_str(),
+            binding.original_ordinal,
+        );
+        let Ok(index) = contracts.memberships.binary_search_by(|(key, _)| {
+            (
+                key.target.as_str(),
+                key.unit.as_str(),
+                key.module.as_str(),
+                key.original_ordinal,
+            )
+                .cmp(&coordinate)
+        }) else {
+            return Ok(None);
+        };
+        let (key, membership) = &contracts.memberships[index];
+        let original = match membership {
+            HomeMembership::CurrentReceipt { original } => *original,
+            HomeMembership::PriorProgram { product_index } => {
+                let product = &contracts.prior_products[*product_index];
+                product.row().original_artifact_id()
+            }
+        };
+        // A target can also select a historical Original through its own exact
+        // use/completion. An annotation for another physical product is unused.
+        if original != binding.binding.artifact() {
+            return Ok(None);
+        }
+        let links = contracts
+            .manifest
+            .home_roots
+            .get(key)
+            .ok_or(CertificationError::Mismatch(
+                "HOME annotation lost its validated links",
+            ))?;
+        Ok(Some(ApplicableHomeContract { links }))
+    }
+
+    pub(crate) fn occurrences(&self) -> &[PackageOccurrenceRow] {
+        &self.contracts().manifest.occurrences
     }
 
     pub(crate) fn target_roots(&self) -> &[PackageLink] {
-        match &self.mode {
-            BoundPackageSelectionState::Ordinary { target, links, .. } => {
-                links.target_roots.get(target).map_or(&[], Vec::as_slice)
-            }
-            BoundPackageSelectionState::Item { selection, .. } => &selection.target_roots,
-        }
-    }
-
-    pub(crate) fn home_roots(
-        &self,
-        unit: &str,
-        module: &str,
-        original_ordinal: u32,
-    ) -> Option<&[PackageLink]> {
-        let (target, roots) = match &self.mode {
-            BoundPackageSelectionState::Ordinary { target, links, .. } => {
-                (target.as_str(), links.home_roots.as_ref())
-            }
-            BoundPackageSelectionState::Item { selection, .. } => {
-                (selection.target.as_str(), &selection.home_roots)
-            }
-        };
-        roots
-            .get(&PackageHomeRootKey {
-                target: target.to_owned(),
-                unit: unit.to_owned(),
-                module: module.to_owned(),
-                original_ordinal,
-            })
-            .map(Vec::as_slice)
-    }
-
-    pub(crate) fn home_root_coordinates(&self) -> Vec<(String, String, u32)> {
-        let (target, roots) = match &self.mode {
-            BoundPackageSelectionState::Ordinary { target, links, .. } => {
-                (target.as_str(), links.home_roots.as_ref())
-            }
-            BoundPackageSelectionState::Item { selection, .. } => {
-                (selection.target.as_str(), &selection.home_roots)
-            }
-        };
-        roots
-            .keys()
-            .filter(|key| key.target == target)
-            .map(|key| (key.unit.clone(), key.module.clone(), key.original_ordinal))
-            .collect()
+        self.contracts()
+            .manifest
+            .target_roots(self.target_name())
+            .unwrap_or(&[])
     }
 
     pub(crate) fn prepared_program(&self) -> &Arc<PreparedProgram> {
-        match &self.mode {
-            BoundPackageSelectionState::Ordinary { imports, .. }
-            | BoundPackageSelectionState::Item { imports, .. } => imports.target(),
-        }
+        self.authenticated_imports().target()
     }
 
     pub(crate) fn authenticated_imports(&self) -> &AuthenticatedTargetImports {
@@ -1218,6 +1230,7 @@ pub(crate) struct CertifiedProducts {
     pub value_interfaces: Arc<[crate::recovery_artifacts::CertifiedValueInterface]>,
     pub retained_core_products: CertifiedRetainedCoreProducts,
     pub(crate) source_selection: CertifiedSourceSelection,
+    pub(crate) home_contracts: Option<Arc<ValidatedHomeContracts>>,
     pub(crate) original_inputs: Option<Arc<crate::declaration_context::OriginalCompilerInputs>>,
 }
 
@@ -1721,12 +1734,11 @@ impl CertifiedSegmentOriginals {
         let package_selection = BoundPackageSelection {
             mode: BoundPackageSelectionState::Item {
                 imports,
-                links: Arc::new(self.receipt.package_links.clone()),
-                selection: item.selection,
+                target: item.selection.target,
+                home_contracts: Arc::clone(self.products.home_contracts.as_ref().ok_or(
+                    CertificationError::Mismatch("segment lacks authenticated HOME contracts"),
+                )?),
                 original_packages,
-                prior_program_products: Arc::clone(
-                    &self.products.source_selection.prior_program_products,
-                ),
             },
         };
         let original_inputs = cursor
@@ -1740,6 +1752,7 @@ impl CertifiedSegmentOriginals {
             value_interfaces: value_interfaces.into(),
             retained_core_products: self.products.retained_core_products.clone(),
             source_selection,
+            home_contracts: self.products.home_contracts.clone(),
         };
         Ok((products, item.globals, additions, package_selection))
     }
@@ -3688,6 +3701,11 @@ fn decode_package_links(
         if target.is_empty() || unit.is_empty() || module.is_empty() {
             return Err(CertificationError::Receipt("package links home owner"));
         }
+        if !target_roots.contains_key(&target) {
+            return Err(CertificationError::Receipt(
+                "package HOME root names an undeclared target",
+            ));
+        }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
         operation.charge(
@@ -5434,24 +5452,12 @@ impl CertifiedSourceSelection {
                 )?;
             products.push(Arc::clone(product));
         }
-        for (key, roots) in receipt.package_links.home_roots.iter() {
-            if let Some(module) = receipt
+        for key in receipt.package_links.home_roots.keys() {
+            if receipt
                 .modules
                 .iter()
-                .find(|module| module.unit == key.unit && module.module == key.module)
+                .any(|module| module.unit == key.unit && module.module == key.module)
             {
-                let group = module
-                    .groups
-                    .iter()
-                    .find(|group| group.original_ordinal == key.original_ordinal)
-                    .ok_or(CertificationError::Mismatch(
-                        "HOME root is not an issued current group",
-                    ))?;
-                check_ordered_home_package_links(
-                    group.globals.iter().map(|global| &global.owner),
-                    roots,
-                    &receipt.package_links.occurrences,
-                )?;
                 continue;
             }
             operation.charge(key.unit.len().saturating_add(key.module.len()))?;
@@ -5465,12 +5471,6 @@ impl CertifiedSourceSelection {
                     .ok_or(CertificationError::Mismatch(
                         "prior HOME lacks its exact program issuer",
                     ))?;
-            check_prior_home_package_links(
-                product,
-                key.original_ordinal,
-                roots,
-                &receipt.package_links.occurrences,
-            )?;
             if products
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, product))
@@ -14574,7 +14574,10 @@ pub(crate) fn certify_products_with_validation(
         retained_core_modules = origin_counts[2][0], retained_core_group_rows = origin_counts[2][1], retained_core_original_bytes = origin_counts[2][2]);
     let groups = IssuedGroupCandidates::bind(groups.into(), &recovery_products)?;
     source_selection.bind_produced_originals(&groups)?;
+    let home_contracts =
+        ValidatedHomeContracts::issue(receipt, &source_selection, &groups, &validation.inventory)?;
     Ok(CertifiedProducts {
+        home_contracts: Some(home_contracts),
         original_inputs: None,
         groups,
         recovery_products: recovery_products.into(),
