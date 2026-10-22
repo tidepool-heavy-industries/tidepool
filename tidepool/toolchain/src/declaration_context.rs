@@ -7977,6 +7977,31 @@ impl ProgramSourceSupport {
         Ok(())
     }
 
+    fn physical_product(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<
+        Option<&Arc<CompletedNativeProductAvailability>>,
+        crate::certified_products::CertificationError,
+    > {
+        let Some(row) = self.imports.get(owner) else {
+            return Ok(None);
+        };
+        let Some(product) = &row.physical_product else {
+            return Ok(None);
+        };
+        if self
+            .compiler_support
+            .implementation_entry(owner)
+            .is_none_or(|entry| !row.matches_domain_entry(entry))
+        {
+            return Err(crate::certified_products::CertificationError::Mismatch(
+                "prior program Source has another physical issuer",
+            ));
+        }
+        Ok(Some(product))
+    }
+
     fn source_original(
         &self,
         owner: &ExactModuleIdentity,
@@ -11160,6 +11185,44 @@ pub(crate) struct WorldProgramContinuation {
     next_stage: usize,
 }
 
+/// Borrowed same-program evidence from the actual immediate predecessor.
+/// Parsing may consult it, but only the closed physical stage can retain the
+/// already-issued products it used. It grants no compiler namespace role.
+pub(crate) struct PriorProgramSourceWitness<'a> {
+    support: Option<&'a ProgramSourceSupport>,
+    operation: &'a tidepool_repr::execution_schema::InventoryOperation,
+}
+
+impl PriorProgramSourceWitness<'_> {
+    pub(crate) fn operation(&self) -> &tidepool_repr::execution_schema::InventoryOperation {
+        self.operation
+    }
+
+    pub(crate) fn physical_product(
+        &self,
+        unit: &str,
+        module: &str,
+    ) -> Result<
+        Option<&Arc<CompletedNativeProductAvailability>>,
+        crate::certified_products::CertificationError,
+    > {
+        let Some(support) = self.support else {
+            return Ok(None);
+        };
+        self.operation
+            .charge(unit.len().saturating_add(module.len()))?;
+        support.physical_product(&ExactModuleIdentity {
+            unit: unit.to_owned(),
+            module: module.to_owned(),
+        })
+    }
+}
+
+struct PreparedWorldStageInputs<'a> {
+    initial: Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>,
+    prior: PriorProgramSourceWitness<'a>,
+}
+
 impl WorldProgramContinuation {
     pub(crate) fn begin(program: &crate::compiler_world::CheckedWorldCellProgram) -> Self {
         // The request owner already incorporated the operand's TYPE inputs.
@@ -11188,18 +11251,14 @@ impl WorldProgramContinuation {
         Ok(())
     }
 
-    fn stage_inputs(
-        &self,
-        decoded: &DecodedWorldSourceReceipt<'_>,
-        receipt: &crate::certified_products::CertifiedReceipt,
-        products: &crate::certified_products::ParsedModuleProducts,
-        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+    fn prepare_stage_inputs<'a>(
+        &'a self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        stage: &Arc<crate::compiler_world::CheckedWorldCellStage>,
         validation: &mut PackageInterfaceValidation,
-    ) -> Result<DemandedWorldCompilerInputs, CompileError> {
-        self.ensure_program(decoded.program)?;
-        let initial =
-            self.request
-                .checked_stage(decoded.program, &decoded.binding.stage, validation)?;
+    ) -> Result<PreparedWorldStageInputs<'a>, CompileError> {
+        self.ensure_program(program)?;
+        let initial = self.request.checked_stage(program, stage, validation)?;
         initial
             .operation()
             .reserve::<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>(1)
@@ -11210,6 +11269,23 @@ impl WorldProgramContinuation {
                 "World stage inputs lack their actual immediate predecessor",
             ));
         }
+        let prior = PriorProgramSourceWitness {
+            support: self.program.program_support.as_ref(),
+            operation: self.request.operation().as_ref(),
+        };
+        Ok(PreparedWorldStageInputs { initial, prior })
+    }
+
+    fn stage_inputs(
+        &self,
+        prepared: &PreparedWorldStageInputs<'_>,
+        decoded: &DecodedWorldSourceReceipt<'_>,
+        receipt: &crate::certified_products::CertifiedReceipt,
+        products: &crate::certified_products::ParsedModuleProducts,
+        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<DemandedWorldCompilerInputs, CompileError> {
+        let initial = Arc::clone(&prepared.initial);
         if !Arc::ptr_eq(products.operation(), initial.operation()) {
             return Err(failure(
                 "World stage products have another accounting owner",
@@ -11291,7 +11367,7 @@ impl WorldProgramContinuation {
             binding: WorldCompilationIdentity::from_binding(&decoded.binding),
             context: Arc::clone(&self.context),
             checked_values,
-            program_support: self.program.program_support.clone(),
+            program_support: prepared.prior.support.cloned(),
         };
         #[cfg(test)]
         stage_type_anchor_tests::assert_actual_type_anchors(
@@ -12098,7 +12174,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
         continuation: WorldProgramContinuation,
     ) -> Result<WorldProgramSegment, CompileError> {
         let program = self.program;
-        continuation.ensure_program(program)?;
+        let prepared =
+            continuation.prepare_stage_inputs(program, &self.binding.stage, validation)?;
         let outputs = self.binding.stage.outputs();
         let stage_root = program.directory().path().join(
             outputs
@@ -12116,20 +12193,24 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             validation.inventory.clone(),
         )
         .map_err(compiler_evidence_failure)?;
-        let receipt = crate::certified_products::decode_segment_originals_with_operation(
+        let receipt = crate::certified_products::decode_world_segment_originals_with_operation(
             crate::checked_cell::world_output_bytes(
                 program,
                 outputs.certified_products().relative(),
             )?,
             &stage_root,
             &validation.inventory,
+            &prepared.prior,
         )
         .map_err(compiler_evidence_failure)?;
 
-        let package_interfaces = crate::certified_products::PackageInterfaceCustody::from_native_output(
-            &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
-            &receipt, validation,
-        ).map_err(compiler_evidence_failure)?;
+        let package_interfaces =
+            crate::certified_products::PackageInterfaceCustody::from_native_output(
+                &crate::artifacts::invocation_output::CapturedNativeOutput::from_world(program),
+                &receipt,
+                validation,
+            )
+            .map_err(compiler_evidence_failure)?;
         validation
             .inventory
             .reserve::<Arc<crate::certified_products::CertifiedPackageCodeProduct>>(
@@ -12157,7 +12238,8 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let operation = program.validation().inventory.as_ref();
-        let inputs = continuation.stage_inputs(&self, &receipt, &raw, produced, validation)?;
+        let inputs =
+            continuation.stage_inputs(&prepared, &self, &receipt, &raw, produced, validation)?;
         let selected_values = crate::artifacts::SelectedSessionValueOwners::from_checked_imports(
             &inputs.checked_values,
             operation,

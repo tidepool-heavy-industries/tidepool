@@ -144,7 +144,9 @@ pub(super) fn assert_actual_prior_source_inputs(
     selection: &crate::certified_products::CertifiedSourceSelection,
     observed: &[crate::certified_products::ReceiptImportOwner],
 ) {
-    use crate::certified_products::{CertificationError, CertifiedSourceSelection, ReceiptImportOwner};
+    use crate::certified_products::{
+        CertificationError, CertifiedSourceSelection, ReceiptImportOwner,
+    };
 
     let mut exercised = 0;
     for reference in observed {
@@ -168,9 +170,13 @@ pub(super) fn assert_actual_prior_source_inputs(
         else {
             continue;
         };
-        let compiler_entry = program.compiler_support.implementation_entry(&owner)
+        let compiler_entry = program
+            .compiler_support
+            .implementation_entry(&owner)
             .expect("actual produced Source has its held compiler entry");
-        let expected_entry = receipt.row().target_original(receipt.row().original_owner())
+        let expected_entry = receipt
+            .row()
+            .target_original(receipt.row().original_owner())
             .expect("actual produced Source retains its physical Original");
         let ArtifactPayload::Original(product) = &expected_entry.payload else {
             panic!("actual produced Source has its Original payload");
@@ -194,11 +200,15 @@ pub(super) fn assert_actual_prior_source_inputs(
             "actual prior Source owns an available occurrence"
         );
         assert_eq!(prior.groups().collect::<BTreeSet<_>>(), expected);
-        assert!(matches!(selection.target_source_origin(key, &entry).unwrap(),
-            crate::certified_products::TargetSourceOrigin::PriorProgram(_)));
+        assert!(matches!(
+            selection.target_source_origin(key, &entry).unwrap(),
+            crate::certified_products::TargetSourceOrigin::PriorProgram(_)
+        ));
         if matches!(compiler_entry.payload, ArtifactPayload::Canonical(_)) {
-            assert!(!selection.permits_native_group(key.artifact, product.owner(), ordinal),
-                "a canonical compiler role does not gain native permission from prior membership");
+            assert!(
+                !selection.permits_native_group(key.artifact, product.owner(), ordinal),
+                "a canonical compiler role does not gain native permission from prior membership"
+            );
         } else {
             assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
         }
@@ -221,7 +231,9 @@ pub(super) fn assert_actual_prior_source_inputs(
         }
         assert!(matches!(
             selection.target_source_entry(&wrong_version),
-            Err(CertificationError::Mismatch("source module version" | "prior Source module version"))
+            Err(CertificationError::Mismatch(
+                "source module version" | "prior Source module version"
+            ))
         ));
         let mut wrong_binder = reference.clone();
         if let ReceiptImportOwner::Source { binder, .. } = &mut wrong_binder {

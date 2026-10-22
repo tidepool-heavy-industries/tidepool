@@ -1417,25 +1417,9 @@ impl CertifiedSegmentOriginals {
             &item.selection.target_roots,
             self.receipt.package_links.occurrences.len(),
         )?;
-        let home_package_groups = index_home_package_groups(&self.receipt.modules)?;
-        for (key, roots) in &item.selection.home_roots {
-            if key.target != item.selection.target {
-                return Err(CertificationError::Mismatch(
-                    "item HOME roots belong to another target",
-                ));
-            }
-            let expected = home_package_groups
-                .get(&(key.unit.clone(), key.module.clone(), key.original_ordinal))
-                .ok_or(CertificationError::Mismatch(
-                    "item HOME root is not an issued receipt group",
-                ))?;
-            if roots.len() != *expected {
-                return Err(CertificationError::Mismatch(
-                    "item HOME package link count differs from its globals",
-                ));
-            }
-            check_package_link_range(roots, self.receipt.package_links.occurrences.len())?;
-        }
+        // The closed segment authenticated every current/prior HOME membership
+        // and its ordered slots once. Exact equality with that immutable stage
+        // manifest above binds this item without reconstructing a membership map.
         match (&self.products.source_selection.produced_types, produced) {
             (None, None) => {}
             (Some(segment), Some(item)) if item.is_item_of(segment) => {}
@@ -2878,13 +2862,14 @@ fn decode_receipt_packet_with_operation(
     }
     let value = operation.decode_value(bytes, limit)?;
     operation.charge_value_copies(&value, 3)?;
-    decode_receipt_value_in(&value, output_dir, operation)
+    decode_receipt_value_in(&value, output_dir, operation, None)
 }
 
 fn decode_receipt_value_in(
     value: &Value,
     output_dir: Option<&Path>,
     operation: &InventoryOperation,
+    prior: Option<&crate::declaration_context::PriorProgramSourceWitness<'_>>,
 ) -> CertResult<DecodedReceiptPacket> {
     let payload = product_receipt_payload(value)?;
     let (
@@ -3008,7 +2993,10 @@ fn decode_receipt_value_in(
         &package_products,
         match kind {
             CompleteProductKind::Ordinary => PackageLinkTargets::Exact(&targets),
-            CompleteProductKind::SegmentOriginals => PackageLinkTargets::Stage,
+            CompleteProductKind::SegmentOriginals => match prior {
+                Some(prior) => PackageLinkTargets::WorldStage(prior),
+                None => PackageLinkTargets::Stage,
+            },
         },
         &home_package_groups,
         operation,
@@ -3156,6 +3144,40 @@ pub(crate) fn decode_segment_originals_with_operation(
     Ok(decoded.receipt)
 }
 
+/// The actual World owner prepared the stage and immediate predecessor before
+/// parsing. A nominal row in a worker packet cannot construct this witness.
+pub(crate) fn decode_world_segment_originals_with_operation(
+    bytes: &[u8],
+    root: &Path,
+    operation: &InventoryOperation,
+    prior: &crate::declaration_context::PriorProgramSourceWitness<'_>,
+) -> CertResult<CertifiedReceipt> {
+    if !std::ptr::eq(operation, prior.operation()) {
+        return Err(CertificationError::Mismatch(
+            "World prior Source accounting owner",
+        ));
+    }
+    #[cfg(test)]
+    SEGMENT_ORIGINAL_RECEIPT_DECODES.with(|count| count.set(count.get() + 1));
+    let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
+    if bytes.len() > limit {
+        return Err(CertificationError::SizeLimit {
+            format: CertificationFormat::ProductReceipt,
+            actual: bytes.len(),
+            limit,
+        });
+    }
+    let value = operation.decode_value(bytes, limit)?;
+    operation.charge_value_copies(&value, 3)?;
+    let decoded = decode_receipt_value_in(&value, Some(root), operation, Some(prior))?;
+    if decoded.kind != CompleteProductKind::SegmentOriginals {
+        return Err(CertificationError::Receipt(
+            "expected World segment original output",
+        ));
+    }
+    Ok(decoded.receipt)
+}
+
 pub(crate) fn decode_segment_item_with_operation(
     bytes: &[u8],
     operation: &InventoryOperation,
@@ -3248,6 +3270,7 @@ fn decode_package_product_outputs(
 enum PackageLinkTargets<'a> {
     Exact(&'a BTreeMap<String, Vec<AcceptedGlobal>>),
     Stage,
+    WorldStage(&'a crate::declaration_context::PriorProgramSourceWitness<'a>),
 }
 
 fn package_slot_count(globals: &[AcceptedGlobal]) -> usize {
@@ -3255,6 +3278,63 @@ fn package_slot_count(globals: &[AcceptedGlobal]) -> usize {
         .iter()
         .filter(|global| matches!(global.owner, ReceiptImportOwner::Package { .. }))
         .count()
+}
+
+fn completed_nominal_group(
+    completed: &crate::declaration_context::CompletedNativeProductAvailability,
+    ordinal: u32,
+) -> CertResult<&AuthenticatedOriginalGroup> {
+    let owner = completed.row().original_owner();
+    let entry = completed
+        .row()
+        .target_original(owner)
+        .ok_or(CertificationError::Mismatch("prior Source physical entry"))?;
+    let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
+        return Err(CertificationError::Mismatch(
+            "prior Source physical payload",
+        ));
+    };
+    product
+        .original_native()
+        .filter(|native| native.matches_original(product))
+        .and_then(|native| native.group(ordinal))
+        .ok_or(CertificationError::Mismatch(
+            "prior Source original ordinal",
+        ))
+}
+
+fn check_prior_home_package_links(
+    completed: &crate::declaration_context::CompletedNativeProductAvailability,
+    ordinal: u32,
+    links: &[PackageLink],
+    occurrences: &[PackageOccurrenceRow],
+) -> CertResult<()> {
+    let group = completed_nominal_group(completed, ordinal)?;
+    let imports = group.imports().iter().filter_map(|owner| match owner {
+        ReceiptImportOwner::Package {
+            unit,
+            module,
+            interface_digest,
+            ..
+        } => Some((unit, module, interface_digest)),
+        _ => None,
+    });
+    if links.len() != imports.clone().count() {
+        return Err(CertificationError::Mismatch(
+            "prior HOME package link count differs from its globals",
+        ));
+    }
+    for (link, (unit, module, seal)) in links.iter().zip(imports) {
+        let row = occurrences
+            .get(link.occurrence() as usize)
+            .ok_or(CertificationError::Receipt("package link occurrence range"))?;
+        if &row.unit != unit || &row.module != module || &row.defining_interface_sha256 != seal {
+            return Err(CertificationError::Mismatch(
+                "prior HOME ordered package import",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn index_home_package_groups(
@@ -3366,7 +3446,7 @@ fn decode_package_links(
                     ));
                 }
             }
-            PackageLinkTargets::Stage => {}
+            PackageLinkTargets::Stage | PackageLinkTargets::WorldStage(_) => {}
         }
         if target_roots.insert(name, links).is_some() {
             return Err(CertificationError::Receipt(
@@ -3405,19 +3485,26 @@ fn decode_package_links(
                 .saturating_add(unit.len())
                 .saturating_add(module.len()),
         )?;
-        match &targets {
-            PackageLinkTargets::Exact(_) | PackageLinkTargets::Stage => {
-                let expected = home_package_groups
-                    .get(&(unit.clone(), module.clone(), original_ordinal))
-                    .ok_or(CertificationError::Receipt(
-                        "package HOME root is not an issued receipt group",
-                    ))?;
-                if links.len() != *expected {
-                    return Err(CertificationError::Receipt(
-                        "package HOME link count differs from its issued group",
-                    ));
-                }
+        if let Some(expected) =
+            home_package_groups.get(&(unit.clone(), module.clone(), original_ordinal))
+        {
+            if links.len() != *expected {
+                return Err(CertificationError::Receipt(
+                    "package HOME link count differs from its issued group",
+                ));
             }
+        } else if let PackageLinkTargets::WorldStage(prior) = &targets {
+            let product =
+                prior
+                    .physical_product(&unit, &module)?
+                    .ok_or(CertificationError::Receipt(
+                        "package HOME root is not an issued prior program group",
+                    ))?;
+            check_prior_home_package_links(product, original_ordinal, &links, &occurrences)?;
+        } else {
+            return Err(CertificationError::Receipt(
+                "package HOME root is not an issued receipt group",
+            ));
         }
         if home_roots
             .insert(
@@ -5102,11 +5189,11 @@ impl CertifiedSourceSelection {
             if current.contains(&(unit.as_str(), module.as_str())) {
                 continue;
             }
+            operation.charge(unit.len() + module.len())?;
             let owner = crate::declaration_join::ExactModuleIdentity {
                 unit: unit.clone(),
                 module: module.clone(),
             };
-            operation.charge(unit.len() + module.len())?;
             let Some(product) = inputs.prior_source_product(&owner)? else {
                 continue;
             };
@@ -5116,6 +5203,64 @@ impl CertifiedSourceSelection {
             {
                 return Err(CertificationError::Mismatch("prior Source module version"));
             }
+            if products
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, product))
+            {
+                continue;
+            }
+            if products
+                .iter()
+                .any(|existing| existing.row().original_owner() == product.row().original_owner())
+            {
+                return Err(CertificationError::Mismatch(
+                    "competing prior Source physical issuers",
+                ));
+            }
+            operation
+                .reserve::<Arc<crate::declaration_context::CompletedNativeProductAvailability>>(
+                    1,
+                )?;
+            products.push(Arc::clone(product));
+        }
+        for (key, roots) in &receipt.package_links.home_roots {
+            if let Some(module) = receipt
+                .modules
+                .iter()
+                .find(|module| module.unit == key.unit && module.module == key.module)
+            {
+                let group = module
+                    .groups
+                    .iter()
+                    .find(|group| group.original_ordinal == key.original_ordinal)
+                    .ok_or(CertificationError::Mismatch(
+                        "HOME root is not an issued current group",
+                    ))?;
+                if roots.len() != package_slot_count(&group.globals) {
+                    return Err(CertificationError::Mismatch(
+                        "HOME package link count differs from its current globals",
+                    ));
+                }
+                check_package_link_range(roots, receipt.package_links.occurrences.len())?;
+                continue;
+            }
+            operation.charge(key.unit.len().saturating_add(key.module.len()))?;
+            let owner = crate::declaration_join::ExactModuleIdentity {
+                unit: key.unit.clone(),
+                module: key.module.clone(),
+            };
+            let product =
+                inputs
+                    .prior_source_product(&owner)?
+                    .ok_or(CertificationError::Mismatch(
+                        "prior HOME lacks its exact program issuer",
+                    ))?;
+            check_prior_home_package_links(
+                product,
+                key.original_ordinal,
+                roots,
+                &receipt.package_links.occurrences,
+            )?;
             if products
                 .iter()
                 .any(|existing| Arc::ptr_eq(existing, product))
