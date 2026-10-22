@@ -4705,7 +4705,10 @@ fn validate_activation_preview_output_context(
 }
 
 struct PackageInterfaceCatalog<'a> {
-    current: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    current: std::borrow::Cow<
+        'a,
+        BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
+    >,
     interfaces: std::borrow::Cow<
         'a,
         BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
@@ -4766,11 +4769,11 @@ impl PackageInterfaceCatalog<'_> {
                 ));
             }
         }
-        for (owner, witness) in self.current {
+        for (owner, witness) in self.current.iter() {
             certified_products::charge_package_copy(owner, witness, operation)
                 .map_err(compiler_evidence_failure)?;
         }
-        let mut selected = self.current.clone();
+        let mut selected = self.current.as_ref().clone();
         for (owner, digest) in demanded {
             let witness = self
                 .current
@@ -4796,10 +4799,9 @@ fn segment_package_availability<'a>(
     originals: &'a certified_products::CertifiedSegmentOriginals,
     additions: &'a BTreeMap<(String, String), certified_products::PackageInterfaceWitness>,
 ) -> PackageInterfaceCatalog<'a> {
-    let interfaces = std::borrow::Cow::Borrowed(originals.package_availability());
     PackageInterfaceCatalog {
-        current: additions,
-        interfaces,
+        current: std::borrow::Cow::Borrowed(additions),
+        interfaces: std::borrow::Cow::Owned(originals.package_witnesses()),
     }
 }
 
@@ -4808,25 +4810,23 @@ fn package_availability_with_validation<'a>(
     certified: &certified_products::CertifiedProducts,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<PackageInterfaceCatalog<'a>, CompileError> {
-    let mut selected = packages.clone();
-    let inherited = certified_products::inherited_package_witnesses_with_validation(
+    let reconciled = certified_products::reconcile_ordinary_package_interfaces(
         &certified.recovery_products,
+        packages,
         validation,
     )
     .map_err(compiler_evidence_failure)?;
-    for (owner, witness) in inherited {
-        if selected
-            .insert(owner, witness.clone())
-            .is_some_and(|old| old != witness)
-        {
-            return Err(CompileError::ExtractFailed(
-                "exact inherited package selection differs from current target".into(),
-            ));
+    let (mut interfaces, decisions) = reconciled.into_parts();
+    let mut current = BTreeMap::new();
+    for decision in &decisions {
+        interfaces.insert(decision.owner().clone(), decision.selected().clone());
+        if decision.is_new() {
+            current.insert(decision.owner().clone(), decision.selected().clone());
         }
     }
     Ok(PackageInterfaceCatalog {
-        current: packages,
-        interfaces: std::borrow::Cow::Owned(selected),
+        current: std::borrow::Cow::Owned(current),
+        interfaces: std::borrow::Cow::Owned(interfaces),
     })
 }
 
@@ -9958,6 +9958,119 @@ mod module_product_tests {
                 {"directory":"history-8","initial":"initial","successors":(1..=8).map(|n|format!("delta-{n:02}")).collect::<Vec<_>>(),"same_product_cold":"cold-final"},
             ]
         })).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires the matched Haskell worker and frontend"]
+    #[serial_test::serial]
+    fn real_worker_ordinary_package_interface_relocation_reuses_retained_token() {
+        use tidepool_repr::execution_schema::testing;
+
+        let fixture_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
+        let source =
+            "module PackageWitness where\nimport Data.Char (toUpper)\nvalue :: Char\nvalue = toUpper 'a'\n";
+        let compiled = crate::artifacts::test_support::compile_targets(
+            source,
+            &["value"],
+            &[fixture_root],
+            |_, _, _| {},
+        )
+        .unwrap();
+        let inherited = certified_products::inherited_package_witnesses_with_validation(
+            &compiled.recovery_products,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let (owner, selected) = inherited
+            .iter()
+            .next()
+            .expect("a tuple program retains its package interface");
+        let token = compiled.recovery_products.iter().find_map(|product| {
+            product
+                .original_native()
+                .and_then(|native| native.package_interfaces().get(owner))
+                .filter(|token| token.sha256() == &selected.sha256)
+                .cloned()
+        });
+        let token = token.expect("the real compiler output retains package custody");
+
+        // The producer's captured copy, not an ambient GHC path, is the first
+        // issued location. Remove it after retaining the exact token bytes.
+        std::fs::remove_file(&selected.selected_path)
+            .expect("remove the completed transaction's package copy");
+        let retained = tempfile::tempdir().unwrap();
+        let relocated = retained.path().join("External.hi");
+        std::fs::write(&relocated, token.bytes().as_ref()).unwrap();
+        let observed = certified_products::PackageInterfaceWitness {
+            selected_path: relocated.clone(),
+            sha256: selected.sha256,
+        };
+        let certified = certified_products::CertifiedProducts {
+            groups: certified_products::IssuedGroupCandidates::empty(),
+            recovery_products: Arc::from(compiled.recovery_products.clone()),
+            module_interfaces: Arc::from([]),
+            value_interfaces: Arc::from([]),
+            retained_core_products: Default::default(),
+            source_selection: certified_products::CertifiedSourceSelection::empty_product_output(),
+            original_inputs: None,
+        };
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let receipt = BTreeMap::from([(owner.clone(), observed.clone())]);
+        let reconciled = certified_products::reconcile_ordinary_package_interfaces(
+            &compiled.recovery_products,
+            &receipt,
+            &mut validation,
+        )
+        .unwrap();
+        let [reuse] = reconciled.decisions() else {
+            panic!("one ordinary package observation expected");
+        };
+        assert_eq!(
+            reuse.kind(),
+            certified_products::PackageInterfaceSelectionKind::Reuse
+        );
+        assert_eq!(reuse.selected(), selected);
+        assert_eq!(reuse.observed(), &observed);
+        assert!(reuse
+            .token()
+            .is_some_and(|token| token.sha256() == &selected.sha256));
+        assert!(matches!(
+            reuse.issuer(),
+            Some(certified_products::PackageInterfaceIssuer::Original(issuer))
+                if compiled
+                    .recovery_products
+                    .iter()
+                    .any(|product| product.owner() == issuer)
+        ));
+
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let catalog = package_availability_with_validation(
+            &receipt,
+            &certified,
+            &mut validation,
+        )
+        .unwrap();
+        assert!(catalog.current.is_empty());
+        assert_eq!(&catalog.interfaces[owner], selected);
+
+        let binder = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: owner.0.clone(),
+            ..testing::identity(&owner.1, "entry")
+        };
+        let selected_for_target = catalog
+            .select(
+                &[],
+                &[certified_products::PendingImportOwner::Package {
+                    unit: owner.0.clone(),
+                    module: owner.1.clone(),
+                    binder,
+                    interface_digest: selected.sha256,
+                }],
+                &validation.inventory,
+            )
+            .unwrap();
+        assert_eq!(&selected_for_target[owner], selected);
     }
 
     #[test]
