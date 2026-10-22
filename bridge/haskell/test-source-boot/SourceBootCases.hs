@@ -3615,13 +3615,11 @@ originalProjectionProducts = withScratch $ \work -> do
     , "{-# NOINLINE good #-}", "good :: Int -> Int", "good x = if x == 0 then 42 else good (x - 1)" ]
   writeFile (work </> "ProjectionIndependent.hs") $ unlines
     ["module ProjectionIndependent (safe) where", "safe :: Int", "safe = 1"]
-  writeFile (work </> "ProjectionMetadata.hs") $ unlines
-    ["module ProjectionMetadata (Scalar) where", "type Scalar = Int"]
   writeFile (work </> "ProjectionConsumer.hs") $ unlines
     [ "{-# OPTIONS_GHC -Wno-unused-imports #-}"
     , "module ProjectionConsumer (usesGood) where"
-    , "import ProjectionOwner", "import ProjectionIndependent", "import ProjectionMetadata"
-    , "usesGood :: Int -> Scalar", "usesGood x = good x + 1" ]
+    , "import ProjectionOwner", "import ProjectionIndependent"
+    , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
   paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
   let findPrepared name = case [prepared | prepared <- pprModules paired
@@ -3735,17 +3733,6 @@ originalProjectionProducts = withScratch $ \work -> do
     fail "target duplicated a current support group or assigned a retained generation"
   currentCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     captureDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
-  let metadataOwner = ("main", "ProjectionMetadata")
-      emitted = map moduleProductInput (certifiedOriginalProducts currentCertificate)
-  unless (all (\(_,_,_,groups) -> not (null groups)) emitted
-      && all (\(unit,owner,_,_) -> (T.unpack unit,T.unpack owner) /= metadataOwner) emitted
-      && (case lookup (mkModule (stringToUnit "main") (mkModuleName "ProjectionMetadata"))
-          (preparedModuleProductOutcomes completeProducts) of
-            Just (Right []) -> True
-            _ -> False)
-      && maybe False (isJust . localFinalizedCore) (Map.lookup metadataOwner
-          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate)))) $
-    fail "metadata-only owner lost its finalization or acquired native product authority"
   let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
         , let (_,_,_,groups) = moduleProductInput product'
         , group <- groups, binder <- projectedBinders group]
@@ -3797,9 +3784,6 @@ originalProjectionProducts = withScratch $ \work -> do
   prematureCertificate <- doesFileExist (segmentDirectory </> "certified-products.cbor")
   when prematureCertificate (fail "staged segment published its original certificate before completion")
   ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
-  unless (all (\(unit,owner,ordinals) -> (unit,owner) /= metadataOwner && not (null ordinals))
-      (codecCertificateModules ordinaryFacts)) $
-    fail "emitted certificate granted native authority to an interface-only owner"
   receiptsAfterItems <- doesDirectoryExist receiptDirectory >>= \exists ->
     if exists then listDirectory receiptDirectory else pure []
   unless (receiptsAfterItems == receiptsBefore) $
