@@ -25,18 +25,6 @@ mod program_source_support_history {
         (custody, projection)
     }
 
-    fn source_selection(
-        projection: &CompilerInputProjection,
-        custody: &ArtifactView,
-    ) -> crate::certified_products::CertifiedSourceSelection {
-        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-            projection,
-            &custody.metadata_snapshot(),
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-        )
-        .unwrap()
-    }
-
     type Graph = BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>;
 
     #[derive(Default, Debug)]
@@ -215,10 +203,11 @@ mod program_source_support_history {
                 alternate.clone()
             };
             let (selected_view, projection) = original_offer(&selected);
-            let selection = source_selection(&projection, &custody);
-            let input = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
-            let issued =
-                recover_fixture_compiler_support(projection.clone(), selected_view, []).unwrap();
+            let issued = recover_fixture_compiler_support(projection.clone(), selected_view, [])
+                .unwrap()
+                .retain_custody(&custody)
+                .unwrap();
+            let input = OriginalCompilerInputs::from_issued_support(&issued);
             let types = issued
                 .selected_interfaces()
                 .unwrap()
@@ -277,14 +266,10 @@ mod program_source_support_history {
                 .as_array_mut()
                 .unwrap()[3] = Value::Array(vec![]);
             write_receipt(&receipt, &value);
+            let mut validation = PackageInterfaceValidation::default();
             let admission = request
                 .receipt_admission()
-                .validate_receipt_with_validation(
-                    &receipt,
-                    None,
-                    &public,
-                    &mut PackageInterfaceValidation::default(),
-                )
+                .validate_receipt_with_validation(&receipt, None, &public, &mut validation)
                 .unwrap();
             let generated_owner = admission.generated_source_owner().unwrap();
             assert_eq!(generated_owner, identity("fixture", "Consumer"));
@@ -295,13 +280,26 @@ mod program_source_support_history {
                 .merge_fixture_selections(&sparse_view)
                 .unwrap();
             let full_projection = effective.projection().merge(&sparse_projection).unwrap();
-            let full_selection = source_selection(&full_projection, &full_view);
-            let full_input =
-                OriginalCompilerInputs::from_selection(&full_selection, &full_view).unwrap();
+            let mut full_selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &full_projection,
+                    &full_view.metadata_snapshot(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            let full_stage = CapturedCompilerStage::issue(
+                &mut full_selection,
+                &full_view,
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
+            let full_input = full_stage.compiler_inputs();
+            let full_selection = full_stage.source_selection();
             let execution = (&request)
                 .receipt_admission()
                 .product_admission(&admission)
-                .original_execution_context(&full_input)
+                .original_execution_context(full_input)
                 .unwrap();
             expected.extend(offered_owners(&sparse));
             assert_eq!(expected.len(), 22);
@@ -336,7 +334,7 @@ mod program_source_support_history {
                     &continuation_artifacts,
                     std::slice::from_ref(&admission),
                     None,
-                    &full_selection,
+                    full_selection,
                 )
                 .unwrap();
             assert_private_choices(&request, &offered_owners(&selected), &public);
@@ -360,17 +358,19 @@ mod program_source_support_history {
             assert_eq!(public.semantic_sha256(), before);
 
             let (wrong_view, wrong_projection) = original_offer(&[excluded]);
-            let wrong_selection = source_selection(&wrong_projection, &wrong_view);
-            let wrong_input =
-                OriginalCompilerInputs::from_selection(&wrong_selection, &wrong_view).unwrap();
+            let wrong_support =
+                recover_fixture_compiler_support(wrong_projection, wrong_view.clone(), []).unwrap();
+            let wrong_input = OriginalCompilerInputs::from_issued_support(&wrong_support);
             let stable_inputs = Arc::clone(&continued.inputs.compiler);
             let stable_roles = continued.compiler_inputs().projection().roles();
             assert!(continued
                 .in_program_context_with_private_input(published.clone(), &wrong_input)
                 .is_err());
-            assert!(OriginalCompilerInputs::from_selection(&selection, &wrong_view).is_err());
+            assert!(recover_fixture_compiler_support(projection.clone(), wrong_view, []).is_err());
             let without_first = support_view(&selected[1..]);
-            assert!(OriginalCompilerInputs::from_selection(&selection, &without_first).is_err());
+            assert!(
+                recover_fixture_compiler_support(projection.clone(), without_first, []).is_err()
+            );
             assert_eq!(
                 continued.compiler_inputs().projection().roles(),
                 stable_roles
