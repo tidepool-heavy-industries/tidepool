@@ -261,6 +261,9 @@ impl ExactDeclarationContext {
                 )));
             }
         }
+        // This role commits compiler/native selection. Source permission is
+        // carried separately by the context's admitted scope and Context9 root;
+        // borrowing this role after source restriction cannot restore a grant.
         let bytes = serde_json::to_vec(&(
             "published-source-original4",
             native_authority.facts().commitment(),
@@ -536,7 +539,12 @@ impl ExactDeclarationContext {
             .facts
             .compiler_support
             .select_publication_graph(root, roots, &owners)?;
-        let source_scope = self.source_scope().restrict(&lexical)?;
+        let source_scope = if self.source_scope().admits(root) {
+            self.source_scope()
+                .project_roots(std::slice::from_ref(root))?
+        } else {
+            SourceLexicalScope::default()
+        };
         source_scope.preserve_support(self.compiler_source_support(), &compiler_support)?;
         Self::from_facts(DeclarationContextFacts {
             producer: self.owner.facts.producer,
