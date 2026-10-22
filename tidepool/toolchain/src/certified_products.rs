@@ -17,6 +17,8 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
+mod original_packages;
+pub(crate) use original_packages::CheckedOriginalPackageAssociations;
 pub(crate) use package_code::PackageInterfaceCustody;
 pub use package_code::{
     CertifiedPackageCodeProduct, CertifiedPackageInterface, RecoveryPackageCodeRef,
@@ -231,6 +233,7 @@ pub(crate) struct PackageLinks {
     occurrences: Arc<[PackageOccurrenceRow]>,
     target_roots: Arc<BTreeMap<String, Vec<PackageLink>>>,
     home_roots: Arc<BTreeMap<PackageHomeRootKey, Vec<PackageLink>>>,
+    original_use_roots: Arc<original_packages::OriginalPackageRoots>,
     products: Arc<[PackageProductOutput]>,
 }
 
@@ -240,11 +243,12 @@ impl PackageLinks {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
-            version: 3,
+            version: 4,
             stage_id: [0; 32],
             occurrences: Arc::from([]),
             target_roots: Arc::new(BTreeMap::new()),
             home_roots: Arc::new(BTreeMap::new()),
+            original_use_roots: Arc::new(BTreeMap::new()),
             products: Arc::from([]),
         }
     }
@@ -252,11 +256,12 @@ impl PackageLinks {
     #[cfg(test)]
     pub(crate) fn empty_for_target(target: &str) -> Self {
         Self {
-            version: 3,
+            version: 4,
             stage_id: [0; 32],
             occurrences: Arc::from([]),
             target_roots: Arc::new(BTreeMap::from([(target.to_owned(), Vec::new())])),
             home_roots: Arc::new(BTreeMap::new()),
+            original_use_roots: Arc::new(BTreeMap::new()),
             products: Arc::from([]),
         }
     }
@@ -352,6 +357,7 @@ pub(crate) struct PackageSelection {
     target: String,
     target_roots: Vec<PackageLink>,
     home_roots: BTreeMap<PackageHomeRootKey, Vec<PackageLink>>,
+    original_use_roots: original_packages::OriginalPackageRoots,
 }
 
 impl PackageSelection {
@@ -448,6 +454,14 @@ impl BoundPackageSelection {
             return Err(CertificationError::Receipt(
                 "item package HOME roots differ from its stage manifest",
             ));
+        }
+        let stage_original_roots = links.original_use_roots.iter()
+            .filter(|(key, _)| key.target == selection.target).collect::<BTreeMap<_, _>>();
+        if stage_original_roots.len() != selection.original_use_roots.len()
+            || selection.original_use_roots.iter().any(|(key, roots)|
+                stage_original_roots.get(key).is_none_or(|stage| *stage != roots))
+        {
+            return Err(CertificationError::Receipt("item Original package uses differ from its stage manifest"));
         }
         Ok(Self {
             mode: BoundPackageSelectionState::Item {
@@ -3281,9 +3295,9 @@ fn decode_package_links(
     home_package_groups: &BTreeMap<(String, String, u32), usize>,
     operation: &InventoryOperation,
 ) -> CertResult<PackageLinks> {
-    let row = sized(value, 6)?;
+    let row = sized(value, 7)?;
     let version = number(&row[0])?;
-    if version != 3 {
+    if version != 4 {
         return Err(CertificationError::Receipt("package links version"));
     }
     let stage_id = bytes32(&row[1])?;
@@ -3423,18 +3437,28 @@ fn decode_package_links(
             return Err(CertificationError::Receipt("duplicate package links home"));
         }
     }
-    let products = decode_package_product_outputs(&row[5], operation)?;
+    let original_use_roots = original_packages::decode_roots(&row[5], operation)?;
+    for (key, roots) in &original_use_roots {
+        if !target_roots.contains_key(&key.target) {
+            return Err(CertificationError::Receipt("Original package use names another target"));
+        }
+        for (_, link) in roots {
+            check_package_link_range(std::slice::from_ref(link), occurrences.len())?;
+        }
+    }
+    let products = decode_package_product_outputs(&row[6], operation)?;
     if products != package_products {
         return Err(CertificationError::Receipt(
             "package links carry another stage product set",
         ));
     }
     let links = PackageLinks {
-        version: 3,
+        version: 4,
         stage_id,
         occurrences: occurrences.into(),
         target_roots: Arc::new(target_roots),
         home_roots: Arc::new(home_roots),
+        original_use_roots: Arc::new(original_use_roots),
         products: products.into(),
     };
     if package_stage_identity(&links, operation)? != stage_id {
@@ -3456,7 +3480,7 @@ fn package_stage_identity(
         ])
     };
     let value = value_array([
-        Value::Integer(1.into()),
+        Value::Integer(2.into()),
         value_array(links.occurrences.iter().map(|occurrence| {
             value_array([
                 Value::Bytes(occurrence.envelope_sha256.to_vec()),
@@ -3484,6 +3508,7 @@ fn package_stage_identity(
                 value_array(roots.iter().map(encode_link)),
             ])
         })),
+        original_packages::encode_roots(&links.original_use_roots),
         value_array(links.products.iter().map(|product| {
             value_array([
                 value_text(&*product.relative_path.to_string_lossy()),
@@ -3502,8 +3527,8 @@ fn decode_package_selection(
     value: &Value,
     operation: &InventoryOperation,
 ) -> CertResult<PackageSelection> {
-    let row = sized(value, 6)?;
-    if number(&row[0])? != 1 {
+    let row = sized(value, 7)?;
+    if number(&row[0])? != 2 {
         return Err(CertificationError::Receipt("package selection version"));
     }
     let stage_id = bytes32(&row[1])?;
@@ -3554,12 +3579,17 @@ fn decode_package_selection(
             ));
         }
     }
+    let original_use_roots = original_packages::decode_roots(&row[6], operation)?;
+    if original_use_roots.keys().any(|key| key.target != target) {
+        return Err(CertificationError::Receipt("item Original package use belongs to another target"));
+    }
     Ok(PackageSelection {
         stage_id,
         program_sha256,
         target,
         target_roots,
         home_roots,
+        original_use_roots,
     })
 }
 
@@ -34165,6 +34195,7 @@ None,
             target: target.into(),
             target_roots: Vec::new(),
             home_roots: BTreeMap::new(),
+            original_use_roots: BTreeMap::new(),
         }
     }
 
@@ -35493,7 +35524,7 @@ None,
             original_ordinal: 7,
         };
         let stage = PackageLinks {
-            version: 3,
+            version: 4,
             stage_id: [0; 32],
             occurrences: Arc::from([occurrence(0), occurrence(1)]),
             target_roots: Arc::new(BTreeMap::from([(
@@ -35519,6 +35550,7 @@ None,
             target: "item".into(),
             target_roots: vec![PackageLink::Local { occurrence: 0 }],
             home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
+            original_use_roots: BTreeMap::new(),
         };
         assert!(BoundPackageSelection::item(
             &stage,
