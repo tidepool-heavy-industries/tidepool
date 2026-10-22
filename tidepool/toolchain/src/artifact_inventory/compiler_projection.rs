@@ -1218,6 +1218,9 @@ pub(crate) fn complete_native_selection(
             "native completion belongs to another output operation",
         ));
     }
+    selection
+        .require_output_operation(output.operation())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
     let check_product = |product: &crate::certified_products::CertifiedPackageCodeProduct| {
         let owner = product.code().owner();
         if &owner.compiler_sha256 != output.producer_sha256()
@@ -1390,72 +1393,14 @@ pub(crate) fn complete_native_selection(
             }
         };
         source_associations.insert(row.binding(), association);
-        let home_origin = selection
-            .home_source_origin(row.binding(), row.group().owner(), operation)
+        let home_contract = selection
+            .applicable_home_contract(row)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        row_inputs.push((row, prior, product, home_origin));
+        row_inputs.push((row, prior, product, home_contract));
     }
-    // Package-bearing rows consume their target-qualified HOME links. A prior
-    // completion is authoritative, but the current occurrence must match its
-    // product and ordered children exactly before admission.
-    let selected_home_keys = selection
-        .home_root_coordinates()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let source_home_rows = row_inputs
-        .iter()
-        .map(|(row, _, _, home_origin)| {
-            let owner = row.group().owner();
-            let package_slots = row
-                .imports()
-                .iter()
-                .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
-                .count();
-            let key = (
-                owner.unit.clone(),
-                owner.module.clone(),
-                row.binding().original_ordinal,
-            );
-            let manifest_root = selection
-                .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
-                .is_some();
-            let prior_program = matches!(
-                home_origin,
-                crate::certified_products::PackageHomeSourceOrigin::PriorProgramContract
-            );
-            (key, package_slots, manifest_root, prior_program)
-        })
-        .collect::<Vec<_>>();
-    let package_free_fresh = source_home_rows
-        .iter()
-        .filter(|(_, slots, manifest_root, prior_program)| {
-            *manifest_root && *slots == 0 && !*prior_program
-        })
-        .map(|(key, _, _, _)| key.clone())
-        .collect::<BTreeSet<_>>();
-    let forbidden_home_roots = selected_home_keys
-        .intersection(&package_free_fresh)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if !forbidden_home_roots.is_empty() {
-        return Err(failure(
-            "package HOME root names a package-free fresh group",
-        ));
-    }
-    let expected_home_keys = source_home_rows
-        .iter()
-        .filter(|(_, slots, manifest_root, prior_program)| {
-            *manifest_root && (*slots > 0 || *prior_program)
-        })
-        .map(|(key, _, _, _)| key.clone())
-        .collect::<BTreeSet<_>>();
-    if selected_home_keys != expected_home_keys {
-        return Err(failure(
-            "package HOME contracts exceed the target's selected source groups",
-        ));
-    }
-    let mut consumed_home_keys = BTreeSet::new();
-    for (row, prior, _, home_origin) in &row_inputs {
+    // Every annotation was authenticated by its issuer. Only actual selected
+    // physical rows consume contracts; unused annotations never select code.
+    for (row, prior, _, home_contract) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
         if imports.len() != definitions.globals().len()
@@ -1465,23 +1410,8 @@ pub(crate) fn complete_native_selection(
                 "native completion slot count differs from its physical definitions",
             ));
         }
-        let owner = row.group().owner();
-        let package_slots = imports
-            .iter()
-            .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
-            .count();
-        let manifest_links =
-            selection.home_roots(&owner.unit, &owner.module, row.binding().original_ordinal);
-        let fresh_links = if package_slots > 0
-            || matches!(
-                home_origin,
-                crate::certified_products::PackageHomeSourceOrigin::PriorProgramContract
-            ) {
-            manifest_links
-        } else {
-            None
-        };
-        let mut fresh_slot = 0usize;
+        let home_links = home_contract.as_ref().map(|contract| contract.links());
+        let mut home_slot = 0usize;
         for (index, (link, global)) in imports.iter().zip(definitions.globals()).enumerate() {
             if let SelectedNativeImport::Package {
                 identity,
@@ -1504,12 +1434,12 @@ pub(crate) fn complete_native_selection(
                 if original_link.is_some() {
                     consumed_original_slots.insert(exact_slot);
                 }
-                let home_link = match fresh_links {
+                let home_link = match home_links {
                     Some(links) => {
                         let link = links
-                            .get(fresh_slot)
-                            .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
-                        fresh_slot += 1;
+                            .get(home_slot)
+                            .ok_or_else(|| failure("selected HOME contract has too few package links"))?;
+                        home_slot += 1;
                         Some(link)
                     }
                     None => None,
@@ -1539,18 +1469,15 @@ pub(crate) fn complete_native_selection(
                                     "fresh HOME evidence disagrees with its prior exact binding",
                                 ));
                             }
-                            SelectedPackageRoot::Held(binding.clone())
-                        } else {
-                            SelectedPackageRoot::Held(binding.clone())
                         }
+                        SelectedPackageRoot::Held(binding.clone())
                     }
                     Some(_) => return Err(failure("completed HOME slot changed its import kind")),
                     None => {
                         let slot = current_link.ok_or_else(|| {
                             failure(&format!(
                                 "HOME package slot lacks either prior completion or current \
-                                     links: owner={:?} ordinal={} binding={:?} package={:?} \
-                                     selected_home_roots={selected_home_keys:?}",
+                                     links: owner={:?} ordinal={} binding={:?} package={:?} slot={index}",
                                 row.group().owner(),
                                 row.group().group().original_ordinal(),
                                 row.binding(),
@@ -1563,25 +1490,15 @@ pub(crate) fn complete_native_selection(
                 selected_package_roots.push(selected);
             }
         }
-        if let Some(list) = fresh_links {
-            if fresh_slot != list.len() {
-                return Err(failure("fresh HOME package links were not fully consumed"));
+        if let Some(links) = home_links {
+            if home_slot != links.len() {
+                return Err(failure("selected HOME package links were not fully consumed"));
             }
-            consumed_home_keys.insert((
-                owner.unit.clone(),
-                owner.module.clone(),
-                row.binding().original_ordinal,
-            ));
         }
     }
     if original_packages.coordinates().collect::<BTreeSet<_>>() != consumed_original_slots {
         return Err(failure(
             "Original package associations exceed the selected exact native slots",
-        ));
-    }
-    if consumed_home_keys != expected_home_keys {
-        return Err(failure(
-            "package HOME roots do not exactly cover the selected package-bearing fresh groups",
         ));
     }
     let target = sources.target();
