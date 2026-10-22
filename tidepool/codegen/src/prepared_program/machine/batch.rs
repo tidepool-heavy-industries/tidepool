@@ -199,7 +199,10 @@ impl NativeExportRequest {
         let key = code.code().id();
         let evidence = match code.code().body() {
             NativeCodeBody::Home(body) => {
-                if !body.binders().contains(&export.identity) {
+                if !body
+                    .exported_values()
+                    .any(|(identity, selected)| selected == value && identity == &export.identity)
+                {
                     return Err(ExecutionError::BatchSourceContract(Box::new(
                         export.identity.clone(),
                     )));
@@ -215,7 +218,10 @@ impl NativeExportRequest {
                 }
             }
             NativeCodeBody::Package(body) => {
-                if !body.binders().contains(&export.identity) {
+                if !body
+                    .exported_values()
+                    .any(|(identity, selected)| selected == value && identity == &export.identity)
+                {
                     return Err(ExecutionError::BatchSourceContract(Box::new(
                         export.identity.clone(),
                     )));
