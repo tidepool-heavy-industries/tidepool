@@ -1,6 +1,10 @@
 //! Semantic observations through admitted compilation, native execution and publication.
 
 use super::*;
+use crate::session::resident::world_cell_test_support::{
+    bootstrap_world_for, fixture_cell_recipe, plan_fixture_specification_for,
+    source_action_with_original, InputRecipe,
+};
 use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::EffectError;
@@ -49,12 +53,13 @@ type ProbeSession = ScaleSession<frunk::HList!(ProbeHandler)>;
 struct SemanticSession {
     resident: ProbeSession,
     public: ScopeId,
+    public_source: Arc<crate::session::RuntimeLexicalScopeLease>,
+    recipe: InputRecipe,
     trace: Arc<CaptureMutex<Vec<i64>>>,
     compiler_counts: Arc<CaptureMutex<Vec<u64>>>,
     history_compiler_census: Option<(u64, Vec<CompilerModeObservation>)>,
     cancel_after_record: Arc<CaptureMutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
     effects: TestEffectSurface,
-    images: Arc<ImageRegistry>,
     _root: tempfile::TempDir,
 }
 
@@ -66,8 +71,9 @@ impl SemanticSession {
     fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("support")).unwrap();
         std::fs::write(
-            root.path().join("SegmentProbeSupport.hs"),
+            root.path().join("support/SegmentProbeSupport.hs"),
             include_str!("fixtures/typed-segment-probe-support.hs"),
         )
         .unwrap();
@@ -79,21 +85,24 @@ impl SemanticSession {
             },
         )
         .unwrap();
-        let images = Arc::new(ImageRegistry::new());
+        let mut includes = effects.include_paths().to_vec();
+        includes.push(root.path().join("support"));
+        let recipe = InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            includes,
+        );
         let lib = SessionLib::open(
             SessionId(1010),
             root.path(),
             ModuleEnv::standalone_default(),
         )
         .unwrap()
-        .with_validation_include(effects.include_paths().to_vec());
-        let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
-        persistent.set_image_registry(images.clone());
-        let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+        .with_validation_include(recipe.include.clone());
         let trace = Arc::new(CaptureMutex::new(Vec::new()));
         let compiler_counts = Arc::new(CaptureMutex::new(Vec::new()));
         let cancel_after_record = Arc::new(CaptureMutex::new(None));
-        let resident = ResidentSession::from_persistent_for_test(
+        let mut resident = ResidentSession::unbootstrapped(
             frunk::hlist![ProbeHandler {
                 trace: trace.clone(),
                 raw_result,
@@ -101,17 +110,28 @@ impl SemanticSession {
                 cancel_after_record: cancel_after_record.clone()
             }],
             QuietOutput,
-            persistent,
+            1024 * 1024,
+            Some(lib),
         );
+        let public_source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let public = public_source.scope();
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: public,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &public_source);
         Self {
             resident,
             public,
+            public_source,
+            recipe,
             trace,
             compiler_counts,
             history_compiler_census: None,
             cancel_after_record,
             effects,
-            images,
             _root: root,
         }
     }
@@ -122,18 +142,16 @@ impl SemanticSession {
         source: &str,
         declarations: usize,
     ) -> Result<Duration, ResidentError> {
-        try_execute_cell_with_authority_checks(
-            &mut self.resident,
-            self.public,
-            &self.effects,
-            &self.images,
-            (0, 0),
+        self.execute_observed(
             label,
             source,
-            declarations,
-            &ScalePublication::Ephemeral,
-            AuthorityChecks::Configured,
+            CellDeclarationExpectation::Total(declarations),
+            SemanticChecks::None,
+            &SourceImports::new(),
+            None,
+            |_| {},
         )
+        .map(|(elapsed, _)| elapsed)
     }
 
     fn observed(&self) -> Vec<i64> {
@@ -147,22 +165,17 @@ impl SemanticSession {
     ) -> Result<Duration, ResidentError> {
         let submissions_before = tidepool_extract_cmd::extract_spawn_count();
         let (result, requests) = with_compiler_mode_capture(|| {
-            try_execute_cell_with_template_imports_expectation(
-                &mut self.resident,
-                self.public,
-                &self.effects,
-                &self.images,
-                (0, 0),
+            self.execute_observed(
                 label,
                 &history.cell,
                 CellDeclarationExpectation::CapturedAt {
                     name: "historyCaptured",
                     line: history.declaration_line,
                 },
-                &ScalePublication::Ephemeral,
-                AuthorityChecks::Configured,
+                SemanticChecks::None,
                 &SourceImports::new(),
                 None,
+                |_| {},
             )
         });
         assert_eq!(
@@ -220,6 +233,255 @@ impl SemanticSession {
             );
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum SemanticChecks {
+    None,
+    Shape(super::SegmentWorkShape),
+    NativeEntries,
+}
+
+impl SemanticSession {
+    fn execute_observed(
+        &mut self,
+        label: &str,
+        source: &str,
+        declarations: CellDeclarationExpectation,
+        checks: SemanticChecks,
+        imports: &SourceImports,
+        preamble: Option<&str>,
+        observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+    ) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+        execute_semantic_cell(
+            &mut self.resident,
+            &self.public_source,
+            &self.recipe,
+            label,
+            source,
+            declarations,
+            checks,
+            imports,
+            preamble,
+            observe,
+        )
+    }
+}
+
+fn semantic_plan_error(error: crate::session::WorldInspectionError) -> ResidentError {
+    match error {
+        crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Compile(error)) => {
+            crate::session::SessionError::Compile(error).into()
+        }
+        crate::session::WorldInspectionError::Runtime(error) => ResidentError::Run(error),
+        other => panic!("semantic fixture World observation failed: {other:?}"),
+    }
+}
+
+fn execute_semantic_cell(
+    resident: &mut ProbeSession,
+    public_source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    recipe: &InputRecipe,
+    label: &str,
+    source: &str,
+    declarations: CellDeclarationExpectation,
+    checks: SemanticChecks,
+    imports: &SourceImports,
+    preamble: Option<&str>,
+    observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+) -> Result<(Duration, Vec<Arc<PreparedProgram>>), ResidentError> {
+    let started = Instant::now();
+    let public = public_source.scope();
+    let original = public_source.original_source().clone();
+    let previous_context = resident.run_context();
+    let execution = Arc::new(source_action_with_original(
+        resident,
+        original.clone(),
+        |resident, _| resident.begin_private_execution(public),
+    )?);
+    let result = (|| {
+        let mut specification = (*fixture_cell_recipe(recipe, source, imports)).clone();
+        if let Some(preamble) = preamble {
+            specification.template =
+                resident_cell_check_template(preamble, &recipe.row, &imports.template_text());
+            specification.turn_templates =
+                resident_workbench_templates(preamble, &recipe.row, &imports.template_text())
+                    .into_iter()
+                    .map(|template| (template.kind.wire_name().to_owned(), template.source))
+                    .collect();
+        }
+        let admission = plan_fixture_specification_for(
+            resident,
+            public_source,
+            Arc::new(specification),
+            execution.clone(),
+        )
+        .map_err(semantic_plan_error)?;
+        let plan = admission
+            .world_reservation()
+            .expect("ordinary semantic cell has a real World reservation")
+            .plan();
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
+        match declarations {
+            CellDeclarationExpectation::Total(expected) => assert_eq!(
+                plan.items()
+                    .iter()
+                    .filter(|item| matches!(
+                        item.kind(),
+                        ParsedCellPlanKind::Prologue | ParsedCellPlanKind::Declaration
+                    ))
+                    .count(),
+                expected
+            ),
+            CellDeclarationExpectation::CapturedAt { name, line } => {
+                let declarations = plan
+                    .items()
+                    .iter()
+                    .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
+                    .collect::<Vec<_>>();
+                let [declaration] = declarations.as_slice() else {
+                    panic!("one authored declaration group: {declarations:?}")
+                };
+                assert_eq!(declaration.binders(), [name]);
+                assert_eq!(declaration.span().start_line(), line);
+                assert_eq!(declaration.span().end_line(), line + 1);
+                assert_eq!(declaration.source_ordinals().len(), 2);
+            }
+        }
+        let settled = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_cell_program_admitted(owner, admission, report),
+            )
+            .map_err(|error| ResidentError::Run(error.into()))?;
+        let (checked, program) = finish_cell_program_admitted(settled)
+            .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
+        observe(&program);
+        if let SemanticChecks::Shape(shape) = checks {
+            assert_segment_shape(&program, shape);
+        }
+        if matches!(checks, SemanticChecks::NativeEntries) {
+            assert_checked_native_entries(resident, public, &checked, &program);
+        }
+        let native_targets = program
+            .items()
+            .iter()
+            .filter_map(|item| item.native().map(|native| native.target_owned()))
+            .collect();
+        let prefix = resident
+            .begin_cell_program(program)?
+            .expect("nonempty semantic cell has ordered items");
+        if matches!(checks, SemanticChecks::NativeEntries) {
+            let before = resident.public_visibility_snapshot_in(public).unwrap();
+            assert!(matches!(
+                source_action_with_original(resident, original.clone(), |resident, _| {
+                    resident.admit_checked_item(prefix.clone(), checked.checked_item(1).unwrap())
+                }),
+                Err(crate::session::SessionError::StaleStagedDeclaration)
+            ));
+            assert_eq!(
+                resident.public_visibility_snapshot_in(public).unwrap(),
+                before
+            );
+        }
+        let before_effects = tidepool_extract_cmd::extract_spawn_count();
+        resident.set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..previous_context
+        })?;
+        for index in 0..checked.items.len() {
+            let item = checked.checked_item(index).unwrap();
+            let reservation =
+                source_action_with_original(resident, original.clone(), |resident, _| {
+                    resident.admit_checked_item(prefix.clone(), item.clone())
+                })?;
+            if item.kind() == CheckedItemKind::Declaration {
+                source_action_with_original(resident, original.clone(), |resident, _| {
+                    resident.adopt_checked_declaration(reservation)
+                })?;
+            } else {
+                let TurnResult::Bind {
+                    bound, compiled, ..
+                } = consume_cell_program_item(reservation.clone()).unwrap()
+                else {
+                    panic!("checked semantic item must return its binding recipe")
+                };
+                if matches!(checks, SemanticChecks::NativeEntries) && index == 1 {
+                    assert_checked_capture_refusals(&compiled, &reservation);
+                }
+                source_action_with_original(resident, original.clone(), |resident, report| {
+                    if item.kind() != CheckedItemKind::Bind {
+                        resident.run_observation_with_sites(
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            false,
+                            report,
+                        )
+                    } else if bound.is_empty() {
+                        resident.run_with_sites(label, compiled.code(), report)
+                    } else if bound.len() == 1 {
+                        resident.run_bind_with_sites(
+                            &bound[0].name,
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            report,
+                        )
+                    } else {
+                        resident.run_projected_bind_with_sites(
+                            label,
+                            compiled.code(),
+                            &bound,
+                            reservation.generation(),
+                            report,
+                        )
+                    }
+                })?;
+            }
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                before_effects,
+                "native execution consumes the complete admitted program without compiler requests"
+            );
+        }
+        let intent = resident.freeze_private_execution(&execution)?;
+        source_action_with_original(resident, original.clone(), |resident, report| {
+            let publication = resident.restage_ephemeral_execution_publication(intent)?;
+            let ticket = match publication {
+                ExecutionPublication::Bindings(base) => base.stage()?,
+                ExecutionPublication::Declarations(base) => {
+                    let reserved = base.reserved_generation();
+                    let span = tracing::info_span!(
+                        "publication_declaration_certification",
+                        reserved_generation = reserved.0
+                    );
+                    let _entered = span.enter();
+                    let CertifiedDeclarationPublication::Accepted(accepted) =
+                        base.certify(report)?
+                    else {
+                        panic!("actual World declaration publication was refused")
+                    };
+                    accepted.stage()?
+                }
+            };
+            assert!(matches!(
+                resident
+                    .attempt_public_manifest(ticket, &PublicationDecision::new())
+                    .map(crate::session::settled_manifest_attempt)?,
+                PublicManifestCommit::Ephemeral
+            ));
+            Ok::<_, crate::session::SessionError>(())
+        })?;
+        Ok((started.elapsed(), native_targets))
+    })();
+    resident.set_run_context(previous_context).unwrap();
+    resident.retire_scope(execution.private_scope());
+    result
 }
 
 fn ghc_trace(source: &str) -> Vec<i64> {
@@ -312,23 +574,17 @@ fn signed_template_helpers_execute_recursion_and_polymorphism_once() {
         ),
         "qualified Data.Text as SegmentHelperText",
     );
-    try_execute_cell_with_template_preamble_observed(
-        &mut session.resident,
-        session.public,
-        &session.effects,
-        &session.images,
-        (0, 0),
-        "signed_template_helpers",
-        include_str!("fixtures/typed-segment-template-helper-use.hs"),
-        CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
-        AuthorityChecks::SegmentWorkCounts(super::SegmentWorkShape::IndependentActions(7)),
-        &SourceImports::new(),
-        None,
-        &preamble,
-        |program| assert_eq!(program.items().len(), 7),
-    )
-    .unwrap();
+    session
+        .execute_observed(
+            "signed_template_helpers",
+            include_str!("fixtures/typed-segment-template-helper-use.hs"),
+            CellDeclarationExpectation::Total(0),
+            SemanticChecks::Shape(super::SegmentWorkShape::IndependentActions(7)),
+            &SourceImports::new(),
+            Some(&preamble),
+            |program| assert_eq!(program.items().len(), 7),
+        )
+        .unwrap();
     let observed = results.lock().clone();
     let [result] = observed.as_slice() else {
         panic!("the single authored report must execute exactly once: {observed:?}");
@@ -637,17 +893,12 @@ fn cancellation_after_real_effect_preserves_receipt_and_allows_new_intent() {
     let error = session
         .resident
         .with_invocation_cancel(cancel, |resident| {
-            try_execute_cell_with_authority_checks(
-                resident,
-                session.public,
-                &session.effects,
-                &session.images,
-                (0, 0),
+            execute_semantic_cell(
+                resident, &session.public_source, &session.recipe,
                 "cancel_after_effect",
                 "cancelledValue <- segmentRecord 1 >> pure (2 :: Int); segmentRecord cancelledValue",
-                0,
-                &ScalePublication::Ephemeral,
-                AuthorityChecks::Configured,
+                CellDeclarationExpectation::Total(0), SemanticChecks::None,
+                &SourceImports::new(), None, |_| {},
             )
         })
         .unwrap_err();
@@ -979,19 +1230,17 @@ fn one_four_eight_actions_use_one_completed_inference_segment() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        try_execute_cell_with_authority_checks(
-            &mut session.resident,
-            session.public,
-            &session.effects,
-            &session.images,
-            (0, 0),
-            &format!("one_segment_{count}"),
-            &source,
-            0,
-            &ScalePublication::Ephemeral,
-            AuthorityChecks::SegmentWorkCounts(super::SegmentWorkShape::CaptureChain(count)),
-        )
-        .unwrap();
+        session
+            .execute_observed(
+                &format!("one_segment_{count}"),
+                &source,
+                CellDeclarationExpectation::Total(0),
+                SemanticChecks::Shape(super::SegmentWorkShape::CaptureChain(count)),
+                &SourceImports::new(),
+                None,
+                |_| {},
+            )
+            .unwrap();
         assert_eq!(session.observed(), (1..=count as i64).collect::<Vec<_>>());
         assert_eq!(session.compiler_counts.lock().len(), count);
         session.assert_no_compiler_since_last_effect();
@@ -1070,32 +1319,27 @@ fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
             .map_or(0, |counts| counts.persistent_roots)
     };
     let mut certificate = None;
-    try_execute_cell_with_template_imports_expectation_observed(
-        &mut session.resident,
-        session.public,
-        &session.effects,
-        &session.images,
-        (0, 0),
-        "binding_index_real_producer",
-        "indexedValue <- pure (41 :: Int)",
-        CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
-        AuthorityChecks::Configured,
-        &SourceImports::new(),
-        None,
-        |program| {
-            let [item] = program.items() else {
-                panic!("producer admits one native binding");
-            };
-            certificate = Some(
-                item.native()
-                    .unwrap()
-                    .value_interface_certificate()
-                    .unwrap(),
-            );
-        },
-    )
-    .unwrap();
+    session
+        .execute_observed(
+            "binding_index_real_producer",
+            "indexedValue <- pure (41 :: Int)",
+            CellDeclarationExpectation::Total(0),
+            SemanticChecks::None,
+            &SourceImports::new(),
+            None,
+            |program| {
+                let [item] = program.items() else {
+                    panic!("producer admits one native binding");
+                };
+                certificate = Some(
+                    item.native()
+                        .unwrap()
+                        .value_interface_certificate()
+                        .unwrap(),
+                );
+            },
+        )
+        .unwrap();
     let certificate = certificate.unwrap();
     let original = session
         .resident
@@ -1150,6 +1394,22 @@ fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
     let certificate_lifetime = Arc::downgrade(&certificate);
     drop(certificate);
     session.public = consumer;
+    session.public_source = session
+        .resident
+        .adopt_initial_notebook_scope(consumer)
+        .unwrap();
+    session
+        .resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: consumer,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(
+        &mut session.resident,
+        &session.recipe,
+        &session.public_source,
+    );
     session
         .execute(
             "binding_index_real_consumer",
@@ -1229,33 +1489,28 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
 
     let mut session = SemanticSession::new();
     let mut cold = None;
-    try_execute_cell_with_template_imports_expectation_observed(
-        &mut session.resident,
-        session.public,
-        &session.effects,
-        &session.images,
-        (0, 0),
-        "warm_native_cold_baseline",
-        "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
-        CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
-        AuthorityChecks::Configured,
-        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
-        None,
-        |program| {
-            let [item] = program.items() else {
-                panic!("the cold baseline must admit exactly one native binding");
-            };
-            cold = Some((
-                execution_context(item),
-                item.native()
-                    .unwrap()
-                    .value_interface_certificate()
-                    .unwrap(),
-            ));
-        },
-    )
-    .unwrap();
+    session
+        .execute_observed(
+            "warm_native_cold_baseline",
+            "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
+            CellDeclarationExpectation::Total(0),
+            SemanticChecks::None,
+            &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
+            None,
+            |program| {
+                let [item] = program.items() else {
+                    panic!("the cold baseline must admit exactly one native binding");
+                };
+                cold = Some((
+                    execution_context(item),
+                    item.native()
+                        .unwrap()
+                        .value_interface_certificate()
+                        .unwrap(),
+                ));
+            },
+        )
+        .unwrap();
     assert!(session.observed().is_empty());
     let (before, baseline_proof) = cold.unwrap();
     let baseline_binding = session
@@ -1344,10 +1599,6 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
     // Per-target imports are distinct from retained heap values and installed code custody.
     let expected_warm_carrier = BTreeSet::from([increment, double]);
     let mut selected_carrier = BTreeSet::new();
-    let old_owners = originals
-        .iter()
-        .map(|product| (product.owner().unit.clone(), product.owner().module.clone()))
-        .collect::<BTreeSet<_>>();
     let assert_retained =
         |context: &tidepool_toolchain::declaration_join::ExactDeclarationContext| {
             let retained = context.recovery_products();
@@ -1361,69 +1612,64 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
         };
     let mut observed = 0;
     let mut warm = None;
-    try_execute_cell_with_template_imports_expectation_observed(
-        &mut session.resident,
-        session.public,
-        &session.effects,
-        &session.images,
-        (0, 0),
-        "warm_native_carrier_demand",
-        include_str!("fixtures/typed-segment-warm-carrier.hs"),
-        CellDeclarationExpectation::Total(0),
-        &ScalePublication::Ephemeral,
-        AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
-        &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
-        None,
-        |program| {
-            for item in program.items() {
-                let Some(native) = item.native() else {
-                    continue;
-                };
-                observed += 1;
-                let products = item.native_products().unwrap();
-                let context = execution_context(item);
-                assert_retained(&context);
-                if native.item().binders() == ["warmCarrierResult"] {
-                    assert!(warm.is_none());
-                    warm = Some((
-                        context.clone(),
-                        native.value_interface_certificate().unwrap(),
-                    ));
+    session
+        .execute_observed(
+            "warm_native_carrier_demand",
+            include_str!("fixtures/typed-segment-warm-carrier.hs"),
+            CellDeclarationExpectation::Total(0),
+            SemanticChecks::None,
+            &SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]),
+            None,
+            |program| {
+                for item in program.items() {
+                    let Some(native) = item.native() else {
+                        continue;
+                    };
+                    observed += 1;
+                    let products = item.native_products().unwrap();
+                    let context = execution_context(item);
+                    assert_retained(&context);
+                    if native.item().binders() == ["warmCarrierResult"] {
+                        assert!(warm.is_none());
+                        warm = Some((
+                            context.clone(),
+                            native.value_interface_certificate().unwrap(),
+                        ));
+                    }
+                    let NativeRequirementRoot::Group {
+                        artifact,
+                        original_ordinal,
+                    } = native.typed_entry().unwrap().native_requirement_root()
+                    else {
+                        panic!("the warm item must issue an exact native group root");
+                    };
+                    let selected = products.artifact_view().selected_native_groups();
+                    assert!(selected.contains(&NativeGroupKey {
+                        artifact,
+                        original_ordinal
+                    }));
+                    let carrier_groups = selected
+                        .into_iter()
+                        .filter(|key| key.artifact == descriptor.id)
+                        .collect::<BTreeSet<_>>();
+                    let context_carrier = context
+                        .artifact_view()
+                        .selected_native_groups()
+                        .into_iter()
+                        .filter(|key| key.artifact == descriptor.id)
+                        .collect::<BTreeSet<_>>();
+                    assert!(carrier_groups.is_subset(&context_carrier));
+                    assert!(carrier_groups.is_subset(&expected_warm_carrier));
+                    assert!(!context_carrier.contains(&negate));
+                    if native.item().binders() == ["warmCarrierResult"] {
+                        assert_eq!(carrier_groups, expected_warm_carrier);
+                        assert_eq!(context_carrier, expected_warm_carrier);
+                    }
+                    selected_carrier.extend(carrier_groups);
                 }
-                let NativeRequirementRoot::Group {
-                    artifact,
-                    original_ordinal,
-                } = native.typed_entry().unwrap().native_requirement_root()
-                else {
-                    panic!("the warm item must issue an exact native group root");
-                };
-                let selected = products.artifact_view().selected_native_groups();
-                assert!(selected.contains(&NativeGroupKey {
-                    artifact,
-                    original_ordinal
-                }));
-                let carrier_groups = selected
-                    .into_iter()
-                    .filter(|key| key.artifact == descriptor.id)
-                    .collect::<BTreeSet<_>>();
-                let context_carrier = context
-                    .artifact_view()
-                    .selected_native_groups()
-                    .into_iter()
-                    .filter(|key| key.artifact == descriptor.id)
-                    .collect::<BTreeSet<_>>();
-                assert!(carrier_groups.is_subset(&context_carrier));
-                assert!(carrier_groups.is_subset(&expected_warm_carrier));
-                assert!(!context_carrier.contains(&negate));
-                if native.item().binders() == ["warmCarrierResult"] {
-                    assert_eq!(carrier_groups, expected_warm_carrier);
-                    assert_eq!(context_carrier, expected_warm_carrier);
-                }
-                selected_carrier.extend(carrier_groups);
-            }
-        },
-    )
-    .unwrap();
+            },
+        )
+        .unwrap();
     assert!(observed >= 2, "both warm authored actions must be observed");
     assert!(selected_carrier.contains(&increment));
     assert!(selected_carrier.contains(&double));
@@ -1483,27 +1729,20 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
         .position(|line| line == "boundaryCapture :: Int")
         .expect("authored capture signature")
         + 1;
-    try_execute_cell_with_template_imports_expectation(
-        &mut session.resident,
-        session.public,
-        &session.effects,
-        &session.images,
-        (0, 0),
-        "native_entry_refusal",
-        source,
-        CellDeclarationExpectation::CapturedAt {
-            name: "boundaryCapture",
-            line,
-        },
-        &ScalePublication::Ephemeral,
-        AuthorityChecks::TypedEntryRefusalBranches(concat!(
-            module_path!(),
-            "::authentic_native_entries_refuse_root_and_order_substitution_before_effects"
-        )),
-        &SourceImports::new(),
-        None,
-    )
-    .unwrap();
+    session
+        .execute_observed(
+            "native_entry_refusal",
+            source,
+            CellDeclarationExpectation::CapturedAt {
+                name: "boundaryCapture",
+                line,
+            },
+            SemanticChecks::NativeEntries,
+            &SourceImports::new(),
+            None,
+            |_| {},
+        )
+        .unwrap();
     assert_eq!(session.observed(), [4]);
 }
 

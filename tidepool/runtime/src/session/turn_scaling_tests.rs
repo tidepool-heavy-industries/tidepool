@@ -949,6 +949,349 @@ enum CellDeclarationExpectation {
     CapturedAt { name: &'static str, line: usize },
 }
 
+fn assert_checked_native_entries<H>(
+    resident: &ScaleSession<H>,
+    public: ScopeId,
+    checked: &CellCheck,
+    program: &tidepool_toolchain::checked_cell::CellProgram,
+) where
+    H: crate::DispatchEffect<QuietOutput> + Send,
+{
+    assert!(
+        checked.pins.is_empty(),
+        "PROGRAM4 must not issue legacy pins"
+    );
+    assert!(
+        !checked.expression_plans.is_empty(),
+        "the native control must include an actual observation"
+    );
+    assert!(
+        !checked.items[0].verdict.binders.is_empty(),
+        "the native control must start with a captured binding"
+    );
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let visibility = resident.public_visibility_snapshot_in(public).unwrap();
+    let refuse = |edited: CellCheck| {
+        for index in 0..checked.items.len() {
+            checked.checked_item(index).unwrap();
+        }
+        assert!(matches!(
+            edited.checked_item(0),
+            Err(CompileError::ExtractFailed(message))
+                if message == "checked cell: checked item body, verdict, pins or expression plan was edited"
+        ));
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        assert_eq!(
+            resident.public_visibility_snapshot_in(public).unwrap(),
+            visibility
+        );
+    };
+    let mut edited = checked.clone();
+    edited.expression_plans.clear();
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited
+        .expression_plans
+        .push(edited.expression_plans[0].clone());
+    refuse(edited);
+    let mut edited = checked.clone();
+    let mut extra = edited.expression_plans[0].clone();
+    extra.key.push_str("_extra");
+    edited.expression_plans.push(extra);
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.expression_plans[0].key.push_str("_edited");
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.expression_plans[0].type_display.push_str(" edited");
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.expression_plans[0].lift = match edited.expression_plans[0].lift {
+        ExpressionLift::Pure => ExpressionLift::Effectful,
+        ExpressionLift::Effectful => ExpressionLift::Pure,
+    };
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.expression_plans[0].heads.push(NominalHead {
+        unit: "foreign-unit".into(),
+        module: "Foreign.Module".into(),
+        name: "ForeignType".into(),
+    });
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.pins.push(CheckedBinderPin {
+        key: "__tidepool_cell_pin_0_firstPlannedValue".into(),
+        ty: "Int".into(),
+        heads: Vec::new(),
+    });
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.items[0].source.push_str(" edited");
+    refuse(edited);
+    let mut edited = checked.clone();
+    edited.items[0].verdict.binders.clear();
+    refuse(edited);
+    for index in 0..checked.items.len() {
+        checked.checked_item(index).unwrap();
+    }
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+    let native_items = program
+        .items()
+        .iter()
+        .filter(|item| item.native().is_some())
+        .collect::<Vec<_>>();
+    assert!(
+        native_items.len() >= 2,
+        "the root substitution control needs two actually compiled roots"
+    );
+    let first = native_items[0];
+    let second = native_items[1];
+    let first_native = first.native().unwrap();
+    let second_target = second.native().unwrap().target_owned();
+    assert_ne!(
+        first_native.typed_entry().unwrap().entry(),
+        second.native().unwrap().typed_entry().unwrap().entry()
+    );
+    let table = first_native.table();
+    let turn: ciborium::value::Value =
+        ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
+    let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+    let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+    let context = first_native
+        .original_execution_context(&first_native.target_owned(), table, &sites)
+        .unwrap();
+    let requirements = context
+        .artifact_view()
+        .native_requirements_from_roots(&[first_native
+            .typed_entry()
+            .unwrap()
+            .native_requirement_root()])
+        .unwrap();
+    assert!(
+        !requirements.bindings.is_empty(),
+        "the first entry requires an actual admitted baseline binding"
+    );
+    assert!(
+        requirements
+            .bindings
+            .iter()
+            .all(
+                |requirement| requirement.generation != first_native.generation()
+                    && requirement.generation != second.native().unwrap().generation()
+            ),
+        "selected first entry must exclude later captures in the same complete original"
+    );
+    assert!(
+        first_native
+            .original_execution_context(&second_target, &table, &sites)
+            .is_err(),
+        "a genuine other item root cannot substitute for the sealed native entry"
+    );
+}
+
+fn assert_checked_capture_refusals(
+    compiled: &CompiledTurn,
+    reservation: &Arc<crate::session::RuntimeCheckedItemAdmission>,
+) {
+    let proof = compiled
+        .certification
+        .as_ref()
+        .unwrap()
+        .checked_execution()
+        .unwrap();
+    let actual = reservation
+        .snapshot()
+        .actual_retained_imports()
+        .collect::<Vec<_>>();
+    proof
+        .validate_required_native_imports(actual.iter().copied())
+        .unwrap();
+    proof
+        .validate_settled_native_bindings(reservation.snapshot().settled_native_bindings())
+        .unwrap();
+    let context = proof
+        .original_execution_context(&compiled.prepared(), &compiled.table(), &compiled.asks)
+        .unwrap();
+    let requirements = context
+        .artifact_view()
+        .native_requirements_from_roots(&[proof.typed_entry().unwrap().native_requirement_root()])
+        .unwrap();
+    let settled = reservation
+        .snapshot()
+        .settled_native_bindings()
+        .collect::<Vec<_>>();
+    let required = requirements
+        .bindings
+        .iter()
+        .find(|requirement| {
+            settled.iter().any(|(_, identity, generation, _)| {
+                *identity == &requirement.identity && *generation == requirement.generation
+            })
+        })
+        .expect("the second entry requires a genuinely completed earlier capture");
+    // The compiler may also emit this capture as a direct global.
+    // This control checks missing and stale completed bindings at
+    // the authenticated entry; transitive-only closure selection
+    // is covered by the artifact inventory's deterministic graph.
+
+    let missing = actual
+        .iter()
+        .copied()
+        .filter(|(identity, generation)| {
+            *identity != &required.identity || *generation != required.generation
+        })
+        .collect::<Vec<_>>();
+    assert!(missing.len() < actual.len());
+    assert!(matches!(proof.validate_required_native_imports(missing),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+    let stale = actual
+        .iter()
+        .map(|(identity, generation)| {
+            (
+                *identity,
+                *generation ^ u64::from(*identity == &required.identity),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(proof.validate_required_native_imports(stale),
+                    Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
+    let edited = settled
+        .iter()
+        .map(|(name, identity, generation, identifier)| {
+            (
+                *name,
+                *identity,
+                *generation,
+                *identifier ^ u64::from(*identity == &required.identity),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        proof.validate_settled_native_bindings(edited).is_err(),
+        "transitive same-cell capture must retain its exact settled native identifier"
+    );
+    proof.validate_required_native_imports(actual).unwrap();
+    proof.validate_settled_native_bindings(settled).unwrap();
+}
+
+fn assert_segment_shape(
+    program: &tidepool_toolchain::checked_cell::CellProgram,
+    shape: super::SegmentWorkShape,
+) {
+    use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
+    let count = shape.item_count();
+    assert_eq!(program.typed_segments().len(), 1);
+    let segment = &program.typed_segments()[0];
+    assert_eq!(segment.items().len(), count);
+    assert_eq!(program.items().len(), count);
+    assert!(segment
+        .items()
+        .iter()
+        .all(|item| matches!(item.body(), CheckedTypedSegmentBody::Action { .. })));
+    let entries = program
+        .items()
+        .iter()
+        .map(|item| item.native().unwrap().typed_entry().unwrap().entry())
+        .map(|entry| (&entry.unit, &entry.module, &entry.occurrence))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        entries.len(),
+        count,
+        "each item must have its own actual entry"
+    );
+    for (index, item) in program.items().iter().enumerate() {
+        let native = item.native().unwrap();
+        let target = native.target_owned();
+        let table = native.table();
+        let turn: ciborium::value::Value =
+            ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
+        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+        let context = native
+            .original_execution_context(&target, table, &sites)
+            .unwrap();
+        // The entry stub can call a selected original helper that demands
+        // a live capture. Inspect that sealed group closure, not the
+        // stub's direct globals or every group in the source capsule.
+        let root = native.typed_entry().unwrap().native_requirement_root();
+        assert!(matches!(
+            root,
+            tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group { .. }
+        ));
+        let dependencies = context
+            .artifact_view()
+            .native_binding_requirements_from_roots(&[root])
+            .unwrap();
+        let prior_captures = program.items()[..index]
+            .iter()
+            .flat_map(|prior| {
+                let DecodedTurnOut::Bind { bound, .. } =
+                    decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
+                else {
+                    panic!("the count gate's prior action must issue actual bindings");
+                };
+                let prior_native = prior.native().unwrap();
+                let unit = prior_native.typed_entry().unwrap().entry().unit.clone();
+                bound.into_iter().map(move |binder| {
+                    (
+                        unit.clone(),
+                        binder.module,
+                        binder.name,
+                        prior_native.generation(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            dependencies.iter().all(|global| {
+                prior_captures
+                    .iter()
+                    .any(|(unit, module, name, generation)| {
+                        global.identity.unit == *unit
+                            && global.identity.module == *module
+                            && global.identity.namespace == "value"
+                            && global.identity.occurrence == *name
+                            && global.identity.record_parent.is_none()
+                            && global.generation == *generation
+                    })
+            }),
+            "the actual item target must demand only exact captures from its prior plan prefix"
+        );
+        if index == 0 {
+            assert!(
+                dependencies.is_empty(),
+                "the first action has no produced inputs"
+            );
+        } else if matches!(shape, SegmentWorkShape::CaptureChain(_)) {
+            let prior = &program.items()[index - 1];
+            let DecodedTurnOut::Bind { bound, .. } =
+                decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
+            else {
+                panic!("the count gate's prior action must issue an actual binding");
+            };
+            assert_eq!(bound.len(), 1);
+            let matching = dependencies
+                .iter()
+                .filter(|global| {
+                    global.identity.unit
+                        == prior.native().unwrap().typed_entry().unwrap().entry().unit
+                        && global.identity.module == bound[0].module
+                        && global.identity.namespace == "value"
+                        && global.identity.occurrence == bound[0].name
+                        && global.identity.record_parent.is_none()
+                        && global.generation == prior.native().unwrap().generation()
+                })
+                .count();
+            assert_eq!(
+                    matching, 1,
+                    "the actual item root must retain the exact prior compiler-issued capture generation"
+                );
+        }
+    }
+}
+
 // The caller supplies the response of the same physical request whose products
 // have just passed admission. Module identity comes from those products, rather
 // than a diagnostic filename or a generated-name convention.
@@ -960,115 +1303,7 @@ pub(super) fn assert_compiler_work(
     use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
 
     if let Some(shape) = expected_shape {
-        let count = shape.item_count();
-        assert_eq!(program.typed_segments().len(), 1);
-        let segment = &program.typed_segments()[0];
-        assert_eq!(segment.items().len(), count);
-        assert_eq!(program.items().len(), count);
-        assert!(segment
-            .items()
-            .iter()
-            .all(|item| matches!(item.body(), CheckedTypedSegmentBody::Action { .. })));
-        let entries = program
-            .items()
-            .iter()
-            .map(|item| item.native().unwrap().typed_entry().unwrap().entry())
-            .map(|entry| (&entry.unit, &entry.module, &entry.occurrence))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            entries.len(),
-            count,
-            "each item must have its own actual entry"
-        );
-        for (index, item) in program.items().iter().enumerate() {
-            let native = item.native().unwrap();
-            let target = native.target_owned();
-            let table = native.table();
-            let turn: ciborium::value::Value =
-                ciborium::de::from_reader(item.native_turn_bytes().unwrap()).unwrap();
-            let fields = turn.as_array().unwrap()[1].as_array().unwrap();
-            let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
-            let context = native
-                .original_execution_context(&target, table, &sites)
-                .unwrap();
-            // The entry stub can call a selected original helper that demands
-            // a live capture. Inspect that sealed group closure, not the
-            // stub's direct globals or every group in the source capsule.
-            let root = native.typed_entry().unwrap().native_requirement_root();
-            assert!(matches!(
-                root,
-                tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group { .. }
-            ));
-            let dependencies = context
-                .artifact_view()
-                .native_binding_requirements_from_roots(&[root])
-                .unwrap();
-            let prior_captures = program.items()[..index]
-                .iter()
-                .flat_map(|prior| {
-                    let DecodedTurnOut::Bind { bound, .. } =
-                        decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
-                    else {
-                        panic!("the count gate's prior action must issue actual bindings");
-                    };
-                    let prior_native = prior.native().unwrap();
-                    let unit = prior_native.typed_entry().unwrap().entry().unit.clone();
-                    bound.into_iter().map(move |binder| {
-                        (
-                            unit.clone(),
-                            binder.module,
-                            binder.name,
-                            prior_native.generation(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            assert!(
-                dependencies.iter().all(|global| {
-                    prior_captures
-                        .iter()
-                        .any(|(unit, module, name, generation)| {
-                            global.identity.unit == *unit
-                                && global.identity.module == *module
-                                && global.identity.namespace == "value"
-                                && global.identity.occurrence == *name
-                                && global.identity.record_parent.is_none()
-                                && global.generation == *generation
-                        })
-                }),
-                "the actual item target must demand only exact captures from its prior plan prefix"
-            );
-            if index == 0 {
-                assert!(
-                    dependencies.is_empty(),
-                    "the first action has no produced inputs"
-                );
-            } else if matches!(shape, SegmentWorkShape::CaptureChain(_)) {
-                let prior = &program.items()[index - 1];
-                let DecodedTurnOut::Bind { bound, .. } =
-                    decode_turn_out(prior.native_turn_bytes().unwrap()).unwrap()
-                else {
-                    panic!("the count gate's prior action must issue an actual binding");
-                };
-                assert_eq!(bound.len(), 1);
-                let matching = dependencies
-                    .iter()
-                    .filter(|global| {
-                        global.identity.unit
-                            == prior.native().unwrap().typed_entry().unwrap().entry().unit
-                            && global.identity.module == bound[0].module
-                            && global.identity.namespace == "value"
-                            && global.identity.occurrence == bound[0].name
-                            && global.identity.record_parent.is_none()
-                            && global.generation == prior.native().unwrap().generation()
-                    })
-                    .count();
-                assert_eq!(
-                    matching, 1,
-                    "the actual item root must retain the exact prior compiler-issued capture generation"
-                );
-            }
-        }
+        assert_segment_shape(program, shape);
     }
 
     let mut owners = std::collections::BTreeMap::new();
@@ -1544,85 +1779,9 @@ where
         authority_checks,
         AuthorityChecks::TypedEntryRefusalBranches(_)
     ) {
-        assert!(
-            checked.pins.is_empty(),
-            "PROGRAM4 must not issue legacy pins"
-        );
-        assert!(
-            !checked.expression_plans.is_empty(),
-            "the native control must include an actual observation"
-        );
-        assert!(
-            !checked.items[0].verdict.binders.is_empty(),
-            "the native control must start with a captured binding"
-        );
-        let before = tidepool_extract_cmd::extract_spawn_count();
-        let visibility = resident.public_visibility_snapshot_in(public).unwrap();
-        let refuse = |edited: CellCheck| {
-            for index in 0..checked.items.len() {
-                checked.checked_item(index).unwrap();
-            }
-            assert!(matches!(
-                edited.checked_item(0),
-                Err(CompileError::ExtractFailed(message))
-                    if message == "checked cell: checked item body, verdict, pins or expression plan was edited"
-            ));
-            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-            assert_eq!(
-                resident.public_visibility_snapshot_in(public).unwrap(),
-                visibility
-            );
-        };
-        let mut edited = checked.clone();
-        edited.expression_plans.clear();
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited
-            .expression_plans
-            .push(edited.expression_plans[0].clone());
-        refuse(edited);
-        let mut edited = checked.clone();
-        let mut extra = edited.expression_plans[0].clone();
-        extra.key.push_str("_extra");
-        edited.expression_plans.push(extra);
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.expression_plans[0].key.push_str("_edited");
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.expression_plans[0].type_display.push_str(" edited");
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.expression_plans[0].lift = match edited.expression_plans[0].lift {
-            ExpressionLift::Pure => ExpressionLift::Effectful,
-            ExpressionLift::Effectful => ExpressionLift::Pure,
-        };
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.expression_plans[0].heads.push(NominalHead {
-            unit: "foreign-unit".into(),
-            module: "Foreign.Module".into(),
-            name: "ForeignType".into(),
-        });
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.pins.push(CheckedBinderPin {
-            key: "__tidepool_cell_pin_0_firstPlannedValue".into(),
-            ty: "Int".into(),
-            heads: Vec::new(),
-        });
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.items[0].source.push_str(" edited");
-        refuse(edited);
-        let mut edited = checked.clone();
-        edited.items[0].verdict.binders.clear();
-        refuse(edited);
-        for index in 0..checked.items.len() {
-            checked.checked_item(index).unwrap();
-        }
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+        assert_checked_native_entries(resident, public, &checked, &program);
     }
+
     eprintln!(
         "protected-scale {}",
         serde_json::json!({
@@ -1640,63 +1799,7 @@ where
         .iter()
         .filter_map(|item| item.native().map(|native| native.target_owned()))
         .collect();
-    if matches!(
-        authority_checks,
-        AuthorityChecks::TypedEntryRefusalBranches(_)
-    ) {
-        let native_items = program
-            .items()
-            .iter()
-            .filter(|item| item.native().is_some())
-            .collect::<Vec<_>>();
-        assert!(
-            native_items.len() >= 2,
-            "the root substitution control needs two actually compiled roots"
-        );
-        let first = native_items[0];
-        let second = native_items[1];
-        let first_native = first.native().unwrap();
-        let second_target = second.native().unwrap().target_owned();
-        assert_ne!(
-            first_native.typed_entry().unwrap().entry(),
-            second.native().unwrap().typed_entry().unwrap().entry()
-        );
-        let table = first_native.table();
-        let turn: ciborium::value::Value =
-            ciborium::de::from_reader(first.native_turn_bytes().unwrap()).unwrap();
-        let fields = turn.as_array().unwrap()[1].as_array().unwrap();
-        let sites = tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
-        let context = first_native
-            .original_execution_context(&first_native.target_owned(), table, &sites)
-            .unwrap();
-        let requirements = context
-            .artifact_view()
-            .native_requirements_from_roots(&[first_native
-                .typed_entry()
-                .unwrap()
-                .native_requirement_root()])
-            .unwrap();
-        assert!(
-            !requirements.bindings.is_empty(),
-            "the first entry requires an actual admitted baseline binding"
-        );
-        assert!(
-            requirements
-                .bindings
-                .iter()
-                .all(
-                    |requirement| requirement.generation != first_native.generation()
-                        && requirement.generation != second.native().unwrap().generation()
-                ),
-            "selected first entry must exclude later captures in the same complete original"
-        );
-        assert!(
-            first_native
-                .original_execution_context(&second_target, &table, &sites)
-                .is_err(),
-            "a genuine other item root cannot substitute for the sealed native entry"
-        );
-    }
+
     let prefix = resident
         .begin_cell_program(program)
         .unwrap()
@@ -1821,98 +1924,9 @@ where
                 AuthorityChecks::TypedEntryRefusalBranches(_)
             ) && index == 1
             {
-                let proof = compiled
-                    .certification
-                    .as_ref()
-                    .unwrap()
-                    .checked_execution()
-                    .unwrap();
-                let actual = reservation
-                    .snapshot()
-                    .actual_retained_imports()
-                    .collect::<Vec<_>>();
-                proof
-                    .validate_required_native_imports(actual.iter().copied())
-                    .unwrap();
-                proof
-                    .validate_settled_native_bindings(
-                        reservation.snapshot().settled_native_bindings(),
-                    )
-                    .unwrap();
-                let context = proof
-                    .original_execution_context(
-                        &compiled.prepared(),
-                        &compiled.table(),
-                        &compiled.asks,
-                    )
-                    .unwrap();
-                let requirements = context
-                    .artifact_view()
-                    .native_requirements_from_roots(&[proof
-                        .typed_entry()
-                        .unwrap()
-                        .native_requirement_root()])
-                    .unwrap();
-                let settled = reservation
-                    .snapshot()
-                    .settled_native_bindings()
-                    .collect::<Vec<_>>();
-                let required = requirements
-                    .bindings
-                    .iter()
-                    .find(|requirement| {
-                        settled.iter().any(|(_, identity, generation, _)| {
-                            *identity == &requirement.identity
-                                && *generation == requirement.generation
-                        })
-                    })
-                    .expect("the second entry requires a genuinely completed earlier capture");
-                // The compiler may also emit this capture as a direct global.
-                // This control checks missing and stale completed bindings at
-                // the authenticated entry; transitive-only closure selection
-                // is covered by the artifact inventory's deterministic graph.
-
-                let missing = actual
-                    .iter()
-                    .copied()
-                    .filter(|(identity, generation)| {
-                        *identity != &required.identity || *generation != required.generation
-                    })
-                    .collect::<Vec<_>>();
-                assert!(missing.len() < actual.len());
-                assert!(matches!(proof.validate_required_native_imports(missing),
-                    Err(CompileError::CompilerEvidence(error))
-                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
-                let stale = actual
-                    .iter()
-                    .map(|(identity, generation)| {
-                        (
-                            *identity,
-                            *generation ^ u64::from(*identity == &required.identity),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                assert!(matches!(proof.validate_required_native_imports(stale),
-                    Err(CompileError::CompilerEvidence(error))
-                    if matches!(error.as_ref(), tidepool_toolchain::certified_products::CertificationError::Mismatch(_))));
-                let edited = settled
-                    .iter()
-                    .map(|(name, identity, generation, identifier)| {
-                        (
-                            *name,
-                            *identity,
-                            *generation,
-                            *identifier ^ u64::from(*identity == &required.identity),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                assert!(
-                    proof.validate_settled_native_bindings(edited).is_err(),
-                    "transitive same-cell capture must retain its exact settled native identifier"
-                );
-                proof.validate_required_native_imports(actual).unwrap();
-                proof.validate_settled_native_bindings(settled).unwrap();
+                assert_checked_capture_refusals(&compiled, &reservation);
             }
+
             if item.kind() == CheckedItemKind::Bind {
                 assert_eq!(
                     bound

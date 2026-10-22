@@ -216,6 +216,19 @@ where
     O: OutputSink + Sync,
 {
     let specification = fixture_cell_recipe(recipe, source, &SourceImports::new());
+    plan_fixture_specification_for(resident, source_owner, specification, execution)
+}
+
+pub(in crate::session) fn plan_fixture_specification_for<H, O>(
+    resident: &mut ResidentSession<H, O>,
+    source_owner: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+    execution: Arc<crate::session::PrivateExecutionAdmission>,
+) -> Result<Arc<crate::session::RuntimeCellAdmission>, crate::session::WorldInspectionError>
+where
+    H: crate::DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
     let original = source_owner.original_source().clone();
     let preparation = source_action_with_original(resident, original.clone(), |resident, _| {
         resident.prepare_private_execution(execution.clone(), None)
