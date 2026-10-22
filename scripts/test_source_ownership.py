@@ -241,6 +241,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/runtime/tests/fixtures/RetainedReceiveConsumer.hs',
         'tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs',
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
+        'tidepool/runtime/src/session/fixtures/world-native-captured-home.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs',
         'tidepool/runtime/src/session/fixtures/checked-cell-template.hs',
