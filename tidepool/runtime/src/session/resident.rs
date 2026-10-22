@@ -6765,8 +6765,9 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<super::PendingHostValueWrite, ResidentError> {
-        self.mount_private_host_input(execution, carrier, payload, settlement, true)
+    ) -> Result<PrivateHostBindingLease, ResidentError> {
+        let write = self.mount_private_host_input(execution, carrier, payload, settlement, true)?;
+        Ok(self.retain_private_host_binding(write))
     }
 
     /// Install an accepted visible host value through the original private
@@ -6778,8 +6779,10 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<super::PendingHostValueWrite, ResidentError> {
-        self.mount_private_host_input(execution, carrier, payload, settlement, false)
+    ) -> Result<PrivateHostBindingLease, ResidentError> {
+        let write =
+            self.mount_private_host_input(execution, carrier, payload, settlement, false)?;
+        Ok(self.retain_private_host_binding(write))
     }
 
     fn mount_private_host_input(
@@ -7258,7 +7261,7 @@ where
     }
 
     /// Transfer a newly mounted private input into the resident cleanup owner.
-    pub fn retain_private_host_binding(
+    fn retain_private_host_binding(
         &self,
         write: super::PendingHostValueWrite,
     ) -> PrivateHostBindingLease {

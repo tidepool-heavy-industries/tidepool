@@ -742,13 +742,14 @@ tidepool_rust_test_cases(
     exact_tests = [
         "resident_workbench::request_tests::private_input_retirement_refusal_retains_original_cleanup_owner",
         "resident_workbench::request_tests::dropped_private_input_retains_refused_cleanup_until_scope_retirement",
+        "resident_workbench::request_tests::original_source_activation_publishes_into_recipient_world_and_replaces_input",
     ],
-    expected_count = 2,
+    expected_count = 3,
     ignored = True,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 1260000,
-    case_compiler_modes = {"resident_workbench::request_tests::private_input_retirement_refusal_retains_original_cleanup_owner": "owned-resident", "resident_workbench::request_tests::dropped_private_input_retains_refused_cleanup_until_scope_retirement": "owned-resident"},
+    case_compiler_modes = {"resident_workbench::request_tests::private_input_retirement_refusal_retains_original_cleanup_owner": "owned-resident", "resident_workbench::request_tests::dropped_private_input_retains_refused_cleanup_until_scope_retirement": "owned-resident", "resident_workbench::request_tests::original_source_activation_publishes_into_recipient_world_and_replaces_input": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },

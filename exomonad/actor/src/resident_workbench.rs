@@ -5370,23 +5370,14 @@ impl HostInputRetirement {
         context: crate::ActorSessionContext,
         input: MountedHostInput,
         lease: tidepool_runtime::session::resident::BindingLease,
-        write: tidepool_runtime::session::PendingHostValueWrite,
-        private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
-        session: &ResidentSession<H, O>,
+        write: Option<tidepool_runtime::session::PendingHostValueWrite>,
+        private_lease: Option<tidepool_runtime::session::resident::PrivateHostBindingLease>,
     ) -> Self
     where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        let (private_lease, write) = match private {
-            Some(_) => (
-                Some(Arc::new(Mutex::new(
-                    session.retain_private_host_binding(write),
-                ))),
-                None,
-            ),
-            None => (None, Some(write)),
-        };
+        let private_lease = private_lease.map(|lease| Arc::new(Mutex::new(lease)));
         let background_retire: Box<dyn FnOnce() + Send> = if private_lease.is_some() {
             Box::new(|| {})
         } else {
@@ -10998,22 +10989,42 @@ where
                     OwnedHostPayload::Text(value) => HostPayload::Text(value),
                     OwnedHostPayload::Job(value) => HostPayload::Job(value),
                 };
-                let write = match private.as_ref() {
-                    Some(execution) if hidden => session.mount_private_hidden_host_input(
-                        execution,
-                        &carrier,
-                        host_payload,
-                        settlement,
+                let (private_write, write) = match private.as_ref() {
+                    Some(execution) if hidden => (
+                        Some(
+                            session
+                                .mount_private_hidden_host_input(
+                                    execution,
+                                    &carrier,
+                                    host_payload,
+                                    settlement,
+                                )
+                                .map_err(ResidentActorWorkbenchError::Resident)?,
+                        ),
+                        None,
                     ),
-                    Some(execution) => session.mount_private_visible_host_input(
-                        execution,
-                        &carrier,
-                        host_payload,
-                        settlement,
+                    Some(execution) => (
+                        Some(
+                            session
+                                .mount_private_visible_host_input(
+                                    execution,
+                                    &carrier,
+                                    host_payload,
+                                    settlement,
+                                )
+                                .map_err(ResidentActorWorkbenchError::Resident)?,
+                        ),
+                        None,
                     ),
-                    None => session.mount_checked_host_input(&carrier, host_payload, settlement),
-                }
-                .map_err(ResidentActorWorkbenchError::Resident)?;
+                    None => (
+                        None,
+                        Some(
+                            session
+                                .mount_checked_host_input(&carrier, host_payload, settlement)
+                                .map_err(ResidentActorWorkbenchError::Resident)?,
+                        ),
+                    ),
+                };
                 let scope = context.placement.lexical_scope;
                 let presentation = match &payload {
                     OwnedHostPayload::Job(job) => {
@@ -11025,7 +11036,11 @@ where
                     _ => Ok(()),
                 };
                 if let Err(error) = presentation {
-                    session.retire_host_binding_owner(&session_root, &binder);
+                    if private_write.is_none() {
+                        session.retire_host_binding_owner(&session_root, &binder);
+                    }
+                    // A private receipt transfers exact cleanup to the resident
+                    // queue when this refused preparation drops its typed lease.
                     return Err(ResidentActorWorkbenchError::Resident(error));
                 }
                 let lease = session.lease_bindings(&[tidepool_repr::VarId(binder.var_id)]);
@@ -11045,8 +11060,7 @@ where
                     mounted,
                     lease,
                     write,
-                    private,
-                    session,
+                    private_write,
                 ))
             })
             .await
@@ -21396,6 +21410,12 @@ pub(crate) mod request_tests {
             let missing_input_plan = missing_input_plan.ok().unwrap();
             let (retained_plan, mut input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let retained_plan = retained_plan.ok().unwrap();
+            let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+            let (retirement_snapshot, mut input) = frontend.access.with_machine(context.clone(), move |session, _, _| {
+                let preparation = input.with_write(|write| session.prepare_private_execution(execution, write))
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+                Ok((preparation.snapshot().clone(), input))
+            }).await.unwrap();
             let input_name = input.mounted_input().binder.name.clone();
             let roots_with_input = frontend.access.with_machine(context.clone(), |session, _, _| Ok(session.persistent_roots_count())).await.unwrap();
             input.retire_for_publication().await.unwrap();
@@ -21408,9 +21428,9 @@ pub(crate) mod request_tests {
                     "retained parser plans keep physical custody without reviving the logical mount");
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(input.with_write(|write| session.admit_world_planned_cell_with_input(execution, plan, write)),
+                assert!(matches!(session.admit_world_planned_cell_with_snapshot(execution, retirement_snapshot, plan, None),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
-                    "the same authentic input write must refuse after its actual mount retires");
+                    "the original readiness snapshot and retained operand refuse after actual mount retirement");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope)));
                 assert_eq!(session.persistent_roots_count(), roots_with_input);
@@ -33758,6 +33778,75 @@ pub(crate) mod request_tests {
         let mut missing = source;
         missing.request_helper_recipe = RequestHelperRecipe::ActorReply;
         assert!(missing.request_annotations().is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the dedicated rooted compiler-world service execution group"]
+    async fn original_source_activation_publishes_into_recipient_world_and_replaces_input() {
+        with_test_compiler_owner(|client| async move {
+            let (mut session, producer, source, inputs, _root) = activation_input_fixture(|_| {});
+            let recipient_placement = crate::ActorPlacement {
+                lexical_scope: session.mint_isolated_scope(),
+                ..producer.placement
+            };
+            let descriptor = crate::ActorDescriptor::new("recipient-world", recipient_placement)
+                .admit_independent_world();
+            let mut public = descriptor.session_context(crate::ActorRef::first(crate::ActorId(29)));
+            public.haskell_effects_alias = producer.haskell_effects_alias.clone();
+            public.effect_policy = producer.effect_policy;
+            public.live_payload = producer.live_payload;
+            let (captured, source_owner) = world_query_test_source_files_with_support(
+                &[vec![("WorldQuestion.hs", "module WorldQuestion where\nknown :: Int\nknown = 42\n")]],
+                &source.base_include,
+            );
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(public.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source.bind_preparation(client), None);
+            workbench_runner_for_test(&workbench).adopt_final_source_scope(public.clone()).await.unwrap();
+            let requests = Arc::new(crate::request::RequestRegistry::default());
+            let requester = crate::ActorRef::first(crate::ActorId(30));
+            let mut prior_binding = None;
+            for (index, input) in inputs.into_iter().enumerate() {
+                let original = input.original_source();
+                let (frontend, private) = workbench.shared_view()
+                    .admit_private_cell_with_source_for_test(public.clone(), captured.clone(), source_owner.clone()).await;
+                let recipient = frontend.private_execution.as_ref().unwrap().admission.original_source().unwrap();
+                assert!(!Arc::ptr_eq(&original, &recipient), "producer A and recipient B retain independent source authority");
+                let prepared = frontend.mount_activation_input(private.clone(), input, None, "()".into(), None, vec![]).await.unwrap();
+                assert!(Arc::ptr_eq(&prepared.admission.original_source(), &original),
+                    "preview retains the original producer source");
+                let binding = prepared.binding;
+                assert_ne!(prior_binding, Some(binding));
+                let request = requests.reserve(requester, public.actor);
+                requests.mark_queued(requester, public.actor, request).unwrap();
+                requests.present_with_progress_type(public.actor, request, None).unwrap();
+                let publication = workbench_runner_for_test(&frontend).publish_activation_input(
+                    private, &prepared, requests.clone(), request, crate::RetainedActorExit::default(), None,
+                ).await.unwrap();
+                let ActivationInputPublication::Published(completion) = publication else {
+                    panic!("original input must publish through recipient World");
+                };
+                assert_eq!(completion.publish_if_current(|| request).unwrap(), request,
+                    "publication completion retains the original request identity");
+                let visible = workbench.access.with_machine(public.clone(), move |session, context, _| {
+                    Ok(session.current_binding_in(context.placement.lexical_scope, "sessionInput").unwrap().0)
+                }).await.unwrap();
+                assert_eq!(visible, binding, "the exact new input replaces the prior winner");
+                drop(prepared);
+                drop(frontend);
+                let (consumer, context) = workbench.shared_view()
+                    .admit_private_cell_with_source_for_test(public.clone(), captured.clone(), source_owner.clone()).await;
+                consumer.execute_cell_for_test(context,
+                    &format!("activationResult <- if sessionInput (5 :: Int) == {} then pure (42 :: Int) else error \"wrong original input\"", index + 6),
+                ).await.expect("a fresh recipient cell executes the original producer closure");
+                prior_binding = Some(binding);
+            }
+            let answer = installed_world_query(&workbench, public, captured, "WorldQuestion",
+                StructuredInspectionKind::Info, tidepool_toolchain::timing::HostWorkObservation::new()).await;
+            assert!(matches!(answer.answer(), tidepool_toolchain::compiler_world::WorldAnswer::Info { info, .. }
+                if info.identifier.name == "known"), "recipient source World remains selected after activation");
+        }).await;
     }
 
     #[tokio::test]

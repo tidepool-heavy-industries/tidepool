@@ -1980,6 +1980,7 @@ tidepool_buildscript_run(
                     ("actor_private_host_custody_test", [
                         "resident_workbench::request_tests::private_input_retirement_refusal_retains_original_cleanup_owner",
                         "resident_workbench::request_tests::dropped_private_input_retains_refused_cleanup_until_scope_retirement",
+                        "resident_workbench::request_tests::original_source_activation_publishes_into_recipient_world_and_replaces_input",
                     ]),
                     ("actor_world_cell_input_test", [
                         "resident_workbench::request_tests::private_world_cell_json_operand_survives_plan_end_and_preparation",

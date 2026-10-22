@@ -809,7 +809,6 @@ impl PendingHostValueWrite {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         if !Arc::ptr_eq(&self.owner, session.admission_owner())
             || !Arc::ptr_eq(&self.owner, &execution.owner)
-            || self.owner_epoch != self.owner.epoch()
             || self.owner_epoch != execution.owner_epoch
             || self.scope != execution.private_scope()
             || session.scope_tree().is_live(self.scope)
