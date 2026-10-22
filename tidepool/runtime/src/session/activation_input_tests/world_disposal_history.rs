@@ -27,18 +27,30 @@ struct WorldObservation {
 fn observations(world: &str) -> Vec<WorldObservation> {
     let root = PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
     let log = std::fs::File::open(root.join("compiler/compiler.jsonl")).unwrap();
-    std::io::BufReader::new(log)
-        .lines()
-        .map(|line| line.unwrap())
-        .filter_map(|line| {
-            // The daemon writer may currently be appending its last record.
-            let envelope: serde_json::Value = serde_json::from_str(&line).ok()?;
-            let payload = envelope.get("fields")?.get("line")?.as_str()?;
-            let payload = payload.strip_prefix("tidepool-world-retention ")?;
-            Some(serde_json::from_str::<WorldObservation>(payload).unwrap())
-        })
-        .filter(|row| row.world == world)
-        .collect()
+    let mut log = std::io::BufReader::new(log);
+    let mut rows = Vec::new();
+    let mut line = String::new();
+    while log.read_line(&mut line).unwrap() != 0 {
+        // Only an unterminated tail can belong to the daemon's current append.
+        if !line.ends_with('\n') {
+            break;
+        }
+        let envelope: serde_json::Value = serde_json::from_str(&line)
+            .expect("a complete compiler diagnostic record must be valid JSON");
+        if let Some(payload) = envelope
+            .get("fields")
+            .and_then(|fields| fields.get("line"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|payload| payload.strip_prefix("tidepool-world-retention "))
+        {
+            let row: WorldObservation = serde_json::from_str(payload).unwrap();
+            if row.world == world {
+                rows.push(row);
+            }
+        }
+        line.clear();
+    }
+    rows
 }
 
 fn disposed_world(world: &str, after: u64) -> WorldObservation {
