@@ -24,7 +24,7 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
             "staged_world_first_demands",
             include_str!("fixtures/staged-world-first-demands.hs"),
             CellDeclarationExpectation::Total(2),
-            SemanticChecks::None,
+            SemanticChecks::ItemOrder { future_item: 4 },
             &imports,
             None,
             |program| {

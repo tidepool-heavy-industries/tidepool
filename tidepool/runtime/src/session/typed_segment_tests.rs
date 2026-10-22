@@ -247,6 +247,7 @@ enum SemanticChecks {
     None,
     Shape(super::SegmentWorkShape),
     NativeEntries,
+    ItemOrder { future_item: usize },
 }
 
 impl SemanticSession {
@@ -392,11 +393,25 @@ fn execute_semantic_cell(
         let prefix = resident
             .begin_cell_program(program)?
             .expect("nonempty semantic cell has ordered items");
-        if matches!(checks, SemanticChecks::NativeEntries) {
+        let future_item = match checks {
+            SemanticChecks::NativeEntries => Some(1),
+            SemanticChecks::ItemOrder { future_item } => Some(future_item),
+            _ => None,
+        };
+        if let Some(future_item) = future_item {
+            assert!(future_item > 0);
             let before = resident.public_visibility_snapshot_in(public).unwrap();
+            let before_private = resident
+                .public_visibility_snapshot_in(execution.private_scope())
+                .unwrap();
+            let before_prefix = prefix.snapshot();
+            let before_requests = tidepool_extract_cmd::extract_spawn_count();
             assert!(matches!(
                 source_action_with_original(resident, original.clone(), |resident, _| {
-                    resident.admit_checked_item(prefix.clone(), checked.checked_item(1).unwrap())
+                    resident.admit_checked_item(
+                        prefix.clone(),
+                        checked.checked_item(future_item).unwrap(),
+                    )
                 }),
                 Err(crate::session::SessionError::StaleStagedDeclaration)
             ));
@@ -404,6 +419,15 @@ fn execute_semantic_cell(
                 resident.public_visibility_snapshot_in(public).unwrap(),
                 before
             );
+            assert_eq!(
+                resident
+                    .public_visibility_snapshot_in(execution.private_scope())
+                    .unwrap(),
+                before_private
+            );
+            assert!(Arc::ptr_eq(&before_prefix, &prefix.snapshot()));
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_requests);
         }
         let before_effects = tidepool_extract_cmd::extract_spawn_count();
         resident.set_run_context(SessionRunContext {
