@@ -1,148 +1,38 @@
-//! Scope-neutral native installation choices from one completed source output.
+//! Compiled image projection of one issuer-owned linked target.
 
 use super::*;
 use tidepool_codegen::binding_table::WorldNativeSlotPermit;
-use tidepool_codegen::prepared_program::{DemandedHomeImage, DemandedPackageImage, LiteralOwner};
 use tidepool_codegen::prepared_program::{
-    NativeArtifactBinding, NativeBindingKey, NativeDomainSelection, NativeExportRequest,
-    NativeHomeBinding, ScopedNativeExport, SourceInstanceDomain, WorldNativeInstanceWitness,
+    LiteralOwner, NativeDomainSelection, NativeExportRequest, PreparedNativeCode,
+    ScopedNativeExport, SourceInstanceDomain, WorldNativeInstanceWitness,
 };
-use tidepool_toolchain::artifact_inventory::{
-    ArtifactBinding, CompletedNativeImport, CompletedNativeSelection, CompletedNativeSourceRow,
-    CompletedNativeTargetImport, NativeGroupBinding, PackageCodeBinding,
+use tidepool_repr::native_code::{
+    NativeCodeBody, NativeCodeId, NativeCodeImport, NativeCodeRef, NativeRetainedRequirement,
 };
-
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-enum LocalBinding {
-    Home(NativeGroupBinding),
-    Package(ArtifactBinding),
-}
-
-/// The index belongs only to this plan. It never authorizes a live root.
-#[derive(Clone, Copy)]
-struct LocalExportRef {
-    program: usize,
-    value: ValueId,
-}
-
-enum NativeProduct {
-    Home(Arc<CompletedNativeSourceRow>),
-    Package(PackageCodeBinding),
-}
-
-impl NativeProduct {
-    fn definitions(&self) -> DefinitionsView<'_> {
-        match self {
-            Self::Home(row) => row.product().group().definitions(),
-            Self::Package(binding) => binding.product().code().definitions(),
-        }
-    }
-}
-
-enum NativeCompiledProduct {
-    Home {
-        row: Arc<CompletedNativeSourceRow>,
-        image: DemandedHomeImage,
-    },
-    Package {
-        binding: PackageCodeBinding,
-        image: Arc<DemandedPackageImage>,
-    },
-}
-
-fn home_key(row: &CompletedNativeSourceRow) -> NativeHomeBinding {
-    let binding = row.binding();
-    NativeHomeBinding {
-        issuer: NativeArtifactBinding {
-            artifact: binding.binding.artifact().0,
-            selection: binding.binding.selection().0,
-        },
-        original_ordinal: binding.original_ordinal,
-    }
-}
-
-fn package_key(binding: &PackageCodeBinding) -> NativeArtifactBinding {
-    let binding = binding.binding();
-    NativeArtifactBinding {
-        artifact: binding.artifact.0,
-        selection: binding.selection.0,
-    }
-}
-
-impl NativeCompiledProduct {
-    fn binding_key(&self) -> NativeBindingKey {
-        match self {
-            Self::Home { row, .. } => NativeBindingKey::Home(home_key(row)),
-            Self::Package { binding, .. } => NativeBindingKey::Package(package_key(binding)),
-        }
-    }
-
-    fn definitions(&self) -> DefinitionsView<'_> {
-        match self {
-            Self::Home { row, .. } => row.product().group().definitions(),
-            Self::Package { binding, .. } => binding.product().code().definitions(),
-        }
-    }
-
-    fn image(&self) -> &Arc<CompiledProgram> {
-        match self {
-            Self::Home { image, .. } => image.image(),
-            Self::Package { image, .. } => image.image(),
-        }
-    }
-
-    fn request(
-        &self,
-        domain: SourceInstanceDomain,
-        value: ValueId,
-    ) -> Result<NativeExportRequest, PreparedRuntimeError> {
-        match self {
-            Self::Home { row, image } => {
-                NativeExportRequest::for_home_code(image, home_key(row), domain, value)
-            }
-            Self::Package { binding, image } => NativeExportRequest::for_package(
-                Arc::clone(image),
-                package_key(binding),
-                domain,
-                value,
-            ),
-        }
-        .map_err(PreparedRuntimeError::Install)
-    }
-}
-
-/// A retained import is a requirement on an actual scoped value, never a root.
-/// Its constructor checks the compiler's ordered declaration before compilation.
-enum RetainedNativeOrigin {
-    Home(ArtifactBinding),
-    TargetCapture,
-}
+use tidepool_toolchain::linked_native::{
+    AcquiredNativeCode, AcquiredNativeImport, LinkedNativeTarget, LinkedNativeTargetImport,
+    NativeCodeGrant, NativeOccurrenceId,
+};
 
 pub(in crate::session) struct RetainedNativeRequirement {
-    identity: SymbolIdentity,
-    generation: u64,
-    origin: RetainedNativeOrigin,
+    leaf: NativeRetainedRequirement,
     rep: RuntimeRep,
     entry_signature: Option<Signature>,
     required_evaluated: bool,
 }
-
 impl RetainedNativeRequirement {
     fn from_declaration(
         declaration: &tidepool_repr::execution_schema::GlobalDecl,
         signatures: &[Signature],
-        identity: &SymbolIdentity,
-        generation: u64,
-        origin: RetainedNativeOrigin,
+        leaf: NativeRetainedRequirement,
     ) -> Result<Self, PreparedRuntimeError> {
-        if declaration.identity != *identity || declaration.required_generation != Some(generation)
+        if declaration.identity != *leaf.identity()
+            || declaration.required_generation != Some(leaf.generation())
         {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
         Ok(Self {
-            identity: identity.clone(),
-            generation,
-            origin,
+            leaf,
             rep: declaration.rep,
             entry_signature: declaration
                 .entry_signature
@@ -158,118 +48,78 @@ impl RetainedNativeRequirement {
     }
 }
 
-enum NativeImportSlot {
-    Local(LocalExportRef),
-    Retained(Arc<RetainedNativeRequirement>),
-}
-
-struct NativeProgram {
-    native: NativeCompiledProduct,
-    imports: Vec<NativeImportSlot>,
-}
-
-/// Definition membership lent only by a checked capture-free plan.
+/// A code-only membership loan. This cannot issue source or runtime authority.
 pub(in crate::session) struct ClosedNativeDefinition<'a> {
     definitions: DefinitionsView<'a>,
 }
-
 impl ClosedNativeDefinition<'_> {
     pub(in crate::session) fn sites(&self) -> &[tidepool_repr::execution_schema::SiteRow] {
         self.definitions.sites()
     }
 }
-
-/// Package products admit only exact package dependency edges and no retained
-/// slots. This proof says nothing about captures in their installing target.
+/// This loan is issued only while consuming an actual PACKAGE acquisition.
 pub(in crate::session) struct ClosedPackageDefinition<'a> {
-    binding: &'a PackageCodeBinding,
+    code: &'a NativeCodeRef,
 }
-
 impl ClosedPackageDefinition<'_> {
     pub(in crate::session) fn sites(&self) -> &[tidepool_repr::execution_schema::SiteRow] {
-        self.binding.product().code().definitions().sites()
+        self.code.body().definitions().sites()
     }
 }
 
-/// Immutable code, acquired products and exact ordered import choices.
-/// No field can represent an existing runtime handle or a lexical domain.
+/// Images borrow their bodies and ordered child choices from one linked owner.
+/// No local HOME/PACKAGE graph or acquisition index is reconstructed here.
 pub(in crate::session) struct NativeInstantiationPlan {
-    selection: Arc<CompletedNativeSelection>,
-    target_definitions: Arc<PreparedProgram>,
-    programs: Vec<NativeProgram>,
+    linked: Arc<LinkedNativeTarget>,
+    programs: BTreeMap<NativeCodeId, Arc<PreparedNativeCode>>,
     target: Arc<CompiledProgram>,
-    target_entry: ValueId,
-    target_imports: Vec<NativeImportSlot>,
 }
 
-/// A checked restriction of the same immutable plan to zero retained inputs.
-/// Only this view may launch a reusable source in an unrelated fresh domain.
 pub(in crate::session) struct ClosedInstantiationPlan {
     native: Arc<NativeInstantiationPlan>,
 }
-
-fn has_retained_inputs(selection: &CompletedNativeSelection) -> bool {
-    !selection.completion().retained_requirements().is_empty()
-        || selection
-            .target_imports()
-            .iter()
-            .any(|import| matches!(import, CompletedNativeTargetImport::RetainedCapture { .. }))
-        || selection.completion().rows().any(|row| {
-            row.imports()
-                .iter()
-                .any(|import| matches!(import, CompletedNativeImport::Retained { .. }))
-        })
-}
-
 impl ClosedInstantiationPlan {
     pub(in crate::session) fn native(&self) -> &Arc<NativeInstantiationPlan> {
         &self.native
     }
-
     pub(in crate::session) fn prepare(
         compiled: &super::super::turn::CompiledTurn,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
         Self::prepare_code(&compiled.code(), registry)
     }
-
     pub(in crate::session) fn prepare_code(
         code: &super::super::turn::TurnCode<'_>,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        let selection = code
-            .certification()
-            .and_then(|certification| certification.native_selection.as_ref())
-            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        if has_retained_inputs(selection) {
-            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-        }
         Self::restrict(Arc::new(NativeInstantiationPlan::prepare_code(
             code, registry,
         )?))
     }
-
-    /// Restrict this exact prepared plan without rebuilding its imports or images.
     pub(in crate::session) fn restrict(
         native: Arc<NativeInstantiationPlan>,
     ) -> Result<Self, PreparedRuntimeError> {
-        if has_retained_inputs(&native.selection) {
+        if native
+            .linked
+            .imports()
+            .iter()
+            .any(|import| matches!(import, LinkedNativeTargetImport::RetainedCapture(_)))
+            || native.programs.values().any(|program| {
+                program
+                    .code()
+                    .imports()
+                    .any(|import| matches!(import, NativeCodeImport::Retained(_)))
+            })
+        {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
         BatchProgram::validate_closed(&native.closed_batch()?)
             .map_err(PreparedRuntimeError::Install)?;
         Ok(Self { native })
     }
-
     fn target_definition(&self) -> ClosedNativeDefinition<'_> {
         ClosedNativeDefinition {
-            definitions: self.native.target_definitions.definitions(),
-        }
-    }
-
-    fn definition<'a>(&'a self, product: &'a NativeCompiledProduct) -> ClosedNativeDefinition<'a> {
-        ClosedNativeDefinition {
-            definitions: product.definitions(),
+            definitions: self.native.linked.prepared().definitions(),
         }
     }
 }
@@ -279,235 +129,112 @@ impl NativeInstantiationPlan {
         code: &super::super::turn::TurnCode<'_>,
         registry: &ImageRegistry,
     ) -> Result<Self, PreparedRuntimeError> {
-        let selection = code
+        let linked = code
             .certification()
-            .and_then(|certification| certification.native_selection.as_ref())
+            .and_then(|certification| certification.linked_target.as_ref())
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        let products = selection
-            .completion()
-            .rows()
-            .cloned()
-            .map(NativeProduct::Home)
-            .chain(
-                selection
-                    .completion()
-                    .package_bindings()
-                    .map(NativeProduct::Package),
-            )
-            .collect::<Vec<_>>();
-        let mut indices = BTreeMap::new();
-        for (index, product) in products.iter().enumerate() {
-            let key = match product {
-                NativeProduct::Home(row) => LocalBinding::Home(row.binding()),
-                NativeProduct::Package(binding) => LocalBinding::Package(binding.binding()),
-            };
-            if indices.insert(key, index).is_some() {
-                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-            }
-        }
-        let local = |key, value| {
-            indices
-                .get(&key)
-                .copied()
-                .map(|program| NativeImportSlot::Local(LocalExportRef { program, value }))
-                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)
-        };
-        let products = products
-            .into_iter()
-            .map(|product| {
-                let imports = match &product {
-                    NativeProduct::Home(row) => {
-                        if row.imports().len() != product.definitions().globals().len() {
-                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                        }
-                        row.imports()
-                            .iter()
-                            .zip(product.definitions().globals())
-                            .map(|(import, declaration)| match import {
-                                CompletedNativeImport::Source { binding, value } => {
-                                    local(LocalBinding::Home(*binding), *value)
-                                }
-                                CompletedNativeImport::Package { binding, value } => {
-                                    local(LocalBinding::Package(binding.binding()), *value)
-                                }
-                                CompletedNativeImport::Retained {
-                                    binding,
-                                    identity,
-                                    generation,
-                                } => RetainedNativeRequirement::from_declaration(
-                                    declaration,
-                                    product.definitions().signatures(),
-                                    identity,
-                                    *generation,
-                                    RetainedNativeOrigin::Home(*binding),
-                                )
-                                .map(|requirement| {
-                                    NativeImportSlot::Retained(Arc::new(requirement))
-                                }),
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    }
-                    NativeProduct::Package(binding) => binding
-                        .import_links()
-                        .map(|(binding, value)| {
-                            local(LocalBinding::Package(binding.binding()), value)
-                        })
-                        .collect(),
-                }?;
-                Ok((product, imports))
-            })
-            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
-        if selection.target_imports().len() != code.prepared().globals().len() {
+        if !Arc::ptr_eq(linked.prepared(), code.prepared_owner()) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
-        let target_imports = selection
-            .target_imports()
-            .iter()
-            .zip(code.prepared().globals())
-            .map(|(import, declaration)| match import {
-                CompletedNativeTargetImport::Source { binding, value } => {
-                    local(LocalBinding::Home(*binding), *value)
-                }
-                CompletedNativeTargetImport::Package { binding, value } => {
-                    local(LocalBinding::Package(binding.binding()), *value)
-                }
-                CompletedNativeTargetImport::RetainedCapture {
-                    identity,
-                    generation,
-                } => RetainedNativeRequirement::from_declaration(
-                    declaration,
-                    code.prepared().signatures(),
-                    identity,
-                    *generation,
-                    RetainedNativeOrigin::TargetCapture,
-                )
-                .map(|requirement| NativeImportSlot::Retained(Arc::new(requirement))),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut literals = BTreeMap::new();
-        for (index, (product, _)) in products.iter().enumerate() {
-            let definitions = product.definitions();
+        // The issuer has already validated every acquired occurrence. The image
+        // projection may share equal code, without replacing those grant owners.
+        let codes = linked
+            .acquired()
+            .map(|acquired| (acquired.code().id(), acquired.code().clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut programs = BTreeMap::new();
+        for (id, node) in &codes {
+            let definitions = node.body().definitions();
             if definitions.globals().is_empty()
                 && matches!(definitions.bindings(), [Group::NonRecursive(top)] if matches!(top.binding.rhs, HeapRhs::Bytes(_)))
             {
-                literals.insert(
-                    index,
-                    Self::compile_product(product, &[], &products, &literals, registry)?,
+                programs.insert(
+                    *id,
+                    Arc::new(PreparedNativeCode::prepare(
+                        node.clone(),
+                        &[],
+                        &Default::default(),
+                        &Default::default(),
+                        registry,
+                    )?),
                 );
             }
         }
-        let mut programs = products
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !literals.contains_key(index))
-            .map(|(index, (product, imports))| {
-                Self::compile_product(product, imports, &products, &literals, registry)
-                    .map(|image| (index, image))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        for (id, node) in &codes {
+            if programs.contains_key(id) {
+                continue;
+            }
+            let (owners, packages, sources) = Self::literal_inputs(
+                node.body().definitions().globals(),
+                node.imports(),
+                &programs,
+            )?;
+            programs.insert(
+                *id,
+                Arc::new(PreparedNativeCode::prepare(
+                    node.clone(),
+                    &owners,
+                    &packages,
+                    &sources,
+                    registry,
+                )?),
+            );
+        }
         let (owners, packages, sources) = Self::literal_inputs(
-            code.prepared().globals(),
-            &target_imports,
-            &products,
-            &literals,
+            linked.prepared().globals(),
+            Self::target_imports(linked),
+            &programs,
         )?;
         let target = CompiledProgram::prepare_target_code(
-            code.prepared(),
+            linked.prepared(),
             &owners,
             &packages,
             &sources,
             registry,
-        )
-        .map_err(PreparedRuntimeError::Compile)?;
-        programs.append(&mut literals);
-        let programs = products
-            .into_iter()
-            .enumerate()
-            .map(|(index, (_, imports))| NativeProgram {
-                imports,
-                native: programs
-                    .remove(&index)
-                    .expect("every immutable occurrence compiled"),
-            })
-            .collect();
+        )?;
         Ok(Self {
-            selection: Arc::clone(selection),
-            target_definitions: Arc::clone(code.prepared_owner()),
+            linked: Arc::clone(linked),
             programs,
             target,
-            target_entry: code.prepared().entry(),
-            target_imports,
         })
     }
-
+    fn target_imports(
+        linked: &LinkedNativeTarget,
+    ) -> impl ExactSizeIterator<Item = NativeCodeImport> + '_ {
+        linked.imports().iter().map(|import| match import {
+            LinkedNativeTargetImport::Code { acquired, value } => NativeCodeImport::Code {
+                code: acquired.code().clone(),
+                value: *value,
+            },
+            LinkedNativeTargetImport::RetainedCapture(requirement) => {
+                NativeCodeImport::Retained(requirement.clone())
+            }
+        })
+    }
     pub(in crate::session) fn matches_code(&self, code: &super::super::turn::TurnCode<'_>) -> bool {
-        Arc::ptr_eq(&self.target_definitions, code.prepared_owner())
+        Arc::ptr_eq(self.linked.prepared(), code.prepared_owner())
             && code
                 .certification()
-                .and_then(|certification| certification.native_selection.as_ref())
-                .is_some_and(|selection| Arc::ptr_eq(selection, &self.selection))
+                .and_then(|certification| certification.linked_target.as_ref())
+                .is_some_and(|linked| Arc::ptr_eq(linked, &self.linked))
     }
-
     pub(in crate::session) fn has_request_sites(&self) -> bool {
-        !self.target_definitions.sites().is_empty()
+        !self.linked.prepared().sites().is_empty()
             || self
                 .programs
-                .iter()
-                .any(|program| !program.native.definitions().sites().is_empty())
+                .values()
+                .any(|program| !program.code().body().definitions().sites().is_empty())
     }
-
     pub(in crate::session) fn target_image(&self) -> &Arc<CompiledProgram> {
         &self.target
     }
-
     pub(in crate::session) fn images(&self) -> impl Iterator<Item = &Arc<CompiledProgram>> {
-        std::iter::once(&self.target)
-            .chain(self.programs.iter().map(|program| program.native.image()))
+        std::iter::once(&self.target).chain(self.programs.values().map(|program| program.image()))
     }
-
-    fn compile_product(
-        product: &NativeProduct,
-        imports: &[NativeImportSlot],
-        products: &[(NativeProduct, Vec<NativeImportSlot>)],
-        literals: &BTreeMap<usize, NativeCompiledProduct>,
-        registry: &ImageRegistry,
-    ) -> Result<NativeCompiledProduct, PreparedRuntimeError> {
-        let (owners, packages, sources) =
-            Self::literal_inputs(product.definitions().globals(), imports, products, literals)?;
-        match product {
-            NativeProduct::Package(binding) => DemandedPackageImage::prepare(
-                binding.product().code().clone(),
-                &owners,
-                &packages,
-                &sources,
-                registry,
-            )
-            .map(|image| NativeCompiledProduct::Package {
-                binding: binding.clone(),
-                image: Arc::new(image),
-            })
-            .map_err(PreparedRuntimeError::Compile),
-            NativeProduct::Home(row) => {
-                let pending = row.product();
-                let code = tidepool_repr::execution_schema::CertifiedGroupCode::admit(
-                    pending.owner().clone(),
-                    pending.group().clone(),
-                )?;
-                DemandedHomeImage::prepare(code, &owners, &packages, &sources, registry)
-                    .map(|image| NativeCompiledProduct::Home {
-                        row: Arc::clone(row),
-                        image,
-                    })
-                    .map_err(PreparedRuntimeError::Compile)
-            }
-        }
-    }
-
     fn literal_inputs(
         globals: &[tidepool_repr::execution_schema::GlobalDecl],
-        imports: &[NativeImportSlot],
-        products: &[(NativeProduct, Vec<NativeImportSlot>)],
-        literals: &BTreeMap<usize, NativeCompiledProduct>,
+        imports: impl ExactSizeIterator<Item = NativeCodeImport>,
+        literals: &BTreeMap<NativeCodeId, Arc<PreparedNativeCode>>,
     ) -> Result<
         (
             Vec<Option<LiteralOwner>>,
@@ -523,24 +250,21 @@ impl NativeInstantiationPlan {
         let mut packages = BTreeMap::new();
         let mut sources = BTreeMap::new();
         for (global, import) in globals.iter().zip(imports) {
-            let NativeImportSlot::Local(import) = import else {
+            let NativeCodeImport::Code { code, value } = import else {
                 owners.push(None);
                 continue;
             };
-            let (product, _) = products
-                .get(import.program)
-                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-            match product {
-                NativeProduct::Home(row) => {
+            match code.body() {
+                NativeCodeBody::Home(body) => {
                     let source = SourceBinder {
-                        version: row.product().owner().module_version.clone(),
+                        version: body.owner().module_version.clone(),
                         binder: global.identity.clone(),
                     };
                     owners.push(Some(LiteralOwner::Source {
                         version: source.version.clone(),
                         binder: source.binder.clone(),
                     }));
-                    if let Some(image) = literals.get(&import.program) {
+                    if let Some(image) = literals.get(&code.id()) {
                         if let Some(literal) = image.image().source_literals().remove(&source) {
                             if sources
                                 .insert(source.clone(), literal.clone())
@@ -551,19 +275,16 @@ impl NativeInstantiationPlan {
                         }
                     }
                 }
-                NativeProduct::Package(binding) => {
-                    let owner = binding.product().code().owner();
+                NativeCodeBody::Package(body) => {
+                    let owner = body.owner();
                     owners.push(Some(LiteralOwner::Package {
                         unit: owner.unit.clone(),
                         module: owner.module.clone(),
                         binder: global.identity.clone(),
                         interface_digest: owner.interface_sha256,
                     }));
-                    if let Some(image) = literals.get(&import.program) {
-                        let NativeCompiledProduct::Package { image, .. } = image else {
-                            return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                        };
-                        if let Some(literal) = image.package_literal(import.value) {
+                    if let Some(image) = literals.get(&code.id()) {
+                        if let Some(literal) = image.package_literal(value) {
                             if packages
                                 .insert(global.identity.clone(), literal.clone())
                                 .is_some_and(|old| old != literal)
@@ -577,42 +298,57 @@ impl NativeInstantiationPlan {
         }
         Ok((owners, packages, sources))
     }
-
     fn closed_batch(&self) -> Result<Vec<BatchProgram>, PreparedRuntimeError> {
-        self.programs
-            .iter()
-            .map(|program| (program.native.image(), &program.imports))
-            .chain(std::iter::once((&self.target, &self.target_imports)))
-            .map(|(image, imports)| {
+        let indices = self
+            .programs
+            .keys()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect::<BTreeMap<_, _>>();
+        let imports = |edges: Vec<NativeCodeImport>| {
+            edges
+                .into_iter()
+                .map(|edge| match edge {
+                    NativeCodeImport::Code { code, value } => Ok(BatchImport::Source {
+                        group: *indices
+                            .get(&code.id())
+                            .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?,
+                        binding: value,
+                    }),
+                    NativeCodeImport::Retained(_) => {
+                        Err(PreparedRuntimeError::CertifiedTargetOwners)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let mut batch = self
+            .programs
+            .values()
+            .map(|program| {
                 Ok(BatchProgram {
-                    image: Arc::clone(image),
-                    imports: imports
-                        .iter()
-                        .map(|import| match import {
-                            NativeImportSlot::Local(import) => Ok(BatchImport::Source {
-                                group: import.program,
-                                binding: import.value,
-                            }),
-                            NativeImportSlot::Retained(_) => {
-                                Err(PreparedRuntimeError::CertifiedTargetOwners)
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                    image: program.image().clone(),
+                    imports: imports(program.code().imports().collect())?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, PreparedRuntimeError>>()?;
+        batch.push(BatchProgram {
+            image: self.target.clone(),
+            imports: imports(Self::target_imports(&self.linked).collect())?,
+        });
+        Ok(batch)
     }
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct NativeOccurrence {
-    program: usize,
+    program: NativeCodeId,
     domain: SourceInstanceDomain,
 }
 
 enum ScopedNativeSlot {
     Local {
         occurrence: NativeOccurrence,
+        acquired: AcquiredNativeCode,
         value: ValueId,
     },
     Retained(Arc<RetainedNativeRequirement>),
@@ -626,6 +362,7 @@ pub(in crate::session) struct NativeInstantiation {
     native_anchors: BTreeMap<NativeOccurrence, WorldNativeInstanceWitness>,
     native_permits: BTreeMap<(NativeOccurrence, ValueId), WorldNativeSlotPermit>,
     programs: BTreeMap<NativeOccurrence, Vec<ScopedNativeSlot>>,
+    fresh_acquisitions: BTreeMap<NativeOccurrence, BTreeSet<NativeOccurrenceId>>,
     target_imports: Vec<ScopedNativeSlot>,
 }
 
@@ -643,7 +380,7 @@ pub(in crate::session) struct ResolvedNativeCapture {
 pub(in crate::session) struct NativeInstallationSources {
     target: NativeSourceCustody,
     // None is an explicitly historical definition, never current source.
-    programs: Vec<Option<NativeSourceCustody>>,
+    programs: BTreeMap<NativeOccurrenceId, Option<NativeSourceCustody>>,
 }
 
 impl NativeInstallationSources {
@@ -651,21 +388,22 @@ impl NativeInstallationSources {
         plan: &NativeInstantiationPlan,
         current: &super::super::turn::CurrentNativeSources<'_>,
     ) -> Result<Self, PreparedRuntimeError> {
-        Ok(Self {
-            target: current.target(&plan.selection)?,
-            programs: plan
-                .programs
-                .iter()
-                .map(|program| match &program.native {
-                    NativeCompiledProduct::Home { row, .. } => current.group(&plan.selection, row),
-                    NativeCompiledProduct::Package { binding, .. } => {
-                        Ok(Some(current.package(ClosedPackageDefinition { binding })))
-                    }
-                })
-                .collect::<Result<Vec<_>, PreparedRuntimeError>>()?,
-        })
+        let target = current.target(&plan.linked)?;
+        let mut programs = BTreeMap::new();
+        // Equal executable identity never substitutes an acquired source grant.
+        for acquired in plan.linked.acquired() {
+            let source = match acquired.grant() {
+                NativeCodeGrant::Home { .. } => current.group(&plan.linked, &acquired)?,
+                NativeCodeGrant::Package { .. } => Some(current.package(ClosedPackageDefinition {
+                    code: acquired.code(),
+                })),
+            };
+            if programs.insert(acquired.occurrence(), source).is_some() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            }
+        }
+        Ok(Self { target, programs })
     }
-
     pub(in crate::session) fn closed(
         plan: &ClosedInstantiationPlan,
         origin: &super::super::resident::CapturedSourceOrigin,
@@ -674,9 +412,16 @@ impl NativeInstallationSources {
             target: origin.for_closed_definition(plan.target_definition()),
             programs: plan
                 .native
-                .programs
-                .iter()
-                .map(|program| Some(origin.for_closed_definition(plan.definition(&program.native))))
+                .linked
+                .acquired()
+                .map(|acquired| {
+                    (
+                        acquired.occurrence(),
+                        Some(origin.for_closed_definition(ClosedNativeDefinition {
+                            definitions: acquired.code().body().definitions(),
+                        })),
+                    )
+                })
                 .collect(),
         }
     }
@@ -688,15 +433,61 @@ impl NativeInstantiationPlan {
     ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
         self.target.constructor_declarations()
     }
-
     pub(in crate::session) fn dependency_constructors(
         &self,
     ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> {
         self.programs
-            .iter()
-            .flat_map(|program| program.native.image().constructor_declarations())
+            .values()
+            .flat_map(|program| program.image().constructor_declarations())
     }
-
+    fn scoped_slots(
+        caller: SourceInstanceDomain,
+        definitions: DefinitionsView<'_>,
+        imports: impl ExactSizeIterator<Item = AcquiredNativeImport>,
+        selection: &NativeDomainSelection,
+    ) -> Result<Vec<ScopedNativeSlot>, PreparedRuntimeError> {
+        if definitions.globals().len() != imports.len() {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        definitions
+            .globals()
+            .iter()
+            .zip(imports)
+            .map(|(declaration, import)| match import {
+                AcquiredNativeImport::Code { acquired, value } => {
+                    Self::scoped_code(caller, acquired, value, selection)
+                }
+                AcquiredNativeImport::Retained {
+                    requirement: leaf, ..
+                } => RetainedNativeRequirement::from_declaration(
+                    declaration,
+                    definitions.signatures(),
+                    leaf,
+                )
+                .map(|requirement| ScopedNativeSlot::Retained(Arc::new(requirement))),
+            })
+            .collect()
+    }
+    fn scoped_code(
+        caller: SourceInstanceDomain,
+        acquired: AcquiredNativeCode,
+        value: ValueId,
+        selection: &NativeDomainSelection,
+    ) -> Result<ScopedNativeSlot, PreparedRuntimeError> {
+        let code = acquired.code();
+        let domain = match code.body() {
+            NativeCodeBody::Home(body) => selection.domain_for_owner(caller, body.owner())?,
+            NativeCodeBody::Package(_) => caller,
+        };
+        Ok(ScopedNativeSlot::Local {
+            occurrence: NativeOccurrence {
+                program: code.id(),
+                domain,
+            },
+            acquired,
+            value,
+        })
+    }
     pub(in crate::session) fn instantiate(
         self: &Arc<Self>,
         selection: NativeDomainSelection,
@@ -708,41 +499,36 @@ impl NativeInstantiationPlan {
             PreparedRuntimeError,
         >,
     ) -> Result<NativeInstantiation, PreparedRuntimeError> {
-        let slots =
-            |caller, imports: &[NativeImportSlot]| -> Result<Vec<_>, PreparedRuntimeError> {
-                imports
-                    .iter()
-                    .map(|slot| match slot {
-                        NativeImportSlot::Retained(requirement) => {
-                            Ok(ScopedNativeSlot::Retained(requirement.clone()))
-                        }
-                        NativeImportSlot::Local(export) => {
-                            let program = self
-                                .programs
-                                .get(export.program)
-                                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-                            let domain = match &program.native {
-                                NativeCompiledProduct::Home { row, .. } => {
-                                    selection.domain_for_owner(caller, row.product().owner())?
-                                }
-                                NativeCompiledProduct::Package { .. } => caller,
-                            };
-                            Ok(ScopedNativeSlot::Local {
-                                occurrence: NativeOccurrence {
-                                    program: export.program,
-                                    domain,
-                                },
-                                value: export.value,
-                            })
-                        }
-                    })
-                    .collect()
-            };
-        let target_imports = slots(selection.current(), &self.target_imports)?;
+        let definitions = self.linked.prepared().definitions();
+        if definitions.globals().len() != self.linked.imports().len() {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        let target_imports = definitions
+            .globals()
+            .iter()
+            .zip(self.linked.imports())
+            .map(|(declaration, import)| match import {
+                LinkedNativeTargetImport::Code { acquired, value } => {
+                    Self::scoped_code(selection.current(), acquired.clone(), *value, &selection)
+                }
+                LinkedNativeTargetImport::RetainedCapture(leaf) => {
+                    RetainedNativeRequirement::from_declaration(
+                        declaration,
+                        definitions.signatures(),
+                        leaf.clone(),
+                    )
+                    .map(|requirement| ScopedNativeSlot::Retained(Arc::new(requirement)))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut pending = target_imports
             .iter()
             .filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
+                ScopedNativeSlot::Local {
+                    occurrence,
+                    acquired,
+                    value,
+                } => Some((*occurrence, acquired.clone(), *value)),
                 ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<Vec<_>>();
@@ -751,12 +537,17 @@ impl NativeInstantiationPlan {
         let mut native_anchors = BTreeMap::new();
         let mut native_permits = BTreeMap::new();
         let mut programs = BTreeMap::new();
-        while let Some((occurrence, value)) = pending.pop() {
-            if !visited.insert(occurrence) {
+        let mut fresh_acquisitions =
+            BTreeMap::<NativeOccurrence, BTreeSet<NativeOccurrenceId>>::new();
+        while let Some((occurrence, acquired, value)) = pending.pop() {
+            if !visited.insert((acquired.occurrence(), occurrence.domain)) {
                 continue;
             }
-            let program = &self.programs[occurrence.program];
-            let binding = program.native.binding_key();
+            let program = self
+                .programs
+                .get(&occurrence.program)
+                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+            let binding = program.code().id();
             let anchor = selection
                 .roots()
                 .range(
@@ -770,7 +561,7 @@ impl NativeInstantiationPlan {
                 .and_then(|(key, lease)| {
                     (key.domain == occurrence.domain && key.binding == binding).then_some(lease)
                 });
-            let request = program.native.request(occurrence.domain, value)?;
+            let request = program.request(occurrence.domain, value)?;
             let (permit, witness) = native_slot(&request, anchor)?;
             if anchor.is_some() && witness.is_none() {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners);
@@ -786,44 +577,58 @@ impl NativeInstantiationPlan {
             if anchored {
                 continue;
             }
-            let imports = slots(occurrence.domain, &program.imports)?;
+            fresh_acquisitions
+                .entry(occurrence)
+                .or_default()
+                .insert(acquired.occurrence());
+            let imports = Self::scoped_slots(
+                occurrence.domain,
+                program.code().body().definitions(),
+                acquired.imports(),
+                &selection,
+            )?;
             pending.extend(imports.iter().filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
+                ScopedNativeSlot::Local {
+                    occurrence,
+                    acquired,
+                    value,
+                } => Some((*occurrence, acquired.clone(), *value)),
                 ScopedNativeSlot::Retained(_) => None,
             }));
-            programs.insert(occurrence, imports);
+            programs.entry(occurrence).or_insert(imports);
         }
         let requested = programs
             .values()
             .flatten()
             .chain(&target_imports)
             .filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
+                ScopedNativeSlot::Local {
+                    occurrence, value, ..
+                } => Some((*occurrence, *value)),
                 ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<BTreeSet<_>>();
         for (occurrence, value) in requested {
-            let program = &self.programs[occurrence.program];
             if native_permits.contains_key(&(occurrence, value)) {
                 continue;
             }
-            let request = program.native.request(occurrence.domain, value)?;
+            let program = &self.programs[&occurrence.program];
+            let request = program.request(occurrence.domain, value)?;
             let (permit, witness) = native_slot(&request, anchors.get(&occurrence))?;
-            if witness.as_ref().map(|witness| witness.instance())
-                != native_anchors
-                    .get(&occurrence)
-                    .map(|witness| witness.instance())
+            if witness.as_ref().map(|w| w.instance())
+                != native_anchors.get(&occurrence).map(|w| w.instance())
             {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners);
             }
             native_permits.insert((occurrence, value), permit);
         }
         Ok(NativeInstantiation {
-            plan: Arc::clone(self),
+            plan: self.clone(),
             anchors,
             native_anchors,
             native_permits,
             programs,
+            fresh_acquisitions,
             target_imports,
         })
     }
@@ -831,10 +636,10 @@ impl NativeInstantiationPlan {
 
 impl RetainedNativeRequirement {
     pub(in crate::session) fn identity(&self) -> &SymbolIdentity {
-        &self.identity
+        self.leaf.identity()
     }
     pub(in crate::session) fn generation(&self) -> u64 {
-        self.generation
+        self.leaf.generation()
     }
 }
 
@@ -907,7 +712,9 @@ impl PreparedEngine {
             .flatten()
             .chain(&instantiation.target_imports)
             .filter_map(|slot| match slot {
-                ScopedNativeSlot::Local { occurrence, value } => Some((*occurrence, *value)),
+                ScopedNativeSlot::Local {
+                    occurrence, value, ..
+                } => Some((*occurrence, *value)),
                 ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<BTreeSet<_>>();
@@ -919,15 +726,16 @@ impl PreparedEngine {
         let program_sources = fresh
             .iter()
             .map(|occurrence| {
-                let program = &plan.programs[occurrence.program];
-                let sources = match &sources.programs[occurrence.program] {
-                    Some(current) => current.clone(),
-                    None if program.native.definitions().sites().is_empty() => {
-                        NativeSourceCustody::default()
+                let program = &plan.programs[&occurrence.program];
+                let mut merged = NativeSourceCustody::default();
+                for acquired in &instantiation.fresh_acquisitions[occurrence] {
+                    match &sources.programs[acquired] {
+                        Some(current) => merged.merge(current),
+                        None if program.code().body().definitions().sites().is_empty() => {}
+                        None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
                     }
-                    None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
-                };
-                Ok((*occurrence, sources))
+                }
+                Ok((*occurrence, merged))
             })
             .collect::<Result<BTreeMap<_, _>, PreparedRuntimeError>>()?;
         let mut late_roots = Vec::<NativeInstanceLease>::new();
@@ -937,9 +745,8 @@ impl PreparedEngine {
             let mut existing = BTreeMap::new();
             let mut requests = Vec::new();
             for (occurrence, value) in requested {
-                let program = &plan.programs[occurrence.program];
+                let program = &plan.programs[&occurrence.program];
                 let contract = program
-                    .native
                     .image()
                     .export_contract(value)
                     .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
@@ -952,7 +759,13 @@ impl PreparedEngine {
                         .programs
                         .get(&witness.instance().program())
                         .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-                    if !Arc::ptr_eq(&held.definitions, program.native.image().definition_facts()) {
+                    let Some(NativeProgramCode::Dependency { code: held_code }) = &held.code_owner
+                    else {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    };
+                    if held_code.code().id() != program.code().id()
+                        || !Arc::ptr_eq(&held.definitions, program.image().definition_facts())
+                    {
                         return Err(PreparedRuntimeError::CertifiedTargetOwners);
                     }
                 }
@@ -985,7 +798,9 @@ impl PreparedEngine {
                 slots
                     .iter()
                     .map(|slot| match slot {
-                        ScopedNativeSlot::Local { occurrence, value } => {
+                        ScopedNativeSlot::Local {
+                            occurrence, value, ..
+                        } => {
                             if let Some(lease) = existing.get(&(*occurrence, *value)) {
                                 Ok(BatchImport::Existing {
                                     handle: lease.handle(),
@@ -1012,24 +827,24 @@ impl PreparedEngine {
                         }
                         ScopedNativeSlot::Retained(requirement) => {
                             let capture = captures
-                                .get(&(requirement.identity.clone(), requirement.generation))
+                                .get(&(requirement.identity().clone(), requirement.generation()))
                                 .ok_or_else(|| {
                                     PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                                        identity: requirement.identity.clone(),
-                                        generation: requirement.generation,
+                                        identity: requirement.identity().clone(),
+                                        generation: requirement.generation(),
                                     }
                                 })?;
                             let entry = bindings
                                 .get(capture.id)
                                 .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-                            if entry.value.identity != requirement.identity
+                            if entry.value.identity != *requirement.identity()
                                 || entry.module
                                     != super::super::SessionModule::val(tidepool_repr::Generation(
-                                        requirement.generation,
+                                        requirement.generation(),
                                     ))
                                 || entry.value.handle != capture.handle
-                                || capture.identity != requirement.identity
-                                || capture.generation != requirement.generation
+                                || capture.identity != *requirement.identity()
+                                || capture.generation != requirement.generation()
                                 || capture.handle.rep() != requirement.rep
                                 || requirement.entry_signature.is_some()
                             {
@@ -1055,7 +870,7 @@ impl PreparedEngine {
                 .iter()
                 .map(|occurrence| {
                     Ok(BatchProgram {
-                        image: Arc::clone(plan.programs[occurrence.program].native.image()),
+                        image: Arc::clone(plan.programs[&occurrence.program].image()),
                         imports: imports(&instantiation.programs[occurrence])?,
                     })
                 })
@@ -1067,25 +882,22 @@ impl PreparedEngine {
             let make_facts = |occurrence: Option<NativeOccurrence>| -> Result<ProgramFacts, PreparedRuntimeError> {
                 let (mut facts, imports) = match occurrence {
                     Some(occurrence) => {
-                        let program = &plan.programs[occurrence.program];
-                        let mut facts = ProgramFacts::from_image(program.native.image(), None);
+                        let program = &plan.programs[&occurrence.program];
+                        let mut facts = ProgramFacts::from_image(program.image(), None);
                         facts.native_sources = program_sources[&occurrence].clone();
-                        facts.native_product = Some(match &program.native {
-                            NativeCompiledProduct::Home { row, .. } => NativeProductProof::SelectedHome { _selection: Arc::clone(&plan.selection), _binding: row.binding() },
-                            NativeCompiledProduct::Package { binding, .. } => NativeProductProof::Package { _binding: binding.clone() },
-                        });
+                        facts.code_owner = Some(NativeProgramCode::Dependency { code: Arc::clone(program) });
                         (facts, &instantiation.programs[&occurrence])
                     }
                     None => {
-                        let mut facts = ProgramFacts::from_image(&plan.target, Some(plan.target_entry));
+                        let mut facts = ProgramFacts::from_image(&plan.target, Some(plan.linked.entry()));
                         facts.native_sources = sources.target.clone();
-                        facts.native_product = Some(NativeProductProof::SelectedTarget { _selection: Arc::clone(&plan.selection) });
+                        facts.code_owner = Some(NativeProgramCode::Invocation { _target: Arc::clone(&plan.linked) });
                         (facts, &instantiation.target_imports)
                     }
                 };
                 for import in imports {
                     match import {
-                        ScopedNativeSlot::Local { occurrence, value } => {
+                        ScopedNativeSlot::Local { occurrence, value, .. } => {
                             // Reuse retains original defining source facts,
                             // including literal imports that have no heap lease.
                             let reused = instantiation.native_anchors.get(occurrence)
@@ -1097,7 +909,7 @@ impl PreparedEngine {
                             }
                         }
                         ScopedNativeSlot::Retained(requirement) => {
-                            let capture = captures.get(&(requirement.identity.clone(), requirement.generation))
+                            let capture = captures.get(&(requirement.identity().clone(), requirement.generation()))
                                 .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
                             facts.native_sources.merge(&capture.sources);
                         }

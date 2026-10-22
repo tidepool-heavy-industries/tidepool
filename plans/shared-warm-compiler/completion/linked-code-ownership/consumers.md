@@ -22,6 +22,25 @@ advances the executed World frontier; preparation or failed/cancelled/stale work
 cannot. Do not put GroupInstanceId or an installed graph into World. Delete the
 old local HOME/PACKAGE graph reconstruction and obsolete native sibling APIs.
 
+### Runtime migration status
+
+A's runtime consumer candidate is in `g2-next/a-linked-runtime-20261022`, in the
+existing isolated `tidepool-g2-a-custody-20261022` checkout. NativeInstantiationPlan
+now projects images from B's LinkedNativeTarget and pure code nodes; it no longer
+reconstructs HOME/PACKAGE executable topology. Scoped placement follows the exact
+acquired-occurrence overlay. Every actual grant is validated before physical
+(code ID, domain) reuse, and all selectors requesting a fresh placement retain
+separate source-birth checks. Historical absence cannot borrow another occurrence's
+Current receipt. Existing instances keep original ProgramFacts/source custody.
+
+ProgramFacts retains an exact prepared dependency node or the fresh invocation
+target. Generic batch/parcel import remains separate and preserves exact instances.
+The ordinary, checked and closed installer still uses the existing final permit
+revalidation, staging, source admission, slot publication and abort boundaries.
+Package/runtime and finite-source-history fixture consumers use the linked owner.
+Production candidate, compilation and execution remain unqualified until C's issuer
+migration is joined and V runs the admitted warm integration checks. No cold lane.
+
 ## D: persistence
 
 Replace NativeCompletionSnapshotFacts expanded rows with references to B's SAME
