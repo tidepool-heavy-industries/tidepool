@@ -1,7 +1,7 @@
-//! Canonical prepared-data encoding. Encoding never issues compiler evidence.
-//!
-//! Keep matches and struct destructuring exhaustive so adding a schema field or
-//! variant requires updating this codec. Semantic admission remains in the reader.
+//! Frozen encoder from before the streaming implementation, used only as a
+//! differential byte oracle. Keep it immutable; never update it in lockstep
+//! with the production codec. Version or replace the oracle deliberately when
+//! the wire format changes, retaining independently verified expected bytes.
 
 use super::*;
 use ciborium::value::Value;
