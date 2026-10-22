@@ -1159,7 +1159,7 @@ mod tests {
                     native
                         .products()
                         .unwrap()
-                        .completed_native_selection()
+                        .linked_native_target()
                         .is_some(),
                     "the normal captured-output path already issued its complete target selection"
                 );
