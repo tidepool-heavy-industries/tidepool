@@ -1178,7 +1178,7 @@ fn assert_checked_capture_refusals(
 
 fn assert_segment_shape(
     program: &tidepool_toolchain::checked_cell::CellProgram,
-    shape: super::SegmentWorkShape,
+    shape: SegmentWorkShape,
 ) {
     use tidepool_toolchain::checked_cell::CheckedTypedSegmentBody;
     let count = shape.item_count();
