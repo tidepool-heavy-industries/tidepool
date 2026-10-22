@@ -21365,7 +21365,16 @@ pub(crate) mod request_tests {
                 let input = frontend.lease_cell_input(&context).await.unwrap().expect("real JSON input owner");
                 let input_id = tidepool_repr::SessionVarId::from_extract(input.mounted_input().binder.var_id);
                 let input_name = input.mounted_input().binder.name.clone();
-                assert_eq!(input.private.as_ref().unwrap().private_scope(), context.placement.lexical_scope);
+                let expected_scope = context.placement.lexical_scope;
+                let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
+                let input = frontend.access.with_machine(context.clone(), move |session, _, _| {
+                    assert_eq!(execution.private_scope(), expected_scope);
+                    let preparation = input.with_write(|write| session.prepare_private_execution(execution, write))
+                        .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+                    assert!(preparation.into_parts().1.is_some(),
+                        "the issued private lease selects its actual input in the demanded scope");
+                    Ok(input)
+                }).await.unwrap();
                 let expected = if correct { "hi" } else { "wrong" };
                 let cell = if used {
                     format!("seen <- if input == object [(\"greeting\", String \"{expected}\")] then pure input else error \"wrong actual JSON input\"")
@@ -21463,7 +21472,7 @@ pub(crate) mod request_tests {
             let plan = plan.ok().unwrap();
             let (missing_input_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let missing_input_plan = missing_input_plan.ok().unwrap();
-            let (retained_plan, mut input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
+            let (retained_plan, input) = plan_actual_world_input(&frontend, &context, input, "seen <- pure input", WorldInputPlanBoundary::Actual).await;
             let retained_plan = retained_plan.ok().unwrap();
             let execution = frontend.private_execution.as_ref().unwrap().admission.clone();
             let (retirement_snapshot, mut input) = frontend.access.with_machine(context.clone(), move |session, _, _| {
