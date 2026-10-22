@@ -14291,6 +14291,9 @@ mod activation_input_tests;
 pub(in crate::session) use activation_input_tests::run_historical_original_recovery_fixture;
 
 #[cfg(test)]
+pub(in crate::session) use activation_input_tests::run_checked_native_source_selection;
+
+#[cfg(test)]
 mod source_origin_tests {
     #[derive(Clone)]
     struct EmptyOutput;

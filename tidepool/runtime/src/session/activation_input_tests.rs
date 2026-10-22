@@ -6918,3 +6918,114 @@ fn request_input_layout_captures_original_nominal_input_and_optional_progress() 
         }
     }
 }
+
+/// Cross two real targets after runtime-owned World capture and checked admission.
+pub(in crate::session) fn run_checked_native_source_selection() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // Keep both imported bodies as actual native demands under optimization.
+    let original = format!(
+        "{}\n{{-# NOINLINE homeValue #-}}\n{{-# NOINLINE homeNumber #-}}\n",
+        include_str!("fixtures/checked-home-value.hs"),
+    );
+    std::fs::write(root.path().join("CheckedHomeValue.hs"), original).unwrap();
+    let mut include = effects.include_paths().to_vec();
+    include.insert(0, root.path().to_owned());
+    let recipe = InputRecipe::capture(
+        insert_preamble_imports(effects.preamble(), "qualified CheckedHomeValue"),
+        effects.row().to_owned(),
+        include,
+    );
+    let library = SessionLib::open(
+        SessionId(1753),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let cell = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        "let nativeFirst = CheckedHomeValue.homeNumber CheckedHomeValue.homeValue\nlet nativeSecond = CheckedHomeValue.homeNumber CheckedHomeValue.homeValue",
+        execution,
+        0,
+    );
+    assert_eq!(cell.checked.items.len(), 2);
+    let mut previous_selection = None;
+    let mut crossed_targets = 0;
+    for index in 0..2 {
+        let (bound, compiled, reservation) = cell.compile_binding(&mut resident, index);
+        let [binder] = bound.as_slice() else {
+            panic!("each source-control target binds one number");
+        };
+        if let Some(previous) = previous_selection.take() {
+            let mut crossed = compiled.code();
+            crossed
+                .certification
+                .to_mut()
+                .as_mut()
+                .unwrap()
+                .native_selection = Some(previous);
+            source_action(&mut resident, |resident, _| {
+                resident.assert_checked_native_source_selection(&compiled.code(), &crossed);
+            });
+            crossed_targets += 1;
+        }
+        previous_selection = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .native_selection
+            .clone();
+        assert!(
+            previous_selection
+                .as_ref()
+                .unwrap()
+                .completion()
+                .rows()
+                .any(|row| { row.product().owner().module == "CheckedHomeValue" }),
+            "the real target must select the non-inlined HOME body"
+        );
+        let outcome = source_action(&mut resident, |resident, settlement| {
+            resident.run_bind_with_sites(
+                &binder.name,
+                compiled.code(),
+                binder,
+                reservation.generation(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        assert_eq!(
+            cell.prefix.snapshot().compiler_prefix().next_item(),
+            index + 1
+        );
+    }
+    assert_eq!(crossed_targets, 1);
+    for name in ["nativeFirst", "nativeSecond"] {
+        let custody = resident
+            .retain_visible_binding_custody(name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resident.render_retained_preview(&custody, 64),
+            Some("41".to_owned())
+        );
+    }
+}
