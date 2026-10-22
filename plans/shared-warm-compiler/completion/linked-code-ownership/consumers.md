@@ -82,8 +82,18 @@ record data but issues no code, source or runtime authority. Existing package
 payload references authenticate only explicitly reached products before linked
 owner restoration. No old completion codec or compatibility route remains.
 
-The actual format-7 preflight candidate `ca07996b3c` compiled and its three focused
-controls passed at integration `2e6ff0abd2`, one case each. This is not format-8
-qualification. The joined Context8/Surface3 compile, canonical restoration,
-malformed/missing/inaccessible storage, overlapping-record growth and actual
-fresh-instance recovery checks remain pending.
+D's source candidates are `c3791230cd`, `6c31f94a8f`, `475184a97b`,
+`8a6d221757` and `dc8ac5fd97`, with B's same-issuer restoration and C's acquired
+collection. Independent source review accepted the storage and authority-transfer
+boundaries. One demanded context batch shares decoded records and authenticated
+pure components; each context must supply its own complete facts and grants.
+Restored native maps rebind their exact immutable HAMT bases after equality checks.
+Separate lazy hydration operations do not share a process-global record cache.
+
+The existing finite-package native-output leaf now exercises real Context8
+publication, explicit package payload capture and authenticated restoration,
+sharing and semantic refusal controls. Its package-only first target, HOME
+canonical companion and alternate package occurrence are fatal, unexecuted fixture
+premises. Eight codec/DATA controls, this actual compiler-owning leaf, Surface3
+version/physical-observation controls and the required corpus remain pending V's
+joined warm compile and execution. No Context8 or Surface3 pass is claimed.
