@@ -26001,7 +26001,11 @@ pub(crate) mod tests {
             .unwrap(),
         );
         assert_eq!(owner.groups().len(), 1);
-        assert_eq!(owner.groups()[0].origin(), ProductOrigin::Fresh);
+        assert_eq!(
+            owner.groups()[0].origin(),
+            original.original_native().unwrap().groups[0].origin(),
+            "target admission preserves its original witness origin",
+        );
         let (_, selected) = admitted.artifacts().selected_native_binding_rows();
         let binding = *selected.first().unwrap();
         assert_eq!(selected.len(), 1);
