@@ -3016,9 +3016,8 @@ fn decode_receipt_value_in(
     if coordinates.used.len() != coordinates.rows.len() {
         return Err(CertificationError::Receipt("unreferenced owner coordinate"));
     }
-    let fresh_home_groups = modules
+    let home_package_groups = modules
         .iter()
-        .filter(|module| module.origin == ProductOrigin::Fresh)
         .flat_map(|module| {
             module.groups.iter().map(move |group| {
                 (
@@ -3039,7 +3038,7 @@ fn decode_receipt_value_in(
             CompleteProductKind::Ordinary => PackageLinkTargets::Exact(&targets),
             CompleteProductKind::SegmentOriginals => PackageLinkTargets::Stage,
         },
-        &fresh_home_groups,
+        &home_package_groups,
         operation,
     )?;
 
@@ -3294,7 +3293,7 @@ fn decode_package_links(
     value: &Value,
     package_products: &[PackageProductOutput],
     targets: PackageLinkTargets<'_>,
-    fresh_home_groups: &BTreeMap<(String, String, u32), usize>,
+    home_package_groups: &BTreeMap<(String, String, u32), usize>,
     operation: &InventoryOperation,
 ) -> CertResult<PackageLinks> {
     let row = sized(value, 6)?;
@@ -3412,14 +3411,14 @@ fn decode_package_links(
         )?;
         match &targets {
             PackageLinkTargets::Exact(_) | PackageLinkTargets::Stage => {
-                let expected = fresh_home_groups
+                let expected = home_package_groups
                     .get(&(unit.clone(), module.clone(), original_ordinal))
                     .ok_or(CertificationError::Receipt(
-                        "package HOME root is not a fresh receipt group",
+                        "package HOME root is not an issued receipt group",
                     ))?;
                 if links.len() != *expected {
                     return Err(CertificationError::Receipt(
-                        "package HOME link count differs from its fresh group",
+                        "package HOME link count differs from its issued group",
                     ));
                 }
             }

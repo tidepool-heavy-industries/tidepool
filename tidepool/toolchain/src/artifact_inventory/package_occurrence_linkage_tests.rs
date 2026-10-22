@@ -434,6 +434,22 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
                 .collect::<Vec<_>>()
         };
     for (ordinal, left) in &result_roots {
+        let left_product = result
+            .completion()
+            .rows()
+            .find(|row| row.binding().original_ordinal == *ordinal)
+            .expect("result HOME row")
+            .product();
+        let right_product = result2
+            .completion()
+            .rows()
+            .find(|row| row.binding().original_ordinal == *ordinal)
+            .expect("result2 HOME row")
+            .product();
+        assert!(
+            Arc::ptr_eq(left_product, right_product),
+            "ordinal {ordinal} reuses the same HOME product custody"
+        );
         let left_bindings = package_bindings(&result, *ordinal);
         let right_bindings = package_bindings(&result2, *ordinal);
         assert_eq!(

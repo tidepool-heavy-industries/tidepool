@@ -634,9 +634,11 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         let (iface,path,seal) = canonicalInterfaceInput proof
         body <- canonicalProofOriginalBody proof path seal
         pure (decodeCapturedPackageImports iface (artifactBytes body))
+      candidatePackages <- forM cached captureCandidatePackageEvidence
       let sidecarPackages = map localFinalizedPackageEvidence
             (Map.elems (finalizedLocalAdmissions finalized))
             ++ [packages | Right packages <- retainedPackages]
+            ++ [packages | Right packages <- candidatePackages]
           selectedPackages = observedPackages ++
             [(unit,name,path,T.pack (artifactSha256 body))
             | ((unit,name),(path,body)) <- Map.toAscList capturedPackages]
@@ -677,6 +679,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         (sum [fromIntegral (BS.length bytes) | (_,bytes) <- packageInterfaceWrites])
       let failures = either (:[]) (const []) owned
             ++ [reason | Left reason <- retainedPackages]
+            ++ [reason | Left reason <- candidatePackages]
             ++ [errorText | (_, _, Left errorText) <- modules]
             ++ [errorText | (_, Left errorText) <- targetRows]
             ++ ["package interface changed during certification" | not packagesValid]
@@ -738,16 +741,19 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                   , encodeString (T.pack path), encodeString sha]
                 | ((unit, name), options) <- Map.toList packages
                 , (path, sha) <- Set.toList options ]
-              freshHomeKeys = Set.fromList
+              homeProductKeys = Set.fromList
                 [ (productUnit product, productModule product, candidateGroupOrdinal group)
-                | (product, group, _) <- moduleRows
-                , productOrigin product == FreshProduct ]
+                | (product, group, _) <- moduleRows ]
+                `Set.union` Set.fromList
+                [ (T.pack (candidateUnit candidate),T.pack (candidateModule candidate),
+                    candidateGroupOrdinal group)
+                | candidate <- cached
+                , group <- candidateGroups candidate ]
               expectedHomeRoots = packageLinkIndexExpectedHomeRoots packageLinks
-              expectedHomeCoordinates = Set.fromList
+              expectedProductCoordinates = Set.fromList
                 [(unit,name,ordinal) | (_,unit,name,ordinal) <- Set.toList expectedHomeRoots]
-              -- Non-fresh (retained/cached) HOME groups pass their prior
-              -- imports through unchanged; only fresh HOME groups emit a
-              -- home_roots entry in this receipt.
+              -- Each demanded target HOME group carries its issued package
+              -- roots, whether its native product rows are current or cached.
               homeRoots = Map.restrictKeys
                 (packageLinkIndexHomeRoots packageLinks) expectedHomeRoots
               targetRoots = case kind of
@@ -794,9 +800,9 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
               else Right ()
-            if not (expectedHomeCoordinates `Set.isSubsetOf` freshHomeKeys)
-              then Left ("HOME package root is not a fresh receipt group: fresh="
-                  ++ show freshHomeKeys
+            if not (expectedProductCoordinates `Set.isSubsetOf` homeProductKeys)
+              then Left ("HOME package root has no issued native product: products="
+                  ++ show homeProductKeys
                   ++ " expected=" ++ show expectedHomeRoots)
               else Right ()
             if Map.keysSet homeRoots /= expectedHomeRoots
@@ -1141,6 +1147,34 @@ captureSelectedPackageWitnesses outDir captured witnesses = do
 
 type PackageGlobalResolver = SymbolIdentity -> IO (Either String (Id, PackageImportRoot))
 type PackageWitnessResolver = SymbolIdentity -> IO (Either String PackageImportRoot)
+
+captureCandidatePackageEvidence :: ModuleCandidate
+  -> IO (Either String PackageImportEvidence)
+captureCandidatePackageEvidence candidate = do
+  interfaceRead <- try (BS.readFile (candidateInterface candidate))
+    :: IO (Either IOException BS.ByteString)
+  packageRead <- try (BS.readFile (candidatePackageImports candidate))
+    :: IO (Either IOException BS.ByteString)
+  pure $ do
+    interfaceBytes <- either
+      (const (Left "candidate interface is unavailable during package capture"))
+      Right interfaceRead
+    packageBytes <- either
+      (const (Left "candidate package evidence is unavailable during package capture"))
+      Right packageRead
+    if artifactSha256 (captureArtifactBytes interfaceBytes)
+          /= candidateInterfaceSha256 candidate
+        || artifactSha256 (captureArtifactBytes packageBytes)
+          /= candidatePackageImportsSha256 candidate
+      then Left "candidate package evidence changed during package capture"
+      else decodeCapturedPackageImports
+        (ExactIfaceArtifact
+          (candidateUnit candidate)
+          (candidateModule candidate)
+          (candidateInterface candidate)
+          (candidateInterfaceSha256 candidate)
+          [])
+        packageBytes
 
 data PackageDeclarationCatalog = PackageDeclarationCatalog
   { catalogOwner :: Module

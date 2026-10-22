@@ -73,6 +73,8 @@ import Data.Sequence qualified as Seq
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Tidepool.PreparedBuiltins
   ( DeferredFunction(..), deferredFunction, wiredInErrorKind )
+import Tidepool.ModuleCandidates
+  ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -955,10 +957,10 @@ data PreparedPackageTarget = PreparedPackageTarget
   }
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
-  -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup)
+  -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts home components reach = do
+projectPreparedPackageTarget env hostBindings targetName context homeProducts cached home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
@@ -974,12 +976,13 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ho
           , Text.pack (moduleNameString (moduleName (pmModule prepared))))
         | prepared <- home ]
       originalIdentities = Set.fromList (Map.elems (projectionCurrentOriginals context))
+      isPackageImportIdentity identity =
+        identity `Set.notMember` originalIdentities
+          && (symbolUnit identity, symbolModule identity) `Set.notMember` homeModulePairs
+          && toUnitId (moduleUnit (symbolOwner identity)) `Set.notMember` homeUnitIds
       isPackageImport global =
         isNothing (globalRequiredGeneration global)
-          && globalIdentity global `Set.notMember` originalIdentities
-          && (symbolUnit (globalIdentity global), symbolModule (globalIdentity global))
-               `Set.notMember` homeModulePairs
-          && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
+          && isPackageImportIdentity (globalIdentity global)
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
   products <- projectPreparedPackageGroupsWithIdentities context components reach identities
@@ -1001,7 +1004,7 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ho
         , TopBinding identity _ <- [binding] ]
       targetSymbols = Set.union programBinders
         (Set.fromList (map globalIdentity (programGlobals program)))
-  homeImports <- concat <$> forM home (\prepared -> do
+  preparedHomeImports <- concat <$> forM home (\prepared -> do
     let selected = Set.fromList
           [ ordinal
           | (ordinal, one) <- preparedBindingGroups prepared
@@ -1028,11 +1031,56 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ho
     pure (map (\(unit,name,ordinal,identities,_) -> (unit,name,ordinal,identities))
       (filter (\(_,_,_,identities,demanded) ->
         demanded && not (null identities)) rows)))
+  let productHomeImports =
+        [ (unit,name,fromIntegral ordinal,identities)
+        | (owner, groups) <- Map.toAscList homeProducts
+        , (ordinal, group) <- Map.toAscList groups
+        , let unit = Text.pack (unitString (moduleUnit owner))
+              name = Text.pack (moduleNameString (moduleName owner))
+              groupSymbols = Set.fromList (projectedBinders group)
+              identities =
+                [ globalIdentity global
+                | global <- projectedGlobals (projectedBody group)
+                , isPackageImport global ]
+              demanded = not (Set.null
+                (Set.intersection groupSymbols targetSymbols))
+        , demanded
+        , not (null identities) ]
+      cachedHomeImports =
+        [ ( Text.pack (candidateUnit candidate)
+          , Text.pack (candidateModule candidate)
+          , fromIntegral (candidateGroupOrdinal group)
+          , identities )
+        | candidate <- cached
+        , group <- candidateGroups candidate
+        , let identities =
+                [ candidateGlobalIdentity global
+                | global <- candidateGroupGlobals group
+                , candidateGlobalGeneration global == Nothing
+                , isPackageImportIdentity (candidateGlobalIdentity global) ]
+              demanded = not (Set.null
+                (Set.intersection
+                  (Set.fromList (candidateGroupBinders group)) targetSymbols))
+        , demanded
+        , not (null identities) ]
+  homeImports <- do
+    byOwner <- foldM insertHomeImport Map.empty
+      (preparedHomeImports ++ productHomeImports ++ cachedHomeImports)
+    pure [ (unit,name,ordinal,identities)
+         | ((unit,name,ordinal),identities) <- Map.toAscList byOwner ]
   let targetImports =
         [ globalIdentity global
         | global <- programGlobals program
         , isPackageImport global ]
   pure (PreparedPackageTarget targetName program constructors products targetImports homeImports)
+  where
+    insertHomeImport known row@(unit,name,ordinal,identities) =
+      case Map.lookup (unit,name,ordinal) known of
+        Nothing -> Right (Map.insert (unit,name,ordinal) identities known)
+        Just prior | prior == identities -> Right known
+        Just prior -> Left (InvalidPreparedRepresentation
+          (Text.pack ("HOME package imports disagree for " ++ show (unit,name,ordinal)
+            ++ ": " ++ show prior ++ " /= " ++ show identities)))
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.

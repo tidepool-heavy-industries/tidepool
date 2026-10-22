@@ -1153,7 +1153,13 @@ pub(crate) fn complete_native_selection(
     for row in sources.groups() {
         let mut prior = None;
         for completed in inherited.iter() {
-            if let Some(old) = completed.rows.get(&row.binding()) {
+            let same_binding = completed.rows.get(&row.binding());
+            let same_physical_row = completed.rows.values().filter(|old| {
+                old.product.owner() == row.group().owner()
+                    && old.product.group().original_ordinal()
+                        == row.group().group().original_ordinal()
+            });
+            for old in same_binding.into_iter().chain(same_physical_row) {
                 let same_exact_rows = old.product.owner() == row.group().owner()
                     && old.product.origin() == row.group().origin()
                     && old.product.group() == row.group().group()
@@ -1180,39 +1186,42 @@ pub(crate) fn complete_native_selection(
                 prior = Some(old);
             }
         }
-        row_inputs.push((row, prior));
+        let product = prior.map_or_else(
+            || Arc::new(row.group().clone()),
+            |old| Arc::clone(&old.product),
+        );
+        row_inputs.push((row, prior, product));
     }
-    // Fresh rows consume their target-qualified HOME links. A prior completion is
-    // authoritative, but the fresh occurrence must match its product and ordered
-    // children exactly before admission. Non-fresh rows without a prior
-    // completion have no reconstructable choice.
+    // Package-bearing rows consume their target-qualified HOME links. A prior
+    // completion is authoritative, but the current occurrence must match its
+    // product and ordered children exactly before admission.
     let selected_home_keys = selection
         .home_root_coordinates()
         .into_iter()
         .collect::<BTreeSet<_>>();
     let source_home_rows = row_inputs
         .iter()
-        .map(|(row, _)| {
+        .map(|(row, _, _)| {
             let owner = row.group().owner();
             let package_slots = row
                 .imports()
                 .iter()
                 .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
                 .count();
-            (
-                (
-                    owner.unit.clone(),
-                    owner.module.clone(),
-                    row.binding().original_ordinal,
-                ),
-                row.group().origin() == crate::certified_products::ProductOrigin::Fresh,
-                package_slots,
-            )
+            let key = (
+                owner.unit.clone(),
+                owner.module.clone(),
+                row.binding().original_ordinal,
+            );
+            let manifest_root = selection
+                .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
+                .is_some();
+            (key, package_slots, manifest_root)
         })
         .collect::<Vec<_>>();
     let package_free_fresh = source_home_rows
         .iter()
-        .filter(|(_, fresh, slots)| *fresh && *slots == 0)
+        .filter(|(_, slots, manifest_root)| *manifest_root && *slots == 0)
         .map(|(key, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let forbidden_home_roots = selected_home_keys
@@ -1226,11 +1235,11 @@ pub(crate) fn complete_native_selection(
     }
     let expected_home_keys = source_home_rows
         .iter()
-        .filter(|(_, fresh, slots)| *fresh && *slots > 0)
+        .filter(|(_, slots, manifest_root)| *manifest_root && *slots > 0)
         .map(|(key, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let mut consumed_home_keys = BTreeSet::new();
-    for (row, prior) in &row_inputs {
+    for (row, prior, _) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
         if imports.len() != definitions.globals().len()
@@ -1241,17 +1250,14 @@ pub(crate) fn complete_native_selection(
             ));
         }
         let owner = row.group().owner();
-        let fresh = row.group().origin() == crate::certified_products::ProductOrigin::Fresh;
         let package_slots = imports
             .iter()
             .filter(|link| matches!(link, SelectedNativeImport::Package { .. }))
             .count();
-        let fresh_links = if fresh && package_slots > 0 {
-            Some(
-                selection
-                    .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
-                    .ok_or_else(|| failure("fresh HOME group lacks package links"))?,
-            )
+        let manifest_links =
+            selection.home_roots(&owner.unit, &owner.module, row.binding().original_ordinal);
+        let fresh_links = if package_slots > 0 {
+            manifest_links
         } else {
             None
         };
@@ -1270,7 +1276,7 @@ pub(crate) fn complete_native_selection(
                 let selected = match prior.map(|row| &row.imports[index]) {
                     Some(CompletedNativeImport::Package { binding, .. }) => {
                         check_product(binding.product())?;
-                        if fresh {
+                        if fresh_links.is_some() {
                             let slot = fresh_links
                                 .and_then(|links| links.get(fresh_slot))
                                 .ok_or_else(|| {
@@ -1298,7 +1304,15 @@ pub(crate) fn complete_native_selection(
                     None => {
                         let slot = fresh_links
                             .ok_or_else(|| {
-                                failure("non-fresh HOME package slot lacks its prior completion")
+                                failure(&format!(
+                                    "HOME package slot lacks either prior completion or current \
+                                     links: owner={:?} ordinal={} binding={:?} package={:?} \
+                                     selected_home_roots={selected_home_keys:?}",
+                                    row.group().owner(),
+                                    row.group().group().original_ordinal(),
+                                    row.binding(),
+                                    identity,
+                                ))
                             })?
                             .get(fresh_slot)
                             .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
@@ -1495,7 +1509,7 @@ pub(crate) fn complete_native_selection(
             .map(Into::into)
     };
     let mut rows = imbl::OrdMap::new();
-    for (row, prior) in row_inputs {
+    for (row, prior, product) in row_inputs {
         let imports = close(row.imports(), row.group().group().definitions())?;
         if prior.is_some_and(|prior| prior.imports != imports) {
             return Err(failure(
@@ -1506,7 +1520,7 @@ pub(crate) fn complete_native_selection(
             row.binding(),
             Arc::new(CompletedNativeSourceRow {
                 binding: row.binding(),
-                product: Arc::new(row.group().clone()),
+                product,
                 imports,
             }),
         );

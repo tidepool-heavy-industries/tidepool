@@ -847,12 +847,9 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     homeComponents = filter isHome (closureComponentSelections recovered)
                     packageComponents = filter (not . isHome) (closureComponentSelections recovered)
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
-                let homeProducts = Map.fromList
-                      [(pmModule preparedModule',
-                        Map.findWithDefault Map.empty (pmModule preparedModule') homeProductGroups)
-                      | preparedModule' <- home]
+                let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts
+                  finalContext homeProducts candidates
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired
