@@ -98,6 +98,12 @@ export_file(
 )
 
 export_file(
+    name = "logging_producer_shape_fixture",
+    src = "test-cell-splitter/fixtures/logging/producer-shape.txt",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "worker_server_source",
     src = "src/Tidepool/WorkerServer.hs",
     out = "WorkerServer.hs",
