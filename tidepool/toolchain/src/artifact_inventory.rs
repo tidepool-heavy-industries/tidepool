@@ -23,7 +23,9 @@ pub(crate) use compiler_projection::{
     InputNativeDecision, IssuedInputNativeDecisions, RecordedCompilerRole,
     RecordedInputNativeDecision,
 };
-pub use compiler_projection::{CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority};
+pub use compiler_projection::{
+    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+};
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
     NativeOfferContribution, ValidatedFreshNativeAvailability,
@@ -646,7 +648,9 @@ impl CertifiedTargetNativeInputs {
         Ok(self)
     }
 
-    pub(crate) fn linked_native_target(&self) -> Option<&Arc<crate::linked_native::LinkedNativeTarget>> {
+    pub(crate) fn linked_native_target(
+        &self,
+    ) -> Option<&Arc<crate::linked_native::LinkedNativeTarget>> {
         self.linked_target.as_ref()
     }
 
@@ -708,7 +712,9 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
             .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
     }
 
-    pub(crate) fn linked_native_target(&self) -> Option<&'a Arc<crate::linked_native::LinkedNativeTarget>> {
+    pub(crate) fn linked_native_target(
+        &self,
+    ) -> Option<&'a Arc<crate::linked_native::LinkedNativeTarget>> {
         self.linked_target
     }
 
@@ -3628,9 +3634,7 @@ impl From<native_availability::NativeGroupTarget> for PlannedTarget {
 }
 
 impl BoundArtifactSelection {
-    pub(crate) fn captured_stage(
-        &self,
-    ) -> &Arc<crate::declaration_context::CapturedCompilerStage> {
+    pub(crate) fn captured_stage(&self) -> &Arc<crate::declaration_context::CapturedCompilerStage> {
         &self.captured_stage
     }
 
@@ -4052,14 +4056,12 @@ impl ArtifactInventory {
             return Err(failure("physical segment belongs to another inventory"));
         }
         let mut selection = selection.clone();
-        let physical = Arc::new(
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selection,
-                parent,
-                entries,
-                validation,
-            )?,
-        );
+        let physical = Arc::new(crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            parent,
+            entries,
+            validation,
+        )?);
         self.index_admitted_segment(physical, &selection)
     }
 
@@ -4077,8 +4079,9 @@ impl ArtifactInventory {
             .flat_map(|outputs| outputs.required())
             .map(|output| output.artifact_id())
             .collect();
-        let compiler_prefix = CompilerSourceSupport::close_complete_output(captured_stage.compiler_inputs())?
-            .segment_value_prefix(&excluded)?;
+        let compiler_prefix =
+            CompilerSourceSupport::close_complete_output(captured_stage.compiler_inputs())?
+                .segment_value_prefix(&excluded)?;
         Ok(BoundArtifactSelection {
             captured_stage,
             compiler_prefix,

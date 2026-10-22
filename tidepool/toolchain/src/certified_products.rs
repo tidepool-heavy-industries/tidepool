@@ -1791,9 +1791,7 @@ impl CertifiedSegmentOriginals {
         }
     }
 
-    pub(crate) fn captured_stage(
-        &self,
-    ) -> &Arc<crate::declaration_context::CapturedCompilerStage> {
+    pub(crate) fn captured_stage(&self) -> &Arc<crate::declaration_context::CapturedCompilerStage> {
         match &self.admission {
             SegmentOriginalAdmission::OriginalOnly(inputs) => inputs,
             SegmentOriginalAdmission::Executable(bound) => bound.captured_stage(),
@@ -11642,10 +11640,18 @@ impl AcquiredHomeCodeGrant {
             })
             .collect()
     }
-    pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding { self.binding }
-    pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> { self.row.product() }
-    pub(crate) fn imports(&self) -> &[SelectedNativeImport] { self.row.imports() }
-    pub(crate) fn artifacts(&self) -> &crate::artifact_inventory::ArtifactView { &self.artifacts }
+    pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.binding
+    }
+    pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> {
+        self.row.product()
+    }
+    pub(crate) fn imports(&self) -> &[SelectedNativeImport] {
+        self.row.imports()
+    }
+    pub(crate) fn artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
+        &self.artifacts
+    }
 }
 
 impl IssuedSelectedNativeGroup {
@@ -11823,13 +11829,28 @@ pub(crate) fn acquire_linked_home_grants(
     view: &crate::artifact_inventory::ArtifactView,
     bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
     validation: &mut PackageInterfaceValidation,
-) -> Result<BTreeMap<crate::artifact_inventory::NativeGroupBinding, AcquiredHomeCodeGrant>, crate::CompileError> {
+) -> Result<
+    BTreeMap<crate::artifact_inventory::NativeGroupBinding, AcquiredHomeCodeGrant>,
+    crate::CompileError,
+> {
     if bindings.is_empty() {
         return Ok(BTreeMap::new());
     }
     let rows = certify_acquired_original_group_rows(view, bindings, validation)?.rows;
-    let custody=view.retain_linked_home_custody(bindings)?;
-    Ok(rows.into_iter().map(|(binding,row)| (binding,AcquiredHomeCodeGrant {binding,row,artifacts:custody.clone()})).collect())
+    let custody = view.retain_linked_home_custody(bindings)?;
+    Ok(rows
+        .into_iter()
+        .map(|(binding, row)| {
+            (
+                binding,
+                AcquiredHomeCodeGrant {
+                    binding,
+                    row,
+                    artifacts: custody.clone(),
+                },
+            )
+        })
+        .collect())
 }
 pub(crate) struct OriginalValidationInventory<'a> {
     available: &'a BTreeMap<

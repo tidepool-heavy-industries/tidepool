@@ -671,14 +671,13 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let issued =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selection,
-                &physical,
-                entries,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+        let issued = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &physical,
+            entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let output = issued;
         let empty = CompilerSourceSupport::close_complete_output(&output)
             .unwrap()
@@ -716,8 +715,8 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             }
         }
         let closure = selection
-                    .selected_original_closure(output.issued_artifacts())
-                    .unwrap();
+            .selected_original_closure(output.issued_artifacts())
+            .unwrap();
         let support = empty.certify_original_closure(&closure).unwrap();
         // The explicit selection consumes all three completed output bodies here;
         // the later target demand independently selects only its exact closure.

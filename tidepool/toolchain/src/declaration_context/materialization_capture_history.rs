@@ -742,7 +742,8 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         .unwrap();
         assert_eq!(
             output
-                .compiler_inputs().role_projection()
+                .compiler_inputs()
+                .role_projection()
                 .roles()
                 .iter()
                 .filter_map(CompilerInputRole::original)
@@ -753,7 +754,11 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .issued_artifacts()
             .selected_native_groups()
             .is_empty());
-        let facts = output.compiler_inputs().native_availability().snapshot_facts().unwrap();
+        let facts = output
+            .compiler_inputs()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap();
         let row = &facts[&b.descriptor.id];
         assert_eq!(row.original, b.descriptor.id);
         assert!(row.contributions.values().all(|contribution| contribution
@@ -762,9 +767,10 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .all(|node| !matches!(node, ArtifactBindingNode::Group(_)))));
         // The authenticated group census is empty; source-graph custody does
         // not require a particular native transport mode for that empty set.
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
-                .unwrap();
+        let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )
+        .unwrap();
         ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&support)
@@ -884,7 +890,8 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
         .unwrap();
         assert_eq!(
             output
-                .compiler_inputs().role_projection()
+                .compiler_inputs()
+                .role_projection()
                 .roles()
                 .iter()
                 .filter_map(CompilerInputRole::original)
@@ -896,7 +903,11 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .issued_artifacts()
             .selected_native_groups()
             .is_empty());
-        let facts = output.compiler_inputs().native_availability().snapshot_facts().unwrap();
+        let facts = output
+            .compiler_inputs()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap();
         let row = &facts[&a.descriptor.id];
         assert_eq!(row.original, a.descriptor.id);
         assert!(row.contributions.values().all(|contribution| contribution
@@ -905,9 +916,10 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
             .all(|node| !matches!(node, ArtifactBindingNode::Group(_)))));
         // The authenticated group census is empty; source-graph custody does
         // not require a particular native transport mode for that empty set.
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
-                .unwrap();
+        let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )
+        .unwrap();
         context
             .as_ref()
             .clone()

@@ -553,7 +553,8 @@ pub(crate) struct CapturedCompilerStage {
 
 impl std::fmt::Debug for CapturedCompilerStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("CapturedCompilerStage")
+        formatter
+            .debug_struct("CapturedCompilerStage")
             .field("facts", &self.facts)
             .field("groups", &self.groups)
             .finish_non_exhaustive()
@@ -634,8 +635,14 @@ impl<'a> PhysicalCohortInputs<'a> {
     }
 
     pub(crate) fn demanded_products(&self) -> Result<Arc<[PendingCertifiedGroup]>, CompileError> {
-        let issued = self.stage.groups.lock().expect("physical group issuance lock");
-        self.stage.operation.reserve::<PendingCertifiedGroup>(issued.len())
+        let issued = self
+            .stage
+            .groups
+            .lock()
+            .expect("physical group issuance lock");
+        self.stage
+            .operation
+            .reserve::<PendingCertifiedGroup>(issued.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(issued
             .values()
@@ -11811,7 +11818,8 @@ pub(crate) fn assert_completed_nominal_program_support(
 ) {
     let cohort = physical.physical_cohort();
     let operation = &cohort.stage.operation;
-    let expected = physical.source_selection()
+    let expected = physical
+        .source_selection()
         .produced_source_receipt(owner, physical.issued_artifacts())
         .unwrap()
         .expect("the existing physical issuer owns a completed receipt");
@@ -11833,8 +11841,10 @@ pub(crate) fn assert_completed_nominal_program_support(
         .source_support
         .implementation_entry(owner)
         .is_none());
-    let fragment =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical.compiler_inputs()).unwrap();
+    let fragment = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        physical.compiler_inputs(),
+    )
+    .unwrap();
     // This control borrows a completed physical row only. It intentionally
     // issues no lexical source claim.
     let support = ProgramSourceSupport {
@@ -19003,9 +19013,10 @@ mod tests {
             )
         })()
         .unwrap();
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
-                .unwrap();
+        let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )
+        .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()

@@ -1156,11 +1156,7 @@ mod tests {
             );
             if let Some(native) = output.native_output() {
                 assert!(
-                    native
-                        .products()
-                        .unwrap()
-                        .linked_native_target()
-                        .is_some(),
+                    native.products().unwrap().linked_native_target().is_some(),
                     "the normal captured-output path already issued its complete target selection"
                 );
                 let captured = extract_turn(&output.run, &deployment, output.directory())

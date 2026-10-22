@@ -912,7 +912,8 @@ fn replay_native_transport_history(
     );
     coverage.dependent_issuances += 1;
     let proof = produced
-        .compiler_inputs().native_offers()
+        .compiler_inputs()
+        .native_offers()
         .iter()
         .filter(|offer| offer.original() == dependent_entry.descriptor.id)
         .find_map(|offer| offer.proof())
@@ -944,7 +945,8 @@ fn replay_native_transport_history(
         .insert(*dependent_group, dependent_carrier)
         .is_none());
     let dependent_offer = produced
-        .compiler_inputs().native_offers()
+        .compiler_inputs()
+        .native_offers()
         .iter()
         .find(|offer| offer.original() == dependent_entry.descriptor.id)
         .unwrap()
@@ -994,7 +996,8 @@ fn replay_native_transport_history(
     let (admission, source) =
         generated_source_admission_fixture(&root.path().join("receipt"), &request);
     let continued = produced
-        .compiler_inputs().for_program_continuation(&support, &[admission], &source)
+        .compiler_inputs()
+        .for_program_continuation(&support, &[admission], &source)
         .unwrap();
     coverage.continuations += 1;
     assert_eq!(

@@ -1790,16 +1790,16 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let output =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selection,
-                &base,
-                Vec::new(),
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &base,
+            Vec::new(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let completed = output.issued_artifacts().clone();
-        let support = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
+        let support =
+            CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
         let mut rows = Rows::default();
         let empty = View {
             inventory: 0,

@@ -460,7 +460,10 @@ pub(crate) fn admit_irrelevant_value_root(
         .clone()
         .extend_issued_compiler_support(&support)
         .unwrap();
-    assert!(expanded.artifact_view().artifact_ids().contains(&interface_id));
+    assert!(expanded
+        .artifact_view()
+        .artifact_ids()
+        .contains(&interface_id));
     assert_eq!(
         expanded.compiler_input_projection(),
         context.compiler_input_projection()

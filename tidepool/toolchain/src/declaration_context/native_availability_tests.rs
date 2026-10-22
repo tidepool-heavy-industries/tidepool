@@ -10960,8 +10960,10 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                     &mut validation,
                 )
                 .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
-                    .unwrap()
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    output.compiler_inputs(),
+                )
+                .unwrap()
             })
             .unwrap(),
     );

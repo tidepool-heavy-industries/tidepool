@@ -60,8 +60,19 @@ cannot replace the issued selection. The item issuer alone refines the selection
 for actual produced types. Joined production/cfg(test) compilation and execution
 of this final cut remain pending.
 
-The synthetic executable future-item control was retired with the raw pair it
-constructed. Representation/offer-transfer checks and full-stage target positives
-remain. T owns a replacement refusal through an actual issued item; the current
-staged first-demand history does not establish that specific boundary. G2 remains
-unqualified until this gap and the integrated execution gates close.
+The synthetic executable future-type pairing control was retired with the raw pair
+it constructed. Representation/offer-transfer checks and full-stage target positives
+remain. The actual staged history separately tests future-item order refusal,
+unchanged prefix and visibility, then honest execution; this is not equivalent to
+the retired synthetic type-pairing oracle.
+
+The producer/runtime consolidation starts at `cbb2caaf2f` and joins the lower
+canonical-code checkpoint `face44dec1`. It carries the private phase bundle, exact
+acquisition grants and Current association, acquired compiler prefixes, Context8
+and Surface3 persistence, shared restoration, runtime consumers and final caller
+migrations. No compatibility constructor or old completion/package graph remains.
+Generator ownership entries are combined rather than replacing another parcel's
+registrations. Source-level deletion and registration checks pass; compilation,
+counted execution, fixture premises and G2 qualification remain pending on V's
+warm integrated lane. The independent source-import provenance tranche is not
+part of this checkpoint.

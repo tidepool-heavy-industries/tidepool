@@ -5770,7 +5770,9 @@ mod tests {
             ReceiptImportOwner,
         };
         use crate::recovery_artifacts::PackageInterfaceValidation;
-        use tidepool_repr::execution_schema::{testing, GlobalDecl, Group, ModuleVersion, RuntimeRep};
+        use tidepool_repr::execution_schema::{
+            testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
+        };
         let products = ["Authored", "Wrapper"]
             .iter()
             .map(|module| {
