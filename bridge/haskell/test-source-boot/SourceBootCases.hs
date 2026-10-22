@@ -6813,7 +6813,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
       producer = prHscEnv (pprPipelineResult cold)
       consumers = [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
         , ms_mod_name summary == mkModuleName "InstanceConsumer"]
-  verifyPackageAndRetainedWitnesses producer evidence
+  verifyPackageAndRetainedWitnesses cold
   lexical <- forM ["InstanceOwner", "InstanceRelay"] $ \name -> do
     requirements <- either fail pure (preparedHomeRequirements cold "main" name)
     unless (preparedExactCompilation cold == Nothing
@@ -6839,9 +6839,11 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
       _ -> liftIO (fail "instance graph lacks one source consumer")
   putStrLn "selected home instance edges: transitive instance, package exclusion and owner mismatch passed"
 
-verifyPackageAndRetainedWitnesses :: HscEnv -> DependencyEvidence -> IO ()
-verifyPackageAndRetainedWitnesses producer evidence = withScratch $ \component -> do
-  let package = SymbolIdentity "ghc-internal" "GHC.Internal.Base" "value" "map" Nothing
+verifyPackageAndRetainedWitnesses :: PreparedPipelineResult -> IO ()
+verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
+  let producer = prHscEnv (pprPipelineResult prepared)
+      evidence = preparedFreshDependencies prepared
+      package = SymbolIdentity "ghc-internal" "GHC.Internal.Base" "value" "map" Nothing
       home = SymbolIdentity "main" "InstanceConsumer" "value" "result" Nothing
       global identity generation = GlobalDecl identity LiftedRefRep Nothing False generation
       program globals = WireProgram
@@ -6850,9 +6852,9 @@ verifyPackageAndRetainedWitnesses producer evidence = withScratch $ \component -
         , programSignatures = [], programGlobals = globals, programConstructors = []
         , programOperations = [], programBindings = [], programEntry = ValueId 0
         , programTypes = TypeGraph IntMap.empty IntMap.empty, programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
-  let owner = mkModule (stringToUnit "main") (mkModuleName "InstanceConsumer")
-      interfacePath = component </> "structural-package-references.hi"
-  (iface, _) <- readExactInterface producer owner >>= either (fail . show) pure
+  let interfacePath = component </> "structural-package-references.hi"
+  iface <- maybe (fail "structural package references lost their completed HOME interface") pure
+    (Map.lookup (mkModuleName "InstanceConsumer") (pprProductInterfaces prepared))
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression interfacePath iface
   interfaceBytes <- BS.readFile interfacePath
   source <- case [dependencyModuleSource row | row <- dependencyModules evidence
