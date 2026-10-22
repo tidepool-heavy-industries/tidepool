@@ -6,13 +6,12 @@ route survives, and make all claims traceable to exact commands/artifacts.
 
 ## Joined-review gates before broad qualification
 
-The controlling source review is [REVIEW-29231ed3](REVIEW-29231ed3.md), with
-sequence in [NEXT-WAVE](NEXT-WAVE.md) and current selectors/premises in
-[TEST-GATES](TEST-GATES.md). Historical actor 5/9 and expanded package 8/11 evidence
-have narrower scope than G2. The old five-case notebook failure used a producer
-without the joined package repair. See STATE for provenance; rerun the joined
-target before treating it as a remaining defect. Do not restart completed logging
-or witness migrations; qualify their actual joined callers.
+[NEXT-WAVE](NEXT-WAVE.md) owns the accepted implementation and
+[TEST-GATES](TEST-GATES.md) owns required qualification. Use [STATE](STATE.md) and
+`/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md` for
+current source and terminal evidence. Historical reviews and passes establish
+only their recorded boundaries; they do not qualify later joined repairs. Do not
+restart completed logging or witness migrations; qualify their actual callers.
 
 Prepare these small joined gates first, using each repair's actual production
 constructors and current declared resources:
@@ -39,9 +38,9 @@ reload, cleanup, cold and frozen-bundle acceptance. Record where a case reaches
 only compilation, admission, execution, publication or recovery. A single
 aggregate target pass is not the number of executed cases.
 
-Do not wait for every leaf before compiling joined consumers. P and N return
-coherent subtrees; C/H/T can join as reviewed. Separate source-review findings,
-retained failures, newly executed regressions and measured performance.
+Compile coherent changes before waiting for every behavioral leaf. Separate
+source review, compilation, execution, frozen qualification and measured
+performance throughout the evidence ledger.
 
 ## Prepare immediately
 
@@ -50,20 +49,27 @@ G2 contract and declared test targets. Browser inputs are required for
 exomonad-host/bundle builds even if a selected test opens no browser. Coordinate
 actual resources with the supervisor; do not start cold lanes from an old free-space number.
 
-Historical command arrays are under
-`/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/morning-review55-commands.json`.
-Reuse their admitted recipe and selected resources, not their executable or
-output directory. Read the current runner before supplying arguments. These
-known target/count pairs are a starting point, not a substitute for discovery:
+Recover commands from current V-HANDOFF receipts, then verify their selectors
+against the current owning generator and runner. Historical commands are recipe
+evidence, not permission to reuse an old executable, resource set or output
+directory. These current target/count pairs are a starting point, not a substitute
+for discovery:
 
 | Target | Expected executed cases |
 |---|---:|
 | `//exomonad/host:facade_introspection_service_test` | 1 |
-| `//exomonad/actor:actor_notebook_contract_tests` | 4 |
+| `//exomonad/actor:actor_notebook_acknowledgement_test` | 1 |
+| `//exomonad/actor:actor_notebook_contract_tests` | 5 |
+| `//exomonad/actor:actor_n2_publication_tests` | 14 |
+| `//exomonad/actor:actor_private_host_custody_test` | 3 |
+| `//exomonad/actor:actor_world_cell_input_test` | 2 |
 | `//exomonad/actor:actor_compiler_world_queries_test` | 2 |
 | `//exomonad/actor:actor_world_status_test` | 1 |
 | `//tidepool/runtime:runtime_package_source_history_test` | 1 |
 | `//tidepool/runtime:runtime_compiler_end_history_test` | 1 |
+| `//tidepool/runtime:runtime_world_owner_controls` | 6 |
+| `//tidepool/runtime:runtime_package_slot_race_test` | 1 |
+| `//tidepool/runtime:runtime_world_disposal_history_test` | 1 |
 
 Use the checkout's `swarm-build just test-native TARGET` workflow, declared
 owned-resident compiler resources, a fresh retained-output directory and the
@@ -73,42 +79,60 @@ cold/cutoff/private/reload selectors from actual targets and command manifests.
 
 ## Gates and batching
 
-1. **Per candidate:** compile production plus directly affected cfg(test), Haskell
-   and hosted consumers. Execute each repair's discriminating positive/refusal
-   history. Linking or metadata generation isn't a test pass. Record actual
-   selected/executed counts and first failure.
-2. **Joined package/native/witness checkpoint:** run Discovery and all four
-   currently registered notebook cases unchanged in semantic purpose. Deliberately
-   register the preserved fifth parked-Job case as specified in TEST-GATES, then
-   report the actual count. These need the joined compiler and private lifecycle;
-   treat progress to a new frontier as a failure with better diagnosis. Include
-   P's producer→decoder→install control rather than waiting for a giant suite.
-3. **Required G2 histories:** query/status, ordinary activation, historical/cold, actual eviction
-   and reacquisition, private input, captured-A cutoff, ordinary reload,
-   caller-loss and uncertain END. H supplies history-specific evidence; verify
-   it applies to the joined source. Preserve refusal and cleanup controls. Cold
-   compiler reacquisition is distinct from restoring a dead process's heap values;
-   the full process-recovery matrix belongs to G3. Port useful finite-path tests
-   to production World admission; don't reintroduce the finite private API.
-4. **Serialization/translation changes:** run the affected declared fixture
-   cohorts via `just fixtures-check` and cross-language tests. Missing compiler
-   inputs are failures, not passing skips. New fixtures need their declared
-   Buck resource inputs.
-5. **One frozen bundle:** build the packaged compiler catalogue and runtime
-   bundle, freeze through the existing qualification owner, then run the named
-   non-cold Persona/G2 acceptance subset with those exact products. Host,
-   libtest, compiler, stdlib, assets, profile and source must match its descriptor.
-6. **Live smoke then user run:** verify Persona selection/tools/initial memory;
-   run a bounded real DeepSeek multi-turn history with ordinary cells, retained
-   use, discovery and compatible reload. Inspect actual provider/tool receipts.
-   Start fresh conversation state for the user while preserving authored files
-   and memory. Report live URL only after service readiness is observed.
+1. **Coherent compilation:** compile affected production, cfg(test), integration,
+   Haskell worker/test binaries and host unit consumers. Linking or discovery is
+   not a test pass. Record exact source, artifacts, counts, exit and cleanup.
+2. **Early ordinary histories:** run acknowledgement1 and checked Text1 through
+   their complete publication and later-consumer histories. Follow with the new
+   native-owner controls, captured-World history, stale-selection controls,
+   prior-HOME first-demand and repaired SourceBoot selected-home leaf. Include
+   representative normal cancellation, caller-loss and uncertain END histories.
+   A later failure frontier is still a failure; preserve its actual inputs.
+3. **Early exploratory Persona:** after those histories pass, build the matched
+   catalog and runtime bundle, freeze through the existing qualification owner,
+   then run the catalog gate, prepared-child-smoke1, the four exact Persona cases
+   and two release contracts specified in TEST-GATES. Verify selected Persona
+   spec, registered tools, rendered memory and readiness. Run bounded real
+   DeepSeek smoke including ordinary cells, retained use, discovery/status and
+   compatible reload, retaining actual provider/tool receipts. This permits
+   explicitly exploratory Persona use while broader qualification continues;
+   it does not establish complete G2 acceptance.
+4. **Complete G2 evidence:** run all remaining TEST-GATES cohorts, including
+   notebook5, N2 publication14, custody/input/owner controls, World semantics18,
+   separate finite component3, package linkage11, query/reload/recovery and actual
+   compiler-World disposal/reacquisition. Run required cross-language leaves and
+   recovered-base corpus after affected translation/serialization changes.
+   Preserve the actual Empty/Partial completed-product obligation: sparse or
+   absent-body representation controls do not prove nominal metadata survives
+   without an executable own offer. Missing declared inputs are failures.
+5. **Final delivery:** reconcile the complete evidence against the exact frozen
+   source/profile/compiler/assets contract. Start fresh user conversation state
+   while preserving authored files and memory. Report a live URL only after
+   service readiness is observed. Keep exploratory, G2-qualified and deployed
+   status distinct.
 
-Run independent admitted targets concurrently when resource measurements support
-it. A full bundle per leaf wastes the shared budget. Once qualification freezes,
-later unrelated speculative/quality proposals become separately published followups; only
-a required repair restarts affected qualification. A known ordinary-workflow bug
-still blocks G2, even if exploratory execution would produce interesting data.
+Avoid repeated work without dropping coverage. Acknowledgement1 is already a
+member of notebook5; checked Text1 is a member of N2 publication14. Package11
+includes repeated-target and cached-HOME cases. Reuse early case results only
+when exact artifacts, resources and runner options establish equivalence; retain
+per-case receipts rather than adding counts across different revisions. Named
+cohorts own their selectors/counts and must not be narrowed with extra filters.
+
+Current native component coverage is four `machine::native_slots` leaves plus
+two `binding_table::source_selections` leaves, six total. The historical PACKAGE
+component4 already included those two source-membership leaves. Its old
+`package_slots` module and `package_slot_commit...` selectors are obsolete.
+The captured-World extension retains the existing
+`session::resident::activation_input_tests::checked_binding_survives_export_and_executes_in_later_cell`
+case and count; use its declared fixture resources.
+
+Run independent admitted work concurrently only when measured resources support
+it. Same-checkout Buck operations share an exclusive output lease; multiple
+clients do not create parallel execution there. Avoid a bundle per leaf. A
+required repair restarts affected qualification; unrelated speculative followups
+remain separate. A known ordinary-workflow bug blocks G2. Actual compiler-World
+release/reacquisition is required; whole-service death, full force/fork/callback
+matrices, packaged performance and release/main convergence remain G3.
 
 ## Persona source and credentials
 
@@ -146,8 +170,8 @@ Run current formatting, documentation/link checks and `git diff --check`.
 Run `scripts/integration-status.py --strict` under the documented command owner;
 report missing refs honestly. It reads cached refs, so also obtain remote
 freshness explicitly. Push consolidated checkpoints to `github` and verify
-exact OIDs with `git ls-remote`. Reconcile controlling integration/release/main
-at a safe ownership boundary; don't switch another active checkout's branch or
+exact OIDs with `git ls-remote`. Root owns integration publication. Record
+release/main convergence as G3; do not switch another active checkout's branch or
 invent a local main ref merely to satisfy a checker.
 
 Final report: source/tree and remote refs; descriptor/executable hashes; exact
