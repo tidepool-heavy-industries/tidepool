@@ -1316,10 +1316,11 @@ impl CertifiedSegmentOriginals {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 panic!("actual prior physical Original payload")
             };
-            for group in &product
+            for group in product
                 .original_native()
                 .expect("actual prior native groups")
                 .groups
+                .iter()
             {
                 if group
                     .group()
