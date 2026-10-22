@@ -708,7 +708,10 @@ impl ImageRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{PreparedMachine, PreparedMachineOptions, RunOptions};
+    use super::super::{
+        native_code_tests::{prepare, prepare_closed},
+        PreparedMachine, PreparedMachineOptions, PreparedNativeCode, RunOptions,
+    };
     use super::*;
     use proptest::strategy::Strategy;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -717,6 +720,18 @@ mod tests {
     use tidepool_repr::execution_schema::{
         link_program, testing, Atom, ExprFrame, MachineImports, ScalarLiteral,
     };
+    use tidepool_repr::native_code::{NativeCodeBody, NativeCodePlanImport};
+
+    fn closed_package(version: u8, registry: &ImageRegistry) -> Arc<PreparedNativeCode> {
+        let mut owner = package_owner();
+        owner.defining_version_sha256 = [version; 32];
+        let code = PackageGroupCode::admit(
+            owner,
+            testing::projected_group(testing::wire_program(), 0).unwrap(),
+        )
+        .unwrap();
+        prepare_closed(NativeCodeBody::Package(code), registry)
+    }
 
     fn package_owner() -> tidepool_repr::execution_schema::PackageCodeOwner {
         tidepool_repr::execution_schema::PackageCodeOwner {
@@ -899,22 +914,17 @@ mod tests {
     #[test]
     fn world_execution_publication_preserves_selected_package_domain_and_custody() {
         use super::super::{
-            BatchLeaseRequest, BatchProgram, DemandedPackageImage, PreparedMachine,
-            PreparedMachineOptions,
+            BatchLeaseRequest, BatchProgram, PreparedMachine, PreparedMachineOptions,
         };
         use crate::binding_table::BindingPromotionError;
         use tidepool_repr::execution_schema::ValueId;
         let registry = ImageRegistry::new();
-        let package = Arc::new(
-            DemandedPackageImage::prepare(
-                package_code(testing::wire_program(), 0),
-                &[],
-                &Default::default(),
-                &Default::default(),
-                &registry,
-            )
-            .unwrap(),
-        );
+        let package = closed_package(1, &registry);
+        let merged_package = closed_package(2, &registry);
+        let later_package = closed_package(3, &registry);
+        assert_ne!(package.code().id(), merged_package.code().id());
+        assert_ne!(package.code().id(), later_package.code().id());
+        assert_ne!(merged_package.code().id(), later_package.code().id());
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -964,24 +974,16 @@ mod tests {
             table.scope_snapshot(&tree, capture).unwrap(),
             capture_before
         );
-        let key = super::super::NativeArtifactBinding {
-            artifact: [5; 32],
-            selection: [6; 32],
-        };
         let installed = machine
             .install_shared_batch_with_leases(
                 vec![BatchProgram {
                     image: Arc::clone(package.image()),
                     imports: vec![],
                 }],
-                vec![BatchLeaseRequest::for_package(
+                vec![BatchLeaseRequest::new(
                     0,
-                    Arc::clone(&package),
-                    key,
-                    domain,
-                    ValueId(0),
-                )
-                .unwrap()],
+                    package.request(domain, ValueId(0)).unwrap(),
+                )],
             )
             .unwrap();
         let actual = installed.leases[0].clone();
@@ -1114,20 +1116,13 @@ mod tests {
         let merged_install = machine
             .install_shared_batch_with_leases(
                 vec![BatchProgram {
-                    image: Arc::clone(package.image()),
+                    image: Arc::clone(merged_package.image()),
                     imports: vec![],
                 }],
-                vec![BatchLeaseRequest::for_package(
+                vec![BatchLeaseRequest::new(
                     0,
-                    Arc::clone(&package),
-                    super::super::NativeArtifactBinding {
-                        artifact: [9; 32],
-                        selection: [10; 32],
-                    },
-                    merged_domain,
-                    ValueId(0),
-                )
-                .unwrap()],
+                    merged_package.request(merged_domain, ValueId(0)).unwrap(),
+                )],
             )
             .unwrap();
         let merged_actual = merged_install.leases[0].clone();
@@ -1151,20 +1146,13 @@ mod tests {
         let later_install = machine
             .install_shared_batch_with_leases(
                 vec![BatchProgram {
-                    image: Arc::clone(package.image()),
+                    image: Arc::clone(later_package.image()),
                     imports: vec![],
                 }],
-                vec![BatchLeaseRequest::for_package(
+                vec![BatchLeaseRequest::new(
                     0,
-                    Arc::clone(&package),
-                    super::super::NativeArtifactBinding {
-                        artifact: [7; 32],
-                        selection: [8; 32],
-                    },
-                    later_domain,
-                    ValueId(0),
-                )
-                .unwrap()],
+                    later_package.request(later_domain, ValueId(0)).unwrap(),
+                )],
             )
             .unwrap();
         let later_actual = later_install.leases[0].clone();
@@ -1260,8 +1248,7 @@ mod tests {
     #[test]
     fn world_execution_preserves_latest_public_source_after_unchanged_private_work() {
         use super::super::{
-            BatchLeaseRequest, BatchProgram, DemandedPackageImage, NativeArtifactBinding,
-            PreparedMachine, PreparedMachineOptions,
+            BatchLeaseRequest, BatchProgram, PreparedMachine, PreparedMachineOptions,
         };
         use crate::binding_table::BindingPromotionError;
         use crate::suspension::RealmId;
@@ -1282,8 +1269,7 @@ mod tests {
             table: &mut crate::binding_table::BindingTable,
             tree: &crate::scope::ScopeTree,
             scope: crate::scope::ScopeId,
-            package: &Arc<DemandedPackageImage>,
-            key: NativeArtifactBinding,
+            package: &Arc<PreparedNativeCode>,
         ) -> super::super::NativeInstanceLease {
             let domain = table
                 .native_domain_selection_in(tree, scope)
@@ -1295,14 +1281,10 @@ mod tests {
                         image: Arc::clone(package.image()),
                         imports: vec![],
                     }],
-                    vec![BatchLeaseRequest::for_package(
+                    vec![BatchLeaseRequest::new(
                         0,
-                        Arc::clone(package),
-                        key,
-                        domain,
-                        ValueId(0),
-                    )
-                    .unwrap()],
+                        package.request(domain, ValueId(0)).unwrap(),
+                    )],
                 )
                 .unwrap();
             table
@@ -1346,16 +1328,6 @@ mod tests {
         }
 
         let registry = ImageRegistry::new();
-        let package = Arc::new(
-            DemandedPackageImage::prepare(
-                package_code(testing::wire_program(), 0),
-                &[],
-                &Default::default(),
-                &Default::default(),
-                &registry,
-            )
-            .unwrap(),
-        );
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -1372,11 +1344,7 @@ mod tests {
             &mut table,
             &tree,
             seed,
-            &package,
-            NativeArtifactBinding {
-                artifact: [1; 32],
-                selection: [2; 32],
-            },
+            &closed_package(1, &registry),
         );
         publish_selected(&mut table, &tree, seed, public, owner(3));
         let original = table.scope_snapshot(&tree, public).unwrap();
@@ -1396,11 +1364,7 @@ mod tests {
             &mut table,
             &tree,
             later,
-            &package,
-            NativeArtifactBinding {
-                artifact: [3; 32],
-                selection: [4; 32],
-            },
+            &closed_package(3, &registry),
         );
         publish_selected(&mut table, &tree, later, public, owner(5));
         let completed = table.scope_snapshot(&tree, private).unwrap();
@@ -1454,11 +1418,7 @@ mod tests {
             &mut table,
             &tree,
             disjoint_seed,
-            &package,
-            NativeArtifactBinding {
-                artifact: [21; 32],
-                selection: [22; 32],
-            },
+            &closed_package(21, &registry),
         );
         publish_selected(&mut table, &tree, disjoint_seed, disjoint_public, owner(23));
         let original = table.scope_snapshot(&tree, disjoint_public).unwrap();
@@ -1473,22 +1433,14 @@ mod tests {
             &mut table,
             &tree,
             disjoint_private,
-            &package,
-            NativeArtifactBinding {
-                artifact: [24; 32],
-                selection: [25; 32],
-            },
+            &closed_package(24, &registry),
         );
         install(
             &mut machine,
             &mut table,
             &tree,
             disjoint_later,
-            &package,
-            NativeArtifactBinding {
-                artifact: [26; 32],
-                selection: [27; 32],
-            },
+            &closed_package(26, &registry),
         );
         let later_completed = table.scope_snapshot(&tree, disjoint_later).unwrap();
         let later_selection = table
@@ -1570,11 +1522,7 @@ mod tests {
             &mut table,
             &tree,
             conflict_seed,
-            &package,
-            NativeArtifactBinding {
-                artifact: [6; 32],
-                selection: [7; 32],
-            },
+            &closed_package(6, &registry),
         );
         publish_selected(&mut table, &tree, conflict_seed, conflict_public, owner(8));
         let original = table.scope_snapshot(&tree, conflict_public).unwrap();
@@ -1590,22 +1538,14 @@ mod tests {
             &mut table,
             &tree,
             conflict_private,
-            &package,
-            NativeArtifactBinding {
-                artifact: [9; 32],
-                selection: [10; 32],
-            },
+            &closed_package(9, &registry),
         );
         install(
             &mut machine,
             &mut table,
             &tree,
             conflict_later,
-            &package,
-            NativeArtifactBinding {
-                artifact: [9; 32],
-                selection: [10; 32],
-            },
+            &closed_package(9, &registry),
         );
         let completed = table.scope_snapshot(&tree, conflict_private).unwrap();
         let completed_later = table.scope_snapshot(&tree, conflict_later).unwrap();
@@ -1697,7 +1637,6 @@ mod tests {
     fn package_definitions_install_independent_instances_and_execute_through_batch_imports() {
         use super::super::{BatchImport, BatchProgram, PreparedCallOptions, PreparedResult};
         use crate::suspension::RealmId;
-        use std::collections::BTreeMap;
         use tidepool_repr::execution_schema::{
             GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep,
             SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
@@ -1733,24 +1672,19 @@ mod tests {
                 },
             },
         }));
-        let package = Arc::new(
-            super::super::DemandedPackageImage::prepare(
-                package_code(package, 3),
-                &[],
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &registry,
-            )
-            .unwrap(),
-        );
+        let code = package_code(package.clone(), 3);
+        let mut foreign_owner = package_owner();
+        foreign_owner.defining_version_sha256 = [9; 32];
+        let foreign_code =
+            PackageGroupCode::admit(foreign_owner, testing::projected_group(package, 3).unwrap())
+                .unwrap();
+        let foreign_package = prepare_closed(NativeCodeBody::Package(foreign_code), &registry);
+        let package = prepare_closed(NativeCodeBody::Package(code), &registry);
+        assert_ne!(package.code().id(), foreign_package.code().id());
         let image = Arc::clone(package.image());
         let mut tree = crate::scope::ScopeTree::new();
         let scopes = [tree.mint_isolated(), tree.mint_isolated()];
         let mut table = crate::binding_table::BindingTable::new();
-        let key = super::super::NativeArtifactBinding {
-            artifact: [1; 32],
-            selection: [2; 32],
-        };
         let mut consumer = testing::wire_program();
         consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         consumer.signatures.push(consumer.signatures[0].clone());
@@ -1791,14 +1725,10 @@ mod tests {
             machine
                 .install_shared_batch_with_leases(
                     batch,
-                    vec![super::super::BatchLeaseRequest::for_package(
+                    vec![super::super::BatchLeaseRequest::new(
                         1,
-                        Arc::clone(&package),
-                        key,
-                        domain,
-                        ValueId(0),
-                    )
-                    .unwrap()],
+                        package.request(domain, ValueId(0)).unwrap(),
+                    )],
                 )
                 .unwrap()
         };
@@ -1849,17 +1779,7 @@ mod tests {
                 .is_empty(),
             "package custody grants no HOME selection"
         );
-        let foreign_key = super::super::NativeArtifactBinding {
-            selection: [3; 32],
-            ..key
-        };
-        let foreign_request = super::super::NativeExportRequest::for_package(
-            Arc::clone(&package),
-            foreign_key,
-            domains[0],
-            ValueId(1),
-        )
-        .unwrap();
+        let foreign_request = foreign_package.request(domains[0], ValueId(1)).unwrap();
         let foreign_permit = table
             .native_slot_permit_in(&tree, scopes[0], &foreign_request)
             .unwrap();
@@ -1881,13 +1801,7 @@ mod tests {
             BatchProgram::validate_closed(&closed_with_live_import).is_err(),
             "closed code cannot acquire a live root"
         );
-        let request = super::super::NativeExportRequest::for_package(
-            Arc::clone(&package),
-            key,
-            domains[0],
-            ValueId(1),
-        )
-        .unwrap();
+        let request = package.request(domains[0], ValueId(1)).unwrap();
         let permit = table
             .native_slot_permit_in(&tree, scopes[0], &request)
             .unwrap();
@@ -2008,11 +1922,9 @@ mod tests {
     #[test]
     fn native_caf_custody_keeps_original_environment_after_foreign_update() {
         use super::super::{
-            BatchImport, BatchLeaseRequest, BatchProgram, DemandedPackageImage,
-            NativeArtifactBinding, NativeExportRequest, PreparedCallOptions, PreparedResult,
+            BatchImport, BatchLeaseRequest, BatchProgram, PreparedCallOptions, PreparedResult,
         };
         use crate::suspension::RealmId;
-        use std::collections::BTreeMap;
         use tidepool_repr::execution_schema::{
             CheckedLayout, ConstructorDecl, ConstructorId, GlobalDecl, GlobalId, Group,
             HeapBinding, HeapRhs, ResultContract, RuntimeRep, SignatureId, TopBinding,
@@ -2047,9 +1959,17 @@ mod tests {
             },
         });
         provider.expressions.nodes.clear();
-        let provider = Arc::new(
-            CompiledProgram::compile_prepared_definitions(&testing::prepare(provider).unwrap())
+        let mut provider_owner = package_owner();
+        provider_owner.module = "Foreign".into();
+        let provider = prepare_closed(
+            NativeCodeBody::Package(
+                PackageGroupCode::admit(
+                    provider_owner,
+                    testing::projected_group(provider, 0).unwrap(),
+                )
                 .unwrap(),
+            ),
+            &registry,
         );
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -2084,15 +2004,16 @@ mod tests {
                 wire.bindings.push(top);
             }
         }
-        let package = Arc::new(
-            DemandedPackageImage::prepare(
-                package_code(wire, 3),
-                &[None],
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &registry,
-            )
-            .unwrap(),
+        let package = prepare(
+            NativeCodeBody::Package(package_code(wire, 3)),
+            vec![NativeCodePlanImport::External {
+                code: provider.code().clone(),
+                value: ValueId(0),
+            }],
+            &[None],
+            &Default::default(),
+            &Default::default(),
+            &registry,
         );
         let consumer = |name| {
             let mut wire = testing::wire_program();
@@ -2119,10 +2040,6 @@ mod tests {
             .native_domain_selection_in(&tree, crate::scope::ScopeId::ROOT)
             .unwrap()
             .current();
-        let key = NativeArtifactBinding {
-            artifact: [1; 32],
-            selection: [2; 32],
-        };
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -2145,18 +2062,14 @@ mod tests {
                         }],
                     },
                     BatchProgram {
-                        image: provider,
+                        image: Arc::clone(provider.image()),
                         imports: vec![],
                     },
                 ],
-                vec![BatchLeaseRequest::for_package(
+                vec![BatchLeaseRequest::new(
                     1,
-                    Arc::clone(&package),
-                    key,
-                    domain,
-                    ValueId(0),
-                )
-                .unwrap()],
+                    package.request(domain, ValueId(0)).unwrap(),
+                )],
             )
             .unwrap();
         let initial_admission = table
@@ -2203,9 +2116,7 @@ mod tests {
             machine.handle_current_pointer(generic),
             machine.handle_current_pointer(anchor.handle())
         );
-        let request =
-            NativeExportRequest::for_package(Arc::clone(&package), key, domain, ValueId(1))
-                .unwrap();
+        let request = package.request(domain, ValueId(1)).unwrap();
         let permit = table
             .native_slot_permit_in(&tree, crate::scope::ScopeId::ROOT, &request)
             .unwrap();

@@ -353,36 +353,34 @@ impl Scenario {
             scenario.bind(unrelated, format!("other_{index:03}"));
         }
         let count = n + baseline;
+        let code = crate::prepared_program::native_code_tests::prepare_closed(
+            tidepool_repr::native_code::NativeCodeBody::Home(image.group().code_identity()),
+            &ImageRegistry::new(),
+        );
         let receipt = scenario
             .machine
             .install_shared_batch_with_leases(
                 (0..count)
                     .map(|_| BatchProgram {
-                        image: Arc::clone(image.image()),
+                        image: Arc::clone(code.image()),
                         imports: vec![],
                     })
                     .collect(),
                 (0..count)
                     .map(|index| {
-                        BatchLeaseRequest::for_home(
+                        BatchLeaseRequest::new(
                             index,
-                            &image,
-                            crate::prepared_program::NativeHomeBinding {
-                                issuer: crate::prepared_program::NativeArtifactBinding {
-                                    artifact: [1; 32],
-                                    selection: [2; 32],
-                                },
-                                original_ordinal: image.group().original_ordinal(),
-                            },
-                            image.domain(),
-                            image
-                                .group()
-                                .exported_values()
-                                .find(|(identity, _)| *identity == &binder.binder)
-                                .unwrap()
-                                .1,
+                            code.request(
+                                image.domain(),
+                                image
+                                    .group()
+                                    .exported_values()
+                                    .find(|(identity, _)| *identity == &binder.binder)
+                                    .unwrap()
+                                    .1,
+                            )
+                            .unwrap(),
                         )
-                        .unwrap()
                     })
                     .collect(),
             )
@@ -721,32 +719,30 @@ fn growing_prefix_captures_measure_physical_lease_work_and_independent_readers()
 fn native_retraction_does_not_extend_last_owner_through_new_captures() {
     let (image, binder) = source_image();
     let mut scenario = Scenario::new(1, 0, &image, &binder);
+    let code = crate::prepared_program::native_code_tests::prepare_closed(
+        tidepool_repr::native_code::NativeCodeBody::Home(image.group().code_identity()),
+        &ImageRegistry::new(),
+    );
     let receipt = scenario
         .machine
         .install_shared_batch_with_leases(
             vec![BatchProgram {
-                image: Arc::clone(image.image()),
+                image: Arc::clone(code.image()),
                 imports: vec![],
             }],
-            vec![BatchLeaseRequest::for_home(
+            vec![BatchLeaseRequest::new(
                 0,
-                &image,
-                crate::prepared_program::NativeHomeBinding {
-                    issuer: crate::prepared_program::NativeArtifactBinding {
-                        artifact: [1; 32],
-                        selection: [2; 32],
-                    },
-                    original_ordinal: image.group().original_ordinal(),
-                },
-                image.domain(),
-                image
-                    .group()
-                    .exported_values()
-                    .find(|(identity, _)| *identity == &binder.binder)
-                    .unwrap()
-                    .1,
-            )
-            .unwrap()],
+                code.request(
+                    image.domain(),
+                    image
+                        .group()
+                        .exported_values()
+                        .find(|(identity, _)| *identity == &binder.binder)
+                        .unwrap()
+                        .1,
+                )
+                .unwrap(),
+            )],
         )
         .unwrap();
     let token = receipt.leases.into_iter().next().unwrap();

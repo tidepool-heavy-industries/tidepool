@@ -1106,6 +1106,16 @@ mod tests {
         ImportOwner, ModuleVersion, Signature, SignatureId, TopBinding, UpdatePolicy, ValueRef,
     };
 
+    fn linked_home(
+        code: tidepool_repr::execution_schema::CertifiedGroupCode,
+        registry: &ImageRegistry,
+    ) -> Arc<PreparedNativeCode> {
+        crate::prepared_program::native_code_tests::prepare_closed(
+            NativeCodeBody::Home(code),
+            registry,
+        )
+    }
+
     fn group(name: &str, ordinal: u32, other: &str) -> Arc<CompiledProgram> {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -1776,20 +1786,9 @@ mod tests {
                 CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
             })
             .unwrap();
-        let lease = BatchLeaseRequest::for_home(
-            0,
-            &images[0],
-            NativeHomeBinding {
-                issuer: NativeArtifactBinding {
-                    artifact: [1; 32],
-                    selection: [2; 32],
-                },
-                original_ordinal: images[0].group().original_ordinal(),
-            },
-            images[0].domain(),
-            ValueId(0),
-        )
-        .unwrap();
+        let code = linked_home(images[0].group().code_identity(), &registry);
+        let lease =
+            BatchLeaseRequest::new(0, code.request(images[0].domain(), ValueId(0)).unwrap());
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -1885,19 +1884,11 @@ mod tests {
             &registry,
         )
         .unwrap();
-        let binding = NativeHomeBinding {
-            issuer: NativeArtifactBinding {
-                artifact: [1; 32],
-                selection: [2; 32],
-            },
-            original_ordinal: group.original_ordinal(),
-        };
+        let code = linked_home(group.code_identity(), &registry);
         let domain = super::super::super::SourceInstanceDomain::single();
         let requests = expected
             .iter()
-            .map(|(_, value)| {
-                BatchLeaseRequest::for_home_code(0, &image, binding, domain, *value).unwrap()
-            })
+            .map(|(_, value)| BatchLeaseRequest::new(0, code.request(domain, *value).unwrap()))
             .collect();
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
@@ -1976,48 +1967,11 @@ mod tests {
                 CompiledProgram::compile_prepared_definitions(&prepared).map(Arc::new)
             })
             .unwrap();
-        let lease = BatchLeaseRequest::for_home_code(
-            0,
-            &neutral,
-            NativeHomeBinding {
-                issuer: NativeArtifactBinding {
-                    artifact: [1; 32],
-                    selection: [2; 32],
-                },
-                original_ordinal: neutral.code().original_ordinal(),
-            },
-            super::super::super::SourceInstanceDomain::single(),
-            ValueId(0),
-        )
-        .unwrap();
+        let code = linked_home(neutral.code().clone(), &registry);
+        let domain = super::super::super::SourceInstanceDomain::single();
+        let lease = BatchLeaseRequest::new(0, code.request(domain, ValueId(0)).unwrap());
         assert!(matches!(
-            NativeExportRequest::for_home_code(
-                &neutral,
-                NativeHomeBinding {
-                    issuer: NativeArtifactBinding {
-                        artifact: [1; 32],
-                        selection: [2; 32]
-                    },
-                    original_ordinal: neutral.code().original_ordinal() + 1
-                },
-                super::super::super::SourceInstanceDomain::single(),
-                ValueId(0),
-            ),
-            Err(ExecutionError::BatchSourceContract(_))
-        ));
-        assert!(matches!(
-            NativeExportRequest::for_home_code(
-                &neutral,
-                NativeHomeBinding {
-                    issuer: NativeArtifactBinding {
-                        artifact: [1; 32],
-                        selection: [2; 32]
-                    },
-                    original_ordinal: neutral.code().original_ordinal()
-                },
-                super::super::super::SourceInstanceDomain::single(),
-                ValueId(999),
-            ),
+            code.request(domain, ValueId(999)),
             Err(ExecutionError::MissingEntry(ValueId(999)))
         ));
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
@@ -2293,23 +2247,10 @@ mod tests {
             .unwrap();
         let images = demand.compile(&ImageRegistry::new()).unwrap();
         let selected = &images[0];
-        let image = Arc::clone(selected.image());
-        let request = || {
-            BatchLeaseRequest::for_home(
-                0,
-                selected,
-                NativeHomeBinding {
-                    issuer: NativeArtifactBinding {
-                        artifact: [1; 32],
-                        selection: [2; 32],
-                    },
-                    original_ordinal: selected.group().original_ordinal(),
-                },
-                selected.domain(),
-                ValueId(0),
-            )
-            .unwrap()
-        };
+        let code = linked_home(selected.group().code_identity(), &ImageRegistry::new());
+        let image = Arc::clone(code.image());
+        let request =
+            || BatchLeaseRequest::new(0, code.request(selected.domain(), ValueId(0)).unwrap());
         let batch = || {
             vec![BatchProgram {
                 image: Arc::clone(&image),

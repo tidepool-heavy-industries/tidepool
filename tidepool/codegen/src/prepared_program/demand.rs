@@ -2166,46 +2166,35 @@ mod selection_tests {
     use std::cell::Cell;
 
     fn installed_leases() -> (PreparedMachine<'static>, Vec<SourceInstanceLease>) {
-        installed_leases_in_selections([[2; 32], [2; 32]])
+        installed_leases_with_ordinals([4, 4])
     }
 
-    fn installed_leases_in_selections(
-        selections: [[u8; 32]; 2],
+    fn installed_leases_with_ordinals(
+        ordinals: [u32; 2],
     ) -> (PreparedMachine<'static>, Vec<SourceInstanceLease>) {
-        let groups = [super::tests::group("a", 4, &[])];
-        let inventory = GroupInventory::new(&groups).unwrap();
         let registry = ImageRegistry::new();
-        let images = inventory
-            .seal([super::tests::source("a")])
-            .unwrap()
-            .compile(&registry)
-            .unwrap();
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
         .unwrap();
         let mut leases = Vec::new();
-        for selection in selections {
+        for ordinal in ordinals {
+            let group = super::tests::group("a", ordinal, &[]);
+            let code = crate::prepared_program::native_code_tests::prepare_closed(
+                tidepool_repr::native_code::NativeCodeBody::Home(group.code_identity()),
+                &registry,
+            );
             let receipt = machine
                 .install_shared_batch_with_leases(
                     vec![BatchProgram {
-                        image: Arc::clone(images[0].image()),
+                        image: Arc::clone(code.image()),
                         imports: vec![],
                     }],
-                    vec![BatchLeaseRequest::for_home(
+                    vec![BatchLeaseRequest::new(
                         0,
-                        &images[0],
-                        NativeCodeId {
-                            issuer: NativeCodeId {
-                                artifact: [1; 32],
-                                selection,
-                            },
-                            original_ordinal: images[0].group().original_ordinal(),
-                        },
-                        images[0].domain(),
-                        ValueId(0),
-                    )
-                    .unwrap()],
+                        code.request(SourceInstanceDomain::single(), ValueId(0))
+                            .unwrap(),
+                    )],
                 )
                 .unwrap();
             leases.extend(receipt.leases.into_iter().map(|lease| match lease {
@@ -2480,7 +2469,7 @@ mod selection_tests {
 
     #[test]
     fn exact_home_bindings_keep_same_binder_histories_distinct() {
-        let (mut machine, leases) = installed_leases_in_selections([[2; 32], [3; 32]]);
+        let (mut machine, leases) = installed_leases_with_ordinals([4, 5]);
         assert_eq!(leases[0].binder(), leases[1].binder());
         assert_ne!(leases[0].binding(), leases[1].binding());
         let tree = ScopeTree::new();
