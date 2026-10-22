@@ -6572,9 +6572,7 @@ where
         {
             return Err(SessionError::WorldCellPublicationBaseStale.into());
         }
-        if !hidden {
-            execution.register_pending_visible_host(id)?;
-        }
+        execution.register_pending_visible_host(id)?;
         let write = match self.mount_checked_host_input_settled(
             carrier,
             payload,
@@ -6583,9 +6581,7 @@ where
         ) {
             Ok(write) => write,
             Err(error) => {
-                if !hidden {
-                    execution.settle_pending_visible_host(id)?;
-                }
+                execution.settle_pending_visible_host(id)?;
                 return Err(error);
             }
         };
@@ -6644,9 +6640,7 @@ where
         match result {
             Ok(write) => Ok(write),
             Err(error) => {
-                if !hidden {
-                    execution.settle_pending_visible_host(id)?;
-                }
+                execution.settle_pending_visible_host(id)?;
                 self.retire_binding_owner_settled(id);
                 Err(error.into())
             }
@@ -7029,9 +7023,7 @@ where
                 Ok(())
             })
             .map_err(SessionError::from)??;
-        if visible {
-            execution.settle_pending_visible_host(id)?;
-        }
+        execution.settle_pending_visible_host(id)?;
         Ok(())
     }
 

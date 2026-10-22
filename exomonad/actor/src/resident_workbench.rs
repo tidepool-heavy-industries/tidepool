@@ -19322,6 +19322,30 @@ pub(crate) mod request_tests {
                 .await
                 .expect("mount the hidden private input");
             let hidden_name = hidden.mounted_input().name.clone();
+            workbench
+                .execute_cell_for_test(private.clone(), "hiddenLive <- pure (43 :: Int)")
+                .await
+                .expect("valid work precedes hidden input retirement");
+            let live_execution = workbench.private_execution.as_ref().unwrap().clone();
+            let error = match workbench_runner_for_test(&workbench)
+                .publish_private_execution(private.clone(), live_execution)
+                .await
+            {
+                Ok(_) => panic!("a live hidden input keeps the execution incomplete"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                ResidentActorWorkbenchError::PrivatePublication {
+                    source,
+                    ..
+                } if matches!(
+                    source.as_ref(),
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                        tidepool_runtime::session::SessionError::WorldCellPublicationIncomplete
+                    ))
+                )
+            ));
             drop(dependencies);
             drop(hidden);
             tokio::time::timeout(Duration::from_secs(10), async {
