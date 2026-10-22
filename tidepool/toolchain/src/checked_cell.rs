@@ -4474,16 +4474,17 @@ impl PreparedCheckedItemOutput {
                         .map(|item| (plan, item))
                 })
                 .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
-            let owner = original_execution.original_instance_target()?;
             let proof = receipt
                 .as_ref()
                 .map(|receipt| row(row(receipt, 9)?.get(8).ok_or_else(typed_entry_failure)?, 4))
                 .transpose()?;
-            if issued.plan_digest != plan.digest
+            // The entry issuer already authenticated its original owner and
+            // native membership. Consume that exact target proof; a complete
+            // instance environment is required for display, not item execution.
+            if !issued.belongs_to_target(target)
+                || issued.plan_digest != plan.digest
                 || issued.origin.occurrence != plan.root
                 || issued.entry.occurrence != item.entry
-                || issued.origin.unit != owner.unit
-                || issued.origin.module != owner.module
                 || match proof {
                     Some(proof) => !issued.matches_receipt(proof)?,
                     None => false,
