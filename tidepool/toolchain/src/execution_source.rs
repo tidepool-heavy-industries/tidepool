@@ -57,6 +57,9 @@ pub(crate) struct SourceSelectionContext<'a> {
     pub(crate) include: &'a [PathBuf],
     pub(crate) fresh: &'a DependencyEvidence,
     pub(crate) roots: &'a [(ExactModuleIdentity, ImportQualifier, ExactModuleIdentity)],
+    pub(crate) compilation_root: &'a ExactModuleIdentity,
+    pub(crate) protected_edges: &'a BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+    pub(crate) authored_overlaps: &'a BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
     pub(crate) independent: &'a BTreeSet<ExactModuleIdentity>,
     pub(crate) source_less: &'a BTreeSet<ExactModuleIdentity>,
 }
@@ -390,49 +393,105 @@ fn validate_source_selected_originals_in_domain(
         .modules
         .iter()
         .filter(|node| !node.boot)
-        .map(|node| ExactModuleIdentity {
-            unit: node.unit.clone(),
-            module: node.module.clone(),
+        .map(|node| {
+            (
+                ExactModuleIdentity {
+                    unit: node.unit.clone(),
+                    module: node.module.clone(),
+                },
+                node,
+            )
         })
-        .collect::<BTreeSet<_>>();
-    let mut pending = Vec::new();
-    for (source, qualifier, owner) in context.roots {
-        if selected.contains_key(owner) {
-            if !fresh.contains(source)
-                || source.unit != owner.unit
-                || !matches!(qualifier, ImportQualifier::Unqualified)
-                    && !matches!(qualifier,ImportQualifier::ThisUnit(unit) if unit == &owner.unit)
-            {
-                return Err(refused(
-                    "selected root leaves the actual fresh import graph",
-                ));
-            }
-            record_resolution(
-                qualifier,
-                &owner.module,
-                Some(modules[owner].source.clone()),
-            )?;
-            pending.push(owner.clone());
-        }
+        .collect::<BTreeMap<_, _>>();
+    if !fresh.contains_key(context.compilation_root) {
+        return Err(refused("selection lacks its actual compilation root"));
     }
+    let mut exact_edges: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for (source, qualifier, owner) in context.roots {
+        exact_edges
+            .entry(source)
+            .or_default()
+            .push((qualifier, owner));
+    }
+    let mut pending = vec![context.compilation_root.clone()];
+    let mut visited = BTreeSet::new();
     let mut reachable = BTreeSet::new();
     while let Some(owner) = pending.pop() {
-        if !reachable.insert(owner.clone()) {
+        if !visited.insert(owner.clone()) {
             continue;
         }
-        for imported in selected[&owner].imports() {
-            let edge = modules[&owner]
-                .imports
-                .iter()
-                .find(|edge| edge.module == imported.module)
-                .unwrap();
-            if let Some(child) = modules.get(imported) {
-                if edge.selected.as_ref() != Some(&child.source) {
-                    return Err(refused("selected dependency source changed"));
+        if let Some(node) = fresh.get(&owner) {
+            for (qualifier, child) in exact_edges.get(&owner).into_iter().flatten() {
+                if context
+                    .protected_edges
+                    .get(&owner)
+                    .is_some_and(|edges| edges.contains(*child))
+                    && !context
+                        .authored_overlaps
+                        .get(&owner)
+                        .is_some_and(|edges| edges.contains(*child))
+                {
+                    continue;
                 }
-                pending.push(imported.clone());
-            } else if !context.independent.contains(imported) && !fresh.contains(imported) {
-                return Err(refused("selected source closure is incomplete"));
+                if selected.contains_key(*child)
+                    && (owner.unit != child.unit
+                        || !matches!(qualifier, ImportQualifier::Unqualified)
+                            && !matches!(qualifier, ImportQualifier::ThisUnit(unit) if unit == &owner.unit))
+                {
+                    return Err(refused(
+                        "selected root leaves the actual fresh import graph",
+                    ));
+                }
+                if selected.contains_key(*child) {
+                    record_resolution(
+                        qualifier,
+                        &child.module,
+                        Some(modules[*child].source.clone()),
+                    )?;
+                }
+                pending.push((*child).clone());
+            }
+            for edge in &node.imports {
+                let Some(path) = &edge.selected else {
+                    continue;
+                };
+                let child = ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: edge.module.clone(),
+                };
+                if context
+                    .protected_edges
+                    .get(&owner)
+                    .is_some_and(|edges| edges.contains(&child))
+                    && !context
+                        .authored_overlaps
+                        .get(&owner)
+                        .is_some_and(|edges| edges.contains(&child))
+                {
+                    continue;
+                }
+                if fresh.get(&child).is_some_and(|node| &node.source == path) {
+                    pending.push(child);
+                }
+            }
+        } else if let Some(original) = selected.get(&owner) {
+            reachable.insert(owner.clone());
+            for imported in original.imports() {
+                let edge = modules[&owner]
+                    .imports
+                    .iter()
+                    .find(|edge| edge.module == imported.module)
+                    .expect("validated canonical source import");
+                if let Some(child) = modules.get(imported) {
+                    if edge.selected.as_ref() != Some(&child.source) {
+                        return Err(refused("selected dependency source changed"));
+                    }
+                    pending.push(imported.clone());
+                } else if fresh.contains_key(imported) {
+                    pending.push(imported.clone());
+                } else if !context.independent.contains(imported) {
+                    return Err(refused("selected source closure is incomplete"));
+                }
             }
         }
     }
@@ -957,6 +1016,8 @@ mod tests {
         let roots = [(consumer, ImportQualifier::Unqualified, owner.clone())];
         let independent = BTreeSet::new();
         let source_less = BTreeSet::new();
+        let protected_edges = BTreeMap::new();
+        let authored_overlaps = BTreeMap::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -964,6 +1025,9 @@ mod tests {
             include: &include,
             fresh: &fresh,
             roots: &roots,
+            compilation_root: &roots[0].0,
+            protected_edges: &protected_edges,
+            authored_overlaps: &authored_overlaps,
             independent: &independent,
             source_less: &source_less,
         };
@@ -974,6 +1038,51 @@ mod tests {
             interface_sha256: interface.interface_sha256(),
         };
         assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
+        // The same consumed inventory and canonical selection cannot promote a
+        // protected template dependency into an authored current-source claim.
+        let template_edges =
+            BTreeMap::from([(roots[0].0.clone(), BTreeSet::from([owner.clone()]))]);
+        let refused = validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                protected_edges: &template_edges,
+                ..context()
+            },
+        )
+        .unwrap_err();
+        assert!(refused
+            .to_string()
+            .contains("selected owners are unreachable from actual imports"));
+        assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
+        // An adjacent consumed module is not another compilation root.
+        let mut adjacent = fresh.clone();
+        let mut unused = adjacent.modules[0].clone();
+        unused.module = "Unused".into();
+        unused.source = root.path().join("Unused.hs");
+        adjacent.modules.push(unused);
+        let unrooted = [(
+            ExactModuleIdentity {
+                unit: "main".into(),
+                module: "Unused".into(),
+            },
+            ImportQualifier::Unqualified,
+            owner.clone(),
+        )];
+        let refused = validate_source_selected_originals(
+            vec![claim()],
+            &evidence,
+            SourceSelectionContext {
+                fresh: &adjacent,
+                roots: &unrooted,
+                ..context()
+            },
+        )
+        .unwrap_err();
+        assert!(refused
+            .to_string()
+            .contains("selected owners are unreachable from actual imports"));
+
         // A duplicated alias/preamble edge retains the same actual source demand.
         let duplicate = [roots[0].clone(), roots[0].clone()];
         assert!(validate_source_selected_originals(
@@ -1202,6 +1311,8 @@ mod tests {
         let includes = [root.path().to_path_buf()];
         let independent = BTreeSet::new();
         let source_less = BTreeSet::new();
+        let protected_edges = BTreeMap::new();
+        let authored_overlaps = BTreeMap::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -1209,6 +1320,9 @@ mod tests {
             include: &includes,
             fresh: &fresh,
             roots: &roots,
+            compilation_root: &roots[0].0,
+            protected_edges: &protected_edges,
+            authored_overlaps: &authored_overlaps,
             independent: &independent,
             source_less: &source_less,
         };
@@ -1375,6 +1489,8 @@ mod tests {
         let includes = [root.path().to_path_buf()];
         let independent = BTreeSet::new();
         let source_less = BTreeSet::new();
+        let protected_edges = BTreeMap::new();
+        let authored_overlaps = BTreeMap::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -1382,6 +1498,9 @@ mod tests {
             include: &includes,
             fresh: &fresh,
             roots: &roots,
+            compilation_root: &roots[0].0,
+            protected_edges: &protected_edges,
+            authored_overlaps: &authored_overlaps,
             independent: &independent,
             source_less: &source_less,
         };

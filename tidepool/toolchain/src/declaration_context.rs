@@ -9453,23 +9453,7 @@ impl ExactSourceAdmission {
     /// Completed-source validation binds GENERATED_SOURCE to this receipt's
     /// hash-verified witness. Resolve its owner without parsing source text.
     pub(crate) fn generated_source_owner(&self) -> Result<ExactModuleIdentity, CompileError> {
-        let owners = self
-            .evidence
-            .modules
-            .iter()
-            .filter(|node| {
-                !node.boot
-                    && (node.source == Path::new(crate::cache::GENERATED_SOURCE)
-                        || node.source == self.witness.source_path())
-            })
-            .map(|node| identity(&node.unit, &node.module))
-            .collect::<Vec<_>>();
-        match owners.as_slice() {
-            [owner] => Ok(owner.clone()),
-            _ => Err(failure(
-                "generated source lacks one authenticated consumed owner",
-            )),
-        }
+        Ok(self.claims.compilation_root().clone())
     }
 
     pub(crate) fn consumed_home_adjacency(
@@ -10803,6 +10787,171 @@ impl ProductInputFacts<'_> {
                         .source_lexical_node(&identity(unit, module))
                         .is_some())
         };
+        let claimed_owners = claims
+            .iter()
+            .map(|claim| claim.owner.clone())
+            .collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut exact_imports = BTreeMap::new();
+        let mut exact_source_imports = BTreeMap::new();
+        let mut scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>> = BTreeMap::new();
+        let mut protected_edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>> =
+            BTreeMap::new();
+        let mut authored_edges = BTreeSet::new();
+        for module in &edges {
+            let owner = (
+                module.owner.unit.as_str(),
+                module.owner.module.as_str(),
+                module.boot,
+            );
+            if !source_owners.contains(&owner) || !seen.insert(owner) {
+                return Err(failure(
+                    "exact import witness has another fresh source owner",
+                ));
+            }
+            let mut imported = BTreeSet::new();
+            let mut resolved = BTreeSet::new();
+            let mut source_imports = Vec::new();
+            for edge in &module.imports {
+                let qualifier = String::from(edge.qualifier.clone());
+                let name = edge.module.as_str();
+                let boot = edge.boot;
+                let unit = edge.unit.as_str();
+                let mut scaffold_import = false;
+                for (index, authority) in self.scaffold_imports.iter().enumerate() {
+                    let permitted = evidence
+                        .modules
+                        .iter()
+                        .find(|module| {
+                            module.unit == owner.0
+                                && module.module == owner.1
+                                && module.boot == owner.2
+                        })
+                        .is_some_and(|module| {
+                            // Completed-source validation bound this marker
+                            // to the hash-verified receipt target snapshot.
+                            let module_source =
+                                if module.source == Path::new(crate::cache::GENERATED_SOURCE) {
+                                    &source_path
+                                } else {
+                                    &module.source
+                                };
+                            authority.permits(
+                                context,
+                                &source,
+                                &source_path,
+                                module_source,
+                                unit,
+                                name,
+                                &qualifier,
+                                boot,
+                            )
+                        });
+                    if permitted {
+                        validation
+                            .inventory
+                            .reserve::<(ExactModuleIdentity, ExactModuleIdentity)>(1)
+                            .and_then(|_| {
+                                validation.inventory.charge(
+                                    module
+                                        .owner
+                                        .unit
+                                        .len()
+                                        .saturating_add(module.owner.module.len())
+                                        .saturating_add(unit.len())
+                                        .saturating_add(name.len()),
+                                )
+                            })
+                            .map_err(|error| compiler_evidence_failure(error.into()))?;
+                        protected_edges
+                            .entry(module.owner.clone())
+                            .or_default()
+                            .insert(identity(unit, name));
+                        scaffold_roots
+                            .entry(index)
+                            .or_default()
+                            .insert(identity(unit, name));
+                        scaffold_import = true;
+                    }
+                }
+                if !scaffold_import {
+                    authored_edges.insert((module.owner.clone(), identity(unit, name)));
+                }
+                let refusal = if boot {
+                    Some(ExactImportWitnessRefusal::BootImport)
+                } else if !(is_selected(unit, name)
+                    || scaffold_import
+                    || claimed_owners.contains(&identity(unit, name)))
+                {
+                    Some(ExactImportWitnessRefusal::OutsideSelectedGraph)
+                } else if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
+                    && !matches!(
+                        &edge.qualifier,
+                        crate::cache::ImportQualifier::ThisUnit(selected_unit) if selected_unit == unit
+                    )
+                {
+                    Some(ExactImportWitnessRefusal::QualifierMismatch)
+                } else if !imported.insert((
+                    qualifier.clone(),
+                    name.to_owned(),
+                    boot,
+                    unit.to_owned(),
+                )) {
+                    Some(ExactImportWitnessRefusal::DuplicateImport)
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    let selected = selected
+                        .get(&(unit, name))
+                        .map(|(unit, module)| identity(unit, module))
+                        .or_else(|| {
+                            world
+                                .then(|| context.source_lexical_node(&identity(unit, name)))
+                                .flatten()
+                                .map(|node| node.owner.clone())
+                        });
+                    return Err(CompileError::ExactImportWitness(Box::new(
+                        ExactImportWitnessFailure {
+                            source: module.owner.clone(),
+                            import: identity(unit, name),
+                            qualifier: edge.qualifier.clone(),
+                            boot,
+                            selected,
+                            reason,
+                        },
+                    )));
+                }
+                resolved.insert(identity(unit, name));
+                source_imports.push(crate::certified_products::CanonicalSourceImport {
+                    qualifier: edge.qualifier.clone(),
+                    module: name.to_owned(),
+                    boot,
+                    home_unit: Some(unit.to_owned()),
+                });
+            }
+            exact_source_imports.insert(identity(owner.0, owner.1), source_imports);
+            exact_imports.insert(identity(owner.0, owner.1), resolved.into_iter().collect());
+        }
+        if seen != source_owners {
+            return Err(failure("exact import witness omits a fresh source module"));
+        }
+        // An owner also imported by an authored edge keeps that independent
+        // role. Protected permission never erases an authored obligation.
+        authored_edges.retain(|(source, imported)| {
+            protected_edges
+                .get(source)
+                .is_some_and(|edges| edges.contains(imported))
+        });
+        let authored_edges = authored_edges.into_iter().fold(
+            BTreeMap::<_, BTreeSet<_>>::new(),
+            |mut rows, (source, imported)| {
+                rows.entry(source).or_default().insert(imported);
+                rows
+            },
+        );
+        let compilation_root =
+            source_admission::authenticated_compilation_root(&evidence, &source_path)?;
         let source_selection_roots = edges
             .iter()
             .flat_map(|module| {
@@ -10908,6 +11057,9 @@ impl ProductInputFacts<'_> {
                 include,
                 fresh: &evidence,
                 roots: &source_selection_roots,
+                compilation_root: &compilation_root,
+                protected_edges: &protected_edges,
+                authored_overlaps: &authored_edges,
                 independent: &independent,
                 source_less: &source_less,
             };
@@ -10920,147 +11072,6 @@ impl ProductInputFacts<'_> {
                 ),
             }?
         };
-        let mut seen = BTreeSet::new();
-        let mut exact_imports = BTreeMap::new();
-        let mut exact_source_imports = BTreeMap::new();
-        let mut scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>> = BTreeMap::new();
-        let mut protected_edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>> =
-            BTreeMap::new();
-        for module in &edges {
-            let owner = (
-                module.owner.unit.as_str(),
-                module.owner.module.as_str(),
-                module.boot,
-            );
-            if !source_owners.contains(&owner) || !seen.insert(owner) {
-                return Err(failure(
-                    "exact import witness has another fresh source owner",
-                ));
-            }
-            let mut imported = BTreeSet::new();
-            let mut resolved = BTreeSet::new();
-            let mut source_imports = Vec::new();
-            for edge in &module.imports {
-                let qualifier = String::from(edge.qualifier.clone());
-                let name = edge.module.as_str();
-                let boot = edge.boot;
-                let unit = edge.unit.as_str();
-                let mut scaffold_import = false;
-                for (index, authority) in self.scaffold_imports.iter().enumerate() {
-                    let permitted = evidence
-                        .modules
-                        .iter()
-                        .find(|module| {
-                            module.unit == owner.0
-                                && module.module == owner.1
-                                && module.boot == owner.2
-                        })
-                        .is_some_and(|module| {
-                            // Completed-source validation bound this marker
-                            // to the hash-verified receipt target snapshot.
-                            let module_source =
-                                if module.source == Path::new(crate::cache::GENERATED_SOURCE) {
-                                    &source_path
-                                } else {
-                                    &module.source
-                                };
-                            authority.permits(
-                                context,
-                                &source,
-                                &source_path,
-                                module_source,
-                                unit,
-                                name,
-                                &qualifier,
-                                boot,
-                            )
-                        });
-                    if permitted {
-                        validation
-                            .inventory
-                            .reserve::<(ExactModuleIdentity, ExactModuleIdentity)>(1)
-                            .and_then(|_| {
-                                validation.inventory.charge(
-                                    module
-                                        .owner
-                                        .unit
-                                        .len()
-                                        .saturating_add(module.owner.module.len())
-                                        .saturating_add(unit.len())
-                                        .saturating_add(name.len()),
-                                )
-                            })
-                            .map_err(|error| compiler_evidence_failure(error.into()))?;
-                        protected_edges
-                            .entry(module.owner.clone())
-                            .or_default()
-                            .insert(identity(unit, name));
-                        scaffold_roots
-                            .entry(index)
-                            .or_default()
-                            .insert(identity(unit, name));
-                        scaffold_import = true;
-                    }
-                }
-                let refusal = if boot {
-                    Some(ExactImportWitnessRefusal::BootImport)
-                } else if !(is_selected(unit, name)
-                    || scaffold_import
-                    || selected_originals.contains_key(&identity(unit, name)))
-                {
-                    Some(ExactImportWitnessRefusal::OutsideSelectedGraph)
-                } else if !matches!(&edge.qualifier, crate::cache::ImportQualifier::Unqualified)
-                    && !matches!(
-                        &edge.qualifier,
-                        crate::cache::ImportQualifier::ThisUnit(selected_unit) if selected_unit == unit
-                    )
-                {
-                    Some(ExactImportWitnessRefusal::QualifierMismatch)
-                } else if !imported.insert((
-                    qualifier.clone(),
-                    name.to_owned(),
-                    boot,
-                    unit.to_owned(),
-                )) {
-                    Some(ExactImportWitnessRefusal::DuplicateImport)
-                } else {
-                    None
-                };
-                if let Some(reason) = refusal {
-                    let selected = selected
-                        .get(&(unit, name))
-                        .map(|(unit, module)| identity(unit, module))
-                        .or_else(|| {
-                            world
-                                .then(|| context.source_lexical_node(&identity(unit, name)))
-                                .flatten()
-                                .map(|node| node.owner.clone())
-                        });
-                    return Err(CompileError::ExactImportWitness(Box::new(
-                        ExactImportWitnessFailure {
-                            source: module.owner.clone(),
-                            import: identity(unit, name),
-                            qualifier: edge.qualifier.clone(),
-                            boot,
-                            selected,
-                            reason,
-                        },
-                    )));
-                }
-                resolved.insert(identity(unit, name));
-                source_imports.push(crate::certified_products::CanonicalSourceImport {
-                    qualifier: edge.qualifier.clone(),
-                    module: name.to_owned(),
-                    boot,
-                    home_unit: Some(unit.to_owned()),
-                });
-            }
-            exact_source_imports.insert(identity(owner.0, owner.1), source_imports);
-            exact_imports.insert(identity(owner.0, owner.1), resolved.into_iter().collect());
-        }
-        if seen != source_owners {
-            return Err(failure("exact import witness omits a fresh source module"));
-        }
         if let SourceCompilationBinding::World(binding) = &compilation_binding {
             for module in &evidence.modules {
                 let owner = identity(&module.unit, &module.module);
@@ -11085,10 +11096,11 @@ impl ProductInputFacts<'_> {
         };
         let claims = Arc::new(ReceiptSourceClaims::issue(
             &evidence,
-            &witness,
+            compilation_root,
             &exact_imports,
             &selected_originals,
             protected_edges,
+            authored_edges,
             |owner| {
                 self.program_support
                     .and_then(|support| support.imports.get(owner))

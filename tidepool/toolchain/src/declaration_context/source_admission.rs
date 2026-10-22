@@ -90,6 +90,23 @@ impl CompilerDependencies {
 #[derive(Clone, Debug, Default)]
 struct ProtectedTemplateLinks {
     edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+    authored_overlaps: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+}
+
+impl ProtectedTemplateLinks {
+    fn excludes_lexical(
+        &self,
+        source: &ExactModuleIdentity,
+        imported: &ExactModuleIdentity,
+    ) -> bool {
+        self.edges
+            .get(source)
+            .is_some_and(|edges| edges.contains(imported))
+            && !self
+                .authored_overlaps
+                .get(source)
+                .is_some_and(|edges| edges.contains(imported))
+    }
 }
 
 /// Pre-product claims have already passed source/path/import authentication.
@@ -97,6 +114,7 @@ struct ProtectedTemplateLinks {
 #[derive(Clone)]
 pub(super) struct ReceiptSourceClaims {
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    compilation_root: ExactModuleIdentity,
     dependencies: CompilerDependencies,
     lexical: BTreeMap<ExactModuleIdentity, SourceLexicalClaim>,
     protected: ProtectedTemplateLinks,
@@ -105,10 +123,11 @@ pub(super) struct ReceiptSourceClaims {
 impl ReceiptSourceClaims {
     pub(super) fn issue(
         evidence: &crate::cache::CompletedSourceEvidence,
-        witness: &ExactSourceWitness,
+        compilation_root: ExactModuleIdentity,
         exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
         selected: &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
         protected_edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+        authored_overlaps: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
         prior: impl Fn(&ExactModuleIdentity) -> bool,
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Self, CompileError> {
@@ -165,26 +184,12 @@ impl ReceiptSourceClaims {
                 ));
             }
         }
-        let roots = evidence
-            .modules
-            .iter()
-            .filter(|node| {
-                !node.boot
-                    && (node.source == Path::new(crate::cache::GENERATED_SOURCE)
-                        || node.source == witness.source_path())
-            })
-            .map(|node| identity(&node.unit, &node.module))
-            .collect::<BTreeSet<_>>();
-        if roots.len() != 1 {
-            return Err(failure(
-                "source claims lack one authenticated compilation root",
-            ));
-        }
+        let protected = ProtectedTemplateLinks {
+            edges: protected_edges,
+            authored_overlaps,
+        };
         let mut lexical = BTreeMap::new();
-        let mut pending = roots
-            .into_iter()
-            .chain(selected.keys().cloned())
-            .collect::<Vec<_>>();
+        let mut pending = vec![compilation_root.clone()];
         while let Some(owner) = pending.pop() {
             crate::host_work::checkpoint()?;
             if lexical.contains_key(&owner) {
@@ -206,26 +211,42 @@ impl ReceiptSourceClaims {
             pending.extend(
                 imports
                     .iter()
-                    .filter(|child| {
-                        !protected_edges
-                            .get(&owner)
-                            .is_some_and(|edges| edges.contains(*child))
-                    })
+                    .filter(|child| !protected.excludes_lexical(&owner, child))
                     .cloned(),
             );
         }
         Ok(Self {
             operation: Arc::clone(operation),
+            compilation_root,
             dependencies: CompilerDependencies { adjacency },
             lexical,
-            protected: ProtectedTemplateLinks {
-                edges: protected_edges,
-            },
+            protected,
         })
+    }
+
+    pub(super) fn compilation_root(&self) -> &ExactModuleIdentity {
+        &self.compilation_root
     }
 
     pub(super) fn dependencies(&self) -> &CompilerDependencies {
         &self.dependencies
+    }
+}
+
+pub(super) fn authenticated_compilation_root(
+    evidence: &crate::cache::CompletedSourceEvidence,
+    source_path: &Path,
+) -> Result<ExactModuleIdentity, CompileError> {
+    let mut owners = evidence.modules.iter().filter(|node| {
+        !node.boot
+            && (node.source == Path::new(crate::cache::GENERATED_SOURCE)
+                || node.source == source_path)
+    });
+    match (owners.next(), owners.next()) {
+        (Some(owner), None) => Ok(identity(&owner.unit, &owner.module)),
+        _ => Err(failure(
+            "source claims lack one authenticated compilation root",
+        )),
     }
 }
 
@@ -315,6 +336,18 @@ impl SourceAdmissionBundle {
                     .entry(owner.clone())
                     .or_default()
                     .extend(edges.iter().cloned());
+            }
+            for (source, imports) in &admission.claims.protected.authored_overlaps {
+                charge_owner(&admission.claims.operation, source, 1)?;
+                for imported in imports {
+                    charge_owner(&admission.claims.operation, imported, 1)?;
+                }
+                bundle
+                    .protected
+                    .authored_overlaps
+                    .entry(source.clone())
+                    .or_default()
+                    .extend(imports.iter().cloned());
             }
             for (owner, original) in &admission.selected_originals {
                 if selected
@@ -435,13 +468,7 @@ impl SourceAdmissionBundle {
             .map(|imports| {
                 imports
                     .iter()
-                    .filter(|child| {
-                        !self
-                            .protected
-                            .edges
-                            .get(owner)
-                            .is_some_and(|edges| edges.contains(*child))
-                    })
+                    .filter(|child| !self.protected.excludes_lexical(owner, child))
                     .cloned()
                     .collect()
             })
