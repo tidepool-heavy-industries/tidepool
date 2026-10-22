@@ -114,7 +114,8 @@ data PackageLinks = PackageLinks
   } deriving (Eq, Show)
 
 emptyPackageLinks :: PackageLinks
-emptyPackageLinks = PackageLinks (BS.replicate 32 0) [] Map.empty Map.empty Map.empty []
+emptyPackageLinks = PackageLinks (packageLinkIndexStageId emptyPackageLinkIndex)
+  [] Map.empty Map.empty Map.empty []
 
 -- The stage owns one occurrence table. Each ordinary/item consumer retains its
 -- ordered links, and fresh HOME groups retain the links issued by their actual
@@ -130,9 +131,12 @@ data PackageLinkIndex = PackageLinkIndex
   , packageLinkIndexProducts :: [(FilePath, BS.ByteString)]
   } deriving (Eq, Show)
 
+-- Original-only captures still seal their empty stage through the package issuer.
 emptyPackageLinkIndex :: PackageLinkIndex
-emptyPackageLinkIndex = PackageLinkIndex (BS.replicate 32 0) [] Map.empty Map.empty
-  Map.empty Set.empty Map.empty []
+emptyPackageLinkIndex = case issuePackageLinkIndex [] Map.empty Map.empty Map.empty
+    Set.empty Map.empty [] of
+  Right issued -> issued
+  Left reason -> error ("empty package stage issuance failed: " ++ reason)
 
 issuePackageLinkIndex
   :: [(BS.ByteString, T.Text, T.Text, BS.ByteString, BS.ByteString, [Word32])]
