@@ -15990,6 +15990,19 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
+        let mut selection = CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &artifacts.metadata_snapshot(),
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap();
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &artifacts.inventory().empty_view(),
+            vec![entry],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let proof = crate::compile_input::seal(
             b"admitted-producer",
             &[],
@@ -16003,13 +16016,7 @@ pub(crate) mod tests {
             &interfaces,
             table.clone(),
             vec![],
-            &artifacts,
-            &CertifiedSourceSelection::from_compiler_projection(
-                &projection,
-                &artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap(),
+            stage.output(),
             Default::default(),
         )
         .unwrap()
@@ -18097,9 +18104,7 @@ pub(crate) mod tests {
             ArtifactEntry, ArtifactInventory, CompilerInputProjection, CompilerSourceSupport,
             NativeGroupKey,
         };
-        use crate::declaration_context::{
-            ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
-        };
+        use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
         use crate::declaration_join::ExactLexicalNode;
         let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
             b"original-binding-test",
@@ -18139,7 +18144,9 @@ pub(crate) mod tests {
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let completed = Arc::new(CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap());
+        let completed = Arc::new(
+            CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap(),
+        );
         let owner = entry.descriptor.owner.clone();
         let primary = completed.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
@@ -18655,7 +18662,11 @@ pub(crate) mod tests {
             )),
         )
         .unwrap();
-        let row = issued.compiler_inputs().native_availability().issued_row(fresh_id).unwrap();
+        let row = issued
+            .compiler_inputs()
+            .native_availability()
+            .issued_row(fresh_id)
+            .unwrap();
         for ordinal in [2, 4, 5] {
             assert!(row.permits(ordinal), "supported local closure {ordinal}");
         }
@@ -18680,10 +18691,7 @@ pub(crate) mod tests {
             .owner
             .clone();
         let publication = fresh_selection
-            .produced_authored_original_publication(
-                issued.physical_cohort(),
-                &produced_owner,
-            )
+            .produced_authored_original_publication(issued.physical_cohort(), &produced_owner)
             .unwrap();
         let receipt = fresh_selection
             .produced_source_receipt(&produced_owner, issued.issued_artifacts())
@@ -18764,7 +18772,8 @@ pub(crate) mod tests {
                 .collect::<BTreeSet<_>>(),
             expected_roots
         );
-        let closed = CompilerSourceSupport::close_complete_output(issued.compiler_inputs()).unwrap();
+        let closed =
+            CompilerSourceSupport::close_complete_output(issued.compiler_inputs()).unwrap();
         let published = closed.certify_original_closure(&publication).unwrap();
         let canonical = ArtifactEntry::canonical_artifact_id(
             publication.products()[0].module_interface().unwrap(),
@@ -18825,16 +18834,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(carried
-            .produced_authored_original_publication(
-                issued.physical_cohort(),
-                &produced_owner,
-            )
+            .produced_authored_original_publication(issued.physical_cohort(), &produced_owner,)
             .is_err());
         assert!(fresh_selection
-            .produced_authored_original_publication(
-                output.physical_cohort(),
-                &produced_owner,
-            )
+            .produced_authored_original_publication(output.physical_cohort(), &produced_owner,)
             .is_err());
 
         let empty_product = fixture_finalized_product(
@@ -18878,10 +18881,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let empty_publication = empty_selection
-            .produced_authored_original_publication(
-                empty_output.physical_cohort(),
-                &empty_owner,
-            )
+            .produced_authored_original_publication(empty_output.physical_cohort(), &empty_owner)
             .unwrap();
         assert!(empty_publication
             .native_closure()
@@ -18912,12 +18912,14 @@ pub(crate) mod tests {
             None,
             17,
         );
-        let empty_support = CompilerSourceSupport::close_complete_output(empty_output.compiler_inputs())
-            .unwrap()
-            .certify_original_closure(&empty_publication)
-            .unwrap();
+        let empty_support =
+            CompilerSourceSupport::close_complete_output(empty_output.compiler_inputs())
+                .unwrap()
+                .certify_original_closure(&empty_publication)
+                .unwrap();
         let empty_row = empty_output
-            .compiler_inputs().native_availability()
+            .compiler_inputs()
+            .native_availability()
             .issued_row(empty_id)
             .unwrap();
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = empty_support
@@ -19002,14 +19004,13 @@ pub(crate) mod tests {
         let mut selected =
             CertifiedSourceSelection::from_compiler_projection(&projection, &metadata, &operation)
                 .unwrap();
-        let output =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selected,
-                &both,
-                vec![entry.clone()],
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selected,
+            &both,
+            vec![entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let issued = output.compiler_inputs().native_availability();
         assert_eq!(
             selected
@@ -19064,7 +19065,8 @@ pub(crate) mod tests {
             panic!("completed current product owns its issued proof");
         };
         let offered = output
-            .compiler_inputs().native_offers()
+            .compiler_inputs()
+            .native_offers()
             .iter()
             .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
             .unwrap();
@@ -19151,14 +19153,13 @@ pub(crate) mod tests {
             &completed[0],
             &view.metadata_snapshot().artifacts[&entry.descriptor.id]
         ));
-        let output =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selected,
-                &view,
-                vec![entry.clone()],
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+        let output = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selected,
+            &view,
+            vec![entry.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let issued = output.compiler_inputs().native_availability();
         assert!(Arc::ptr_eq(
             issued
@@ -19188,7 +19189,8 @@ pub(crate) mod tests {
             panic!("completed current product owns its issued proof");
         };
         let offered = output
-            .compiler_inputs().native_offers()
+            .compiler_inputs()
+            .native_offers()
             .iter()
             .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
             .unwrap();
@@ -19504,35 +19506,44 @@ pub(crate) mod tests {
                 projected
             );
             assert_namespace_ids(&selection, &view, namespace_original);
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &view,
+                vec![native.clone()],
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
             let mut carried = selection;
+            let mut continuation = stage.compiler_inputs().as_ref().clone();
+            let owner = native.descriptor.owner.clone();
+            let context = Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_issued_output(
+                    producer.sha256(),
+                    stage.output(),
+                    vec![crate::declaration_join::ExactLexicalNode {
+                        owner: owner.clone(),
+                        imports: vec![],
+                    }],
+                    owner,
+                    &[],
+                )
+                .unwrap(),
+            );
             for _ in 0..3 {
-                let owner = crate::declaration_join::ExactModuleIdentity {
-                    unit: original.owner().unit.clone(),
-                    module: original.owner().module.clone(),
-                };
-                let context =
-                    crate::declaration_context::ExactDeclarationContext::from_source_selection(
-                        producer.sha256(),
-                        &carried,
-                        &view,
-                        vec![crate::declaration_join::ExactLexicalNode {
-                            owner: owner.clone(),
-                            imports: vec![],
-                        }],
-                        owner,
-                        &[],
-                    )
-                    .unwrap();
                 assert!(context
                     .compiler_source_support()
                     .native_offers()
                     .iter()
                     .any(|offer| offer.original() == native.descriptor.id && offer.is_full()));
                 let root = tempfile::tempdir().unwrap();
-                let request =
-                    crate::declaration_context::ExactCompileContext::new(Arc::new(context))
-                        .prepare_compilation(root.path(), producer_bytes)
-                        .unwrap();
+                let request = crate::declaration_context::ExactCompileContext::new(context.clone())
+                    .prepare_compilation_with_private_input(
+                        root.path(),
+                        producer_bytes,
+                        None,
+                        Some(continuation),
+                    )
+                    .unwrap();
                 assert!(request.groups.is_empty());
                 assert!(request
                     .compiler_inputs()
@@ -19548,6 +19559,10 @@ pub(crate) mod tests {
                 );
                 assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
                 assert_namespace_ids(&carried, inputs.artifacts(), namespace_original);
+                continuation =
+                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        inputs.compiler_source_support(),
+                    );
             }
             if !namespace_original {
                 assert_eq!(carried.receipt_native_body_owners().count(), 0);
@@ -19638,30 +19653,18 @@ pub(crate) mod tests {
                     &IssuedGroupCandidates::bind(Arc::from([]), &[missing.clone()]).unwrap(),
                 )
                 .unwrap();
-            let owner = crate::declaration_join::ExactModuleIdentity {
-                unit: missing.owner().unit.clone(),
-                module: missing.owner().module.clone(),
-            };
-            let result = crate::declaration_context::ExactDeclarationContext::from_source_selection(
-                producer.sha256(),
-                &absent,
-                available,
-                vec![],
-                owner,
-                &[],
-            );
-            assert!(matches!(result,
-                Err(crate::CompileError::CompilerEvidence(error))
-                if matches!(*error, CertificationError::MissingRetainedCustody { artifact }
-                    if artifact == expected_missing)));
+            assert!(matches!(
+                absent.complete_native_entries(available, &operation),
+                Err(CertificationError::MissingRetainedCustody { artifact })
+                    if artifact == expected_missing
+            ));
         }
     }
 
     #[test]
     fn completed_new_product_request_preserves_input_group_permissions() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeArtifactDemand,
-            NativeGroupKey,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         };
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
@@ -19879,9 +19882,9 @@ pub(crate) mod tests {
                     let mut selection =
                         CertifiedSourceSelection::from_compiler_inputs(&request, &operation)
                             .unwrap();
-                    let input_only =
-                        OriginalCompilerInputs::from_selection(&selection, request.artifacts())
-                            .unwrap();
+                    let input_only = OriginalCompilerInputs::from_issued_support(
+                        request.compiler_source_support(),
+                    );
                     let source =
                         crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                             &input_only,
@@ -19910,16 +19913,54 @@ pub(crate) mod tests {
                             &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
                         )
                         .unwrap();
-                    let physical = request
-                        .artifacts()
-                        .inventory()
-                        .admit_shared_with_demand(
-                            request.artifacts(),
-                            vec![fresh_entry.clone()],
-                            NativeArtifactDemand::ScopeInterfaces,
+                    let result = crate::declaration_context::CapturedCompilerStage::issue(
+                        &mut selection,
+                        request.artifacts(),
+                        vec![fresh_entry.clone()],
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .and_then(|stage| {
+                        assert_eq!(
+                            stage
+                                .compiler_inputs()
+                                .native_availability()
+                                .issued_row(fresh_entry.descriptor.id)
+                                .unwrap()
+                                .permits(3),
+                            permitted
+                        );
+                        assert!(stage
+                            .source_selection()
+                            .current_product(
+                                crate::artifact_inventory::NativeGroupKey {
+                                    artifact: fresh_entry.descriptor.id,
+                                    original_ordinal: 3
+                                },
+                                &fresh_entry,
+                            )
+                            .unwrap()
+                            .is_some());
+                        let mut validation = PackageInterfaceValidation::default();
+                        let observations = source_target_observations(&[(fresh, 3)]);
+                        let prepared = prepared_target_fixture(&observations);
+                        let observed = AuthenticatedTargetImports::issue(
+                            &prepared,
+                            &observations,
+                            &validation.inventory,
                         )
                         .unwrap();
-                    let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+                        stage.issued_artifacts().inventory().select_native_target(
+                            stage.physical_cohort(),
+                            stage.source_selection(),
+                            observed,
+                            None,
+                            Some(request.artifacts()),
+                            &[],
+                            &BTreeMap::new(),
+                            &mut validation,
+                        )?;
+                        Ok(stage.compiler_inputs().as_ref().clone())
+                    });
                     assert_eq!(
                         result.is_ok(),
                         permitted,
@@ -19954,11 +19995,9 @@ pub(crate) mod tests {
                             .all(|key| key.artifact != fresh_entry.descriptor.id));
                     } else {
                         assert!(
-                            matches!(result, Err(crate::CompileError::ArtifactInventory(error))
-                    if matches!(error.failure,
-                        crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                            artifact, original_ordinal: 7,
-                        } if artifact == input.descriptor.id)),
+                            matches!(result, Err(crate::CompileError::CompilerEvidence(error))
+    if matches!(*error, CertificationError::OriginalAvailability(ref refusal)
+        if refusal.owner == *dependency.owner() && refusal.original_ordinal == 7)),
                             "request must refuse unavailable input group 7"
                         );
                     }
@@ -19999,13 +20038,12 @@ pub(crate) mod tests {
     #[test]
     fn completed_request_keeps_two_input_permissions_separate_from_fresh_outputs() {
         use crate::artifact_inventory::{
-            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
-            CanonicalProducerIdentity, CompilerInputProjection, ExactArtifactSelection,
-            NativeArtifactDemand, NativeGroupKey,
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
+            CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
         };
         use crate::declaration_context::{
             issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
-            NativeTransportMode, OriginalCompilerInputs,
+            NativeTransportMode,
         };
         use crate::CompileError;
         let producer_bytes = b"two-input-request-obligations";
@@ -20255,27 +20293,63 @@ pub(crate) mod tests {
                                 )
                                 .unwrap();
                         }
-                        let physical = input
-                            .artifacts()
-                            .inventory()
-                            .admit_shared_with_demand(
-                                input.artifacts(),
-                                output_indices
-                                    .iter()
-                                    .map(|index| entries[*index].clone())
-                                    .collect(),
-                                NativeArtifactDemand::ScopeInterfaces,
+                        let result = crate::declaration_context::CapturedCompilerStage::issue(
+                            &mut selection,
+                            input.artifacts(),
+                            output_indices
+                                .iter()
+                                .map(|index| entries[*index].clone())
+                                .collect(),
+                            &mut PackageInterfaceValidation::default(),
+                        )
+                        .and_then(|stage| {
+                            assert_eq!(
+                                stage
+                                    .compiler_inputs()
+                                    .native_availability()
+                                    .issued_row(entries[3].descriptor.id)
+                                    .unwrap()
+                                    .permits(9001),
+                                grant_full || selected == Some(demanded)
+                            );
+                            assert!(stage
+                                .source_selection()
+                                .current_product(
+                                    crate::artifact_inventory::NativeGroupKey {
+                                        artifact: entries[3].descriptor.id,
+                                        original_ordinal: 9001
+                                    },
+                                    &entries[3],
+                                )
+                                .unwrap()
+                                .is_some());
+                            let mut validation = PackageInterfaceValidation::default();
+                            let observations =
+                                source_target_observations(&[(&products[3].product, 9001)]);
+                            let prepared = prepared_target_fixture(&observations);
+                            let observed = AuthenticatedTargetImports::issue(
+                                &prepared,
+                                &observations,
+                                &validation.inventory,
                             )
                             .unwrap();
-                        let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+                            stage.issued_artifacts().inventory().select_native_target(
+                                stage.physical_cohort(),
+                                stage.source_selection(),
+                                observed,
+                                None,
+                                Some(input.artifacts()),
+                                &[],
+                                &BTreeMap::new(),
+                                &mut validation,
+                            )?;
+                            Ok(stage.compiler_inputs().as_ref().clone())
+                        });
                         let expected = grant_full || selected == Some(demanded);
                         if !expected {
-                            assert!(matches!(result, Err(CompileError::ArtifactInventory(error))
-                                if matches!(error.failure,
-                                    ArtifactInventoryFailure::NativeGroupUnavailable {
-                                        artifact, original_ordinal,
-                                    } if artifact == entries[2].descriptor.id
-                                        && original_ordinal == demanded)),
+                            assert!(matches!(result, Err(crate::CompileError::CompilerEvidence(error))
+    if matches!(*error, CertificationError::OriginalAvailability(ref refusal)
+        if refusal.owner == *products[2].product.owner() && refusal.original_ordinal == demanded)),
                                 "demanded={demanded} selected={selected:?} full={grant_full} extra={extra_output}");
                         } else {
                             accepted += 1;
@@ -20587,18 +20661,14 @@ pub(crate) mod tests {
                     &IssuedGroupCandidates::bind(Arc::from([]), &[parent_product.clone()]).unwrap(),
                 )
                 .unwrap();
-            let physical = parent_request
-                .compiler_inputs()
-                .artifacts()
-                .inventory()
-                .admit_shared_with_demand(
-                    parent_request.compiler_inputs().artifacts(),
-                    vec![parent_entry.clone()],
-                    NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let parent_input =
-                OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                parent_request.compiler_inputs().artifacts(),
+                vec![parent_entry.clone()],
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let parent_input = stage.compiler_inputs().as_ref().clone();
             assert_eq!(
                 parent_input.issued_artifacts().selected_native_groups(),
                 parent_request
@@ -20936,8 +21006,8 @@ pub(crate) mod tests {
     fn completed_request_retained_generation_history_uses_exact_input_permissions() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
-            CompilerInputProjection, ExactArtifactSelection, IssuedNativeOffer,
-            NativeArtifactDemand, NativeGroupKey, NativeOriginalRequirement,
+            CompilerInputProjection, ExactArtifactSelection, IssuedNativeOffer, NativeGroupKey,
+            NativeOriginalRequirement,
         };
         use crate::declaration_context::{
             issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
@@ -21054,12 +21124,18 @@ pub(crate) mod tests {
             "RetainedCore availability does not select a compiler Original"
         );
         assert_eq!(
-            completed.compiler_inputs().native_availability().snapshot_facts().unwrap()[&original.descriptor.id].mode,
+            completed
+                .compiler_inputs()
+                .native_availability()
+                .snapshot_facts()
+                .unwrap()[&original.descriptor.id]
+                .mode,
             crate::declaration_context::NativeTransportMode::Full
         );
-        let closed =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(completed.compiler_inputs())
-                .unwrap();
+        let closed = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            completed.compiler_inputs(),
+        )
+        .unwrap();
         let retained_owner = original.descriptor.owner.clone();
         let world_roles = closed
             .projection()
@@ -21069,7 +21145,8 @@ pub(crate) mod tests {
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
         ));
         let world_availability = completed
-            .compiler_inputs().native_availability()
+            .compiler_inputs()
+            .native_availability()
             .for_compiler_roles(&world_roles, completed.issued_artifacts())
             .unwrap();
         let retained_row = world_availability
@@ -21279,8 +21356,8 @@ pub(crate) mod tests {
     fn compiled_new_output_refuses_absent_input_native_permission() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
-            ArtifactInventoryFailure, CanonicalProducerIdentity, CompilerInputProjection,
-            CompilerInputRole, IssuedNativeOffer, NativeArtifactDemand,
+            CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
+            IssuedNativeOffer, NativeArtifactDemand,
         };
         use crate::declaration_context::{
             issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
@@ -21417,14 +21494,9 @@ pub(crate) mod tests {
                 .unwrap();
             let support_projection =
                 CompilerInputProjection::from_issued_entries(&[support_entry.clone()]).unwrap();
-            let support_selection = CertifiedSourceSelection::from_compiler_projection(
-                &support_projection,
-                &support_view.metadata_snapshot(),
-                &InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
-            let support_output =
-                OriginalCompilerInputs::from_selection(&support_selection, &support_view).unwrap();
+            let support_source =
+                issue_fixture_compiler_support(support_projection, support_view).unwrap();
+            let support_output = OriginalCompilerInputs::from_issued_support(&support_source);
             let issued_view = support_output.issued_artifacts();
             let issued_graph = issued_view.capture_graph_selection();
             let empty_offer =
@@ -21609,43 +21681,56 @@ pub(crate) mod tests {
                     input.artifacts(),
                     vec![output_entry.clone()],
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                );
+                )
+                .unwrap();
+                let completed_row = completed
+                    .compiler_inputs()
+                    .native_availability()
+                    .issued_row(output_entry.descriptor.id)
+                    .unwrap();
+                for (ordinal, _, _) in &required_edges {
+                    assert_eq!(completed_row.permits(*ordinal), expected);
+                    assert!(completed
+                        .source_selection()
+                        .current_product(
+                            crate::artifact_inventory::NativeGroupKey {
+                                artifact: output_entry.descriptor.id,
+                                original_ordinal: *ordinal
+                            },
+                            &output_entry,
+                        )
+                        .unwrap()
+                        .is_some());
+                }
                 if !expected {
-                    let outcome = match &completed {
-                        Ok(completed) => {
-                            let rows = completed
-                                .compiler_inputs().native_availability()
-                                .rows()
-                                .map(|row| {
-                                    (
-                                        row.target_original(row.original_owner())
-                                            .unwrap()
-                                            .descriptor
-                                            .id,
-                                        row.original_owner().clone(),
-                                        row.permits(required_ordinal),
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            format!(
-                                "success roles={:?} rows={rows:?} offers={} selected_groups={}",
-                                completed.compiler_inputs().role_projection().snapshot_roles(),
-                                completed.compiler_inputs().native_offers().len(),
-                                completed.issued_artifacts().selected_native_groups().len()
-                            )
-                        }
-                        Err(error) => format!("typed_error={error:?}"),
-                    };
-                    assert!(
-                        matches!(completed, Err(CompileError::ArtifactInventory(error))
-                        if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
-                            artifact: support_entry.descriptor.id, original_ordinal: required_ordinal,
-                        }),
-                        "actual NEW C must consult the receiving Request's absent A permission; label={label} inputA={:?} newC={:?} required_ordinal={required_ordinal} required_edges={required_edges:?} outcome={outcome}",
-                        support_entry.descriptor.id, output_entry.descriptor.id,
-                    );
+                    let observations =
+                        source_target_observations(&[(output_product, required_edges[0].0)]);
+                    let prepared = prepared_target_fixture(&observations);
+                    let mut validation = PackageInterfaceValidation::default();
+                    let observed = AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &observations,
+                        &validation.inventory,
+                    )
+                    .unwrap();
+                    let demand = completed
+                        .issued_artifacts()
+                        .inventory()
+                        .select_native_target(
+                            completed.physical_cohort(),
+                            completed.source_selection(),
+                            observed,
+                            None,
+                            Some(input.artifacts()),
+                            &[],
+                            &BTreeMap::new(),
+                            &mut validation,
+                        );
+                    assert!(matches!(demand, Err(CompileError::CompilerEvidence(ref error))
+                        if matches!(error.as_ref(), CertificationError::OriginalAvailability(ref refusal)
+                            if refusal.owner == *support_product.owner() && refusal.original_ordinal == required_ordinal)),
+                        "actual C demand must consult the receiving Request's absent A permission; label={label} required_ordinal={required_ordinal}; demand={demand:?}");
                 } else {
-                    let completed = completed.unwrap();
                     assert!(
                         matches!(completed.compiler_inputs().role_projection().snapshot_roles()[&output_entry.descriptor.owner],
                         CompilerInputRole::InterfaceOnly { interface }
@@ -21675,8 +21760,11 @@ pub(crate) mod tests {
                         }
                     }
                     assert_eq!(
-                        completed.compiler_inputs().native_availability().snapshot_facts().unwrap()
-                            [&output_entry.descriptor.id]
+                        completed
+                            .compiler_inputs()
+                            .native_availability()
+                            .snapshot_facts()
+                            .unwrap()[&output_entry.descriptor.id]
                             .mode,
                         NativeTransportMode::Full
                     );
@@ -21685,7 +21773,8 @@ pub(crate) mod tests {
                         .selected_native_groups()
                         .is_empty());
                     let completed_offer = completed
-                        .compiler_inputs().native_offers()
+                        .compiler_inputs()
+                        .native_offers()
                         .iter()
                         .find(|offer| offer.original() == output_entry.descriptor.id)
                         .expect("actual completed C has its issued native offer")
@@ -21786,11 +21875,10 @@ pub(crate) mod tests {
     fn completed_type_output_preserves_baseline_original_permissions() {
         use crate::artifact_inventory::{
             ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity, CompilerInputProjection,
-            NativeArtifactDemand, NativeGroupKey,
+            NativeGroupKey,
         };
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
-            OriginalCompilerInputs,
         };
         let producer_bytes = b"baseline-permission-type-output";
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
@@ -21873,17 +21961,14 @@ pub(crate) mod tests {
                     &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
                 )
                 .unwrap();
-            let physical = request
-                .compiler_inputs()
-                .artifacts()
-                .inventory()
-                .admit_shared_with_demand(
-                    request.compiler_inputs().artifacts(),
-                    vec![output.clone()],
-                    NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                request.compiler_inputs().artifacts(),
+                vec![output.clone()],
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let completed = stage.compiler_inputs().as_ref().clone();
             assert_eq!(
                 completed
                     .native_availability()
@@ -21944,13 +22029,11 @@ pub(crate) mod tests {
         grant_full: bool,
     ) -> BTreeSet<u32> {
         use crate::artifact_inventory::{
-            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
-            CanonicalProducerIdentity, CompilerInputProjection, NativeArtifactDemand,
-            NativeGroupKey,
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
+            CompilerInputProjection, NativeGroupKey,
         };
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
-            OriginalCompilerInputs,
         };
         use crate::CompileError;
         let producer_bytes = b"request-obligation-history";
@@ -22123,28 +22206,66 @@ pub(crate) mod tests {
                 &IssuedGroupCandidates::bind(Arc::from([]), &[fresh.clone()]).unwrap(),
             )
             .unwrap();
-        let physical = request
-            .artifacts()
-            .inventory()
-            .admit_shared_with_demand(
-                request.artifacts(),
-                vec![Arc::new(
-                    ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap(),
-                )],
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
-        let result = OriginalCompilerInputs::from_selection(&selection, &physical);
+        let result = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            request.artifacts(),
+            vec![Arc::new(
+                ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap(),
+            )],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .and_then(|stage| {
+            let entry = stage
+                .issued_artifacts()
+                .observed_payload(&fresh_id)
+                .unwrap();
+            assert_eq!(
+                stage
+                    .compiler_inputs()
+                    .native_availability()
+                    .issued_row(entry.descriptor.id)
+                    .unwrap()
+                    .permits(3),
+                permitted.contains(&7)
+            );
+            assert!(stage
+                .source_selection()
+                .current_product(
+                    crate::artifact_inventory::NativeGroupKey {
+                        artifact: entry.descriptor.id,
+                        original_ordinal: 3
+                    },
+                    &entry,
+                )
+                .unwrap()
+                .is_some());
+            let mut validation = PackageInterfaceValidation::default();
+            let observations = source_target_observations(&[(fresh, 3)]);
+            let prepared = prepared_target_fixture(&observations);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
+            stage.issued_artifacts().inventory().select_native_target(
+                stage.physical_cohort(),
+                stage.source_selection(),
+                observed,
+                None,
+                Some(request.artifacts()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )?;
+            Ok(stage.compiler_inputs().as_ref().clone())
+        });
         let allowed = permitted.contains(&7);
         let consumer = "request";
         {
             if !allowed {
                 let actual_error = format!("{:?}", result.as_ref().err());
                 assert!(
-                    matches!(result, Err(CompileError::ArtifactInventory(error))
-                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact, original_ordinal: 7,
-                    } if artifact == input.descriptor.id)),
+                    matches!(result, Err(crate::CompileError::CompilerEvidence(error))
+    if matches!(*error, CertificationError::OriginalAvailability(ref refusal)
+        if refusal.owner == *dependency.owner() && refusal.original_ordinal == 7)),
                     "{consumer}: broader proof cannot grant unavailable B7; actual_error={actual_error}"
                 );
                 assert_eq!(
@@ -23718,71 +23839,34 @@ pub(crate) mod tests {
         let mut observed = 0;
         for mode in ["canonical", "issued", "full"] {
             let inventory = ArtifactInventory::default();
-            let mut full_selection = None;
+            let mut full_output = None;
             let view = if mode == "full" {
-                let complete = inventory
-                    .admit_shared(&inventory.empty_view(), vec![entry.clone()])
-                    .unwrap();
-                let roles = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-                let support = crate::declaration_context::recover_fixture_compiler_support(
-                    roles.clone(),
-                    complete.clone(),
-                    [],
-                )
-                .unwrap();
-                let owner = entry.descriptor.owner.clone();
-                let seed_context = ExactDeclarationContext::from_authenticated_execution(
-                    producer.sha256(),
-                    &complete,
-                    roles.clone(),
-                    vec![crate::declaration_join::ExactLexicalNode {
-                        owner: owner.clone(),
-                        imports: vec![],
-                    }],
-                    owner,
-                    &[],
-                )
-                .unwrap();
-                let seed_root = tempfile::tempdir().unwrap();
-                let seed_request = ExactCompileContext::new(Arc::new(seed_context))
-                    .prepare_compilation(seed_root.path(), producer_bytes)
-                    .unwrap();
-                let seed_availability = seed_request
-                    .compiler_inputs()
-                    .native_availability(entry.descriptor.id)
-                    .unwrap();
-                assert!(seed_availability.permits(9001));
-                assert!(seed_availability
-                    .offers()
-                    .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
-                full_selection = Some(
-                    CertifiedSourceSelection::from_compiler_inputs(
-                        seed_request.compiler_inputs(),
-                        &InventoryOperation::new(Default::default()),
-                    )
-                    .unwrap(),
-                );
-                let narrowed = support
-                    .select_support_roots(vec![roles.roles()[0].interface()])
-                    .unwrap()
-                    .finalize_namespace()
-                    .unwrap();
-                let available = complete
-                    .select_issued(
-                        roles
-                            .roles()
-                            .iter()
-                            .flat_map(|role| {
-                                std::iter::once(role.interface()).chain(role.original())
-                            })
-                            .collect(),
-                        &crate::artifact_inventory::ExactArtifactSelection::capture(
-                            narrowed.artifacts(),
-                        ),
+                let available = inventory
+                    .admit_shared_with_demand(
+                        &inventory.empty_view(),
+                        vec![entry.clone()],
+                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
                     )
                     .unwrap();
-                assert!(available.selected_native_groups().is_empty());
-                available
+                let projection =
+                    CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                let mut selection = CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &available.metadata_snapshot(),
+                    &InventoryOperation::new(Default::default()),
+                )
+                .unwrap();
+                let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                    &mut selection,
+                    &inventory.empty_view(),
+                    vec![entry.clone()],
+                    &mut PackageInterfaceValidation::default(),
+                )
+                .unwrap();
+                let view = stage.issued_artifacts().clone();
+                full_output = Some(stage.output().clone());
+                assert!(view.selected_native_groups().is_empty());
+                view
             } else {
                 inventory
                     .admit_recovery_selection(
@@ -23807,11 +23891,10 @@ pub(crate) mod tests {
                 owner: owner.clone(),
                 imports: vec![],
             }];
-            let context = if let Some(selection) = &full_selection {
-                let context = ExactDeclarationContext::from_source_selection(
+            let context = if let Some(output) = &full_output {
+                let context = ExactDeclarationContext::from_issued_output(
                     producer.sha256(),
-                    selection,
-                    &view,
+                    output,
                     lexical,
                     owner,
                     &[],
@@ -23879,13 +23962,6 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            assert!(
-                crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-                    request.compiler_inputs().compiler_source_support(),
-                )
-                .physical_cohort()
-                .is_err()
-            );
             let physical = inventory
                 .bind_segment(
                     request.compiler_inputs().artifacts(),
@@ -24120,7 +24196,7 @@ pub(crate) mod tests {
                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-                let private = completed;
+                let private = completed.compiler_inputs();
                 let support =
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                         &private,
@@ -24201,15 +24277,6 @@ pub(crate) mod tests {
                 &validation.inventory,
             )
             .unwrap();
-            let mut missing_input_owner = selection.clone();
-            missing_input_owner.input_origin = CertifiedInputOrigin::NewProducts;
-            assert!(matches!(
-                OriginalCompilerInputs::from_selection(&missing_input_owner, request.compiler_inputs().artifacts()),
-                Err(crate::CompileError::CompilerEvidence(error))
-                    if matches!(*error, CertificationError::InputDecision {
-                        reason: InputDecisionRefusal::MissingContinuationOwner, ..
-                    })
-            ), "a continuation cannot fall back to fresh policy when its exact input owner is lost");
             if mode == "current" {
                 // A newly certified complete product is issued by the current
                 // source owner, independently of this request's empty baseline.
@@ -24260,7 +24327,17 @@ pub(crate) mod tests {
                 } else {
                     baseline.clone()
                 };
-                let private = OriginalCompilerInputs::from_selection(&selection, &custody).unwrap();
+                let source = if let Some(output) = &current_output {
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        output.compiler_inputs(),
+                    )
+                    .unwrap()
+                } else {
+                    request.compiler_inputs().compiler_source_support().clone()
+                }
+                .retain_custody(&custody)
+                .unwrap();
+                let private = OriginalCompilerInputs::from_issued_support(&source);
                 if mode != "current" {
                     let issued = request
                         .compiler_inputs()
@@ -24303,13 +24380,6 @@ pub(crate) mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
-                assert!(
-                    crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-                        next.compiler_inputs().compiler_source_support(),
-                    )
-                    .physical_cohort()
-                    .is_err()
-                );
                 let physical = next
                     .compiler_inputs()
                     .artifacts()
@@ -24578,7 +24648,6 @@ pub(crate) mod tests {
         Arc::make_mut(&mut premature.modules)
             .remove(&future_owner)
             .unwrap();
-        let item_view = available.select_roots(vec![native.descriptor.id]).unwrap();
         assert!(matches!(
             crate::declaration_context::CapturedCompilerStage::issue(
                 &mut premature,
@@ -24672,7 +24741,13 @@ pub(crate) mod tests {
             .current_product(current_key, &native)
             .unwrap()
             .is_some());
-        let private = OriginalCompilerInputs::from_selection(&item, &item_view).unwrap();
+        let item_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            completed.compiler_inputs(),
+        )
+        .unwrap()
+        .source_support(&BTreeSet::from([native.descriptor.owner.clone()]))
+        .unwrap();
+        let private = OriginalCompilerInputs::from_issued_support(&item_support);
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
             before.issued_scope_nodes,
@@ -24879,16 +24954,14 @@ pub(crate) mod tests {
                 &IssuedGroupCandidates::bind(Arc::from([]), &[consumer.clone()]).unwrap(),
             )
             .unwrap();
-        let physical = input
-            .artifacts()
-            .inventory()
-            .admit_shared_with_demand(
-                input.artifacts(),
-                vec![entry.clone()],
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
-        let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            input.artifacts(),
+            vec![entry.clone()],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let completed = stage.compiler_inputs().as_ref().clone();
         let canonical = ArtifactEntry::canonical(consumer.module_interface().unwrap().clone());
         assert_eq!(
             completed.role_projection().snapshot_roles()[&entry.descriptor.owner],
@@ -25253,7 +25326,7 @@ pub(crate) mod tests {
             CanonicalProducerIdentity, CompilerInputProjection, CompilerSourceSupport,
             NativeArtifactDemand, NativeGroupKey, NativeOriginalRequirement,
         };
-        use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
+        use crate::declaration_context::ExactDeclarationContext;
         let producer =
             CanonicalProducerIdentity::from_producer_bytes(b"mixed-current-historical-key");
         let values_old =
@@ -25350,15 +25423,18 @@ pub(crate) mod tests {
             r_entry.descriptor.id,
             g_entry.descriptor.id,
             output
-                .compiler_inputs().native_availability()
+                .compiler_inputs()
+                .native_availability()
                 .issued_row(r_entry.descriptor.id)
                 .is_some(),
             output
-                .compiler_inputs().native_availability()
+                .compiler_inputs()
+                .native_availability()
                 .issued_row(g_entry.descriptor.id)
                 .is_some(),
         );
-        let completed = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
+        let completed =
+            CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
         let support = completed.certify_original_closure(&closure).unwrap_or_else(|error| {
             panic!(
                 "initial closure transfer: {error:?}; R={:?} G={:?} Rcanonical={:?} Gcanonical={:?}; roles={:?}; receiving_groups={:?}; closure_groups={:?}",
@@ -25648,7 +25724,8 @@ pub(crate) mod tests {
 
         // The World demand owner must retain both exact G occurrences too;
         // their equal logical key cannot erase either dependency history.
-        let complete = CompilerSourceSupport::close_complete_output(finished.compiler_inputs()).unwrap();
+        let complete =
+            CompilerSourceSupport::close_complete_output(finished.compiler_inputs()).unwrap();
         let closure = current.selected_original_closure(&target).unwrap();
         let selected = complete.certify_original_closure(&closure).unwrap();
         let context = ExactDeclarationContext::new(&[], &[], vec![])
@@ -30581,17 +30658,7 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                let selection = CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &physical.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &selection, &physical,
-                )
-                .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
                     .unwrap()
             })
             .unwrap();
@@ -30706,17 +30773,7 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                let selection = CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &physical.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &selection, &physical,
-                )
-                .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
                     .unwrap()
             })
             .unwrap();
@@ -30758,17 +30815,7 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                let selection = CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &physical.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &selection, &physical,
-                )
-                .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
                     .unwrap()
             })
             .unwrap();
@@ -30898,17 +30945,7 @@ pub(crate) mod tests {
                         &entries,
                     )
                     .unwrap();
-                let selection = CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &physical.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
-                )
-                .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &selection, &physical,
-                )
-                .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                crate::declaration_context::issue_fixture_compiler_support(projection, physical)
                     .unwrap()
             })
             .unwrap();
@@ -31858,21 +31895,18 @@ pub(crate) mod tests {
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
-                let physical = inventory
-                    .admit_certified_with_demand(
-                        &inventory.empty_view(),
-                        entries,
-                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                        &initial.source_selection,
-                    )
-                    .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &initial.source_selection,
-                    &physical,
+                let mut selection = initial.source_selection.clone();
+                let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                    &mut selection,
+                    &inventory.empty_view(),
+                    entries,
+                    &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap()
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    stage.compiler_inputs(),
+                )
+                .unwrap()
             })
             .unwrap();
 
@@ -32266,23 +32300,18 @@ None,
                     )
                     .unwrap(),
                 );
-                let physical = inputs
-                    .artifacts()
-                    .inventory()
-                    .admit_certified_with_demand(
-                        inputs.artifacts(),
-                        vec![entry],
-                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                        &issued.source_selection,
-                    )
-                    .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &issued.source_selection,
-                    &physical,
+                let mut selection = issued.source_selection.clone();
+                let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                    &mut selection,
+                    inputs.artifacts(),
+                    vec![entry],
+                    &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap()
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    stage.compiler_inputs(),
+                )
+                .unwrap()
             };
             let emitted_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
                 canonical_producer,
@@ -33146,17 +33175,13 @@ None,
                 "issued_selected_fresh_versions": selected_fresh.len(),
             })
         );
-        let output = crate::declaration_context::IssuedOriginalOutput::issue(
-            planned.certified.source_selection.clone(),
-            view.clone(),
-        )
-        .unwrap();
+        let output = planned.completed_output();
         let joined = crate::declaration_join::certify_same_offer_planned_declaration(
             planned_module,
             &planned_source,
             &producer,
             &selected,
-            &output,
+            output,
             &exact,
             &include,
             &serde_json::to_vec(&inventory).unwrap(),
@@ -33295,21 +33320,18 @@ None,
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
-                let physical = inventory
-                    .admit_certified_with_demand(
-                        &inventory.empty_view(),
-                        entries,
-                        crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                        &initial.source_selection,
-                    )
-                    .unwrap();
-                let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                    &initial.source_selection,
-                    &physical,
+                let mut selection = initial.source_selection.clone();
+                let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                    &mut selection,
+                    &inventory.empty_view(),
+                    entries,
+                    &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap();
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                    .unwrap()
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    stage.compiler_inputs(),
+                )
+                .unwrap()
             })
             .unwrap();
         for index in 0..2 {
@@ -33397,22 +33419,18 @@ None,
                         })
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
-                    let physical = inventory
-                        .admit_certified_with_demand(
-                            &inventory.empty_view(),
-                            entries,
-                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                            &marker_certified.source_selection,
-                        )
-                        .unwrap();
-                    let output =
-                        crate::declaration_context::OriginalCompilerInputs::from_selection(
-                            &marker_certified.source_selection,
-                            &physical,
-                        )
-                        .unwrap();
-                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                        .unwrap()
+                    let mut selection = marker_certified.source_selection.clone();
+                    let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                        &mut selection,
+                        &inventory.empty_view(),
+                        entries,
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .unwrap();
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        stage.compiler_inputs(),
+                    )
+                    .unwrap()
                 })
                 .unwrap();
             let public_context = Arc::new(
@@ -33441,22 +33459,12 @@ None,
                 .iter()
                 .all(|entry| entry.owner.module != "Fresh"));
             // Full original custody and executable group selection are independent.
-            let inventory = ArtifactInventory::default();
-            let private_view = inventory
-                .admit_recovery_selection(
-                    &inventory.empty_view(),
-                    context.artifact_view().entries(),
-                    &BTreeSet::new(),
-                )
-                .unwrap();
-            let selection = CertifiedSourceSelection::from_compiler_projection(
-                context.compiler_input_projection(),
-                &private_view.metadata_snapshot(),
-                &InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
             let private_input =
-                OriginalCompilerInputs::from_selection(&selection, &private_view).unwrap();
+                OriginalCompilerInputs::from_issued_support(context.compiler_source_support());
+            assert!(private_input
+                .issued_artifacts()
+                .selected_native_groups()
+                .is_empty());
             let request = public_context
                 .prepare_compilation_with_private_input(
                     &directory.join("private-inputs"),
@@ -33600,21 +33608,29 @@ None,
             // Production certification issues a complete current product even
             // when the target has not demanded every body. The private-input
             // handoff must preserve that issuance for a later notebook cell.
-            let output_view =
-                crate::declaration_context::certified_product_artifact_view_with_validation(
-                    canonical_producer,
-                    &certified.recovery_products,
-                    &certified.module_interfaces,
-                    &certified.value_interfaces,
-                    Some(request.compiler_inputs().artifacts()),
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                    &mut PackageInterfaceValidation::default(),
-                )
+            let mut selection = certified.source_selection.clone();
+            let output_entries = certified
+                .recovery_products
+                .iter()
+                .cloned()
+                .map(|product| {
+                    crate::artifact_inventory::ArtifactEntry::original(canonical_producer, product)
+                        .map(Arc::new)
+                })
+                .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-            assert!(output_view.selected_native_groups().is_empty());
-            let private =
-                OriginalCompilerInputs::from_selection(&certified.source_selection, &output_view)
-                    .unwrap();
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                request.compiler_inputs().artifacts(),
+                output_entries,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            let private = stage.compiler_inputs().as_ref().clone();
+            assert!(private
+                .issued_artifacts()
+                .selected_native_groups()
+                .is_empty());
             let current_support =
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
                     .unwrap();
@@ -33836,21 +33852,10 @@ None,
                     select(&producer, &include, &directory.join("cached-offer")).unwrap();
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];
                 assert_eq!(bundle.owner, owner);
-                let inventory = ArtifactInventory::default();
-                let mut private_entries = request.compiler_inputs().artifacts().entries();
-                private_entries.extend(context.artifact_view().entries());
-                let private_view = inventory
-                    .admit_recovery_selection(
-                        &inventory.empty_view(),
-                        private_entries,
-                        &BTreeSet::new(),
-                    )
+                let cached_support = current_support
+                    .retain_custody(context.artifact_view())
                     .unwrap();
-                let private_input = OriginalCompilerInputs::from_selection(
-                    &certified.source_selection,
-                    &private_view,
-                )
-                .unwrap();
+                let private_input = OriginalCompilerInputs::from_issued_support(&cached_support);
                 let cached_request = public_context
                     .prepare_compilation_with_private_input(
                         &directory.join("cached-private-inputs"),
@@ -34131,24 +34136,18 @@ None,
                         .collect::<Result<Vec<_>, _>>()
                         .unwrap();
                     let inputs = request.compiler_inputs();
-                    let physical = inputs
-                        .artifacts()
-                        .inventory()
-                        .admit_certified_with_demand(
-                            inputs.artifacts(),
-                            entries,
-                            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                            &certified.source_selection,
-                        )
-                        .unwrap();
-                    let output =
-                        crate::declaration_context::OriginalCompilerInputs::from_selection(
-                            &certified.source_selection,
-                            &physical,
-                        )
-                        .unwrap();
-                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
-                        .unwrap()
+                    let mut selection = certified.source_selection.clone();
+                    let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                        &mut selection,
+                        inputs.artifacts(),
+                        entries,
+                        &mut PackageInterfaceValidation::default(),
+                    )
+                    .unwrap();
+                    crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                        stage.compiler_inputs(),
+                    )
+                    .unwrap()
                 })
                 .unwrap(),
         );
