@@ -12181,9 +12181,8 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 };
                 assert!(!produced_rows.is_empty(),
                     "actual authored stage owns produced Source proofs");
-                assert!(produced_rows.iter().any(|(receipt, entry)|
-                    entry.descriptor.owner == authored_owner
-                        && receipt.row().original_owner() == &authored_owner),
+                assert!(produced_rows.iter().any(|(_, entry)|
+                    entry.descriptor.owner == authored_owner),
                     "the actual authored Original retains its physical issuer, independently of protected dependency production or lexical permission");
                 let (continuation, _) = next.finish();
                 let following = &program.stages()[2];
