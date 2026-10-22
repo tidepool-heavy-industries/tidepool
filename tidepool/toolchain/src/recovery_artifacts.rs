@@ -1196,6 +1196,10 @@ pub(crate) fn package_interface_io() -> (u64, u64) {
 
 pub(crate) struct PackageInterfaceValidation {
     pub(crate) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    // Canonical code owners may be shared across contexts admitted by this one
+    // operation. Their presence never supplies a missing product or source grant.
+    pub(crate) native_code_components:
+        BTreeMap<[u8; 32], Arc<tidepool_repr::native_code::NativeCodeComponent>>,
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
     // Budget for copied file-read payloads. Captured-output Arcs already have
     // a physical owner and share their bytes without another payload copy.
@@ -1296,6 +1300,7 @@ impl PackageInterfaceValidation {
     ) -> Self {
         Self {
             inventory,
+            native_code_components: BTreeMap::new(),
             captured: BTreeMap::new(),
             retained_bytes: 0,
             hash_bytes: 0,
