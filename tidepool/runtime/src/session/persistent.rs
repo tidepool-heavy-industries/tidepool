@@ -51,6 +51,10 @@ use super::{
     SessionError, SessionLib, SourceImports, StagedPublicManifest,
 };
 
+#[cfg(test)]
+#[path = "package_runtime_tests.rs"]
+mod package_runtime_tests;
+
 /// Render the unqualified imports for the exact names visible from each live
 /// value interface. A generated `Val.G` module can export helpers that have
 /// not entered the binding table yet, so importing the module wholesale would
