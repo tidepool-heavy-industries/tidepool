@@ -7525,7 +7525,7 @@ impl ProgramSourceSupportState {
         let updated = context.owner.facts.compiler_support.extend_program_source(
             selection,
             support,
-            admissions,
+            &issued,
             &dependencies,
         )?;
         let admission = SourceAdmissionBundle::issue(
