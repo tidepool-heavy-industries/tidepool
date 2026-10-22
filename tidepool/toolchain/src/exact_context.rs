@@ -3014,6 +3014,14 @@ fn hydrate_context_with<BS: Blockstore>(
 mod tests;
 
 #[cfg(test)]
+pub(crate) fn assert_linked_snapshot_recovery(
+    support: &crate::artifact_inventory::CompilerSourceSupport,
+    targets: &[Arc<crate::linked_native::LinkedNativeTarget>],
+) {
+    native_components::tests::assert_linked_snapshot_recovery(support, targets);
+}
+
+#[cfg(test)]
 mod projection_tests {
     use super::*;
     use std::collections::BTreeMap;

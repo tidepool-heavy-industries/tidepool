@@ -13312,6 +13312,9 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             self = self.admit_producer(descriptor.producer_sha256)?;
         }
+        for product in support.acquired_native_closures().package_products() {
+            self = self.admit_producer(product.code().owner().compiler_sha256)?;
+        }
         let support = self.owner.facts.compiler_support.merge(support)?;
         self = self.rebuild(|facts| facts.compiler_support = support);
         self.finish()

@@ -1480,6 +1480,10 @@ mod tests {
             .unwrap()
             .with_linked_native_target(&second)
             .unwrap();
+        crate::exact_context::assert_linked_snapshot_recovery(
+            &later,
+            &[Arc::clone(&first), Arc::clone(&second)],
+        );
         assert_eq!(
             later.recorded_input_decisions(),
             empty.recorded_input_decisions(),

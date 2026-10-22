@@ -665,6 +665,12 @@ impl AcquiredNativeClosures {
         self.packages.get(id)
     }
 
+    pub(crate) fn package_products(
+        &self,
+    ) -> impl Iterator<Item = &Arc<crate::certified_products::CertifiedPackageCodeProduct>> {
+        self.packages.values()
+    }
+
     pub(crate) fn component_records(&self) -> &crate::exact_context::NativeComponentRecords {
         &self.components
     }

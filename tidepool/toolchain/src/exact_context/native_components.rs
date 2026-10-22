@@ -170,11 +170,344 @@ impl SnapshotValueCodec<ImmutableNativeComponentRecordRef> for NativeComponentRe
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use tidepool_repr::native_code::{
         NativeCodeBodyKey, NativeCodeNodeFacts, NativeCodeNominalKey, NativeHomeOwnerKey,
     };
+
+    pub(crate) fn assert_linked_snapshot_recovery(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        targets: &[Arc<crate::linked_native::LinkedNativeTarget>],
+    ) {
+        use crate::artifact_inventory::{ArtifactPayload, CompilerSourceSupport};
+        use crate::declaration_context::{ExactDeclarationContext, RecoveredArtifactAcquisition};
+        use crate::linked_native::NativeCodeGrant;
+        assert_eq!(targets.len(), 2);
+        let first_support = CompilerSourceSupport::empty()
+            .with_linked_native_target(&targets[0])
+            .unwrap();
+        assert!(
+            first_support.artifacts().artifact_ids().is_empty(),
+            "the first target must exercise package-only producer transfer"
+        );
+        assert!(first_support
+            .acquired_native_closures()
+            .package_products()
+            .next()
+            .is_some());
+        let first = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&first_support)
+            .unwrap();
+        assert_ne!(first.toolchain_identity_sha256(), [0; 32]);
+        let second = first
+            .clone()
+            .extend_issued_compiler_support(support)
+            .unwrap();
+        let first_snapshot = first.snapshot();
+        let second_snapshot = second.snapshot();
+        assert!(!first_snapshot.native_components.is_empty());
+        assert!(second_snapshot.native_components.len() >= first_snapshot.native_components.len());
+        let common = *first_snapshot
+            .native_components
+            .keys()
+            .find(|id| second_snapshot.native_components.contains_key(*id))
+            .unwrap();
+
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let first_record = writer.materialize_context(None, &first_snapshot).unwrap();
+        install(&store, writer.finish().unwrap());
+        let mut writer = Materializer::new(&store);
+        let second_record = writer
+            .materialize_context(Some(&first_record), &second_snapshot)
+            .unwrap();
+        install(&store, writer.finish().unwrap());
+        assert_ne!(first_record.root(), second_record.root());
+        let roots = [first_record.root().clone(), second_record.root().clone()];
+        let decoded = hydrate_contexts(&store, &roots).unwrap();
+        let receipts = roots
+            .into_iter()
+            .zip(decoded.into_iter().map(Arc::new))
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(
+            &receipts[0].1.snapshot().native_components[&common].0,
+            &receipts[1].1.snapshot().native_components[&common].0
+        ));
+
+        let source_ids = second_snapshot
+            .selection()
+            .artifact_ids_introduced(None)
+            .unwrap();
+        let package_ids = second_snapshot.native_package_artifacts_introduced(None);
+        assert!(!package_ids.is_empty());
+        let mut payload_ids = source_ids.clone();
+        payload_ids.extend(package_ids.iter().copied());
+        let directory = tempfile::tempdir().unwrap();
+        let references = second
+            .materialize_recovery_artifacts(directory.path(), &payload_ids)
+            .unwrap();
+        let entries = second
+            .artifact_view()
+            .entries_for_artifacts(&source_ids)
+            .unwrap();
+        let mut descriptors = entries
+            .iter()
+            .map(|entry| entry.descriptor.clone())
+            .collect::<Vec<_>>();
+        let packages = support.selected_package_products(&package_ids).unwrap();
+        assert_eq!(
+            packages
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            package_ids
+        );
+        descriptors.extend(
+            packages
+                .values()
+                .map(|product| product.descriptor().clone()),
+        );
+        let graph = second_snapshot.graph_selection().unwrap();
+        let edges = second_snapshot.binding_dependencies().unwrap();
+        let mut acquisition = RecoveredArtifactAcquisition::new(directory.path());
+        let inventory = acquisition
+            .capture_payloads_bound(&references, &descriptors, &graph.bindings, &edges)
+            .unwrap();
+        let restored = inventory
+            .contexts_for_expected_snapshots(&receipts)
+            .unwrap();
+        assert_eq!(restored.len(), 2);
+        let mut shared_components = 0;
+        for (context, (_, receipt)) in restored.iter().zip(&receipts) {
+            let held = context.compiler_source_support();
+            assert!(held
+                .native_component_records()
+                .ptr_eq(&receipt.snapshot().native_components));
+            assert!(held
+                .native_closure_records()
+                .ptr_eq(&receipt.snapshot().native_closures));
+            for closure in held.acquired_native_closures().iter() {
+                for acquired in closure.acquired() {
+                    if let NativeCodeGrant::Home { current, .. } = acquired.grant() {
+                        assert!(
+                            current.is_none(),
+                            "durable code cannot restore a fresh Current capture"
+                        );
+                    }
+                }
+            }
+            let mut writer = Materializer::new(&store);
+            let same = writer
+                .materialize_context(Some(receipt), &context.snapshot())
+                .unwrap();
+            assert_eq!(same.root(), receipt.root());
+            assert_eq!(
+                writer.finish().unwrap().metrics(),
+                MaterializationMetrics::default()
+            );
+        }
+        let first_components = restored[0]
+            .compiler_source_support()
+            .acquired_native_closures()
+            .iter()
+            .flat_map(|owner| owner.acquired())
+            .map(|code| {
+                (
+                    *code.code().component().identity(),
+                    Arc::clone(code.code().component()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for later_owner in restored[1]
+            .compiler_source_support()
+            .acquired_native_closures()
+            .iter()
+        {
+            for later_code in later_owner.acquired() {
+                if let Some(first) = first_components.get(later_code.code().component().identity())
+                {
+                    shared_components += 1;
+                    assert!(Arc::ptr_eq(first, later_code.code().component()));
+                }
+            }
+        }
+        assert!(
+            shared_components > 0,
+            "independent acquired contexts must share actual restored components"
+        );
+
+        // The first context fills the operation's pure component cache. A later
+        // context must still supply its own exact component record.
+        let mut missing = second_snapshot.clone();
+        missing.native_components.remove(&common);
+        let mut writer = Materializer::new(&store);
+        let missing = writer.materialize_context(None, &missing).unwrap();
+        install(&store, writer.finish().unwrap());
+        let missing = Arc::new(hydrate_context(&store, missing.root()).unwrap());
+        let refusal = inventory
+            .contexts_for_expected_snapshots(&[
+                receipts[0].clone(),
+                (missing.root().clone(), Arc::clone(&missing)),
+            ])
+            .unwrap_err();
+        assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
+            if detail.contains("recorded code component is absent")));
+
+        let mut corrupt = second_snapshot.clone();
+        let mut facts = corrupt.native_components[&common].facts().as_ref().clone();
+        facts.nodes[0].body.definitions_sha256[0] ^= 1;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&facts, &mut bytes).unwrap();
+        corrupt.native_components.insert(
+            common,
+            ImmutableNativeComponentRecordRef(Arc::new(NativeComponentRecord {
+                facts: Arc::new(facts),
+                bytes: bytes.into(),
+                cid: OnceLock::new(),
+            })),
+        );
+        let mut writer = Materializer::new(&store);
+        let corrupt = writer.materialize_context(None, &corrupt).unwrap();
+        install(&store, writer.finish().unwrap());
+        let corrupt = Arc::new(hydrate_context(&store, corrupt.root()).unwrap());
+        let refusal = inventory
+            .contexts_for_expected_snapshots(&[
+                receipts[0].clone(),
+                (corrupt.root().clone(), Arc::clone(&corrupt)),
+            ])
+            .unwrap_err();
+        assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
+            if detail.contains("cached native component differs from current acquired facts")));
+
+        let crossing = second_snapshot
+            .native_closures
+            .iter()
+            .find_map(|(identity, record)| {
+                record.facts().package_receipts.iter().enumerate().find_map(
+                    |(receipt_index, receipt)| {
+                        receipt
+                            .occurrences
+                            .iter()
+                            .enumerate()
+                            .find_map(|(row_index, row)| {
+                                let original = *row.children.first()?;
+                                receipt
+                                    .occurrences
+                                    .iter()
+                                    .find(|other| other.occurrence != original)
+                                    .map(|other| {
+                                        (*identity, receipt_index, row_index, other.occurrence)
+                                    })
+                            })
+                    },
+                )
+            })
+            .expect("actual package closure must have two distinct admitted occurrence choices");
+        let (identity, receipt_index, row_index, replacement) = crossing;
+        let mut crossed = second_snapshot.clone();
+        let mut facts = crossed.native_closures[&identity].facts().as_ref().clone();
+        let receipt = Arc::make_mut(&mut facts.package_receipts[receipt_index]);
+        let selected = &mut receipt.occurrences[row_index].children[0];
+        assert_ne!(*selected, replacement);
+        *selected = replacement;
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&facts, &mut bytes).unwrap();
+        crossed.native_closures.insert(
+            identity,
+            ImmutableNativeAcquiredClosureRecordRef(Arc::new(NativeAcquiredClosureRecord {
+                facts: Arc::new(facts),
+                bytes: bytes.into(),
+                cid: OnceLock::new(),
+            })),
+        );
+        let mut writer = Materializer::new(&store);
+        let crossed = writer.materialize_context(None, &crossed).unwrap();
+        install(&store, writer.finish().unwrap());
+        let crossed = hydrate_context(&store, crossed.root()).unwrap();
+        let refusal = inventory
+            .context_for_expected_snapshot(crossed.root(), &crossed)
+            .unwrap_err();
+        assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
+            if detail.contains("package selected edge changed its exact occurrence")));
+
+        // Bytes remain on disk and in the acquisition's retained cache. Omitting
+        // the explicit requested reference cannot borrow either as permission.
+        let omitted = *package_ids.iter().next().unwrap();
+        let missing_references = references
+            .iter()
+            .filter(|reference| match reference {
+                crate::declaration_context::RecoveryPayloadReference::PackageCode(reference) => {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_package_code(
+                        reference,
+                    )
+                    .id != omitted
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let missing_descriptors = descriptors
+            .iter()
+            .filter(|descriptor| descriptor.id != omitted)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut stage = acquisition.stage_payloads(&missing_references).unwrap();
+        let missing_inventory = stage
+            .capture_payloads_bound(
+                &missing_references,
+                &missing_descriptors,
+                &graph.bindings,
+                &edges,
+            )
+            .unwrap();
+        let refusal = missing_inventory
+            .context_for_expected_snapshot(&receipts[1].0, &receipts[1].1)
+            .unwrap_err();
+        assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
+            if detail.contains("recorded package occurrence lacks acquired product custody")));
+
+        let omitted_interface = entries
+            .iter()
+            .find(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
+            .expect("actual HOME dependency retains its canonical companion")
+            .descriptor
+            .id;
+        let incomplete = references
+            .iter()
+            .filter(|reference| match reference {
+                crate::declaration_context::RecoveryPayloadReference::Canonical(reference) => {
+                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                        reference,
+                    )
+                    .id != omitted_interface
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let incomplete_descriptors = descriptors
+            .iter()
+            .filter(|descriptor| descriptor.id != omitted_interface)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut stage = acquisition.stage_payloads(&incomplete).unwrap();
+        let refusal = stage
+            .capture_payloads_bound(
+                &incomplete,
+                &incomplete_descriptors,
+                &graph.bindings,
+                &edges,
+            )
+            .err()
+            .expect("missing required interface must refuse");
+        assert!(
+            matches!(refusal, crate::declaration_context::RecoveryInventoryError::Certification(crate::CompileError::ExtractFailed(detail))
+            if detail.contains("bound recovery has duplicate or missing exact endpoints")),
+            "the native payload cannot replace its required canonical interface"
+        );
+    }
 
     // Serializer DATA only; no body, acquired grant or usable CodeRef is issued.
     fn data_record(index: u64) -> ImmutableNativeComponentRecordRef {
