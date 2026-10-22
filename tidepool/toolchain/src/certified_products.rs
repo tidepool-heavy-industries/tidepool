@@ -47,6 +47,7 @@ pub use finalized_module::{
 
 use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
+use crate::prepared_artifact::BoundPackageProgram;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 
 /// Durable compiler records have an independent bound from scope descriptors
@@ -375,11 +376,11 @@ pub(crate) struct BoundPackageSelection {
 enum BoundPackageSelectionState {
     Ordinary {
         target: String,
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
         links: Arc<PackageLinks>,
     },
     Item {
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
         links: Arc<PackageLinks>,
         selection: PackageSelection,
     },
@@ -392,7 +393,7 @@ impl BoundPackageSelection {
     pub(crate) fn ordinary(
         links: &PackageLinks,
         target: &str,
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
     ) -> CertResult<Self> {
         if links.target_roots(target).is_none() {
             return Err(CertificationError::Receipt(
@@ -402,7 +403,7 @@ impl BoundPackageSelection {
         Ok(Self {
             mode: BoundPackageSelectionState::Ordinary {
                 target: target.to_owned(),
-                program_sha256,
+                program,
                 links: Arc::new(links.clone()),
             },
         })
@@ -411,9 +412,10 @@ impl BoundPackageSelection {
     pub(crate) fn item(
         links: &PackageLinks,
         selection: &PackageSelection,
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
     ) -> CertResult<Self> {
-        if selection.stage_id() != links.stage_id() || selection.program_sha256() != &program_sha256
+        if selection.stage_id() != links.stage_id()
+            || selection.program_sha256() != program.sha256()
         {
             return Err(CertificationError::Receipt(
                 "item package selection references another stage or program",
@@ -448,7 +450,7 @@ impl BoundPackageSelection {
         }
         Ok(Self {
             mode: BoundPackageSelectionState::Item {
-                program_sha256,
+                program,
                 links: Arc::new(links.clone()),
                 selection: selection.clone(),
             },
@@ -523,11 +525,11 @@ impl BoundPackageSelection {
             .collect()
     }
 
-    pub(crate) fn program_sha256(&self) -> [u8; 32] {
+    pub(crate) fn prepared_program(&self) -> Option<&Arc<PreparedProgram>> {
         match &self.mode {
-            BoundPackageSelectionState::Ordinary { program_sha256, .. }
-            | BoundPackageSelectionState::Item { program_sha256, .. } => *program_sha256,
-            BoundPackageSelectionState::HomeOrFixture { .. } => [0; 32],
+            BoundPackageSelectionState::Ordinary { program, .. }
+            | BoundPackageSelectionState::Item { program, .. } => Some(program.prepared()),
+            BoundPackageSelectionState::HomeOrFixture { .. } => None,
         }
     }
 
@@ -561,14 +563,14 @@ impl CertifiedReceipt {
     pub(crate) fn ordinary_package_selection(
         &self,
         target: &str,
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
     ) -> CertResult<BoundPackageSelection> {
         if !self.targets.contains_key(target) {
             return Err(CertificationError::Receipt(
                 "ordinary package selection lacks its exact target",
             ));
         }
-        BoundPackageSelection::ordinary(&self.package_links, target, program_sha256)
+        BoundPackageSelection::ordinary(&self.package_links, target, program)
     }
 }
 
@@ -576,9 +578,9 @@ impl SegmentItemReceipt {
     pub(crate) fn package_selection(
         &self,
         stage: &CertifiedReceipt,
-        program_sha256: [u8; 32],
+        program: BoundPackageProgram,
     ) -> CertResult<BoundPackageSelection> {
-        BoundPackageSelection::item(&stage.package_links, &self.selection, program_sha256)
+        BoundPackageSelection::item(&stage.package_links, &self.selection, program)
     }
 }
 
@@ -1420,8 +1422,7 @@ impl CertifiedSegmentOriginals {
         &self,
         cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
-        prepared: &PreparedProgram,
-        program_sha256: &[u8; 32],
+        program: &BoundPackageProgram,
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
@@ -1440,39 +1441,29 @@ impl CertifiedSegmentOriginals {
                 "item package selection references another stage manifest",
             ));
         }
-        if item.selection.program_sha256() != program_sha256 {
+        if item.selection.program_sha256() != program.sha256() {
             return Err(CertificationError::Mismatch(
                 "item package selection references another prepared program",
             ));
         }
+        let prepared = program.prepared().as_ref();
         check_package_link_range(
             &item.selection.target_roots,
             self.receipt.package_links.occurrences.len(),
         )?;
+        let home_package_groups = index_home_package_groups(&self.receipt.modules)?;
         for (key, roots) in &item.selection.home_roots {
             if key.target != item.selection.target {
                 return Err(CertificationError::Mismatch(
                     "item HOME roots belong to another target",
                 ));
             }
-            let group = self
-                .receipt
-                .modules
-                .iter()
-                .filter(|module| module.origin == ProductOrigin::Fresh)
-                .flat_map(|module| {
-                    module.groups.iter().filter_map(move |group| {
-                        (module.unit == key.unit
-                            && module.module == key.module
-                            && group.original_ordinal == key.original_ordinal)
-                            .then_some(group)
-                    })
-                })
-                .next()
+            let expected = home_package_groups
+                .get(&(key.unit.clone(), key.module.clone(), key.original_ordinal))
                 .ok_or(CertificationError::Mismatch(
-                    "item HOME root is not an issuing fresh group",
+                    "item HOME root is not an issued receipt group",
                 ))?;
-            if roots.len() != package_slot_count(&group.globals) {
+            if roots.len() != *expected {
                 return Err(CertificationError::Mismatch(
                     "item HOME package link count differs from its globals",
                 ));
@@ -3016,21 +3007,7 @@ fn decode_receipt_value_in(
     if coordinates.used.len() != coordinates.rows.len() {
         return Err(CertificationError::Receipt("unreferenced owner coordinate"));
     }
-    let home_package_groups = modules
-        .iter()
-        .flat_map(|module| {
-            module.groups.iter().map(move |group| {
-                (
-                    (
-                        module.unit.clone(),
-                        module.module.clone(),
-                        group.original_ordinal,
-                    ),
-                    package_slot_count(&group.globals),
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
+    let home_package_groups = index_home_package_groups(&modules)?;
     let package_links = decode_package_links(
         package_links_value,
         &package_products,
@@ -3283,6 +3260,30 @@ fn package_slot_count(globals: &[AcceptedGlobal]) -> usize {
         .iter()
         .filter(|global| matches!(global.owner, ReceiptImportOwner::Package { .. }))
         .count()
+}
+
+fn index_home_package_groups(
+    modules: &[CertifiedModuleReceipt],
+) -> CertResult<BTreeMap<(String, String, u32), usize>> {
+    let mut groups = BTreeMap::new();
+    for module in modules {
+        for group in &module.groups {
+            let key = (
+                module.unit.clone(),
+                module.module.clone(),
+                group.original_ordinal,
+            );
+            if groups
+                .insert(key, package_slot_count(&group.globals))
+                .is_some()
+            {
+                return Err(CertificationError::Receipt(
+                    "package HOME group repeats an issued owner ordinal",
+                ));
+            }
+        }
+    }
+    Ok(groups)
 }
 
 /// Decode the receipt-scoped occurrence/linkage manifest and refuse malformed
@@ -35472,6 +35473,9 @@ None,
             )])),
             products: Arc::from([]),
         };
+        let program = Arc::new(testing::prepare(testing::wire_program()).unwrap());
+        let program_binding =
+            BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
         let selection = PackageSelection {
             stage_id: [0; 32],
             program_sha256: [1; 32],
@@ -35479,21 +35483,83 @@ None,
             target_roots: vec![PackageLink::Local { occurrence: 0 }],
             home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
         };
-        assert!(BoundPackageSelection::item(&stage, &selection, [1; 32]).is_ok());
-        assert!(BoundPackageSelection::item(&stage, &selection, [2; 32]).is_err());
+        assert!(
+            BoundPackageSelection::item(&stage, &selection, program_binding.clone()).is_ok()
+        );
+        let mut wrong_program = selection.clone();
+        wrong_program.program_sha256 = [2; 32];
+        assert!(
+            BoundPackageSelection::item(&stage, &wrong_program, program_binding.clone()).is_err()
+        );
         let mut crossed_stage = selection.clone();
         crossed_stage.stage_id = [3; 32];
-        assert!(BoundPackageSelection::item(&stage, &crossed_stage, [1; 32]).is_err());
+        assert!(
+            BoundPackageSelection::item(&stage, &crossed_stage, program_binding.clone()).is_err()
+        );
         let mut crossed_target = selection.clone();
         crossed_target.target = "other".into();
-        assert!(BoundPackageSelection::item(&stage, &crossed_target, [1; 32]).is_err());
+        assert!(
+            BoundPackageSelection::item(&stage, &crossed_target, program_binding).is_err()
+        );
         let mut crossed_roots = selection.clone();
         crossed_roots.target_roots = vec![PackageLink::Local { occurrence: 1 }];
-        assert!(BoundPackageSelection::item(&stage, &crossed_roots, [1; 32]).is_err());
+        let crossed_program =
+            BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
+        assert!(BoundPackageSelection::item(&stage, &crossed_roots, crossed_program).is_err());
         let mut crossed_home = selection;
         crossed_home.home_roots.values_mut().next().unwrap()[0] =
             PackageLink::Local { occurrence: 0 };
-        assert!(BoundPackageSelection::item(&stage, &crossed_home, [1; 32]).is_err());
+        assert!(BoundPackageSelection::item(
+            &stage,
+            &crossed_home,
+            BoundPackageProgram::fixture(program, [1; 32])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cached_home_item_admission_uses_the_shared_issued_group_policy() {
+        let package = testing::identity("PackageOwner", "packageValue");
+        let global = AcceptedGlobal {
+            identity: package.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            owner: ReceiptImportOwner::Package {
+                unit: package.unit.clone(),
+                module: package.module.clone(),
+                binder: package,
+                interface_digest: [7; 32],
+            },
+        };
+        let cached = CertifiedModuleReceipt {
+            origin: ProductOrigin::Cached,
+            unit: "main".into(),
+            module: "CachedHome".into(),
+            module_version: Some(ModuleVersion([8; 32])),
+            skinny_iface_sha256: [9; 32],
+            product_sha256: [10; 32],
+            source_sha256: [11; 32],
+            dependency_witness_sha256: [12; 32],
+            groups: vec![AcceptedGroup {
+                original_ordinal: 3,
+                globals: vec![global],
+            }],
+            interface_requirements: BTreeMap::new(),
+        };
+        assert_eq!(
+            index_home_package_groups(std::slice::from_ref(&cached)).unwrap(),
+            BTreeMap::from([(("main".into(), "CachedHome".into(), 3), 1)])
+        );
+
+        let mut duplicate = cached.clone();
+        duplicate.origin = ProductOrigin::Fresh;
+        assert!(matches!(
+            index_home_package_groups(&[cached, duplicate]),
+            Err(CertificationError::Receipt(
+                "package HOME group repeats an issued owner ordinal"
+            ))
+        ));
     }
 
     #[test]

@@ -51,6 +51,28 @@ pub struct PreparedArtifact {
     prepared: Arc<PreparedProgram>,
 }
 
+/// Wire identity paired with the exact prepared owner admitted from those bytes.
+#[derive(Clone, Debug)]
+pub(crate) struct BoundPackageProgram {
+    sha256: [u8; 32],
+    prepared: Arc<PreparedProgram>,
+}
+
+impl BoundPackageProgram {
+    pub(crate) fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    pub(crate) fn prepared(&self) -> &Arc<PreparedProgram> {
+        &self.prepared
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(prepared: Arc<PreparedProgram>, sha256: [u8; 32]) -> Self {
+        Self { sha256, prepared }
+    }
+}
+
 impl PreparedArtifact {
     pub fn parse(bytes: Vec<u8>, limits: DecodeLimits) -> Result<Self, ParseError> {
         let requirements = production_requirements()?;
@@ -81,6 +103,33 @@ impl PreparedArtifact {
 
     pub(crate) fn prepared_shared(&self) -> &Arc<PreparedProgram> {
         &self.prepared
+    }
+
+    pub(crate) fn bind_package_program(&self) -> BoundPackageProgram {
+        use sha2::{Digest, Sha256};
+        BoundPackageProgram {
+            sha256: Sha256::digest(&*self.bytes).into(),
+            prepared: Arc::clone(&self.prepared),
+        }
+    }
+
+    pub(crate) fn bind_package_program_from_bytes(
+        bytes: Arc<Vec<u8>>,
+        prepared: Arc<PreparedProgram>,
+        requirements: &ProgramRequirements,
+        limits: DecodeLimits,
+    ) -> Result<BoundPackageProgram, ParseError> {
+        let checked = parse_program(&bytes, requirements, limits)?;
+        if checked != *prepared {
+            return Err(ParseError::Malformed(
+                "package program bytes and prepared owner differ".into(),
+            ));
+        }
+        use sha2::{Digest, Sha256};
+        Ok(BoundPackageProgram {
+            sha256: Sha256::digest(&*bytes).into(),
+            prepared,
+        })
     }
 
     pub fn prepared(&self) -> &PreparedProgram {

@@ -225,6 +225,43 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         "GHC.Internal.Data.OldList"
     );
     assert_eq!(home_packages[1].imports().len(), 2);
+    let transitive_home_rows = selection
+        .completion()
+        .rows()
+        .filter(|row| {
+            row.imports()
+                .iter()
+                .filter_map(|import| match import {
+                    crate::artifact_inventory::CompletedNativeImport::Package {
+                        binding,
+                        ..
+                    } => Some(binding.product().code().owner().module.as_str()),
+                    _ => None,
+                })
+                .eq(["Tidepool.Internal.Resume", "Tidepool.Internal.Resume"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitive_home_rows.len(),
+        1,
+        "the transitively reached HOME row retains its package obligations"
+    );
+    let transitive_packages = transitive_home_rows[0]
+        .imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
+                Some(binding.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(transitive_packages.len(), 2);
+    assert_ne!(
+        transitive_packages[0].binding(),
+        transitive_packages[1].binding(),
+        "the transitive HOME row keeps both exact package bindings"
+    );
     let execution = first.items()[0]
         .native()
         .expect("package input item is executable")
@@ -546,15 +583,12 @@ fn assert_physical_selection(
         })
         .expect("actual prepared bytes");
     let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
-    let program_sha256: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(prepared_bytes.as_ref()).into()
-    };
-    let target = tidepool_repr::execution_schema::parse_program(
-        prepared_bytes,
+    let program_artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+        Arc::new(prepared_bytes.as_ref().to_vec()),
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
+    let program = program_artifact.bind_package_program();
     let mut cursor = segment
         .originals
         .bound_artifacts()
@@ -573,8 +607,7 @@ fn assert_physical_selection(
         let result = segment.originals.select_item(
             &mut cursor,
             receipt,
-            &target,
-            &program_sha256,
+            &program,
             selected,
             &mut validation,
         );
@@ -599,8 +632,7 @@ fn assert_physical_selection(
         segment.originals.select_item(
             &mut cursor,
             receipt,
-            &target,
-            &program_sha256,
+            &program,
             Some(&later_selector),
             &mut validation,
         ),
@@ -620,8 +652,7 @@ fn assert_physical_selection(
         .select_item(
             &mut cursor,
             receipt,
-            &target,
-            &program_sha256,
+            &program,
             Some(&first),
             &mut validation,
         )
@@ -638,8 +669,7 @@ fn assert_physical_selection(
         segment.originals.select_item(
             &mut cursor,
             receipt,
-            &target,
-            &program_sha256,
+            &program,
             Some(&first),
             &mut validation,
         ),
@@ -684,15 +714,12 @@ fn assert_physical_selection(
         })
         .expect("actual second prepared bytes");
     let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
-    let second_program_sha256: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(prepared_bytes.as_ref()).into()
-    };
-    let target = tidepool_repr::execution_schema::parse_program(
-        prepared_bytes,
+    let program_artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+        Arc::new(prepared_bytes.as_ref().to_vec()),
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
+    let program = program_artifact.bind_package_program();
     let receipt = certified_products::decode_segment_item_with_operation(
         crate::checked_cell::world_output_bytes(
             checked,
@@ -706,8 +733,7 @@ fn assert_physical_selection(
         .select_item(
             &mut cursor,
             receipt,
-            &target,
-            &second_program_sha256,
+            &program,
             Some(&later_selector),
             &mut validation,
         )
