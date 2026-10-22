@@ -6149,7 +6149,7 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
 }
 
 #[test]
-fn started_world_item_refuses_freeze_before_completion() {
+fn started_world_item_freezes_incomplete_and_refuses_publication() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let recipe = InputRecipe::capture(

@@ -11,6 +11,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::execution_schema::ImportOwner;
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::Generation;
+use tidepool_toolchain::compiler_world::PrivateCheckedItemProgress;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
@@ -187,16 +188,9 @@ pub struct PrivateExecutionAdmission {
     pub(super) host_retirements: parking_lot::Mutex<Vec<super::resident::PrivateHostRetirement>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PrivateCheckedProgress {
-    NotStarted,
-    Started,
-    Completed,
-}
-
 struct PrivateExecutionState {
     frozen: bool,
-    checked: PrivateCheckedProgress,
+    checked: PrivateCheckedItemProgress,
 }
 
 struct PrivateExecutionCompilerBasis {
@@ -450,6 +444,10 @@ impl PersistentSession {
     }
 }
 impl CertifiedPrivateValueWrite {
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(super) fn visible_host(&self) -> Option<&PrivateVisibleHostPublication> {
         self.visible_host.as_ref()
     }
@@ -672,7 +670,6 @@ impl PendingHostValueWrite {
     ) -> Result<Self, SessionError> {
         if !self.matches_private_mount(session, &execution)
             || !Arc::ptr_eq(&before.world, &after.world)
-            || !Arc::ptr_eq(&before.world, execution.compiler_world()?)
             || !Arc::ptr_eq(&before.base.source, &after.base.source)
             || !before
                 .base
@@ -768,6 +765,20 @@ impl PendingHostValueWrite {
                 .is_some_and(|mount| std::ptr::eq(mount.execution.as_ref(), execution))
     }
 
+    pub(super) fn matches_private_visible_mount(
+        &self,
+        session: &PersistentSession,
+        execution: &PrivateExecutionAdmission,
+        id: tidepool_repr::SessionVarId,
+    ) -> bool {
+        self.id == id
+            && self.matches_private_mount(session, execution)
+            && self
+                .private_visible_mount
+                .as_ref()
+                .is_some_and(|mount| std::ptr::eq(mount.execution.as_ref(), execution))
+    }
+
     pub(super) fn private_hidden_mount_key(
         &self,
         session: &PersistentSession,
@@ -779,7 +790,6 @@ impl PendingHostValueWrite {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         if !Arc::ptr_eq(&mount.execution, execution)
             || !self.matches_private_mount(session, execution)
-            || !Arc::ptr_eq(&mount.before.world, execution.compiler_world()?)
             || !session.inspection_world_base_is_current(
                 &mount.after.base,
                 &mount.after.base.source,
@@ -879,7 +889,7 @@ impl PendingHostValueWrite {
 }
 
 impl PrivateExecutionAdmission {
-    pub(super) fn checked_progress(&self) -> PrivateCheckedProgress {
+    pub(super) fn checked_progress(&self) -> PrivateCheckedItemProgress {
         self.state.lock().checked
     }
 
@@ -907,17 +917,17 @@ impl PrivateExecutionAdmission {
         }
     }
 
-    fn note_checked_started(&self) -> Result<(), SessionError> {
+    pub(super) fn record_checked_item_started(&self) -> Result<(), SessionError> {
         let mut state = self.state.lock();
         if state.frozen {
             return Err(SessionError::StaleStagedDeclaration);
         }
         match state.checked {
-            PrivateCheckedProgress::NotStarted | PrivateCheckedProgress::Started => {
-                state.checked = PrivateCheckedProgress::Started;
+            PrivateCheckedItemProgress::NotStarted | PrivateCheckedItemProgress::Started => {
+                state.checked = PrivateCheckedItemProgress::Started;
                 Ok(())
             }
-            PrivateCheckedProgress::Completed => Err(SessionError::StaleStagedDeclaration),
+            PrivateCheckedItemProgress::Completed => Err(SessionError::StaleStagedDeclaration),
         }
     }
 
@@ -940,21 +950,24 @@ impl PrivateExecutionAdmission {
         Ok(())
     }
 
-    fn note_checked_completed(&self) -> Result<(), SessionError> {
+    pub(super) fn record_checked_item_completed(
+        &self,
+        final_item: bool,
+    ) -> Result<(), SessionError> {
         let mut state = self.state.lock();
         if state.frozen {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        match state.checked {
-            PrivateCheckedProgress::Started => {
-                state.checked = PrivateCheckedProgress::Completed;
-                Ok(())
-            }
-            PrivateCheckedProgress::Completed => Ok(()),
-            PrivateCheckedProgress::NotStarted => Err(SessionError::StaleStagedDeclaration),
+        if state.checked != PrivateCheckedItemProgress::Started {
+            return Err(SessionError::StaleStagedDeclaration);
         }
+        state.checked = if final_item {
+            PrivateCheckedItemProgress::Completed
+        } else {
+            PrivateCheckedItemProgress::Started
+        };
+        Ok(())
     }
-
     /// Share the exact admitted scope without minting a different selection.
     pub fn retained_lexical_scope(&self) -> Arc<RuntimeLexicalScopeLease> {
         self.scope_lease.clone()
@@ -1022,63 +1035,6 @@ impl PrivateExecutionAdmission {
             admitted: basis.admitted.clone(),
             admitted_context: basis.admitted_context.clone(),
         }
-    }
-
-    /// Host-interface proofs accepted by this private execution. Publication
-    /// still intersects these with the private visibility snapshot and the
-    /// prepared runtime promotion; accepting a guarded write alone does not
-    /// make a name public.
-    pub(super) fn confirmed_host_bindings(
-        &self,
-    ) -> Result<Vec<tidepool_toolchain::compiler_world::CompilerWorldHostBinding>, SessionError>
-    {
-        let completed = self.completed_values.lock();
-        let world = self.compiler_basis.published.world.as_ref();
-        let mut bindings = Vec::new();
-        for (id, write) in completed.iter() {
-            let Some(visible) = write.visible_host.as_ref() else {
-                continue;
-            };
-            if visible.before.base.scope != self.private_scope
-                || visible.after.base.scope != self.private_scope
-                || !Arc::ptr_eq(&visible.before.world, &visible.after.world)
-                || !Arc::ptr_eq(&visible.before.base.source, &visible.after.base.source)
-                || !visible
-                    .before
-                    .base
-                    .original_source
-                    .same_observation(&visible.after.base.original_source)
-                || !visible
-                    .before
-                    .base
-                    .target
-                    .same_observation(&visible.after.base.target)
-            {
-                return Err(SessionError::WorldCellPublicationBaseStale);
-            }
-            bindings.push(
-                match &write.proof {
-                    CertifiedPrivateValueProof::HostInterface(interface) =>
-                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_host_interface(
-                        world,
-                        &write.identity,
-                        *id,
-                        self.private_scope.0,
-                        interface,
-                    ),
-                    CertifiedPrivateValueProof::Execution(execution) =>
-                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_checked_host_execution(
-                        world,
-                        &write.identity,
-                        *id,
-                        self.private_scope.0,
-                        execution,
-                    ),
-                }
-                .map_err(SessionError::from)?,
-            );
-        }
-        Ok(bindings)
     }
 
     pub fn binding_tip(&self) -> BindingTipId {
@@ -2251,6 +2207,9 @@ impl RuntimeCheckedPrefix {
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+        if let Some(private) = self.admission.private_execution() {
+            private.ensure_open()?;
+        }
         self.settled.checkpoint()?;
         session.validate_lexical_scope_lease(scope, &self.admission._retained_scope)?;
         if self.admission.world_reservation().is_some() {
@@ -2285,6 +2244,9 @@ impl RuntimeCheckedPrefix {
         execution.validate_runtime_admission(reservation.digest, self.admission.digest())?;
         execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        if let Some(private) = self.admission.private_execution() {
+            private.record_checked_item_started()?;
+        }
         // Appending checks the compiler-owned same-cell identity and order.
         validate_private_value_overlay(
             self,
@@ -2306,9 +2268,6 @@ impl RuntimeCheckedPrefix {
         self.admission.with_open_sources(|| {
             if !state.snapshot.is_current(session, scope) {
                 return Err(SessionError::StaleStagedDeclaration);
-            }
-            if let Some(private) = self.admission.private_execution() {
-                private.note_checked_started()?;
             }
             state.in_flight = Some(execution);
             Ok(())
@@ -2494,6 +2453,9 @@ impl CheckedTurnCompletion {
     }
 
     pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
+        if let Some(private) = self.prefix.admission.private_execution() {
+            private.ensure_open()?;
+        }
         session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
         if self.prefix.admission.world_reservation().is_some() {
             self.prefix
@@ -2601,10 +2563,8 @@ impl CheckedTurnCompletion {
             .map(|binding| binding.id.raw())
             .collect::<Vec<_>>();
         let cell_complete = compiler_prefix.next_item() == self.prefix.program.items().len();
-        if cell_complete {
-            if let Some(private) = self.prefix.admission.private_execution() {
-                private.note_checked_completed()?;
-            }
+        if let Some(private) = self.prefix.admission.private_execution() {
+            private.record_checked_item_completed(cell_complete)?;
         }
         settle_checked_snapshot(
             session,
@@ -4118,6 +4078,9 @@ impl PersistentSession {
         if !admission.has_execution_purpose() {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        if let Some(private) = admission.private_execution() {
+            private.ensure_open()?;
+        }
         if admission.world_reservation().is_some() {
             return self.begin_world_cell_program(admission, program, settled);
         }
@@ -4164,7 +4127,7 @@ impl PersistentSession {
                 )
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
             if let Some(private) = admission.private_execution() {
-                private.note_checked_started()?;
+                private.record_checked_item_started()?;
             }
             return Ok(None);
         };
@@ -4220,7 +4183,7 @@ impl PersistentSession {
                     )
                     .map_err(|_| SessionError::StaleStagedDeclaration)?;
                 if let Some(private) = admission.private_execution() {
-                    private.note_checked_started()?;
+                    private.record_checked_item_started()?;
                 }
                 Ok::<(), SessionError>(())
             })??;
@@ -4623,7 +4586,7 @@ impl PersistentSession {
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             state: parking_lot::Mutex::new(PrivateExecutionState {
                 frozen: false,
-                checked: PrivateCheckedProgress::NotStarted,
+                checked: PrivateCheckedItemProgress::NotStarted,
             }),
             pending_visible_hosts: parking_lot::Mutex::new(std::collections::HashSet::new()),
             final_intent: OnceLock::new(),

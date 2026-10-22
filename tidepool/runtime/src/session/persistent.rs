@@ -4221,35 +4221,36 @@ impl PersistentSession {
                 .transpose()?;
             let successor = match &world.progress {
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged => {
-                    // The private execution borrowed the public World and
-                    // added no compiler facts. Keep the latest public product;
-                    // a newer public successor must not be rolled back to the
-                    // older borrowed base. A declaration publication without
-                    // a checked successor is a separate progress form with no
-                    // owner here; it is refused rather than silently dropped.
                     if declaration.is_some() {
                         return Err(SessionError::WorldCellPublicationIncomplete);
                     }
-                    public.world.promote_unchanged_private_bindings(
-                        &world.association.world,
-                        &world.private.world,
-                        ticket.public_scope.0,
-                        visible_changes
-                            .iter()
-                            .map(|(name, entry)| (name.as_str(), *entry)),
-                        world.host_bindings.iter().cloned(),
-                    )?
+                    public.world.clone()
                 }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked => {
-                    public.world.promote_checked_private_bindings(
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_) => {
+                    public.world.promote_private_bindings(
                         &world.association.world,
                         &world.private.world,
                         ticket.public_scope.0,
+                        &world.progress,
                         declaration,
                         visible_changes
                             .iter()
                             .map(|(name, entry)| (name.as_str(), *entry)),
-                        world.host_bindings.iter().cloned(),
+                    )?
+                }
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::HostChanged(_) => {
+                    if declaration.is_some() {
+                        return Err(SessionError::WorldCellPublicationIncomplete);
+                    }
+                    public.world.promote_private_bindings(
+                        &world.association.world,
+                        &world.private.world,
+                        ticket.public_scope.0,
+                        &world.progress,
+                        None,
+                        visible_changes
+                            .iter()
+                            .map(|(name, entry)| (name.as_str(), *entry)),
                     )?
                 }
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Incomplete => {

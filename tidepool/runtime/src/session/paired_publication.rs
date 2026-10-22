@@ -9,9 +9,7 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{PreparedWorldExecutionSelection, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
-use tidepool_toolchain::compiler_world::{
-    CompilerWorld, CompilerWorldHostBinding, PrivateCompilerProgress,
-};
+use tidepool_toolchain::compiler_world::{CompilerWorld, PrivateCompilerProgress};
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,
@@ -94,8 +92,6 @@ pub(super) struct WorldExecutionIntent {
     /// execution's actual admissions. Publication composes it over the latest
     /// public selection without treating the frozen public base as current.
     pub(super) selection: PreparedWorldExecutionSelection,
-    /// Exact accepted host-interface rows visible in the private snapshot.
-    pub(super) host_bindings: Vec<CompilerWorldHostBinding>,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -624,46 +620,94 @@ impl PersistentSession {
         {
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
-        let classified =
-            CompilerWorld::classify_private_publication(&private.world, &facts.published.world);
-        let progress = match admission.checked_progress() {
-            super::admission::PrivateCheckedProgress::NotStarted => {
-                if classified == PrivateCompilerProgress::Unchanged {
-                    PrivateCompilerProgress::Unchanged
-                } else {
-                    PrivateCompilerProgress::Incomplete
-                }
-            }
-            super::admission::PrivateCheckedProgress::Started => {
-                PrivateCompilerProgress::Incomplete
-            }
-            super::admission::PrivateCheckedProgress::Completed => {
-                if classified == PrivateCompilerProgress::Checked {
-                    PrivateCompilerProgress::Checked
-                } else {
-                    PrivateCompilerProgress::Incomplete
-                }
-            }
-        };
-        let private_snapshot = self
+        let private_visibility = self
             .public_visibility_snapshot_in(admission.private_scope())
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
-        let visible_private_ids = private_snapshot
-            .bindings
-            .iter()
-            .map(|(_, id)| *id)
-            .collect::<std::collections::HashSet<_>>();
-        let mut host_bindings = admission
-            .confirmed_host_bindings()
-            .map_err(SessionError::from)?;
-        host_bindings.retain(|binding| visible_private_ids.contains(&binding.session_var()));
-        host_bindings.sort_by_key(|binding| binding.session_var().raw());
+            .ok_or(SessionError::DeadScope(admission.private_scope()))?;
+        let mut host_bindings = Vec::new();
+        for (id, write) in completed_values.iter() {
+            if !private_visibility
+                .bindings
+                .iter()
+                .any(|(_, winner)| winner == id)
+            {
+                continue;
+            }
+            let Some(mount) = write.visible_host() else {
+                continue;
+            };
+            if mount.before.base.scope != admission.private_scope()
+                || mount.after.base.scope != admission.private_scope()
+                || !Arc::ptr_eq(&mount.before.world, &mount.after.world)
+            {
+                return Err(SessionError::WorldCellPublicationBaseStale);
+            }
+            let entry = self
+                .bindings()
+                .get(*id)
+                .filter(|entry| entry.scope == admission.private_scope() && write.matches(entry))
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            host_bindings.push(match &write.proof {
+                super::admission::CertifiedPrivateValueProof::Execution(execution) => {
+                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_checked_execution(
+                        write.name(),
+                        &entry.value.identity,
+                        *id,
+                        entry.scope.0,
+                        execution.clone(),
+                    )
+                }
+                super::admission::CertifiedPrivateValueProof::HostInterface(interface) => {
+                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_host_interface(
+                        write.name(),
+                        &entry.value.identity,
+                        *id,
+                        entry.scope.0,
+                        interface.clone(),
+                    )
+                }
+            });
+        }
+        let (private_world, host_progress) = if host_bindings.is_empty() {
+            (private.world.clone(), None)
+        } else {
+            let successor = private
+                .world
+                .with_visible_host_bindings(admission.private_scope().0, host_bindings)?;
+            (
+                successor.world().clone(),
+                Some(successor.progress().clone()),
+            )
+        };
+        if let Some(progress) = &host_progress {
+            tracing::debug!(target: "exomonad_harness::timing",
+                checked_execution_bindings = progress.checked_execution_bindings(),
+                host_interface_bindings = progress.host_interface_bindings(),
+                "private host binding progress issued");
+        }
+        let mut private = private;
+        if host_progress.is_some() {
+            private = Arc::new(super::inspection::InspectionWorldAssociation {
+                base: private.base.clone(),
+                world: private_world,
+            });
+            self.lib_mut()
+                .tips
+                .get_mut(&admission.private_scope())
+                .expect("validated private association")
+                .inspection_world = Some(private.clone());
+        }
+        let progress = CompilerWorld::classify_private_publication(
+            &private.world,
+            &facts.published.world,
+            admission.checked_progress(),
+            host_progress,
+        );
         let selection = self
             .bindings()
             .prepare_world_execution_selection_delta(
                 self.scope_tree(),
                 admission.private_scope(),
-                &private_snapshot.source_selection,
+                &private_visibility.source_selection,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let world = Some(WorldExecutionIntent {
@@ -674,7 +718,6 @@ impl PersistentSession {
             private,
             progress,
             selection,
-            host_bindings,
         });
         let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(
@@ -729,27 +772,28 @@ impl PersistentSession {
                         {
                             return Err(SessionError::WorldCellPublicationBaseStale);
                         }
-                        let mut key = &private.base.key;
+                        let mut expected = records.first().map(|record| record.before().clone());
                         for record in records.iter() {
-                            key = record
-                                .following_key(self, &private, &target, key)
+                            let key = record
+                                .following_key(
+                                    self,
+                                    &target,
+                                    expected
+                                        .as_ref()
+                                        .expect("private host retirements form one chain"),
+                                )
                                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
+                            expected = Some(key.clone());
                         }
-                        if self.compile_view_key_in(admission.private_scope()).as_ref() != Some(key)
+                        if records
+                            .last()
+                            .is_none_or(|record| !Arc::ptr_eq(record.association(), &private))
+                            || expected.as_ref() != Some(&private.base.key)
+                            || self.compile_view_key_in(admission.private_scope()).as_ref()
+                                != Some(&private.base.key)
                         {
                             return Err(SessionError::WorldCellPublicationBaseStale);
                         }
-                        let mut base = private.base.clone();
-                        base.key = key.clone();
-                        let successor = Arc::new(super::inspection::InspectionWorldAssociation {
-                            base,
-                            world: private.world.clone(),
-                        });
-                        self.lib_mut()
-                            .tips
-                            .get_mut(&admission.private_scope())
-                            .expect("private association was checked")
-                            .inspection_world = Some(successor);
                         records.clear();
                         Ok(())
                     },
