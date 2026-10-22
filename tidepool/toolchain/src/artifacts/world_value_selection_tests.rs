@@ -232,8 +232,7 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
                 .iter()
                 .filter_map(|import| match import {
                     crate::artifact_inventory::CompletedNativeImport::Package {
-                        binding,
-                        ..
+                        binding, ..
                     } => Some(binding.product().code().owner().module.as_str()),
                     _ => None,
                 })
@@ -327,6 +326,22 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         |_, _, _| {},
     )
     .expect("the cached HOME owner comes from the production compiler");
+    let issued_rows = compiled_home.targets["cachedTextLength"]
+        .completed_native_selection()
+        .expect("the initial compiler target owns a native completion")
+        .completion()
+        .rows()
+        .filter(|row| {
+            row.product()
+                .group()
+                .binders()
+                .iter()
+                .any(|binder| binder.occurrence == "cachedTextLength")
+        })
+        .collect::<Vec<_>>();
+    let [issued] = issued_rows.as_slice() else {
+        panic!("the initial target must issue one cachedTextLength HOME group");
+    };
     let owner = crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
         module: "CachedPackageWorldHome".into(),
@@ -386,11 +401,11 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let row = selection
         .completion()
         .rows()
-        .find(|row| row.product().owner().module == "CachedPackageWorldHome")
-        .expect("the cached HOME product remains an issued completion row");
-    assert_eq!(
-        row.product().origin(),
-        crate::certified_products::ProductOrigin::Cached
+        .find(|row| row.binding() == issued.binding())
+        .expect("the World target preserves the initial HOME group's exact binding");
+    assert!(
+        row.product().same_issuance(issued.product()),
+        "the World target preserves the original group's issuing product"
     );
     let packages = row
         .imports()
