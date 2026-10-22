@@ -597,6 +597,11 @@ impl AcquiredNativeClosures {
     }
 
     fn one(owner: Arc<crate::linked_native::AcquiredNativeClosure>) -> Result<Self, CompileError> {
+        // A successfully issued empty target has no historical CODE grants.
+        // Its prepared body stays with the target rather than the compiler prefix.
+        if owner.acquired().len() == 0 {
+            return Ok(Self::default());
+        }
         let mut components = crate::exact_context::NativeComponentRecords::new();
         let mut packages = imbl::OrdMap::new();
         for acquired in owner.acquired() {
@@ -3986,7 +3991,7 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         // Repeated publication borrows the same immutable owner and does not
         // rebuild its scalar records or accumulate fresh wrapper owners.
-        if self.native_closures.contains_owner(target.closure()) {
+        if target.acquired().len() == 0 || self.native_closures.contains_owner(target.closure()) {
             return Ok(self.clone());
         }
         let mut draft = self.reopen();

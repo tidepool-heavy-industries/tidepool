@@ -426,7 +426,7 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
     let output = compile_invocation(
         &CompileInvocation {
             source,
-            targets: &["result"],
+            targets: &["result", "emptyTarget"],
             include: &[root.path().to_owned()],
             fallback_module_name: "MultiOrdinalHomeConsumer",
         },
@@ -434,6 +434,25 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
     )
     .expect("fresh multi-ordinal HOME module compiles through common admission");
     assert_current_handles_are_target_bound(&output, "result");
+    let empty = output.targets["emptyTarget"]
+        .linked_native_target()
+        .expect("actual literal target has an issued linked owner");
+    assert!(
+        empty.prepared().globals().is_empty(),
+        "literal target must actually have no dependency globals"
+    );
+    assert_eq!(empty.acquired().len(), 0);
+    let baseline = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let unchanged = baseline.with_linked_native_target(empty).unwrap();
+    assert!(unchanged
+        .acquired_native_closures()
+        .same_held_owners(baseline.acquired_native_closures()));
+    assert!(unchanged.native_component_records().is_empty());
+    assert!(unchanged.native_closure_records().is_empty());
+    assert!(Arc::ptr_eq(
+        unchanged.native_fact_owner(),
+        baseline.native_fact_owner()
+    ));
 
     let selection = completed_selection(&output, "result");
     let roots = home_package_roots(&selection);
