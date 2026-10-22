@@ -994,6 +994,11 @@ mod tests {
             prop_assert_eq!(large[1].id(), small[1].id());
             prop_assert!(Arc::ptr_eq(large[0].component(), large[1].component()));
             prop_assert_eq!(large_operation.work_usage().unwrap(), (spent, 0));
+            let no_demand = InventoryOperation::new(crate::execution_schema::InventoryDecodeLimits {
+                max_work: 0, ..Default::default()
+            });
+            prop_assert!(NativeCodeComponent::link(&inventory, &[], &no_demand).unwrap().is_empty());
+            prop_assert_eq!(no_demand.work_usage().unwrap(), (0, 0));
         }
     }
 
