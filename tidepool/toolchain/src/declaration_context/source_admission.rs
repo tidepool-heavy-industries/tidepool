@@ -366,6 +366,28 @@ impl ReceiptSourceClaims {
         self.roles.compilation_root()
     }
 
+    pub(super) fn lexical_claims(
+        &self,
+    ) -> impl Iterator<Item = (&ExactModuleIdentity, SourceLexicalClaim)> {
+        self.lexical.iter().map(|(owner, claim)| (owner, *claim))
+    }
+
+    pub(super) fn lexical_imports(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<Vec<ExactModuleIdentity>> {
+        self.lexical
+            .get(owner)
+            .and_then(|_| self.dependencies.adjacency.get(owner))
+            .map(|imports| {
+                imports
+                    .iter()
+                    .filter(|child| self.roles.admits_lexical_edge(owner, child))
+                    .cloned()
+                    .collect()
+            })
+    }
+
     pub(super) fn dependencies(&self) -> &CompilerDependencies {
         &self.dependencies
     }

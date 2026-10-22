@@ -9469,6 +9469,21 @@ impl ExactSourceAdmission {
         self.claims.roles.observed_rows()
     }
 
+    /// Authenticated receipt claims still need the actual output support before
+    /// an output consumer can publish their source scope.
+    pub(crate) fn source_lexical_claims(
+        &self,
+    ) -> impl Iterator<Item = (&ExactModuleIdentity, SourceLexicalClaim)> {
+        self.claims.lexical_claims()
+    }
+
+    pub(crate) fn source_lexical_imports(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<Vec<ExactModuleIdentity>> {
+        self.claims.lexical_imports(owner)
+    }
+
     pub(crate) fn selected_originals(
         &self,
     ) -> &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal> {
