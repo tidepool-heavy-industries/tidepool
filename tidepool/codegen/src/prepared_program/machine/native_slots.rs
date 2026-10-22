@@ -899,12 +899,14 @@ mod tests {
         wire.globals.push(GlobalDecl {
             identity: testing::identity("Fixture", "entry"),
             rep: RuntimeRep::LiftedRef,
-            entry_signature: None,
+            entry_signature: Some(SignatureId(0)),
             required_evaluated: false,
             required_generation: None,
         });
-        wire.expressions.nodes[0] =
-            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        wire.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+        };
         let body = NativeCodeBody::Package(
             PackageGroupCode::admit(
                 PackageCodeOwner {
