@@ -537,6 +537,7 @@ pub(crate) struct OriginalCompilerInputs {
 
 #[derive(Debug)]
 struct PhysicalValueCaptures {
+    operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
     // Admission issues only demanded rows. Their owner survives every target
     // projection of this physical cohort; retained availability is not demand.
@@ -566,6 +567,9 @@ impl<'a> PhysicalCohortInputs<'a> {
         baseline: Option<CertifiedNativeGroupBaseline<'_>>,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+        if !Arc::ptr_eq(&self.captures.operation, &validation.inventory) {
+            return Err(failure("physical cohort has another accounting owner"));
+        }
         let mut issued = self
             .captures
             .groups
@@ -917,6 +921,7 @@ impl OriginalCompilerInputs {
             "initial_admission",
         );
         let mut captures = PhysicalValueCaptures {
+            operation: Arc::clone(&validation.inventory),
             facts: BTreeMap::new(),
             groups: Default::default(),
         };
@@ -2801,6 +2806,7 @@ pub(crate) struct NativePackageObligation {
 /// Code equality cannot merge these occurrence-specific dependency choices.
 #[derive(Clone)]
 pub(crate) struct SelectedNativeGroupRow {
+    issued: Arc<IssuedSelectedNativeGroup>,
     product: PendingCertifiedGroup,
     dependencies: Vec<crate::artifact_inventory::NativeGroupBinding>,
     imports: Arc<[crate::certified_products::SelectedNativeImport]>,
@@ -3566,6 +3572,7 @@ impl DemandNativeInputs {
                 certified.insert(
                     binding,
                     SelectedNativeGroupRow {
+                        issued: Arc::clone(&row),
                         product: row.product().as_ref().clone(),
                         dependencies,
                         imports: Arc::clone(row.shared_imports()),
@@ -16161,6 +16168,47 @@ fn certify_artifact_view_groups(
             }
         }
     }
+    // Borrow the opaque selected row from its issuing owner. Revalidating the
+    // scoped links below does not grant permission to issue a replacement row.
+    let mut shared_rows = issued_rows.cloned().unwrap_or_default();
+    let mut inherit_row = |binding, row: &Arc<IssuedSelectedNativeGroup>| {
+        if let Some(previous) = shared_rows.get(&binding) {
+            if !previous.product().same_issuance(row.product())
+                || previous.imports() != row.imports()
+            {
+                return Err(failure("native baseline has competing selected row issuers"));
+            }
+        } else {
+            shared_rows.insert(binding, Arc::clone(row));
+        }
+        Ok(())
+    };
+    match bound_baseline {
+        Some(CertifiedNativeGroupBaseline::Demand(groups)) => {
+            for (binding, row) in groups.selected_rows() {
+                inherit_row(*binding, &row.issued)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::Target(groups)) => {
+            for (binding, row) in &groups.rows {
+                inherit_row(*binding, row)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, prior }) => {
+            for (binding, row) in stage.selected_rows() {
+                inherit_row(*binding, &row.issued)?;
+            }
+            for (binding, row) in &prior.rows {
+                inherit_row(*binding, row)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::InitialRequest(request)) => {
+            for (binding, row) in &request.groups.rows {
+                inherit_row(*binding, row)?;
+            }
+        }
+        Some(CertifiedNativeGroupBaseline::Rows(_)) | None => {}
+    }
     let keyed_current = selected_bindings
         .iter()
         .filter_map(|binding| {
@@ -16183,7 +16231,7 @@ fn certify_artifact_view_groups(
             crate::certified_products::SelectedOriginalGroupScope::View(view),
             &keyed_current,
             validation,
-            issued_rows,
+            Some(&shared_rows),
         )
         .map_err(compiler_evidence_failure)?;
     let rows = certification.rows;

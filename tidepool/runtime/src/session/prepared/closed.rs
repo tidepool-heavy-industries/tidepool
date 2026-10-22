@@ -839,33 +839,19 @@ impl PreparedEngine {
             .collect::<BTreeSet<_>>();
         // Resolve historical source custody before acquiring any mutable native
         // resources. A retained code row cannot become current merely because
-        // this target installs equal code. Existing exact instances keep their
-        // own original ProgramFacts; closed installation supplies its own origin.
+        // this target installs equal code. Anchored occurrences are absent from
+        // fresh and keep their original ProgramFacts; closed installation supplies
+        // its own origin.
         let program_sources = fresh
             .iter()
             .map(|occurrence| {
                 let program = &plan.programs[occurrence.program];
                 let sources = match &sources.programs[occurrence.program] {
                     Some(current) => current.clone(),
-                    None => match instantiation.anchors.get(occurrence) {
-                        Some(anchor) => {
-                            let held = self
-                                .programs
-                                .get(&anchor.instance().program())
-                                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-                            if !Arc::ptr_eq(
-                                &held.definitions,
-                                program.native.image().definition_facts(),
-                            ) {
-                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
-                            }
-                            held.native_sources.clone()
-                        }
-                        None if program.native.definitions().sites().is_empty() => {
-                            NativeSourceCustody::default()
-                        }
-                        None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
-                    },
+                    None if program.native.definitions().sites().is_empty() => {
+                        NativeSourceCustody::default()
+                    }
+                    None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
                 };
                 Ok((*occurrence, sources))
             })
