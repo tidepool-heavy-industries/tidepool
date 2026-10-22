@@ -6,8 +6,8 @@ use crate::artifact_inventory::{
     CompilerInputProjection, CompilerInputRole, NativeGroupBinding, NativeGroupKey,
 };
 use crate::declaration_context::{
-    issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
-    OriginalCompilerInputs, OriginalInstanceEnvironment, PublishedSourceOriginalSelection,
+    issue_fixture_compiler_support, CapturedCompilerStage, ExactCompileContext,
+    ExactDeclarationContext, OriginalInstanceEnvironment, PublishedSourceOriginalSelection,
     RecoveredArtifactInventory, RecoveryPayloadReference,
 };
 use crate::declaration_join::ExactLexicalNode;
@@ -392,7 +392,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         let mut context = original.as_ref().clone();
         let mut outputs = BTreeMap::new();
         let mut output_producers: BTreeMap<u32, (
-            CertifiedSourceSelection, OriginalCompilerInputs,
+            CapturedCompilerStage,
             BTreeSet<NativeGroupBinding>, ProductOrigin,
         )> = BTreeMap::new();
         let mut cached_outputs = BTreeSet::new();
@@ -506,9 +506,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                             .into_keys().collect::<BTreeSet<_>>())
                     } else {
                         prop_assert!(emitted_before && cached_outputs.contains(&ordinal));
-                        let (prior_selection, _, prior_bindings, _) = output_producers.get(&ordinal)
+                        let (prior_stage, prior_bindings, _) = output_producers.get(&ordinal)
                             .expect("carried Cached input must retain its actual earlier producer");
-                        let prior = prior_selection.target_original(product.owner()).unwrap().unwrap();
+                        let prior = prior_stage.source_selection().target_original(product.owner()).unwrap().unwrap();
                         prop_assert_eq!(prior.as_ref(), output.as_ref());
                         let ArtifactPayload::Original(prior_product) = &prior.payload else { unreachable!() };
                         prop_assert_eq!(prior_product.product_bytes(), product.product_bytes());
@@ -529,7 +529,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(completed.compiler_inputs()).unwrap();
                     context = context.extend_issued_compiler_support(&support).unwrap();
                     if let Some(bindings) = new_bindings {
-                        output_producers.insert(ordinal, (selection, completed, bindings, origin));
+                        output_producers.insert(ordinal, (completed, bindings, origin));
                     }
                     prop_assert_eq!(&output.requirements, &vec![root.descriptor.owner.clone()]);
                     let output_lexical = ExactLexicalNode {
@@ -691,7 +691,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 // context preserves availability, not same-program Source identity.
                 let mut aggregate_targets = BTreeSet::new();
                 for (ordinal, (output, _, permitted_carriers)) in &outputs {
-                    let (selection, physical, expected_bindings, origin) = &output_producers[ordinal];
+                    let (physical, expected_bindings, origin) = &output_producers[ordinal];
                     let ArtifactPayload::Original(product) = &output.payload else { unreachable!() };
                     let mut observations = source_target_observations(&[(product, 0)]);
                     if *origin == ProductOrigin::RetainedCore {

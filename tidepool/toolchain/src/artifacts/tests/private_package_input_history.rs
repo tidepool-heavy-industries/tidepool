@@ -528,10 +528,8 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Public inheritance retains availability without selecting a body or
     // granting lexical imports for this original.
-    let public_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
-        physical.compiler_inputs(),
-    )
-    .unwrap();
+    let public_support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical).unwrap();
     let public_original = Arc::new(
         ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()

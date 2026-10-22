@@ -536,9 +536,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
             );
         }
     }
-    let initial_support =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&initial_output)
-            .unwrap();
+    let initial_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        initial_output.compiler_inputs(),
+    )
+    .unwrap();
     let mut context = ExactDeclarationContext::new(&[], &[], vec![])
         .unwrap()
         .extend_issued_compiler_support(&initial_support)
@@ -1425,8 +1426,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
         owner_history
     );
     assert_eq!(certified.recovery_products.len(), owner_history.len());
-    let completed =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output).unwrap();
+    let completed = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        output.compiler_inputs(),
+    )
+    .unwrap();
     let selected_entries = [current_a, current_b]
         .into_iter()
         .map(|product| {
