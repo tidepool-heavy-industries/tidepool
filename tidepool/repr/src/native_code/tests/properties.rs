@@ -300,6 +300,13 @@ fn fixture_body(module: &str, globals: Vec<GlobalDecl>, two_exports: bool) -> Na
         let mut alias = top.clone();
         alias.identity = testing::identity(module, "alias");
         alias.binding.id = ValueId(1);
+        let HeapRhs::Function { body, .. } = &mut alias.binding.rhs else {
+            unreachable!()
+        };
+        *body = wire.expressions.nodes.len();
+        wire.expressions
+            .nodes
+            .push(wire.expressions.nodes[0].clone());
         wire.bindings = vec![Group::Recursive(vec![top, alias])];
     } else {
         wire.bindings = vec![Group::NonRecursive(top)];
@@ -319,17 +326,36 @@ fn exact_retained_requirements_change_code_and_keep_symbol_generation_and_type()
     let held = |generation: u64, type_artifact| {
         let identity = testing::identity("Captured", "value");
         NativeCodePlan {
-            body: fixture_body(
-                "Held",
-                vec![GlobalDecl {
+            body: {
+                use crate::execution_schema::{CachedHomeOwner, ModuleVersion};
+                let mut wire = testing::wire_program();
+                let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                    unreachable!()
+                };
+                top.identity = testing::identity("Held", "entry");
+                wire.globals.push(GlobalDecl {
                     identity: identity.clone(),
                     rep: RuntimeRep::LiftedRef,
                     entry_signature: None,
                     required_evaluated: false,
                     required_generation: Some(generation),
-                }],
-                false,
-            ),
+                });
+                // A retained machine binding belongs to HOME code. Package
+                // groups must remain independent of machine-local generations.
+                NativeCodeBody::Home(
+                    CertifiedGroupCode::admit(
+                        CachedHomeOwner {
+                            unit: "fixture".into(),
+                            module: "Held".into(),
+                            module_version: ModuleVersion([1; 32]),
+                            skinny_iface_sha256: [2; 32],
+                            product_sha256: [3; 32],
+                        },
+                        testing::projected_group(wire, 7).unwrap(),
+                    )
+                    .unwrap(),
+                )
+            },
             imports: vec![NativeCodePlanImport::Retained(
                 NativeRetainedRequirement::new(identity, generation, type_artifact),
             )],

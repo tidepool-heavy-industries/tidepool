@@ -1196,6 +1196,13 @@ mod tests {
             unreachable!()
         };
         entry.binding.id = ValueId(1);
+        let HeapRhs::Function { body, .. } = &mut entry.binding.rhs else {
+            unreachable!()
+        };
+        *body = wire.expressions.nodes.len();
+        wire.expressions
+            .nodes
+            .push(wire.expressions.nodes[0].clone());
         wire.bindings.insert(0, Group::NonRecursive(helper));
         wire.entry = ValueId(1);
         let requirements = ProgramRequirements {
