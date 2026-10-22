@@ -31,14 +31,25 @@ pub(super) fn decode_roots(
             original: receipt_artifact_binding(&use_row[3])?,
             binder: identity(&use_row[4])?,
         };
-        let mut identities = BTreeSet::new();
-        let mut links = Vec::new();
+        let key = OriginalPackageRootKey { target, reference };
+        if roots
+            .last_key_value()
+            .is_some_and(|(previous, _)| previous >= &key)
+        {
+            return Err(CertificationError::Receipt(
+                "Original package uses are not unique and ordered",
+            ));
+        }
+        let mut links: Vec<(SymbolIdentity, PackageLink)> = Vec::new();
         for entry in array(&row[1])? {
             let entry = sized(entry, 2)?;
             let identity = identity(&entry[0])?;
-            if !identities.insert(identity.clone()) {
+            if links
+                .last()
+                .is_some_and(|(previous, _)| previous >= &identity)
+            {
                 return Err(CertificationError::Receipt(
-                    "duplicate Original package identity",
+                    "Original package identities are not unique and ordered",
                 ));
             }
             let link = decode_package_links_list(&value_array([entry[1].clone()]), operation)?;
@@ -47,15 +58,8 @@ pub(super) fn decode_roots(
             links.push((identity, link.into_iter().next().unwrap()));
         }
         operation.reserve::<OriginalPackageRootKey>(1)?;
-        operation.charge(target.len())?;
-        if roots
-            .insert(OriginalPackageRootKey { target, reference }, links)
-            .is_some()
-        {
-            return Err(CertificationError::Receipt(
-                "duplicate Original package use",
-            ));
-        }
+        operation.charge(key.target.len())?;
+        roots.insert(key, links);
     }
     Ok(roots)
 }
@@ -106,6 +110,7 @@ pub(super) fn encode_roots(roots: &OriginalPackageRoots) -> Value {
 /// Local receipt links cannot manufacture this owner.
 pub(crate) struct CheckedOriginalPackageAssociations {
     slots: BTreeMap<(NativeGroupBinding, u32), CheckedOriginalPackageSlot>,
+    use_roots: BTreeSet<NativeGroupBinding>,
 }
 struct CheckedOriginalPackageSlot {
     identity: SymbolIdentity,
@@ -129,6 +134,9 @@ impl CheckedOriginalPackageAssociations {
             ));
         }
         Ok(Some(&slot.link))
+    }
+    pub(crate) fn use_roots(&self) -> &BTreeSet<NativeGroupBinding> {
+        &self.use_roots
     }
     pub(crate) fn coordinates(&self) -> impl Iterator<Item = (NativeGroupBinding, u32)> + '_ {
         self.slots.keys().copied()
@@ -157,6 +165,7 @@ impl BoundPackageSelection {
             BoundPackageSelectionState::HomeOrFixture { .. } => {
                 return Ok(CheckedOriginalPackageAssociations {
                     slots: BTreeMap::new(),
+                    use_roots: BTreeSet::new(),
                 })
             }
         };
@@ -164,6 +173,7 @@ impl BoundPackageSelection {
             crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(message)))
         };
         let mut slots = BTreeMap::new();
+        let mut use_roots = BTreeSet::new();
         for (key, links) in roots.iter().filter(|(key, _)| key.target == target) {
             crate::host_work::checkpoint()?;
             let binding = source
@@ -183,6 +193,11 @@ impl BoundPackageSelection {
             let demand = stage.selection().ok_or_else(|| {
                 failure("Original package association exceeds empty stage demand")
             })?;
+            let (root, _) = demand
+                .selected_groups()
+                .original_use_row(&key.reference)
+                .ok_or_else(|| failure("Original package use exceeds exact stage demand"))?;
+            use_roots.insert(root);
             let obligations = demand
                 .selected_groups()
                 .package_obligations_for_use(&key.reference)?;
@@ -244,6 +259,6 @@ impl BoundPackageSelection {
                 }
             }
         }
-        Ok(CheckedOriginalPackageAssociations { slots })
+        Ok(CheckedOriginalPackageAssociations { slots, use_roots })
     }
 }

@@ -1171,6 +1171,15 @@ pub(crate) fn complete_native_selection(
     let mut source_associations = BTreeMap::new();
     let original_packages: crate::certified_products::CheckedOriginalPackageAssociations =
         selection.checked_original_packages(source_selection, operation)?;
+    let selected_groups = sources
+        .groups()
+        .map(|row| row.binding())
+        .collect::<BTreeSet<_>>();
+    if !original_packages.use_roots().is_subset(&selected_groups) {
+        return Err(failure(
+            "Original package use exceeds the target's selected exact groups",
+        ));
+    }
     let mut consumed_original_slots = BTreeSet::new();
     let mut selected_package_roots = Vec::new();
     operation
@@ -1503,10 +1512,7 @@ pub(crate) fn complete_native_selection(
         operation,
     )?;
     let mut roots = packages.roots().iter();
-    let selected_groups = sources
-        .groups()
-        .map(|row| row.binding())
-        .collect::<BTreeSet<_>>();
+
     let mut retained = BTreeSet::new();
     let mut close = |links: &[SelectedNativeImport],
                      definitions: DefinitionsView<'_>|
