@@ -293,6 +293,57 @@ impl PreparedMachine<'_> {
             witness.clone(),
         ))
     }
+
+    pub fn world_package_literal_import(
+        &self,
+        witness: &WorldPackageInstanceWitness,
+        permit: &WorldPackageSlotPermit,
+    ) -> Result<BatchImport, ExecutionError> {
+        self.validate_world_package_witness(witness, permit)?;
+        let request = &permit.request;
+        let export = &request.image.top_exports[&request.binding];
+        if export.rep != tidepool_repr::execution_schema::RuntimeRep::Address
+            || !request.image.byte_tops.contains_key(&request.binding)
+        {
+            return Err(Self::package_request_error(permit));
+        }
+        Ok(BatchImport::WorldPackageLiteral {
+            permit: permit.clone(),
+            witness: witness.clone(),
+        })
+    }
+
+    pub(super) fn validate_world_package_literal_import(
+        &self,
+        permit: &WorldPackageSlotPermit,
+        witness: &WorldPackageInstanceWitness,
+        slot: &crate::prepared_program::plan::ImportSlot,
+    ) -> Result<(), ExecutionError> {
+        self.validate_world_package_witness(witness, permit)?;
+        let request = &permit.request;
+        let export = &request.image.top_exports[&request.binding];
+        let valid = slot.rep == tidepool_repr::execution_schema::RuntimeRep::Address
+            && export.rep == slot.rep
+            && slot.identity == export.identity
+            && slot
+                .entry_signature
+                .as_ref()
+                .is_none_or(|expected| export.entry_signature.as_ref() == Some(expected))
+            && (!slot.required_evaluated || export.evaluated)
+            && slot.literal_source.is_none()
+            && slot.literal.as_ref().is_some_and(|literal| {
+                request
+                    .image
+                    .byte_tops
+                    .get(&request.binding)
+                    .map(Arc::as_ref)
+                    == Some(literal.as_ref())
+            });
+        if !valid {
+            return Err(Self::package_request_error(permit));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +363,10 @@ mod tests {
     };
 
     fn fixture() -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
+        fixture_bytes(b"package-slot")
+    }
+
+    fn fixture_bytes(bytes: &[u8]) -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
         let mut package = testing::wire_program();
         package.signatures.push(package.signatures[0].clone());
         package.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -346,7 +401,7 @@ mod tests {
             identity: testing::identity("Fixture", "bytes"),
             binding: HeapBinding {
                 id: ValueId(2),
-                rhs: HeapRhs::Bytes(b"package-slot".to_vec()),
+                rhs: HeapRhs::Bytes(bytes.to_vec()),
             },
         }));
         let code = PackageGroupCode::admit(
@@ -390,6 +445,46 @@ mod tests {
                 .unwrap(),
         );
         (package, consumer)
+    }
+
+    fn literal_consumer(package: &DemandedPackageImage) -> Arc<CompiledProgram> {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let binder = testing::identity("Fixture", "bytes");
+        wire.globals.push(GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let code = PackageGroupCode::admit(
+            PackageCodeOwner {
+                unit: "fixture".into(),
+                module: "LiteralConsumer".into(),
+                compiler_sha256: [1; 32],
+                profile_sha256: [2; 32],
+                interface_sha256: [5; 32],
+                defining_version_sha256: [6; 32],
+            },
+            testing::projected_group(wire, 8).unwrap(),
+        )
+        .unwrap();
+        CompiledProgram::prepare_package_group_code(
+            &code,
+            &[Some(crate::prepared_program::LiteralOwner::Package {
+                unit: binder.unit.clone(),
+                module: binder.module.clone(),
+                binder,
+                interface_digest: [3; 32],
+            })],
+            &package.image().package_literals(|_, _| Some([3; 32])),
+            &Default::default(),
+            &ImageRegistry::new(),
+        )
+        .unwrap()
     }
 
     fn key(byte: u8) -> NativeArtifactBinding {
@@ -681,11 +776,56 @@ mod tests {
             .ok()
             .unwrap();
         machine.commit_world_package_slots(staged);
+        let literal_witness = machine
+            .lookup_world_package_slot(&address, None)
+            .unwrap()
+            .unwrap();
+        let literal_image = literal_consumer(&package);
+        let closed = vec![BatchProgram {
+            image: literal_image.clone(),
+            imports: vec![machine
+                .world_package_literal_import(&literal_witness, &address)
+                .unwrap()],
+        }];
+        assert!(
+            BatchProgram::validate_closed(&closed).is_err(),
+            "closed recipes still reject physical World imports"
+        );
+        let installed_literal = machine.install_shared_batch(closed).unwrap()[0];
+        let slot = &literal_image.import_slots[0];
+        assert_eq!(
+            machine.programs[&installed_literal]
+                .roots
+                .read(slot.slot)
+                .unwrap(),
+            slot.literal.as_ref().unwrap().as_ptr() as u64,
+            "literal imports use the importing image's authenticated bytes"
+        );
+        let (wrong_bytes, _) = fixture_bytes(b"different-package-slot");
+        let before = machine.residency().programs;
+        assert!(
+            machine
+                .install_shared_batch(vec![BatchProgram {
+                    image: literal_consumer(&wrong_bytes),
+                    imports: vec![machine
+                        .world_package_literal_import(&literal_witness, &address)
+                        .unwrap()]
+                }])
+                .is_err(),
+            "same identity with different literal bytes refuses before installation"
+        );
+        assert_eq!(machine.residency().programs, before);
         let value = permit(&mut table, &tree, scope, &package, key(1), 1);
         let witness = machine
             .lookup_world_package_slot(&value, None)
             .unwrap()
             .unwrap();
+        assert!(
+            machine
+                .world_package_literal_import(&witness, &value)
+                .is_err(),
+            "managed export cannot stand in for PACKAGE literal"
+        );
         assert_eq!(
             witness.instance(),
             group,
@@ -759,6 +899,9 @@ mod tests {
             .is_err());
         assert!(machine
             .retain_world_package_export(&witness, &value)
+            .is_err());
+        assert!(machine
+            .world_package_literal_import(&literal_witness, &address)
             .is_err());
         assert!(machine.package_domains.is_empty());
         drop(held_marker);

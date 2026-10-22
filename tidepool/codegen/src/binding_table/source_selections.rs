@@ -63,7 +63,7 @@ pub(super) struct PreparedSourceSelectionReplacement {
 
 impl PreparedSourceSelectionReplacement {
     pub(super) fn set_view(&mut self, view: SourceSelectionView) {
-        debug_assert!(self.view.as_ref().is_some_and(|old| old
+        assert!(self.view.as_ref().is_some_and(|old| old
             .domains
             .keys()
             .all(|domain| view.domains.contains_key(domain))
@@ -181,33 +181,67 @@ impl SourceSelections {
         old
     }
 
-    pub(super) fn materialize_scope(&mut self, scope: ScopeId) -> &mut SourceSelectionView {
+    pub(super) fn materialize_scope(&mut self, scope: ScopeId) -> &SourceSelectionView {
         if !self.views.contains_key(&scope) {
             self.implicit.reserve(1);
             self.replace(scope, SourceSelectionView::for_scope(scope));
             self.implicit.insert(scope);
         }
         self.views
-            .get_mut(&scope)
+            .get(&scope)
             .expect("materialized source selection")
     }
 
-    pub(super) fn ensure_scope(&mut self, scope: ScopeId) -> &mut SourceSelectionView {
+    pub(super) fn select(
+        &mut self,
+        scope: ScopeId,
+        domain: SourceInstanceDomain,
+        key: SourceLeaseKey,
+    ) {
         self.materialize_scope(scope);
         self.implicit.remove(&scope);
         self.views
             .get_mut(&scope)
             .expect("materialized source selection")
+            .add(domain, key);
     }
 
     pub(super) fn contains_key(&self, scope: &ScopeId) -> bool {
         self.views.contains_key(scope) && !self.implicit.contains(scope)
     }
 
-    // These callers edit selected roots within existing domains. Domain-set
-    // changes require the prepared replacement above.
-    pub(super) fn get_mut(&mut self, scope: &ScopeId) -> Option<&mut SourceSelectionView> {
-        self.views.get_mut(scope)
+    pub(super) fn remove_selected(
+        &mut self,
+        scope: ScopeId,
+        domain: SourceInstanceDomain,
+        key: &SourceLeaseKey,
+    ) {
+        let view = self
+            .views
+            .get_mut(&scope)
+            .expect("selected source scope exists");
+        let mut record = view
+            .domains
+            .get(&domain)
+            .cloned()
+            .expect("selected source domain exists");
+        record.selected.remove_mut(key);
+        view.domains.insert_mut(domain, record);
+    }
+
+    pub(super) fn remove_selected_from_all_domains(
+        &mut self,
+        scope: ScopeId,
+        key: &SourceLeaseKey,
+    ) {
+        let domains = self
+            .views
+            .get(&scope)
+            .map(|view| view.domains.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for domain in domains {
+            self.remove_selected(scope, domain, key);
+        }
     }
 }
 

@@ -2191,8 +2191,7 @@ impl BindingTable {
             .or_default()
             .insert(key.clone());
         self.add_capturable_sources(scope, [key.clone()]);
-        let selected = self.source_selection.ensure_scope(scope);
-        selected.add(domain, key.clone());
+        self.source_selection.select(scope, domain, key.clone());
         self.changed(scope);
         Ok(key)
     }
@@ -2312,7 +2311,7 @@ impl BindingTable {
                     self.add_capturable_sources(scope, [key.clone()]);
                     self.acquire_source_shares(&HashSet::from([key.clone()]));
                 }
-                self.source_selection.ensure_scope(scope).add(domain, key);
+                self.source_selection.select(scope, domain, key);
             } else {
                 admission.owned.push(
                     self.register_source_instance_in_domain(tree, scope, domain, token)
@@ -2360,12 +2359,8 @@ impl BindingTable {
         admission
             .rolled_back
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(view) = self.source_selection.get_mut(&scope) {
-            for (domain, key) in &admission.selected {
-                let mut record = view.domains.get(domain)?.clone();
-                record.selected.remove_mut(key);
-                view.domains.insert_mut(*domain, record);
-            }
+        for (domain, key) in &admission.selected {
+            self.source_selection.remove_selected(scope, *domain, key);
         }
         for key in &admission.shares {
             self.promoted_source_instances
@@ -2471,18 +2466,8 @@ impl BindingTable {
             lease.owner_retired = true;
             let unshared = lease.shares == 0;
             self.remove_capturable_source(scope, key);
-            if let Some(selected) = self.source_selection.get_mut(&scope) {
-                let domains: Vec<_> = selected.domains.keys().copied().collect();
-                for domain in domains {
-                    let mut record = selected
-                        .domains
-                        .get(&domain)
-                        .cloned()
-                        .expect("selected domain exists");
-                    record.selected.remove_mut(key);
-                    selected.domains.insert_mut(domain, record);
-                }
-            }
+            self.source_selection
+                .remove_selected_from_all_domains(scope, key);
             self.changed(scope);
             if unshared {
                 released.push(

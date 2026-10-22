@@ -11,6 +11,10 @@ use tidepool_repr::execution_schema::{CachedHomeOwner, Signature};
 /// One import slot's already admitted owner. `Source` selects a top in this
 /// sealed batch; it never accepts a spelling-only match.
 pub enum BatchImport {
+    WorldPackageLiteral {
+        permit: crate::binding_table::WorldPackageSlotPermit,
+        witness: super::WorldPackageInstanceWitness,
+    },
     Existing {
         handle: PreparedHandle,
         entry_signature: Option<Signature>,
@@ -633,6 +637,9 @@ impl PreparedMachine<'_> {
                 .enumerate()
             {
                 match origin {
+                    BatchImport::WorldPackageLiteral { permit, witness } => {
+                        self.validate_world_package_literal_import(permit, witness, slot)?;
+                    }
                     BatchImport::Source { group, binding } => {
                         BatchProgram::validate_source(
                             batch.as_slice(),
@@ -1072,6 +1079,14 @@ impl PreparedMachine<'_> {
         }
         for candidate in candidates {
             for (slot, origin) in candidate.image.import_slots.iter().zip(&candidate.imports) {
+                if let BatchImport::WorldPackageLiteral { .. } = origin {
+                    let literal = slot
+                        .literal
+                        .as_ref()
+                        .expect("validated PACKAGE literal import");
+                    candidate.roots.write(slot.slot, literal.as_ptr() as u64)?;
+                    continue;
+                }
                 if let BatchImport::Source { group, binding } = origin {
                     if let Some(literal) = &slot.literal {
                         candidate.roots.write(slot.slot, literal.as_ptr() as u64)?;
