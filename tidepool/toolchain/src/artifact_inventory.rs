@@ -8063,16 +8063,13 @@ impl ArtifactView {
     }
 
     /// Retain the exact payloads and groups named by issued native permissions
-    /// as non-executable custody. This repairs a narrowed support without
-    /// promoting those bodies into its compiler namespace.
+    /// as non-executable custody. The returned contribution excludes the
+    /// receiver's other payloads, compiler roles and execution roots.
     pub(crate) fn retain_native_availability_custody(
         &self,
         availability: &crate::declaration_context::RequestNativeAvailability,
     ) -> Result<Self, CompileError> {
         let contributions = availability.custody_contributions();
-        if contributions.is_empty() {
-            return Ok(self.clone());
-        }
         let mut retained = self.inventory().empty_view();
         for (id, contribution) in contributions {
             crate::host_work::checkpoint()?;
@@ -8100,7 +8097,7 @@ impl ArtifactView {
             let selected = custody.retain_projected_materializations(selected)?;
             retained = retained.retain_custody(&selected)?;
         }
-        self.retain_custody(&retained)
+        Ok(retained)
     }
 
     /// Preserve exact support nodes even when they were dependencies of the

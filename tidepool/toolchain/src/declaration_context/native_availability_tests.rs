@@ -6555,7 +6555,11 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
             .unwrap(),
             certification_bytes: wrong.certification_bytes().to_vec(),
             module_interface: wrong.module_interface().unwrap().clone(),
-            package_interfaces: wrong.original_native().unwrap().package_interfaces().clone(),
+            package_interfaces: wrong
+                .original_native()
+                .unwrap()
+                .package_interfaces()
+                .clone(),
             execution_source: None,
         },
         &mut PackageInterfaceValidation::default(),
@@ -10232,6 +10236,45 @@ fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationCon
 }
 
 #[test]
+fn source_support_with_empty_native_permissions_discards_unrelated_parent_custody() {
+    let inventory = ArtifactInventory::default();
+    let entries = ["NarrowedRoot", "UnrelatedSibling"].map(|module| {
+        Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "fixture",
+                module,
+                BTreeMap::new(),
+            ),
+        ))
+    });
+    let parent = inventory
+        .admit_shared(&inventory.empty_view(), entries.to_vec())
+        .unwrap();
+    let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+    let support = recover_fixture_compiler_support(projection, parent, []).unwrap();
+    assert!(support.native_availability().rows().next().is_none());
+    assert_eq!(support.native_completions().iter().count(), 0);
+    assert!(support
+        .artifacts()
+        .artifact_ids()
+        .contains(&entries[1].descriptor.id));
+    let narrowed = support
+        .source_support(&BTreeSet::from([entries[0].descriptor.owner.clone()]))
+        .unwrap();
+    assert_eq!(
+        narrowed.artifacts().artifact_ids(),
+        vec![entries[0].descriptor.id]
+    );
+    assert_eq!(narrowed.projection().roles().len(), 1);
+    assert!(narrowed.artifacts().selected_native_groups().is_empty());
+    let empty = support.source_support(&BTreeSet::new()).unwrap();
+    assert!(empty.artifacts().artifact_ids().is_empty());
+    assert!(empty.projection().roles().is_empty());
+    assert!(empty.artifacts().selected_native_groups().is_empty());
+}
+
+#[test]
 fn source_support_retains_every_original_in_a_shared_native_contribution() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let native = |module: &str, ordinal: u32, seed: u8| {
@@ -10320,16 +10363,53 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         Arc::clone(&entries[0]),
         Arc::clone(&entries[1]),
     ])
-    .unwrap();
-    let support = recover_fixture_compiler_support(projection, root_view, [offer])
+    .unwrap()
+    .interface_only();
+    let support = recover_fixture_compiler_support(projection, artifacts, [offer])
         .unwrap()
         .retain_normalized_availability(&rows)
         .unwrap();
+    assert!(
+        support.artifacts().artifact_ids().contains(sibling_id),
+        "narrowing must start with the unrelated sibling physically retained"
+    );
     let narrowed = support
-        .source_support(&BTreeSet::from([entries[3].descriptor.owner.clone()]))
+        .source_support(&BTreeSet::from([
+            entries[0].descriptor.owner.clone(),
+            entries[1].descriptor.owner.clone(),
+        ]))
         .unwrap();
+    assert!(
+        narrowed.native_offers().is_empty(),
+        "the removed root offer must not independently retain the required child custody"
+    );
+    let contributions = narrowed.native_availability().custody_contributions();
+    assert_eq!(contributions.len(), 2);
+    assert_eq!(
+        contributions
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([*left_id, *right_id])
+    );
+    assert!(
+        Arc::ptr_eq(&contributions[0].1, &contributions[1].1),
+        "both required Originals must still share one contribution"
+    );
     let retained = narrowed.artifacts();
     let captured = retained.capture_graph_selection();
+    assert_eq!(
+        captured
+            .native_groups
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        shared
+            .original_groups(*left_id)
+            .chain(shared.original_groups(*right_id))
+            .collect(),
+        "narrowing retains exactly the two required issued Group closures"
+    );
     for (id, owner) in [
         (*left_id, &entries[0].descriptor.owner),
         (*right_id, &entries[1].descriptor.owner),
@@ -10344,8 +10424,10 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
             "both shared-contribution rows retain their exact Group closure"
         );
         assert!(
-            !narrowed.projection().snapshot_roles().contains_key(owner),
-            "private native custody does not promote its row owner to a compiler role"
+            narrowed.projection().snapshot_roles()[owner]
+                .original()
+                .is_none(),
+            "private native custody does not promote its TYPE row to an Original role"
         );
     }
     assert!(
@@ -10366,6 +10448,92 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
             .contains_key(&entries[2].descriptor.owner),
         "the unrelated sibling also gains no compiler role"
     );
+
+    // The actual request consumer must retain both exact dependency bindings
+    // without restoring the parent's unrelated acquired payload.
+    let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+        producer,
+        compiler_support: narrowed,
+        lexical: Default::default(),
+        template_imports: None,
+        original_instance_environment: OriginalInstanceEnvironment::Unknown,
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let request = ExactCompileContext::new(Arc::new(context))
+        .prepare_compilation(directory.path(), PRODUCER)
+        .unwrap();
+    let permissions = request.compiler_inputs().private_native_availability();
+    for (id, ordinal, product) in [(*left_id, 7, &products[0]), (*right_id, 11, &products[1])] {
+        assert!(permissions
+            .dependency_support(
+                NativeGroupKey {
+                    artifact: id,
+                    original_ordinal: ordinal,
+                },
+                product.owner()
+            )
+            .is_some());
+        assert!(
+            permissions
+                .dependency_support(
+                    NativeGroupKey {
+                        artifact: id,
+                        original_ordinal: ordinal + 1,
+                    },
+                    product.owner()
+                )
+                .is_none(),
+            "custody does not authorize an unissued ordinal"
+        );
+        assert!(
+            permissions
+                .dependency_support(
+                    NativeGroupKey {
+                        artifact: id,
+                        original_ordinal: ordinal,
+                    },
+                    products[2].owner()
+                )
+                .is_none(),
+            "custody does not authorize another native owner"
+        );
+    }
+    assert!(permissions
+        .dependency_support(
+            NativeGroupKey {
+                artifact: *sibling_id,
+                original_ordinal: 13,
+            },
+            products[2].owner()
+        )
+        .is_none());
+    let consumed = request.compiler_inputs().artifacts();
+    assert!(!consumed.artifact_ids().contains(sibling_id));
+    let graph = consumed.capture_graph_selection();
+    let edges = consumed.binding_dependencies();
+    let restored_inventory = ArtifactInventory::default();
+    let restored = restored_inventory
+        .recover_selection(
+            &restored_inventory.empty_view(),
+            consumed.entries(),
+            &graph,
+            &edges,
+        )
+        .unwrap();
+    assert_eq!(restored.capture_graph_selection(), graph);
+    assert_eq!(restored.binding_dependencies(), edges);
+    for view in [consumed, &restored] {
+        for id in [*left_id, *right_id] {
+            let ordinal = shared.original_groups(id).next().unwrap().original_ordinal;
+            view.native_requirements_from_roots(&[
+                crate::artifact_inventory::NativeRequirementRoot::Group {
+                    artifact: id,
+                    original_ordinal: ordinal,
+                },
+            ])
+            .expect("the native consumer resolves each required exact child after narrowing");
+        }
+    }
 
     let left_only = inventory
         .admit_shared(&inventory.empty_view(), vec![Arc::clone(&entries[0])])
