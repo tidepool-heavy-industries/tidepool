@@ -101,6 +101,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/activation_input_tests/finite_source_world_history.rs',
         'tidepool/runtime/src/session/activation_input_tests/world_disposal_history.rs',
         'tidepool/runtime/src/session/world_cell_test_support.rs',
+        'tidepool/runtime/src/session/package_runtime_tests.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
         'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
         'tidepool/runtime/src/session/registry_properties.rs',
@@ -233,6 +234,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
     })),
     ('tidepool-runtime', frozenset({
         'tidepool/runtime/tests/fixtures/PackageCafIsolation.hs',
+        'tidepool/runtime/tests/fixtures/WorldPackageRuntime.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveOwner.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveSupport.hs',
         'tidepool/runtime/tests/fixtures/RetainedReceiveProbe.hs',

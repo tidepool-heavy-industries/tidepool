@@ -1341,6 +1341,7 @@ def runtime_test_cases(binary):
         "inspection_key_invalidates_hidden_inherited_binding_projection",
         "never_visible_input_retirement_keeps_hidden_classification_until_last_lease",
     )]
+    tests.append("session::persistent::package_runtime_tests::refused_install_retains_primary_and_uncertain_abort_separately")
     compiler_env, compiler_resources, worker = test_runtime_inputs("tidepool-runtime", "")
     compiler_arguments = runtime_arguments(
         compiler_env, compiler_resources, worker,
@@ -1353,6 +1354,20 @@ def runtime_test_cases(binary):
         f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 30,",
         f"    test_rule_timeout_ms = {(len(tests) * 30 + 60) * 1000},", '    visibility = ["PUBLIC"],', ")", "",
     ])]
+    package_race = "session::persistent::package_runtime_tests::sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group"
+    package_env, package_resources, package_worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_package_slot_race_test"
+    )
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(", '    name = "runtime_package_slot_race_test",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings([package_race], 8), "    ],",
+        "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
+        "    test_rule_timeout_ms = 660000,",
+        '    case_compiler_modes = {' + json.dumps(package_race) + ': "owned-resident"},',
+        runtime_arguments(package_env, package_resources, package_worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     lifetime_env, lifetime_resources, lifetime_worker = compiler_service_test_inputs("tidepool-runtime", "runtime_world_lifetime_tests")
     lifetime_test = "session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"
     rules.append("\n".join([
