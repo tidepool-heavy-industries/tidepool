@@ -1097,8 +1097,11 @@ tidepool_rust_test_cases(
 tidepool_rust_test_cases(
     name = "runtime_world_lifetime_tests",
     binary = ":tidepool_runtime_unit_tests",
-    exact_tests = ["session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment"],
-    expected_count = 1,
+    exact_tests = [
+        "session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment",
+        "session::prepared::tests::production_source_race_preserves_the_latest_public_selection",
+    ],
+    expected_count = 2,
     ignored = True,
     jobs = 1,
     timeout = 180,
@@ -1127,7 +1130,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
-    case_compiler_modes = {"session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment": "owned-resident"},
+    case_compiler_modes = {"session::persistent::checkpoint_scope_tests::completed_world_holds_exact_source_custody_until_install_and_abandonment": "owned-resident", "session::prepared::tests::production_source_race_preserves_the_latest_public_selection": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 
