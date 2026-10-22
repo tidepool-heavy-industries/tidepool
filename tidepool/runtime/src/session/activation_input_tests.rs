@@ -1261,7 +1261,13 @@ fn plan_fixture_cell(
             })
             .collect(),
     });
-    let world = execution.compiler_world().unwrap().clone();
+    let preparation = source_action(resident, |resident, _| {
+        resident.prepare_private_execution(execution.clone(), None)
+    })
+    .expect("capture the current private frontier before fixture planning");
+    let (snapshot, operand) = preparation.into_parts();
+    assert!(operand.is_none());
+    let world = snapshot.world().clone();
     let original = resident.public_source.original_source().clone();
     let settled = original
         .with_source_compiler_transaction(
@@ -1275,7 +1281,7 @@ fn plan_fixture_cell(
     let plan = turn::finish_world_cell_plan_admitted(settled)
         .expect("parse fixture through its actual World");
     source_action(resident, |resident, _| {
-        resident.admit_world_planned_cell_for_execution(execution, plan)
+        resident.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
     })
     .unwrap()
 }
@@ -6149,7 +6155,7 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
 }
 
 #[test]
-fn started_world_item_freezes_incomplete_and_refuses_publication() {
+fn active_world_item_freeze_refusal_preserves_completion_and_publication() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let recipe = InputRecipe::capture(
@@ -6179,49 +6185,41 @@ fn started_world_item_freezes_incomplete_and_refuses_publication() {
             ..resident.public_context()
         })
         .unwrap();
-    let (_, compiled, reservation) = compile_checked_binding(
+    let (bound, compiled, reservation) = compile_checked_binding(
         &mut resident,
         &recipe,
         "pendingPrivate <- pure (41 :: Int)",
         execution.clone(),
     );
-    let checked = compiled
-        .certification
-        .as_ref()
-        .as_ref()
-        .and_then(|certification| certification.checked_execution())
-        .expect("checked bind retains its exact execution")
-        .clone();
     let public_before = resident
         .public_visibility_snapshot_in(execution.public_scope())
         .unwrap();
     let private_before = resident
         .public_visibility_snapshot_in(execution.private_scope())
         .unwrap();
-    let completion = resident
-        .start_checked_item_for_test(reservation.prefix(), execution.private_scope(), checked)
-        .expect("start through the actual checked-prefix owner");
-    let intent = resident
-        .freeze_private_execution(&execution)
-        .expect("freeze carries started work as terminal incomplete progress");
-    let error = source_action(&mut resident, |resident, _| {
-        let publication = resident
-            .restage_ephemeral_execution_publication(intent)
-            .expect("restage the frozen incomplete execution");
-        let crate::session::ExecutionPublication::Bindings(base) = publication else {
-            panic!("a bind-only fixture cannot reserve a declaration publication");
-        };
-        let ticket = base.stage().expect("stage the frozen binding promotion");
-        match resident.attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
-        {
-            Ok(_) => panic!("started work without a completed successor cannot publish"),
-            Err(error) => error,
-        }
-    });
+    let private_world = resident.state.lib().tips[&execution.private_scope()]
+        .inspection_world
+        .as_ref()
+        .unwrap()
+        .world
+        .clone();
+    let error = match resident.freeze_private_execution(&execution) {
+        Ok(_) => panic!("an admitted active program refuses freeze before sealing"),
+        Err(error) => error,
+    };
     assert!(
         matches!(error, SessionError::WorldCellPublicationIncomplete),
         "{error:?}"
     );
+    assert!(execution.final_intent.get().is_none());
+    assert!(Arc::ptr_eq(
+        &private_world,
+        &resident.state.lib().tips[&execution.private_scope()]
+            .inspection_world
+            .as_ref()
+            .unwrap()
+            .world
+    ));
     assert_eq!(
         resident.public_visibility_snapshot_in(execution.public_scope()),
         Some(public_before)
@@ -6230,7 +6228,19 @@ fn started_world_item_freezes_incomplete_and_refuses_publication() {
         resident.public_visibility_snapshot_in(execution.private_scope()),
         Some(private_before)
     );
-    drop(completion);
+    let outcome = source_action(&mut resident, |resident, settlement| {
+        resident.run_bind_with_sites(
+            "pendingPrivate",
+            compiled.code(),
+            &bound[0],
+            reservation.generation(),
+            settlement,
+        )
+    })
+    .expect("the same admitted item remains usable after refused freeze");
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    publish_checked_fixture(&mut resident, &execution, 1);
+    original_value_probe(&mut resident, &recipe, "pendingPrivate + 1", 42);
 }
 
 #[test]
@@ -6264,28 +6274,24 @@ fn frozen_private_execution_refuses_a_later_checked_start() {
             ..resident.public_context()
         })
         .unwrap();
-    let (_, compiled, reservation) = compile_checked_binding(
+    let fixture = check_fixture_cell(
         &mut resident,
         &recipe,
         "frozenPrivate <- pure (41 :: Int)",
         execution.clone(),
+        0,
     );
-    let checked = compiled
-        .certification
-        .as_ref()
-        .as_ref()
-        .and_then(|certification| certification.checked_execution())
-        .expect("checked bind retains its exact execution")
-        .clone();
     let private_before = resident
         .public_visibility_snapshot_in(execution.private_scope())
         .unwrap();
     resident
         .freeze_private_execution(&execution)
         .expect("an unstarted private execution freezes as unchanged");
-    let error = resident
-        .start_checked_item_for_test(reservation.prefix(), execution.private_scope(), checked)
-        .expect_err("a frozen execution is terminal for checked work");
+    let item = fixture.checked.checked_item(0).unwrap();
+    let error = source_action(&mut resident, |resident, _| {
+        resident.admit_checked_item(fixture.prefix.clone(), item)
+    })
+    .expect_err("a frozen execution refuses the first real item entry");
     assert!(
         matches!(error, SessionError::StaleStagedDeclaration),
         "{error:?}"
