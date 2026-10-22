@@ -658,11 +658,12 @@ fn source_boot_candidate_packet_producer() {
                     std::slice::from_ref(target),
                     "published target must be the authenticated completed source owner"
                 );
-                let view = certified
-                    .original_inputs
-                    .as_ref()
-                    .expect("published fixture products passed physical cohort issuance")
-                    .issued_artifacts();
+                let output =
+                    crate::declaration_join::IssuedOriginalOutput::from_segment_item(&certified)
+                        .expect(
+                            "published fixture products retain their completed compiler output",
+                        );
+                let view = output.artifacts();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(target),
                     &fixture_source_imports(&certified),
@@ -675,10 +676,9 @@ fn source_boot_candidate_packet_producer() {
                     .iter()
                     .map(|node| node.owner.clone())
                     .collect::<Vec<_>>();
-                let source_context = ExactDeclarationContext::from_source_selection(
+                let source_context = ExactDeclarationContext::from_issued_output(
                     producer_sha,
-                    &certified.source_selection,
-                    &view,
+                    &output,
                     surface.lexical,
                     target.clone(),
                     &required,
