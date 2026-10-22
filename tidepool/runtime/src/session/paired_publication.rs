@@ -71,6 +71,7 @@ pub struct FinalExecutionIntent {
     /// Exact published World basis for a World execution. Finite executions
     /// have no World intent and never synthesize one.
     world: Option<WorldExecutionIntent>,
+    pub(super) binding_policy: super::BindingPublicationPolicy,
 }
 
 /// The exact published World association and admitted source facts a final
@@ -518,8 +519,28 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        self.freeze_execution_intent_with_policy(
+            admission,
+            write_ids,
+            source_keys,
+            super::BindingPublicationPolicy::ExactPromotion,
+        )
+    }
+
+    pub(super) fn freeze_execution_intent_with_policy(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+        policy: super::BindingPublicationPolicy,
+    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         let transition = admission.begin_freeze()?;
-        let result = self.freeze_execution_intent_locked(admission, write_ids, source_keys);
+        let result = self.freeze_execution_intent_locked_with_policy(
+            admission,
+            write_ids,
+            source_keys,
+            policy,
+        );
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -528,13 +549,28 @@ impl PersistentSession {
         result
     }
 
-    /// The caller holds this admission's ledger lock from write selection
-    /// through final sealing, so effect acceptance cannot enter between them.
+    /// The caller owns the Freezing exclusion from write selection through
+    /// final sealing. Acceptance and new authored starts cannot enter.
     pub(super) fn freeze_execution_intent_locked(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
+    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        self.freeze_execution_intent_locked_with_policy(
+            admission,
+            write_ids,
+            source_keys,
+            super::BindingPublicationPolicy::ExactPromotion,
+        )
+    }
+
+    fn freeze_execution_intent_locked_with_policy(
+        &mut self,
+        admission: &super::PrivateExecutionAdmission,
+        write_ids: Vec<SessionVarId>,
+        source_keys: Vec<SourceLeaseKey>,
+        policy: super::BindingPublicationPolicy,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         let stale_reason = if !Arc::ptr_eq(&admission.owner, self.admission_owner()) {
             Some("owner")
@@ -609,7 +645,10 @@ impl PersistentSession {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            if writes != intent.write_ids || keys != intent.source_keys {
+            if writes != intent.write_ids
+                || keys != intent.source_keys
+                || policy != intent.binding_policy
+            {
                 return Err(invalid_at(
                     &self.lib().root,
                     "execution final intent is already frozen with different writes",
@@ -685,6 +724,7 @@ impl PersistentSession {
             admission.durable_owner.clone(),
             &completed_values,
             world,
+            policy,
         )?;
         assert!(
             admission.final_intent.set(intent.clone()).is_ok(),
@@ -707,6 +747,7 @@ impl PersistentSession {
             super::admission::CertifiedPrivateValueWrite,
         >,
         world: Option<WorldExecutionIntent>,
+        binding_policy: super::BindingPublicationPolicy,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
@@ -864,6 +905,7 @@ impl PersistentSession {
             source_keys,
             head_replacements,
             world,
+            binding_policy,
         }))
     }
 
@@ -1025,6 +1067,7 @@ impl PersistentSession {
             Some(owner.clone()),
             &std::collections::HashMap::new(),
             None,
+            super::BindingPublicationPolicy::ExactPromotion,
         )?;
         self.restage_declaration_publication(owner, intent)
     }

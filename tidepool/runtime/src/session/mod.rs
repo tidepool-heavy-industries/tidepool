@@ -636,7 +636,7 @@ enum PublicationIntent {
     HostBindings(BindingPublicationPolicy),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BindingPublicationPolicy {
     ExactPromotion,
     ActivationInput,

@@ -4047,15 +4047,19 @@ impl PersistentSession {
                 },
             ));
         }
-        if matches!(
-            ticket.intent,
-            super::PublicationIntent::HostBindings(
-                super::BindingPublicationPolicy::ActivationInput
-            )
-        ) && lib
-            .current_decl_heads_in(ticket.public_scope)
-            .iter()
-            .any(|(name, _)| name == "sessionInput")
+        let activation_input = match &ticket.intent {
+            super::PublicationIntent::HostBindings(policy) => {
+                *policy == super::BindingPublicationPolicy::ActivationInput
+            }
+            super::PublicationIntent::Final(intent) => {
+                intent.binding_policy == super::BindingPublicationPolicy::ActivationInput
+            }
+        };
+        if activation_input
+            && lib
+                .current_decl_heads_in(ticket.public_scope)
+                .iter()
+                .any(|(name, _)| name == "sessionInput")
         {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {
