@@ -5787,8 +5787,7 @@ pub(super) mod tests {
                 panic!("HOME fixture published package custody");
             };
             let super::super::recovery::RecoveryNativeBinding::Home {
-                artifact,
-                selection,
+                code_id,
                 original_ordinal,
                 module_version,
                 binder,
@@ -5796,8 +5795,7 @@ pub(super) mod tests {
             else {
                 panic!("HOME recovery observation lost its kind");
             };
-            assert_eq!(*artifact, lease.binding().issuer.artifact);
-            assert_eq!(*selection, lease.binding().issuer.selection);
+            assert_eq!(code_id, lease.binding().as_bytes());
             assert_eq!(*original_ordinal, lease.original_ordinal());
             assert_eq!(*module_version, lease.binder().version.0);
             assert_eq!(binder.unit, lease.binder().binder.unit);

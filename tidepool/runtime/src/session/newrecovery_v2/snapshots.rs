@@ -72,7 +72,8 @@ pub(crate) fn observe_context_materialization<T>(
     (value, work)
 }
 
-const VERSION: u32 = 2;
+const DOMAIN_SNAPSHOT_VERSION: u32 = 2;
+const SURFACE_SNAPSHOT_VERSION: u32 = 3;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DomainSnapshot {
@@ -101,7 +102,7 @@ impl RecoveryDomainReader {
     ) -> Result<Self, RecoveryError> {
         store.ensure_ready()?;
         let snapshot: DomainSnapshot = read_value(store.as_ref(), state.snapshot_root.cid())?;
-        if snapshot.version != VERSION {
+        if snapshot.version != DOMAIN_SNAPSHOT_VERSION {
             return Err(error("unsupported domain snapshot version"));
         }
         Ok(Self { store, snapshot })
@@ -525,7 +526,7 @@ impl RecoveryGraph {
     ) -> Result<Self, RecoveryError> {
         store.ensure_ready()?;
         let snapshot: DomainSnapshot = read_value(store.as_ref(), state.snapshot_root.cid())?;
-        if snapshot.version != VERSION {
+        if snapshot.version != DOMAIN_SNAPSHOT_VERSION {
             return Err(error("unsupported domain snapshot version"));
         }
         let nodes = hydrate_map::<u64, Cid, _>(store.as_ref(), &snapshot.nodes)?;
@@ -716,7 +717,7 @@ impl RecoveryGraph {
             return Ok(Some(surface));
         }
         let snapshot: SurfaceSnapshot = read_value(self, header.surface_root.cid())?;
-        if snapshot.version != VERSION
+        if snapshot.version != SURFACE_SNAPSHOT_VERSION
             || snapshot
                 .declaration_root
                 .is_some_and(|id| !self.nodes.contains_key(&id.0))
@@ -813,7 +814,7 @@ impl RecoveryGraph {
         let artifacts =
             materializer.materialize_map(self.artifact_receipt.as_ref(), &self.artifacts)?;
         let root = DomainSnapshotRoot::new(materializer.materialize_value(&DomainSnapshot {
-            version: VERSION,
+            version: DOMAIN_SNAPSHOT_VERSION,
             source_session: self.source_session,
             nodes: nodes.root().clone(),
             artifacts: artifacts.root().clone(),
@@ -997,7 +998,7 @@ impl RecoveryGraphCandidate {
             &surface.source_instances,
         )?;
         let root = PublicSurfaceRoot::new(materializer.materialize_value(&SurfaceSnapshot {
-            version: VERSION,
+            version: SURFACE_SNAPSHOT_VERSION,
             declaration_root: surface.declaration_root,
             context_root: surface.context_root.clone(),
             bindings: bindings.root().clone(),
@@ -1162,7 +1163,7 @@ mod tests {
         (directory, graph)
     }
     #[test]
-    fn snapshot_readers_refuse_previous_package_custody_format() {
+    fn snapshot_readers_refuse_previous_domain_and_instance_observation_formats() {
         let (_directory, base) = fixture();
         let mut staged = base
             .candidate()
@@ -1211,8 +1212,8 @@ mod tests {
         let mut graph = candidate.seal().unwrap();
         let mut header = graph.owner_roots[&owner].clone();
         let mut snapshot: SurfaceSnapshot = read_value(&graph, header.surface_root.cid()).unwrap();
-        assert_eq!(snapshot.version, 2);
-        snapshot.version = 1;
+        assert_eq!(snapshot.version, 3);
+        snapshot.version = 2;
         let mut writer = Materializer::new(&graph);
         header.surface_root = PublicSurfaceRoot::new(writer.materialize_value(&snapshot).unwrap());
         let packet = writer.finish().unwrap();
@@ -1674,8 +1675,7 @@ mod tests {
             instance: u32::MAX,
             value: u32::MAX,
             binding: RecoveryNativeBinding::Home {
-                artifact: [253; 32],
-                selection: [254; 32],
+                code_id: [254; 32],
                 original_ordinal: u32::MAX,
                 module_version: [255; 32],
                 binder: RecoverySourceIdentity {
@@ -1844,16 +1844,14 @@ mod tests {
         };
         let binding = if identity % 2 == 0 {
             RecoveryNativeBinding::Home {
-                artifact: [1; 32],
-                selection: [identity as u8; 32],
+                code_id: [identity as u8; 32],
                 original_ordinal: u32::MAX,
                 module_version: [identity as u8; 32],
                 binder,
             }
         } else {
             RecoveryNativeBinding::Package {
-                artifact: [2; 32],
-                selection: [identity as u8; 32],
+                code_id: [identity as u8; 32],
                 binder,
             }
         };

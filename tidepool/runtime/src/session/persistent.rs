@@ -2998,9 +2998,8 @@ impl PersistentSession {
                     NativeInstanceLease::Home(home) => {
                         let key = home.binding();
                         super::recovery::RecoveryNativeBinding::Home {
-                            artifact: key.issuer.artifact,
-                            selection: key.issuer.selection,
-                            original_ordinal: key.original_ordinal,
+                            code_id: *key.as_bytes(),
+                            original_ordinal: home.original_ordinal(),
                             module_version: home.binder().version.0,
                             binder,
                         }
@@ -3008,8 +3007,7 @@ impl PersistentSession {
                     NativeInstanceLease::Package(package) => {
                         let key = package.binding();
                         super::recovery::RecoveryNativeBinding::Package {
-                            artifact: key.artifact,
-                            selection: key.selection,
+                            code_id: *key.as_bytes(),
                             binder,
                         }
                     }

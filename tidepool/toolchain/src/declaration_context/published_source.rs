@@ -1959,7 +1959,7 @@ mod tests {
                             .iter()
                             .cloned(),
                     )?
-                    .restore_snapshot_evidence(&published.snapshot())?;
+                    .restore_snapshot_evidence(&published.snapshot(), &BTreeMap::new())?;
                     published
                         .as_ref()
                         .clone()
@@ -2221,7 +2221,7 @@ mod tests {
                 .unwrap();
             let support = recovered
                 .compiler_source_support()
-                .restore_snapshot_evidence(&published.snapshot())
+                .restore_snapshot_evidence(&published.snapshot(), &BTreeMap::new())
                 .unwrap();
             let recovered = recovered
                 .rebuild(|facts| facts.compiler_support = support)
@@ -2312,7 +2312,7 @@ mod tests {
                 .unwrap();
                 let support = durable
                     .compiler_source_support()
-                    .restore_snapshot_evidence(&snapshot.snapshot())
+                    .restore_snapshot_evidence(&snapshot.snapshot(), &BTreeMap::new())
                     .unwrap();
                 let durable = durable
                     .rebuild(|facts| facts.compiler_support = support)

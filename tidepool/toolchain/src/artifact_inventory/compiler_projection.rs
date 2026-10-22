@@ -3884,34 +3884,87 @@ impl CompilerSourceSupport {
         }
     }
 
-    pub(crate) fn restore_native_completion_facts(
+    fn restore_native_code_records(
         &self,
-        facts: &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>>,
+        snapshot: &crate::exact_context::ExactContextSnapshot,
+        acquired_packages: &BTreeMap<
+            ArtifactId,
+            Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+        >,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
+        let components = snapshot
+            .native_components
+            .iter()
+            .map(|(identity, record)| (*identity, Arc::clone(record.facts())))
+            .collect();
+        let closures = snapshot
+            .native_closures
+            .iter()
+            .map(|(identity, record)| (*identity, Arc::clone(record.facts())))
+            .collect();
+        let issued = crate::linked_native::restore_acquired_native_closures(
+            &components,
+            &closures,
+            &self.artifacts,
+            acquired_packages,
+            validation,
+        )?;
         let mut restored = AcquiredNativeClosures::default();
-        for (identity, recorded) in facts {
+        for closure in issued {
             crate::host_work::checkpoint()?;
-            if recorded.identity_in(Some(&validation.inventory))? != *identity {
-                return Err(failure(
-                    "native completion fact commitment differs from its record",
-                ));
-            }
-            let completion = restore_native_completion(recorded, &self.artifacts, validation)?;
-            restored = restored.append(&AcquiredNativeClosures::one(completion))?;
+            restored = restored.append(&AcquiredNativeClosures::one(closure)?)?;
         }
-        // Restoration replaces the recorded completion set; receiver facts
-        // cannot fill missing records in the requested snapshot.
+        // The snapshot replaces the entire prefix. Receiver custody cannot fill
+        // missing recorded grants or components.
         let mut draft = self.reopen();
         draft.native_closures = AcquiredNativeClosures::default();
         draft.append_acquired_closures(&restored)?;
         draft.close()
     }
 
-    pub(crate) fn native_completion_facts(
+    pub(crate) fn selected_package_products(
         &self,
-    ) -> &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>> {
-        self.native_closures.recorded_facts()
+        selected: &BTreeSet<ArtifactId>,
+    ) -> Result<
+        BTreeMap<ArtifactId, Arc<crate::certified_products::CertifiedPackageCodeProduct>>,
+        CompileError,
+    > {
+        let mut products = BTreeMap::new();
+        for closure in self.native_closures.iter() {
+            for acquired in closure.acquired() {
+                let crate::linked_native::NativeCodeGrant::Package { product, .. } =
+                    acquired.grant()
+                else {
+                    continue;
+                };
+                let id = product.artifact_id();
+                if !selected.contains(&id) {
+                    continue;
+                }
+                if let Some(prior) = products.insert(id, Arc::clone(product)) {
+                    if prior.descriptor() != product.descriptor()
+                        || prior.product_sha256() != product.product_sha256()
+                        || prior.envelope_sha256() != product.envelope_sha256()
+                    {
+                        return Err(failure(
+                            "selected package product has competing authenticated custody",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(products)
+    }
+
+    pub(crate) fn native_component_records(&self) -> &crate::exact_context::NativeComponentRecords {
+        self.native_closures.component_records()
+    }
+
+    pub(crate) fn native_closure_records(
+        &self,
+    ) -> &crate::exact_context::NativeAcquiredClosureRecords {
+        self.native_closures.closure_records()
     }
 
     pub(crate) fn acquired_native_closures(&self) -> &AcquiredNativeClosures {
@@ -4061,24 +4114,20 @@ impl CompilerSourceSupport {
     pub(crate) fn restore_snapshot_evidence(
         &self,
         snapshot: &crate::exact_context::ExactContextSnapshot,
+        acquired_packages: &BTreeMap<
+            ArtifactId,
+            Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+        >,
     ) -> Result<Self, CompileError> {
-        if snapshot
-            .native_closures
-            .values()
-            .any(|facts| facts.producer_sha256 != snapshot.producer)
-        {
-            return Err(failure(
-                "native completion belongs to another context producer",
-            ));
-        }
         let restored = self.restore_native_maps(
             &snapshot.roles,
             &snapshot.offers,
             &snapshot.native_availability,
             &snapshot.input_decisions,
         )?;
-        restored.restore_native_completion_facts(
-            &snapshot.native_closures,
+        restored.restore_native_code_records(
+            snapshot,
+            acquired_packages,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
     }

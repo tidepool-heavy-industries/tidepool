@@ -5675,7 +5675,9 @@ impl RecoveredArtifactInventory {
                 .iter()
                 .map(|binding| binding.artifact)
                 .collect::<BTreeSet<_>>()
-                != actual.keys().copied().collect()
+                != captured.entries.iter().filter_map(|(id, entry)| {
+                    (!matches!(entry.payload, ArtifactPayload::PackageCode(_))).then_some(*id)
+                }).collect()
             || edges.iter().cloned().collect::<BTreeSet<_>>().len() != edges.len()
             || edges
                 .iter()
@@ -5906,11 +5908,20 @@ impl RecoveredArtifactInventory {
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
                 .replace(snapshot.lexical())?,
         });
+        let acquired_packages = snapshot.native_package_artifacts_introduced(None).into_iter()
+            .map(|id| {
+                let entry = self.entries.get(&id)
+                    .ok_or_else(|| failure("recorded package occurrence lacks acquired product custody"))?;
+                let ArtifactPayload::PackageCode(product) = &entry.payload else {
+                    return Err(failure("recorded package occurrence references another payload kind"));
+                };
+                Ok((id, Arc::clone(product)))
+            }).collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let updated = context
             .owner
             .facts
             .compiler_support
-            .restore_snapshot_evidence(snapshot)?;
+            .restore_snapshot_evidence(snapshot, &acquired_packages)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
         context = context.finish()?;
         context.bind_snapshot_baseline(acquired)?;
@@ -13786,7 +13797,7 @@ impl ExactDeclarationContext {
             .collect()
     }
 
-    /// Materialize exactly the requested payloads from this view. The run retains
+    /// Materialize exactly the requested payloads from this context's custody. The run retains
     /// previously published references; this batch does not issue compiler roles.
     pub fn materialize_recovery_artifacts(
         &self,
@@ -13796,12 +13807,15 @@ impl ExactDeclarationContext {
         if artifacts.is_empty() {
             return Ok(Vec::new());
         }
-        let entries = self
+        let packages = self.owner.facts.compiler_support.selected_package_products(artifacts)?;
+        let selected = artifacts.iter().filter(|id| !packages.contains_key(id)).copied().collect();
+        let mut entries = self
             .owner
             .facts
             .compiler_support
             .artifacts()
-            .entries_for_artifacts(artifacts)?;
+            .entries_for_artifacts(&selected)?;
+        entries.extend(packages.into_values().map(|product| Arc::new(ArtifactEntry::package_code(product))));
         self.materialize_recovery_entries(root, &entries)
     }
 
@@ -14013,11 +14027,17 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .recorded_input_decisions()
                 .clone(),
+            native_components: self
+                .owner
+                .facts
+                .compiler_support
+                .native_component_records()
+                .clone(),
             native_closures: self
                 .owner
                 .facts
                 .compiler_support
-                .native_completion_facts()
+                .native_closure_records()
                 .clone(),
         }
     }
@@ -14040,7 +14060,9 @@ impl ExactDeclarationContext {
             || self.snapshot().offers != snapshot.offers
             || self.owner.facts.compiler_support.recorded_input_decisions()
                 != &snapshot.input_decisions
-            || self.owner.facts.compiler_support.native_completion_facts()
+            || self.owner.facts.compiler_support.native_component_records()
+                != &snapshot.native_components
+            || self.owner.facts.compiler_support.native_closure_records()
                 != &snapshot.native_closures
         {
             return Err(failure(
@@ -27090,7 +27112,7 @@ mod tests {
         .unwrap()
         .retain_custody(&retained)
         .unwrap()
-        .restore_snapshot_evidence(&snapshot)
+        .restore_snapshot_evidence(&snapshot, &BTreeMap::new())
         .unwrap();
         assert_eq!(
             support.input_decisions().recorded_facts(),
@@ -29515,7 +29537,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     .cloned(),
             )
             .unwrap()
-            .restore_snapshot_evidence(&issued.snapshot())
+            .restore_snapshot_evidence(&issued.snapshot(), &BTreeMap::new())
             .unwrap();
             assert_eq!(
                 support.input_decisions().recorded_facts(),

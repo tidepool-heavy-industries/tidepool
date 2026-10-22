@@ -16,12 +16,19 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,
-    CompilerInputRole, NativeCompletionSnapshotFacts, ScopeProofV3,
+    CompilerInputRole, ScopeProofV3,
 };
 use crate::declaration_context::{
     NativeAvailabilitySnapshotFacts, NativeContributionSnapshotFacts, NativeTransportMode,
 };
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
+
+mod native_components;
+pub(crate) use native_components::{
+    ImmutableNativeAcquiredClosureRecordRef, ImmutableNativeComponentRecordRef,
+    NativeAcquiredClosureRecordCodec, NativeAcquiredClosureRecords, NativeComponentRecordCodec,
+    NativeComponentRecords,
+};
 
 // Transport facts retain canonical tuple order; decoding never acquires a view.
 pub(crate) mod serde_ord_map {
@@ -1034,6 +1041,9 @@ pub struct SnapshotHydrator<'a, BS> {
     store: &'a BS,
     selections: RefCell<std::collections::BTreeMap<SelectionRoot, MaterializedSelection>>,
     scopes: RefCell<std::collections::BTreeMap<Cid, ImmutableScopeProofRef>>,
+    native_components: RefCell<std::collections::BTreeMap<Cid, ImmutableNativeComponentRecordRef>>,
+    native_closures:
+        RefCell<std::collections::BTreeMap<Cid, ImmutableNativeAcquiredClosureRecordRef>>,
 }
 impl<'a, BS: Blockstore> SnapshotHydrator<'a, BS> {
     fn new(store: &'a BS) -> Self {
@@ -1042,6 +1052,8 @@ impl<'a, BS: Blockstore> SnapshotHydrator<'a, BS> {
             store,
             selections: RefCell::new(Default::default()),
             scopes: RefCell::new(Default::default()),
+            native_components: RefCell::new(Default::default()),
+            native_closures: RefCell::new(Default::default()),
         }
     }
     fn selection(&self, root: &SelectionRoot) -> Result<MaterializedSelection, SnapshotError> {
@@ -2354,7 +2366,8 @@ pub struct ExactContextSnapshot {
     pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
     pub(crate) input_decisions:
         OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
-    pub(crate) native_completions: OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>>,
+    pub(crate) native_components: NativeComponentRecords,
+    pub(crate) native_closures: NativeAcquiredClosureRecords,
 }
 impl ExactContextSnapshot {
     pub(crate) fn native_offers(&self) -> impl Iterator<Item = &NativeOfferSnapshotFacts> {
@@ -2368,6 +2381,27 @@ impl ExactContextSnapshot {
     }
     pub fn selection(&self) -> &Arc<ExactSelectionSnapshot> {
         &self.selection
+    }
+    /// Exact product custody required by the recorded acquired occurrences.
+    /// These IDs select payload references, never executable scope bindings.
+    pub fn native_package_artifacts_introduced(
+        &self,
+        base: Option<&Self>,
+    ) -> std::collections::BTreeSet<ArtifactId> {
+        let empty = OrdMap::new();
+        base.map(|base| &base.native_closures)
+            .unwrap_or(&empty)
+            .diff(&self.native_closures)
+            .filter_map(|change| match change {
+                DiffItem::Add(_, record)
+                | DiffItem::Update {
+                    new: (_, record), ..
+                } => Some(record),
+                DiffItem::Remove(_, _) => None,
+            })
+            .flat_map(|record| record.facts().package_receipts.iter())
+            .flat_map(|receipt| receipt.occurrences.iter().map(|row| row.product))
+            .collect()
     }
     pub fn graph_selection(&self) -> Result<ArtifactGraphSelection, SnapshotError> {
         self.selection.graph_selection()
@@ -2605,31 +2639,6 @@ impl SnapshotValueCodec<crate::artifact_inventory::RecordedInputNativeDecision>
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct NativeCompletionCodec;
-impl SnapshotValueCodec<Arc<NativeCompletionSnapshotFacts>> for NativeCompletionCodec {
-    type Wire = Cid;
-    fn encode<BS: Blockstore>(
-        store: &mut Materializer<'_, BS>,
-        facts: &Arc<NativeCompletionSnapshotFacts>,
-    ) -> Result<Cid, SnapshotError> {
-        if facts.version != 1 {
-            return Err(malformed("native completion encoding requires version 1"));
-        }
-        store.materialize_value(facts.as_ref())
-    }
-    fn decode<BS: Blockstore>(
-        store: &SnapshotHydrator<'_, BS>,
-        cid: Cid,
-    ) -> Result<Arc<NativeCompletionSnapshotFacts>, SnapshotError> {
-        let facts: NativeCompletionSnapshotFacts = read_value(store, &cid)?;
-        if facts.version != 1 {
-            return Err(malformed("native completion encoding requires version 1"));
-        }
-        Ok(Arc::new(facts))
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicationNativeDescriptor {
@@ -2751,7 +2760,7 @@ fn hydrate_publication_native<BS: Blockstore>(
     Ok(facts)
 }
 
-const CONTEXT_ENCODING_VERSION: u32 = 7;
+const CONTEXT_ENCODING_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2764,7 +2773,8 @@ struct ContextDescriptor {
     offers: SnapshotMapRoot,
     native_availability: SnapshotMapRoot,
     input_decisions: SnapshotMapRoot,
-    native_completions: SnapshotMapRoot,
+    native_components: SnapshotMapRoot,
+    native_closures: SnapshotMapRoot,
 }
 #[derive(Clone, Debug)]
 pub struct MaterializedContext {
@@ -2785,8 +2795,13 @@ pub struct MaterializedContext {
         crate::artifact_inventory::RecordedInputNativeDecision,
         InputNativeDecisionCodec,
     >,
-    native_completions:
-        MaterializedMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>, NativeCompletionCodec>,
+    native_components:
+        MaterializedMap<[u8; 32], ImmutableNativeComponentRecordRef, NativeComponentRecordCodec>,
+    native_closures: MaterializedMap<
+        [u8; 32],
+        ImmutableNativeAcquiredClosureRecordRef,
+        NativeAcquiredClosureRecordCodec,
+    >,
 }
 impl MaterializedContext {
     pub fn root(&self) -> &ContextRoot {
@@ -2828,9 +2843,13 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.input_decisions),
             &next.input_decisions,
         )?;
-        let native_completions = self.materialize_map_with::<_, _, NativeCompletionCodec>(
-            base.map(|base| &base.native_completions),
-            &next.native_completions,
+        let native_components = self.materialize_map_with::<_, _, NativeComponentRecordCodec>(
+            base.map(|base| &base.native_components),
+            &next.native_components,
+        )?;
+        let native_closures = self.materialize_map_with::<_, _, NativeAcquiredClosureRecordCodec>(
+            base.map(|base| &base.native_closures),
+            &next.native_closures,
         )?;
         let descriptor = ContextDescriptor {
             version: CONTEXT_ENCODING_VERSION,
@@ -2841,7 +2860,8 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
             input_decisions: input_decisions.root.clone(),
-            native_completions: native_completions.root.clone(),
+            native_components: native_components.root.clone(),
+            native_closures: native_closures.root.clone(),
         };
         let root = if base.is_some_and(|base| {
             base.snapshot.producer == next.producer
@@ -2851,7 +2871,8 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 && base.offers.root == offers.root
                 && base.native_availability.root == native_availability.root
                 && base.input_decisions.root == input_decisions.root
-                && base.native_completions.root == native_completions.root
+                && base.native_components.root == native_components.root
+                && base.native_closures.root == native_closures.root
         }) {
             base.expect("equal context implies base").root.clone()
         } else {
@@ -2866,7 +2887,8 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             offers,
             native_availability,
             input_decisions,
-            native_completions,
+            native_components,
+            native_closures,
         })
     }
 }
@@ -2923,15 +2945,14 @@ pub fn hydrate_context<BS: Blockstore>(
     }
     let input_decisions =
         hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(store, &descriptor.input_decisions)?;
-    let native_completions =
-        hydrate_map_owned::<_, _, NativeCompletionCodec, _>(store, &descriptor.native_completions)?;
-    for (identity, facts) in &native_completions.facts {
-        if *identity != facts.identity().map_err(malformed)? {
-            return Err(malformed(
-                "native completion key differs from its issued facts",
-            ));
-        }
-    }
+    let native_components = hydrate_map_owned::<_, _, NativeComponentRecordCodec, _>(
+        store,
+        &descriptor.native_components,
+    )?;
+    let native_closures = hydrate_map_owned::<_, _, NativeAcquiredClosureRecordCodec, _>(
+        store,
+        &descriptor.native_closures,
+    )?;
     let native_fact_owner = Some(PublicationNativeFacts::maintain(
         None,
         PublicationNativeMaps {
@@ -2949,7 +2970,8 @@ pub fn hydrate_context<BS: Blockstore>(
         offers: offers.facts.clone(),
         native_availability: native_availability.facts.clone(),
         input_decisions: input_decisions.facts.clone(),
-        native_completions: native_completions.facts.clone(),
+        native_components: native_components.facts.clone(),
+        native_closures: native_closures.facts.clone(),
         lexical: ExactLexicalSnapshot {
             facts: lexical.facts.clone(),
             rows: Arc::new(OnceLock::new()),
@@ -2964,7 +2986,8 @@ pub fn hydrate_context<BS: Blockstore>(
         offers,
         native_availability,
         input_decisions,
-        native_completions,
+        native_components,
+        native_closures,
     })
 }
 

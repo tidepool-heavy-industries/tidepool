@@ -128,11 +128,13 @@ fn hydrate_context_roots(
     let mut receipts = Vec::new();
     let mut bindings = BTreeSet::new();
     let mut edges = BTreeSet::new();
+    let mut package_products = BTreeSet::new();
     for root in demanded {
         let receipt = graph
             .acquire_context(&root)
             .map_err(|error| recovery::graph_error(&owner.path, error))?;
         let snapshot = receipt.snapshot();
+        package_products.extend(snapshot.native_package_artifacts_introduced(None));
         let selection = snapshot
             .graph_selection()
             .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?;
@@ -144,10 +146,11 @@ fn hydrate_context_roots(
         );
         receipts.push((root, receipt));
     }
-    let artifacts = bindings
+    let mut artifacts = bindings
         .iter()
         .map(|binding| binding.artifact)
         .collect::<BTreeSet<_>>();
+    artifacts.extend(package_products);
     let mut references = Vec::new();
     let mut descriptors = Vec::new();
     for id in artifacts {
@@ -556,7 +559,10 @@ impl SessionLib {
                 external_imports: SourceImports::new(),
                 sources: Vec::new(),
                 workbench_imports: SourceImports::from_specs(imports),
-                items: evidence.exports().iter().map(ExportItem::try_from)
+                items: evidence
+                    .exports()
+                    .iter()
+                    .map(ExportItem::try_from)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| invalid(error.to_string()))?,
                 value_types: BTreeMap::new(),
