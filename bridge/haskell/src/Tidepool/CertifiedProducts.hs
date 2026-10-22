@@ -352,6 +352,59 @@ data Product = Product
 type BinderOwner = (T.Text, T.Text, Maybe T.Text, Word)
 type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
 
+-- Keep one counterexample, rather than retaining or rendering whole inventories.
+-- These causes are private to certification; the worker keeps its existing error
+-- transport and renders the selected cause only when returning a refusal.
+data OriginalInventoryRefusal
+  = ConflictingInterfaceSeals (T.Text,T.Text) Int [T.Text]
+  | PriorInterfaceSealConflict (T.Text,T.Text) T.Text T.Text
+  | MissingFreshSourceEvidence (T.Text,T.Text)
+  | MissingFreshSignature (T.Text,T.Text) Word SymbolIdentity Word32 Int
+  | DuplicateOriginalBinder SymbolIdentity BinderOwner BinderOwner
+  | PriorBinderOwnerConflict SymbolIdentity BinderOwner BinderOwner
+  | PriorOriginalReferenceConflict SymbolIdentity WorldOriginalReference WorldOriginalReference
+  | OriginalBinderReferenceConflict SymbolIdentity BinderOwner WorldOriginalReference
+  | PriorNativeOwnerConflict (T.Text,T.Text) (Maybe BinderOwner) (Maybe BinderOwner)
+
+renderOriginalInventoryRefusal :: OriginalInventoryRefusal -> String
+renderOriginalInventoryRefusal refusal = case refusal of
+  ConflictingInterfaceSeals owner count seals ->
+    "conflicting original interface owner seals: owner=" ++ show owner
+      ++ "; expected count=1; observed count=" ++ show count
+      ++ "; first seals=" ++ show seals
+  PriorInterfaceSealConflict owner expected observed ->
+    "prior original interface owner seal changed: owner=" ++ show owner
+      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+  MissingFreshSourceEvidence owner ->
+    "fresh original lacks ready source evidence: owner=" ++ show owner
+  MissingFreshSignature owner ordinal binder index count ->
+    "fresh original signature is out of range: owner=" ++ show owner
+      ++ "; group=" ++ show ordinal ++ "; binder=" ++ show binder
+      ++ "; signature=" ++ show index ++ "; signature count=" ++ show count
+  DuplicateOriginalBinder binder first second ->
+    "duplicate current original binder: binder=" ++ show binder
+      ++ "; first=" ++ show first ++ "; second=" ++ show second
+  PriorBinderOwnerConflict binder expected observed ->
+    "prior original binder owner changed: binder=" ++ show binder
+      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+  PriorOriginalReferenceConflict binder expected observed ->
+    "prior original reference changed: binder=" ++ show binder
+      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+  OriginalBinderReferenceConflict binder owner reference ->
+    "current original binder collides with an original reference: binder=" ++ show binder
+      ++ "; owner=" ++ show owner ++ "; reference=" ++ show reference
+  PriorNativeOwnerConflict owner expected observed ->
+    "native original owner was already certified by a prior stage: owner=" ++ show owner
+      ++ "; prior group=" ++ show expected ++ "; current group=" ++ show observed
+
+duplicateOriginalBinder :: [(SymbolIdentity,BinderOwner)] -> Maybe OriginalInventoryRefusal
+duplicateOriginalBinder = visit Map.empty
+  where
+    visit _ [] = Nothing
+    visit seen ((binder,owner):rest) = case Map.lookup binder seen of
+      Just previous -> Just (DuplicateOriginalBinder binder previous owner)
+      Nothing -> visit (Map.insert binder owner seen) rest
+
 -- An owner has the witnessed binder already carried by its global. Coordinates
 -- remain independent: a source group's owner need not be the binder's module.
 data OwnerCoordinate
@@ -489,13 +542,15 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
         Nothing -> fmap (fmap snd) (resolveGlobal identity)
   let freshEvidenceSha = digest evidenceBytes
       freshProductSha = digest productBytes
-      freshProducts = catMaybes
+      freshProductResults =
         [ do
-            let original = Map.lookup (T.unpack unit,T.unpack name) retained
+            let owner = (unit,name)
+                original = Map.lookup (T.unpack unit,T.unpack name) retained
             sourceSha <- case original of
-              Nothing -> readyNativeProductSourceSha256 evidence (T.unpack unit) (T.unpack name)
-              Just proof -> Just (T.pack (canonicalSourceSha256 proof))
-            groups <- traverse freshGroup projected
+              Nothing -> maybe (Left (MissingFreshSourceEvidence owner)) Right
+                (readyNativeProductSourceSha256 evidence (T.unpack unit) (T.unpack name))
+              Just proof -> Right (T.pack (canonicalSourceSha256 proof))
+            groups <- traverse (freshGroup owner) projected
             pure Product
               { productOrigin = maybe FreshProduct (const RetainedCoreProduct) original, productUnit = unit, productModule = name
               , productVersion = Nothing, productSourceSha = sourceSha
@@ -506,6 +561,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
               , productGroups = groups
               }
         | (unit, name, iface, projected) <- fresh ]
+      freshProducts = [product | Right product <- freshProductResults]
       cachedProducts =
         [ Product
           { productOrigin = CachedProduct
@@ -532,9 +588,6 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
       selectedSeals key = case Map.lookup key interfaceSeals of
         Just seals -> Just seals
         Nothing -> Set.singleton <$> Map.lookup key previousSeals
-      priorSealConflicts = Map.mapWithKey (\key seals -> case Map.lookup key previousSeals of
-        Nothing -> False
-        Just sha -> seals /= Set.singleton sha) interfaceSeals
   sealedProducts <- forM unsealedProducts $ \product -> do
     let owner = mkModule (stringToUnit (T.unpack (productUnit product))) (mkModuleName (T.unpack (productModule product)))
     selected <- case Map.lookup (moduleName owner) interfaces of
@@ -566,7 +619,6 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
             ++ "; selected seals=" ++ show (maybe [] Set.toAscList missingSeals))
       Right product { productInterfaces = requirements }
   let products = [product | Right product <- sealedProducts]
-      expectedFresh = length fresh
       admittedBinders =
         [ (binder, (T.pack (originalUnit product), T.pack (originalModule product),
                     Just (T.pack (originalVersion product)), originalOrdinal group))
@@ -580,11 +632,9 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
       freshOwnerMap = Map.fromList binders
       previousReferences = maybe Map.empty targetOriginalReferences prior
       originalReferences = Map.union currentReferences previousReferences
-      referenceConflicts = Map.intersectionWith (/=) currentReferences previousReferences
       priorOwners = maybe Map.empty targetBinderOwners prior
       ownerMap = Map.union freshOwnerMap priorOwners
       nativeOwners = Set.fromList [(productUnit product,productModule product) | product <- products]
-      binderConflicts = Map.intersectionWith (/=) freshOwnerMap priorOwners
       homeModules = Set.union (maybe Set.empty targetHomeModules prior) $ Set.fromList (
         [ (T.pack (dependencyModuleUnit node), T.pack (dependencyModuleName node))
         | node <- dependencyModules evidence, not (dependencyModuleBoot node) ]
@@ -594,20 +644,40 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
            | scope <- maybe [] pure exact, iface <- scopeValueInterfaces scope])
       allGlobals =
         [ (product, group) | product <- products, group <- productGroups product ]
-  if any ((/= 1) . Set.size) (Map.elems interfaceSeals)
-      || or (Map.elems priorSealConflicts)
-      || length products /= length unsealedProducts
-      || length freshProducts /= expectedFresh
-      || length binders /= Map.size freshOwnerMap
-      || or (Map.elems binderConflicts)
-      || or (Map.elems referenceConflicts)
-      || not (Set.null (Map.keysSet freshOwnerMap `Set.intersection` Map.keysSet originalReferences))
-      || not (Set.null (Set.intersection nativeOwners (maybe Set.empty targetNativeOwners prior)))
-    then pure (Left (case [reason | Left reason <- sealedProducts] of
-      reason : _ -> reason
-      [] | any ((/= 1) . Set.size) (Map.elems interfaceSeals) -> "conflicting original interface owner seals"
-         | otherwise -> "incomplete fresh source or duplicate original binder inventory"))
-    else do
+      inventoryRefusals =
+        [ConflictingInterfaceSeals owner (Set.size seals) (take 2 (Set.toAscList seals))
+        | (owner,seals) <- Map.toAscList interfaceSeals
+        , Set.size seals /= 1]
+        ++ [PriorInterfaceSealConflict owner expected observed
+           | (owner,seals) <- Map.toAscList interfaceSeals
+           , Just expected <- [Map.lookup owner previousSeals]
+           , observed : _ <- [Set.toAscList (Set.delete expected seals)]]
+        ++ [reason | Left reason <- freshProductResults]
+        ++ [reason | length binders /= Map.size freshOwnerMap
+           , Just reason <- [duplicateOriginalBinder binders]]
+        ++ [PriorBinderOwnerConflict binder expected observed
+           | (binder,observed) <- Map.toAscList freshOwnerMap
+           , Just expected <- [Map.lookup binder priorOwners], observed /= expected]
+        ++ [PriorOriginalReferenceConflict binder expected observed
+           | (binder,observed) <- Map.toAscList currentReferences
+           , Just expected <- [Map.lookup binder previousReferences], observed /= expected]
+        ++ [OriginalBinderReferenceConflict binder owner reference
+           | (binder,owner) <- Map.toAscList freshOwnerMap
+           , Just reference <- [Map.lookup binder originalReferences]]
+        ++ [PriorNativeOwnerConflict owner
+              (find (\(unit,name,_,_) -> (unit,name) == owner)
+                (Map.keys (maybe Map.empty targetGroupWitnesses prior)))
+              (case productGroups product of
+                group : _ -> Just (productUnit product,productModule product,
+                  productVersion product,candidateGroupOrdinal group)
+                [] -> Nothing)
+           | product <- products
+           , let owner = (productUnit product,productModule product)
+           , owner `Set.member` maybe Set.empty targetNativeOwners prior]
+  case [reason | Left reason <- sealedProducts]
+      ++ map renderOriginalInventoryRefusal inventoryRefusals of
+    reason : _ -> pure (Left reason)
+    [] -> do
       modules <- forM allGlobals $ \(product, group) -> do
         globals <- forM (candidateGroupGlobals group) $ \global ->
           encodeGlobalWitness env resolvePackage packageRef originalReferences ownerMap homeModules
@@ -1026,14 +1096,16 @@ certifyLocalPackageExports env resolvePackage packageRef programs = do
         ((symbolUnit identity, symbolModule identity, packagePath witness,
           T.pack (packageSha256 witness)) :)
 
-freshGroup :: ProjectedGroup -> Maybe CandidateGroup
-freshGroup group = do
+freshGroup :: (T.Text,T.Text) -> ProjectedGroup -> Either OriginalInventoryRefusal CandidateGroup
+freshGroup owner group = do
   let body = projectedBody group
   globals <- traverse (\global -> do
     signature <- case globalEntrySignature global of
-      Nothing -> Just Nothing
-      Just (SignatureId index) -> Just <$> at
-        (projectedSignatures body) (fromIntegral index)
+      Nothing -> Right Nothing
+      Just (SignatureId index) -> fmap Just $ maybe
+        (Left (MissingFreshSignature owner (fromIntegral (projectedOriginalOrdinal group))
+          (globalIdentity global) index (length (projectedSignatures body)))) Right
+        (at (projectedSignatures body) (fromIntegral index))
     pure CandidateGlobal
       { candidateGlobalIdentity = globalIdentity global
       , candidateGlobalRep = globalRep global
