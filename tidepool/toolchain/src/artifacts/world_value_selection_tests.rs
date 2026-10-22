@@ -82,6 +82,26 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             .expect("second target owner");
         let first_bindings = first.target.artifacts().selected_native_binding_rows().1;
         let second_bindings = second.target.artifacts().selected_native_binding_rows().1;
+        let first_packages = first
+            .target
+            .completed_selection()
+            .expect("first item has package completion")
+            .target_imports()
+            .iter()
+            .filter_map(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding, ..
+                } => Some((
+                    binding.product().code().owner().unit.clone(),
+                    binding.product().code().owner().module.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !first_packages.is_empty(),
+            "the World declaration item must carry its actual Data.Text package roots"
+        );
         assert!(
             !first_bindings.is_empty(),
             "first item selects executable code"
@@ -103,6 +123,159 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         });
         assert_eq!(requires_operand, used);
     }
+}
+
+#[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_package_occurrence_linkage_tests owns it"]
+fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
+    let ((endpoint, world, source, prepared), admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world()?;
+        let checked = prepare_package_checked(
+            &endpoint,
+            &world,
+            &source,
+            include_str!("../../tests/fixtures/world-native/PackageWorldItem.hs"),
+            &[(41, "supplied")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        assert_eq!(checked.stages()[0].ordinals(), &[0]);
+        let prepared = prepare_world_cell_program(checked)?;
+        Ok((endpoint, world, source, prepared))
+    });
+    let first = prepared
+        .seal(&admission)
+        .expect("package-using World item reaches native END");
+    assert_eq!(first.items().len(), 1);
+    let products = first.items()[0]
+        .native_products()
+        .expect("package item owns native products");
+    let selection = products
+        .completed_native_selection()
+        .expect("package item owns its exact completed selection");
+    assert_eq!(
+        products
+            .native_source_products()
+            .expect("item source products resolve through the item issuer")
+            .target()
+            .definitions()
+            .globals()
+            .len(),
+        selection.target_imports().len(),
+        "the item target has exactly one selected link per physical global"
+    );
+    let package_roots = selection
+        .target_imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeTargetImport::Package { binding, .. } => {
+                Some(format!(
+                    "{}:{}",
+                    binding.product().code().owner().unit,
+                    binding.product().code().owner().module
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        package_roots.len(),
+        3,
+        "Data.List.sort retains its three ordered package roots: {package_roots:?}"
+    );
+    assert!(
+        package_roots.iter().all(|owner| owner.ends_with("Resume")),
+        "the ordered roots retain their issued package owner: {package_roots:?}"
+    );
+    let home_rows = selection
+        .completion()
+        .rows()
+        .filter(|row| {
+            row.imports()
+                .iter()
+                .filter_map(|import| match import {
+                    crate::artifact_inventory::CompletedNativeImport::Package {
+                        binding,
+                        ..
+                    } => Some(binding.product().code().owner().module.as_str()),
+                    _ => None,
+                })
+                .eq(["GHC.Classes", "GHC.Internal.Data.OldList"])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(home_rows.len(), 1, "one package-using HOME declaration");
+    let home = home_rows[0];
+    assert_eq!(home.binding().original_ordinal, 0);
+    let home_packages = home
+        .imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
+                Some(binding)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(home_packages.len(), 2);
+    assert_eq!(
+        home_packages[0].product().code().owner().module,
+        "GHC.Classes"
+    );
+    assert_eq!(
+        home_packages[1].product().code().owner().module,
+        "GHC.Internal.Data.OldList"
+    );
+    assert_eq!(home_packages[1].imports().len(), 2);
+    let execution = first.items()[0]
+        .native()
+        .expect("package input item is executable")
+        .clone();
+    let operand = CompilerWorldCellOperand::from_checked_host_execution(
+        &world,
+        WorldCellOperandExposure::Input,
+        1,
+        &execution,
+    )
+    .expect("the package result is captured by the later-cell operand owner");
+    let (prepared, admission) = settle(|| {
+        let body = include_str!("../../tests/fixtures/world-native/PackageWorldConsumer.hs")
+            .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence);
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            &body,
+            Some(operand),
+            &[(51, "laterValue")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        assert_eq!(checked.stages()[0].ordinals(), &[0]);
+        prepare_world_cell_program(checked)
+    });
+    let later = prepared
+        .seal(&admission)
+        .expect("later World cell consumes the package-derived value");
+    assert_eq!(later.items().len(), 1);
+    let later_products = later.items()[0]
+        .native_products()
+        .expect("later item owns native products");
+    assert!(
+        later_products
+            .completed_native_selection()
+            .expect("later item owns its exact completion")
+            .target_imports()
+            .iter()
+            .all(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding,
+                    ..
+                } => {
+                    let module = &binding.product().code().owner().module;
+                    module != "GHC.Classes" && module != "GHC.Internal.Data.OldList"
+                }
+                _ => true,
+            }),
+        "the later cell consumes the issued value, not a package import chosen by name"
+    );
 }
 
 #[test]
@@ -240,6 +413,36 @@ fn prepare_checked(
             include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
         ),
     };
+    prepare_checked_with_template(endpoint, world, source, body, operand, values, template)
+}
+
+fn prepare_package_checked(
+    endpoint: &AdmittedCompilerEndpoint,
+    world: &Arc<CompilerWorld>,
+    source: &WorldSourceSelection,
+    body: &str,
+    values: &[(u64, &str)],
+) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
+    prepare_checked_with_template(
+        endpoint,
+        world,
+        source,
+        body.into(),
+        None,
+        values,
+        include_str!("../../tests/fixtures/world-native/PackageCellTemplate.hs").into(),
+    )
+}
+
+fn prepare_checked_with_template(
+    endpoint: &AdmittedCompilerEndpoint,
+    world: &Arc<CompilerWorld>,
+    source: &WorldSourceSelection,
+    body: String,
+    operand: Option<Arc<CompilerWorldCellOperand>>,
+    values: &[(u64, &str)],
+    template: String,
+) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
     let plan = crate::compiler_world::plan_cell(
         endpoint,
         world,
@@ -342,8 +545,13 @@ fn assert_physical_selection(
                 .is_some_and(|path| path.ends_with(".prepared.cbor"))
         })
         .expect("actual prepared bytes");
+    let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
+    let program_sha256: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(prepared_bytes.as_ref()).into()
+    };
     let target = tidepool_repr::execution_schema::parse_program(
-        crate::checked_cell::world_output_bytes(checked, &relative.join(path))?,
+        prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
@@ -362,10 +570,14 @@ fn assert_physical_selection(
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let result =
-            segment
-                .originals
-                .select_item(&mut cursor, receipt, &target, selected, &mut validation);
+        let result = segment.originals.select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            selected,
+            &mut validation,
+        );
         assert!(matches!(
             result,
             Err(certified_products::CertificationError::Mismatch(
@@ -388,6 +600,7 @@ fn assert_physical_selection(
             &mut cursor,
             receipt,
             &target,
+            &program_sha256,
             Some(&later_selector),
             &mut validation,
         ),
@@ -402,9 +615,16 @@ fn assert_physical_selection(
         &validation.inventory,
     )
     .map_err(compiler_evidence_failure)?;
-    let (certified, _, _) = segment
+    let (certified, _, _, _) = segment
         .originals
-        .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation)
+        .select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            Some(&first),
+            &mut validation,
+        )
         .map_err(compiler_evidence_failure)?;
     let receipt = certified_products::decode_segment_item_with_operation(
         crate::checked_cell::world_output_bytes(
@@ -415,9 +635,14 @@ fn assert_physical_selection(
     )
     .map_err(compiler_evidence_failure)?;
     assert!(matches!(
-        segment
-            .originals
-            .select_item(&mut cursor, receipt, &target, Some(&first), &mut validation,),
+        segment.originals.select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            Some(&first),
+            &mut validation,
+        ),
         Err(certified_products::CertificationError::OriginalClosure(_))
     ));
     let current = physical.current_interface(51)?.artifact_id();
@@ -458,8 +683,13 @@ fn assert_physical_selection(
                 .is_some_and(|path| path.ends_with(".prepared.cbor"))
         })
         .expect("actual second prepared bytes");
+    let prepared_bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
+    let second_program_sha256: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(prepared_bytes.as_ref()).into()
+    };
     let target = tidepool_repr::execution_schema::parse_program(
-        crate::checked_cell::world_output_bytes(checked, &relative.join(path))?,
+        prepared_bytes,
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
     )?;
@@ -471,12 +701,13 @@ fn assert_physical_selection(
         &validation.inventory,
     )
     .map_err(compiler_evidence_failure)?;
-    let (second, _, _) = segment
+    let (second, _, _, _) = segment
         .originals
         .select_item(
             &mut cursor,
             receipt,
             &target,
+            &second_program_sha256,
             Some(&later_selector),
             &mut validation,
         )

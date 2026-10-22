@@ -2056,7 +2056,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                 output <- BS.readFile (worldCellPrepareOutput prepareRequest)
                 certificate <- BS.readFile (directory </> "stage-0" </> "certified-products.cbor")
                 case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
-                  Right (remaining,TList [TString "TPCERT",TInt 12,TList
+                  Right (remaining,TList [TString "TPCERT",TInt 13,TList
                     [TString "segment-originals",_,_,_,_,TList
                       [TString "world-unavailable",TBytes base,TBytes domain,TString "unsupported-source-recipe"],_,TList _,_]])
                     | BL.null remaining,base == worldInputsIdentityBytes facts

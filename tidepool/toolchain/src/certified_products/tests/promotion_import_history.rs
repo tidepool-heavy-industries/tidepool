@@ -943,16 +943,17 @@ fn check_retained_core_promotion_history(item_count: usize) {
     let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
         globals: vec![],
         packages: BTreeMap::new(),
-        package_products: vec![],
+        selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
     }));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
     let prepared = testing::prepare(testing::wire_program()).unwrap();
     for item in 0..item_count {
-        let (selected, globals, additions) = shared
+        let (selected, globals, additions, _) = shared
             .select_item(
                 &mut cursor,
                 decode_segment_item_with_operation(&empty_delta, &validation.inventory).unwrap(),
                 &prepared,
+                &[0; 32],
                 None,
                 &mut validation,
             )
@@ -1038,12 +1039,19 @@ fn check_retained_core_promotion_history(item_count: usize) {
             sha256: sha(&payload),
         };
         let addition = || SegmentItemReceipt {
-            package_products: Vec::new(),
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
+            selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
         };
-        let (selected, globals, packages) = shared
-            .select_item(&mut cursor, addition(), &target, None, &mut validation)
+        let (selected, globals, packages, _) = shared
+            .select_item(
+                &mut cursor,
+                addition(),
+                &target,
+                &[0; 32],
+                None,
+                &mut validation,
+            )
             .unwrap();
         assert_eq!(packages.len(), 1);
         assert!(packages.contains_key(&owner));
@@ -1071,15 +1079,19 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 if binder == &identity && *interface_digest == witness.sha256
         ));
         assert!(admitted.artifacts().selected_native_groups().is_empty());
-        let (_, _, next_packages) = shared
+        let (_, _, next_packages, _) = shared
             .select_item(
                 &mut cursor,
                 SegmentItemReceipt {
-                    package_products: Vec::new(),
                     globals: vec![],
                     packages: BTreeMap::new(),
+                    selection: empty_package_selection(
+                        *shared.receipt.package_links.stage_id(),
+                        "item",
+                    ),
                 },
                 &prepared,
+                &[0; 32],
                 None,
                 &mut validation,
             )
@@ -1088,7 +1100,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let mut unused = addition();
         unused.globals.clear();
         assert!(matches!(
-            shared.select_item(&mut cursor, unused, &prepared, None, &mut validation),
+            shared.select_item(
+                &mut cursor,
+                unused,
+                &prepared,
+                &[0; 32],
+                None,
+                &mut validation
+            ),
             Err(CertificationError::Mismatch(
                 "item package has no target demand"
             ))
@@ -1096,7 +1115,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         std::fs::write(&path, [0xFF]).unwrap();
         let mut recapture = PackageInterfaceValidation::with_inventory(shared.operation().clone());
         assert!(matches!(
-            shared.select_item(&mut cursor, addition(), &target, None, &mut recapture),
+            shared.select_item(
+                &mut cursor,
+                addition(),
+                &target,
+                &[0; 32],
+                None,
+                &mut recapture,
+            ),
             Err(CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
             ))
@@ -1107,11 +1133,15 @@ fn check_retained_core_promotion_history(item_count: usize) {
         shared.select_item(
             &mut cursor,
             SegmentItemReceipt {
-                package_products: Vec::new(),
                 globals: vec![],
-                packages: BTreeMap::new()
+                packages: BTreeMap::new(),
+                selection: empty_package_selection(
+                    *shared.receipt.package_links.stage_id(),
+                    "item",
+                ),
             },
             &prepared,
+            &[0; 32],
             None,
             &mut other_validation,
         ),

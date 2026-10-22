@@ -1,8 +1,7 @@
--- P3 oracle fixture 3: repeated import slots over shared identical leaves.
---
--- `threeSorts` demands the same package symbol three times in one program
--- over three distinct arguments, so the target keeps three ordered slots over
--- one shared immutable body. Byte sharing must not erase slot multiplicity.
+-- P3 physical-dedup fixture: GHC deduplicates the three authored `sort`
+-- demands into one package global. This fixture does not establish receipt
+-- slot multiplicity; repeated wire roots are covered by the HOME target/root
+-- controls.
 module RepeatedSlots where
 
 import Data.List (sort)

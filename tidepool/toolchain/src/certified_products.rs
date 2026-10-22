@@ -17,8 +17,11 @@ use tidepool_repr::execution_schema::{
 };
 
 mod package_code;
-pub use package_code::{CertifiedPackageInterface, CertifiedPackageCodeProduct, RecoveryPackageCodeRef, RecoveryPackageInterfaceRef};
 pub(crate) use package_code::PackageInterfaceCustody;
+pub use package_code::{
+    CertifiedPackageCodeProduct, CertifiedPackageInterface, RecoveryPackageCodeRef,
+    RecoveryPackageInterfaceRef,
+};
 
 /// Legacy independent certification authenticates current selected paths. This
 /// is not used by completed native output, whose captured issuer is mandatory.
@@ -209,61 +212,73 @@ pub struct PackageProductOutput {
 /// and never becomes durable authority by itself. Runtime binding authority
 /// stays with `IssuedPackageCodeGraph` / `ScopeProofV3`.
 ///
-/// Wire (one paired value, version 1):
+/// Wire (one paired value, version 3):
 /// ```text
-/// [1, occurrences, target_roots, home_roots]
+/// [3, stage_id, occurrences, target_roots, home_roots, package_products]
 /// occurrence = [id, envelope_sha256, unit, module,
 ///               defining_interface_sha256, defining_version_sha256, imports]
-/// link = ["local", occurrence] | ["inherited"]
-/// target_roots = [[target_name, [link, ..]], ..]
-/// home_roots   = [[[unit, module, original_ordinal], [link, ..]], ..]
+/// link = ["local", occurrence]
+/// target_roots = [[target_name, [occurrence, ..]], ..]
+/// home_roots   = [[[target_name, unit, module, original_ordinal],
+///                  [occurrence, ..]], ..]
 /// ```
 /// Digest fields are raw 32-byte CBOR byte strings, matching `package_products`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PackageLinks {
+pub(crate) struct PackageLinks {
     version: u8,
-    occurrences: Vec<PackageOccurrenceRow>,
-    target_roots: BTreeMap<String, Vec<PackageLink>>,
-    home_roots: BTreeMap<(String, String, u32), Vec<PackageLink>>,
+    stage_id: [u8; 32],
+    occurrences: Arc<[PackageOccurrenceRow]>,
+    target_roots: Arc<BTreeMap<String, Vec<PackageLink>>>,
+    home_roots: Arc<BTreeMap<PackageHomeRootKey, Vec<PackageLink>>>,
+    products: Arc<[PackageProductOutput]>,
 }
 
 impl PackageLinks {
-    /// Empty, version-1 manifest used by fixtures and receipts without any
-    /// selected package occurrence. It is not production authority.
+    /// Empty, version-2 manifest used only by fixtures with no selected package
+    /// occurrence. Production construction is the bounded decoder below.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
-            version: 1,
-            occurrences: Vec::new(),
-            target_roots: BTreeMap::new(),
-            home_roots: BTreeMap::new(),
+            version: 3,
+            stage_id: [0; 32],
+            occurrences: Arc::from([]),
+            target_roots: Arc::new(BTreeMap::new()),
+            home_roots: Arc::new(BTreeMap::new()),
+            products: Arc::from([]),
         }
     }
 
-    pub fn version(&self) -> u8 {
-        self.version
+    #[cfg(test)]
+    pub(crate) fn empty_for_target(target: &str) -> Self {
+        Self {
+            version: 3,
+            stage_id: [0; 32],
+            occurrences: Arc::from([]),
+            target_roots: Arc::new(BTreeMap::from([(target.to_owned(), Vec::new())])),
+            home_roots: Arc::new(BTreeMap::new()),
+            products: Arc::from([]),
+        }
     }
-    pub fn occurrences(&self) -> &[PackageOccurrenceRow] {
+
+    #[cfg(test)]
+    fn occurrences(&self) -> &[PackageOccurrenceRow] {
         &self.occurrences
     }
-    pub fn target_roots(&self) -> &BTreeMap<String, Vec<PackageLink>> {
-        &self.target_roots
+
+    fn stage_id(&self) -> &[u8; 32] {
+        &self.stage_id
     }
-    pub fn home_roots(&self) -> &BTreeMap<(String, String, u32), Vec<PackageLink>> {
+
+    fn target_roots(&self, target: &str) -> Option<&[PackageLink]> {
+        self.target_roots.get(target).map(Vec::as_slice)
+    }
+
+    fn home_roots(&self) -> &BTreeMap<PackageHomeRootKey, Vec<PackageLink>> {
         &self.home_roots
     }
-    pub fn target_links(&self, name: &str) -> Option<&[PackageLink]> {
-        self.target_roots.get(name).map(Vec::as_slice)
-    }
-    pub fn home_links(
-        &self,
-        unit: &str,
-        module: &str,
-        original_ordinal: u32,
-    ) -> Option<&[PackageLink]> {
-        self.home_roots
-            .get(&(unit.to_owned(), module.to_owned(), original_ordinal))
-            .map(Vec::as_slice)
+
+    fn products(&self) -> &[PackageProductOutput] {
+        &self.products
     }
 }
 
@@ -305,19 +320,230 @@ impl PackageOccurrenceRow {
     }
 }
 
-/// A single ordered import destination. `Local` names an occurrence row by its
-/// positional `OccurrenceId`; `Inherited` is a demand marker resolved only to
-/// the exact held binding already carried in the inherited completions.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PackageLink {
+pub(crate) enum PackageLink {
     Local { occurrence: u32 },
-    Inherited,
 }
 
+impl PackageLink {
+    pub(crate) fn occurrence(&self) -> u32 {
+        let Self::Local { occurrence } = self;
+        *occurrence
+    }
+}
+
+/// A HOME package root is scoped to the exact target projection that issued it.
+/// A module can carry several original ordinals, and two targets can project the
+/// same owner through different package environments.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PackageHomeRootKey {
+    target: String,
+    unit: String,
+    module: String,
+    original_ordinal: u32,
+}
+
+/// One checked item's narrow reference into an authenticated stage manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PackageSelection {
+    stage_id: [u8; 32],
+    program_sha256: [u8; 32],
+    target: String,
+    target_roots: Vec<PackageLink>,
+    home_roots: BTreeMap<PackageHomeRootKey, Vec<PackageLink>>,
+}
+
+impl PackageSelection {
+    fn stage_id(&self) -> &[u8; 32] {
+        &self.stage_id
+    }
+
+    fn program_sha256(&self) -> &[u8; 32] {
+        &self.program_sha256
+    }
+}
+
+/// Opaque target-scoped package selection associated with one decoded receipt.
+/// The physical program is checked against this value at native admission. No
+/// caller can construct a selection from an arbitrary root vector.
+#[derive(Clone, Debug)]
+pub(crate) struct BoundPackageSelection {
+    mode: BoundPackageSelectionState,
+}
+
+#[derive(Clone, Debug)]
+enum BoundPackageSelectionState {
+    Ordinary {
+        target: String,
+        program_sha256: [u8; 32],
+        links: Arc<PackageLinks>,
+    },
+    Item {
+        program_sha256: [u8; 32],
+        links: Arc<PackageLinks>,
+        selection: PackageSelection,
+    },
+    HomeOrFixture {
+        links: Arc<PackageLinks>,
+    },
+}
+
+impl BoundPackageSelection {
+    pub(crate) fn ordinary(
+        links: &PackageLinks,
+        target: &str,
+        program_sha256: [u8; 32],
+    ) -> CertResult<Self> {
+        if links.target_roots(target).is_none() {
+            return Err(CertificationError::Receipt(
+                "ordinary package selection lacks its exact target",
+            ));
+        }
+        Ok(Self {
+            mode: BoundPackageSelectionState::Ordinary {
+                target: target.to_owned(),
+                program_sha256,
+                links: Arc::new(links.clone()),
+            },
+        })
+    }
+
+    pub(crate) fn item(
+        links: &PackageLinks,
+        selection: &PackageSelection,
+        program_sha256: [u8; 32],
+    ) -> CertResult<Self> {
+        if selection.stage_id() != links.stage_id() || selection.program_sha256() != &program_sha256
+        {
+            return Err(CertificationError::Receipt(
+                "item package selection references another stage or program",
+            ));
+        }
+        let stage_target_roots =
+            links
+                .target_roots(&selection.target)
+                .ok_or(CertificationError::Receipt(
+                    "item package target is absent from its stage manifest",
+                ))?;
+        if stage_target_roots != selection.target_roots {
+            return Err(CertificationError::Receipt(
+                "item package target roots differ from its stage manifest",
+            ));
+        }
+        let stage_home_roots = links
+            .home_roots()
+            .iter()
+            .filter(|(key, _)| key.target == selection.target)
+            .collect::<BTreeMap<_, _>>();
+        if stage_home_roots.len() != selection.home_roots.len()
+            || selection.home_roots.iter().any(|(key, roots)| {
+                stage_home_roots
+                    .get(key)
+                    .is_none_or(|stage_roots| *stage_roots != roots)
+            })
+        {
+            return Err(CertificationError::Receipt(
+                "item package HOME roots differ from its stage manifest",
+            ));
+        }
+        Ok(Self {
+            mode: BoundPackageSelectionState::Item {
+                program_sha256,
+                links: Arc::new(links.clone()),
+                selection: selection.clone(),
+            },
+        })
+    }
+
+    pub(crate) fn execution_target(&self) -> Option<&str> {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { target, .. } => Some(target),
+            BoundPackageSelectionState::Item { selection, .. } => Some(&selection.target),
+            BoundPackageSelectionState::HomeOrFixture { .. } => None,
+        }
+    }
+
+    pub(crate) fn occurrences(&self) -> &[PackageOccurrenceRow] {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { links, .. }
+            | BoundPackageSelectionState::Item { links, .. }
+            | BoundPackageSelectionState::HomeOrFixture { links } => &links.occurrences,
+        }
+    }
+
+    pub(crate) fn target_roots(&self) -> &[PackageLink] {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { target, links, .. } => {
+                links.target_roots.get(target).map_or(&[], Vec::as_slice)
+            }
+            BoundPackageSelectionState::Item { selection, .. } => &selection.target_roots,
+            BoundPackageSelectionState::HomeOrFixture { .. } => &[],
+        }
+    }
+
+    pub(crate) fn home_roots(
+        &self,
+        unit: &str,
+        module: &str,
+        original_ordinal: u32,
+    ) -> Option<&[PackageLink]> {
+        let (target, roots) = match &self.mode {
+            BoundPackageSelectionState::Ordinary { target, links, .. } => {
+                (target.as_str(), links.home_roots.as_ref())
+            }
+            BoundPackageSelectionState::Item { selection, .. } => {
+                (selection.target.as_str(), &selection.home_roots)
+            }
+            BoundPackageSelectionState::HomeOrFixture { .. } => return None,
+        };
+        roots
+            .get(&PackageHomeRootKey {
+                target: target.to_owned(),
+                unit: unit.to_owned(),
+                module: module.to_owned(),
+                original_ordinal,
+            })
+            .map(Vec::as_slice)
+    }
+
+    pub(crate) fn home_root_coordinates(&self) -> Vec<(String, String, u32)> {
+        let (target, roots) = match &self.mode {
+            BoundPackageSelectionState::Ordinary { target, links, .. } => {
+                (target.as_str(), links.home_roots.as_ref())
+            }
+            BoundPackageSelectionState::Item { selection, .. } => {
+                (selection.target.as_str(), &selection.home_roots)
+            }
+            BoundPackageSelectionState::HomeOrFixture { .. } => return Vec::new(),
+        };
+        roots
+            .keys()
+            .filter(|key| key.target == target)
+            .map(|key| (key.unit.clone(), key.module.clone(), key.original_ordinal))
+            .collect()
+    }
+
+    pub(crate) fn program_sha256(&self) -> [u8; 32] {
+        match &self.mode {
+            BoundPackageSelectionState::Ordinary { program_sha256, .. }
+            | BoundPackageSelectionState::Item { program_sha256, .. } => *program_sha256,
+            BoundPackageSelectionState::HomeOrFixture { .. } => [0; 32],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn home_fixture(links: Arc<PackageLinks>) -> Self {
+        Self {
+            mode: BoundPackageSelectionState::HomeOrFixture { links },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct SegmentItemReceipt {
-    pub package_products: Vec<PackageProductOutput>,
     pub globals: Vec<AcceptedGlobal>,
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
+    pub selection: PackageSelection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -329,6 +555,31 @@ pub struct CertifiedReceipt {
     pub packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     pub finalization: FinalizationEnvelope,
     pub source_recipe: WorkerExecutionSource,
+}
+
+impl CertifiedReceipt {
+    pub(crate) fn ordinary_package_selection(
+        &self,
+        target: &str,
+        program_sha256: [u8; 32],
+    ) -> CertResult<BoundPackageSelection> {
+        if !self.targets.contains_key(target) {
+            return Err(CertificationError::Receipt(
+                "ordinary package selection lacks its exact target",
+            ));
+        }
+        BoundPackageSelection::ordinary(&self.package_links, target, program_sha256)
+    }
+}
+
+impl SegmentItemReceipt {
+    pub(crate) fn package_selection(
+        &self,
+        stage: &CertifiedReceipt,
+        program_sha256: [u8; 32],
+    ) -> CertResult<BoundPackageSelection> {
+        BoundPackageSelection::item(&stage.package_links, &self.selection, program_sha256)
+    }
 }
 
 /// Untrusted worker result until the original product admission authenticates
@@ -359,6 +610,153 @@ pub enum SourceRecipeUnavailable {
 pub struct PackageInterfaceWitness {
     pub selected_path: PathBuf,
     pub sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PackageInterfaceSelectionKind {
+    Reuse,
+    NewSelection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PackageInterfaceIssuer {
+    Original(CachedHomeOwner),
+    CurrentOutput,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum InheritedPackageInterfaceCustody {
+    Issued {
+        issuer: PackageInterfaceIssuer,
+        token: Arc<CertifiedPackageInterface>,
+    },
+    Legacy,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InheritedPackageInterface {
+    witness: PackageInterfaceWitness,
+    custody: InheritedPackageInterfaceCustody,
+}
+
+impl InheritedPackageInterface {
+    fn issued(
+        witness: PackageInterfaceWitness,
+        issuer: PackageInterfaceIssuer,
+        token: Arc<CertifiedPackageInterface>,
+    ) -> Self {
+        Self {
+            witness,
+            custody: InheritedPackageInterfaceCustody::Issued { issuer, token },
+        }
+    }
+
+    fn legacy(witness: PackageInterfaceWitness) -> Self {
+        Self {
+            witness,
+            custody: InheritedPackageInterfaceCustody::Legacy,
+        }
+    }
+
+    pub(crate) fn witness(&self) -> &PackageInterfaceWitness {
+        &self.witness
+    }
+
+    fn custody(&self) -> &InheritedPackageInterfaceCustody {
+        &self.custody
+    }
+
+    #[cfg(test)]
+    fn token(&self) -> Option<&Arc<CertifiedPackageInterface>> {
+        match &self.custody {
+            InheritedPackageInterfaceCustody::Issued { token, .. } => Some(token),
+            InheritedPackageInterfaceCustody::Legacy => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn issuer(&self) -> Option<&PackageInterfaceIssuer> {
+        match &self.custody {
+            InheritedPackageInterfaceCustody::Issued { issuer, .. } => Some(issuer),
+            InheritedPackageInterfaceCustody::Legacy => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PackageInterfaceDecisionAction {
+    Reuse {
+        selected: PackageInterfaceWitness,
+        custody: InheritedPackageInterfaceCustody,
+    },
+    New,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PackageInterfaceDecision {
+    owner: (String, String),
+    observed: PackageInterfaceWitness,
+    action: PackageInterfaceDecisionAction,
+}
+
+impl PackageInterfaceDecision {
+    pub(crate) fn owner(&self) -> &(String, String) {
+        &self.owner
+    }
+
+    pub(crate) fn selected(&self) -> &PackageInterfaceWitness {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse { selected, .. } => selected,
+            PackageInterfaceDecisionAction::New => &self.observed,
+        }
+    }
+
+    pub(crate) fn observed(&self) -> &PackageInterfaceWitness {
+        &self.observed
+    }
+
+    pub(crate) fn token(&self) -> Option<&Arc<CertifiedPackageInterface>> {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Issued { token, .. },
+                ..
+            } => Some(token),
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Legacy,
+                ..
+            }
+            | PackageInterfaceDecisionAction::New => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issuer(&self) -> Option<&PackageInterfaceIssuer> {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Issued { issuer, .. },
+                ..
+            } => Some(issuer),
+            PackageInterfaceDecisionAction::Reuse {
+                custody: InheritedPackageInterfaceCustody::Legacy,
+                ..
+            }
+            | PackageInterfaceDecisionAction::New => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> PackageInterfaceSelectionKind {
+        match self.action {
+            PackageInterfaceDecisionAction::Reuse { .. } => PackageInterfaceSelectionKind::Reuse,
+            PackageInterfaceDecisionAction::New => {
+                PackageInterfaceSelectionKind::NewSelection
+            }
+        }
+    }
+
+    pub(crate) fn is_new(&self) -> bool {
+        matches!(self.action, PackageInterfaceDecisionAction::New)
+    }
 }
 
 /// Borrowed package lookup lets item additions coexist with immutable originals
@@ -437,14 +835,24 @@ pub(crate) fn inherited_package_witnesses_with_validation(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
-    let mut selected: BTreeMap<(String,String),PackageInterfaceWitness> = BTreeMap::new();
+    Ok(inherited_package_interfaces_with_validation(products, validation)?
+        .into_iter()
+        .map(|(owner, inherited)| (owner, inherited.witness))
+        .collect())
+}
+
+fn inherited_package_interfaces_with_validation(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<BTreeMap<(String, String), InheritedPackageInterface>> {
+    let mut selected: BTreeMap<(String, String), InheritedPackageInterface> = BTreeMap::new();
     for product in products {
         let decoded;
-        let packages = match product.original_native() {
+        let (packages, custody) = match product.original_native() {
             Some(witness) if witness.matches_original(product) => {
                 witness.validate_package_interfaces(validation)?;
-                &witness.packages
-            },
+                (&witness.packages, Some(witness.package_interfaces()))
+            }
             Some(_) => {
                 return Err(CertificationError::Mismatch(
                     "original native witness bytes",
@@ -460,32 +868,124 @@ pub(crate) fn inherited_package_witnesses_with_validation(
                         "inherited package product owner",
                     ));
                 }
-                &decoded.packages
+                (&decoded.packages, None)
             }
         };
         for (owner, interface) in packages {
             verify_package_interface(validation, interface)?;
             match selected.get(owner) {
-                Some(old) if old.sha256 != interface.sha256 => {
+                Some(old) if old.witness.sha256 != interface.sha256 => {
                     return Err(CertificationError::Mismatch("inherited package selection"));
                 }
                 Some(_) => continue,
                 None => {}
             }
+            let inherited = match custody {
+                Some(custody) => {
+                    let token = custody
+                        .get(owner)
+                        .filter(|token| token.sha256() == &interface.sha256)
+                        .cloned()
+                        .ok_or(CertificationError::Mismatch(
+                            "inherited package interface custody",
+                        ))?;
+                    InheritedPackageInterface::issued(
+                        interface.clone(),
+                        PackageInterfaceIssuer::Original(product.owner().clone()),
+                        token,
+                    )
+                }
+                None => InheritedPackageInterface::legacy(interface.clone()),
+            };
             // The returned selection owns its containers; the issued witness
             // retains immutable native facts under the original byte anchors.
             validation
                 .inventory
-                .reserve::<((String, String), PackageInterfaceWitness, [usize; 4])>(1)?;
+                .reserve::<(String, String, InheritedPackageInterface, [usize; 4])>(1)?;
             validation.inventory.charge(owner.0.len())?;
             validation.inventory.charge(owner.1.len())?;
             validation
                 .inventory
                 .charge(interface.selected_path.as_os_str().as_encoded_bytes().len())?;
-            selected.insert(owner.clone(), interface.clone());
+            selected.insert(owner.clone(), inherited);
         }
     }
     Ok(selected)
+}
+
+/// Ordinary package observations reconciled against interfaces already issued
+/// by retained originals. Only genuine new selections remain in `current`;
+/// authenticated overlaps retain the inherited witness and its custody.
+pub(crate) struct OrdinaryPackageInterfaces {
+    inherited: BTreeMap<(String, String), InheritedPackageInterface>,
+    decisions: Vec<PackageInterfaceDecision>,
+}
+
+impl OrdinaryPackageInterfaces {
+    #[cfg(test)]
+    pub(crate) fn decisions(&self) -> &[PackageInterfaceDecision] {
+        &self.decisions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inherited(
+        &self,
+    ) -> &BTreeMap<(String, String), InheritedPackageInterface> {
+        &self.inherited
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<(String, String), PackageInterfaceWitness>,
+        Vec<PackageInterfaceDecision>,
+    ) {
+        (
+            self.inherited
+                .into_iter()
+                .map(|(owner, inherited)| (owner, inherited.witness))
+                .collect(),
+            self.decisions,
+        )
+    }
+}
+
+pub(crate) fn reconcile_ordinary_package_interfaces(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<OrdinaryPackageInterfaces> {
+    let inherited = inherited_package_interfaces_with_validation(products, validation)?;
+    let mut decisions = Vec::new();
+    for (owner, witness) in receipt_packages {
+        verify_package_interface(validation, witness)?;
+        match inherited.get(owner) {
+            Some(inherited) if inherited.witness.sha256 != witness.sha256 => {
+                return Err(CertificationError::Mismatch(
+                    "exact inherited package selection differs from current target",
+                ));
+            }
+            Some(inherited) => {
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::Reuse {
+                        selected: inherited.witness.clone(),
+                        custody: inherited.custody.clone(),
+                    },
+                });
+            }
+            None => decisions.push(PackageInterfaceDecision {
+                owner: owner.clone(),
+                observed: witness.clone(),
+                action: PackageInterfaceDecisionAction::New,
+            }),
+        }
+    }
+    Ok(OrdinaryPackageInterfaces {
+        inherited,
+        decisions,
+    })
 }
 
 /// A group whose retained globals still need an exact live binding or native
@@ -591,7 +1091,7 @@ pub(crate) struct CertifiedSegmentOriginals {
     raw: ParsedModuleProducts,
     receipt: CertifiedReceipt,
     products: CertifiedProducts,
-    package_availability: BTreeMap<(String, String), PackageInterfaceWitness>,
+    package_availability: BTreeMap<(String, String), InheritedPackageInterface>,
     artifact_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
     value_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
     value_entry_index: BTreeMap<
@@ -610,9 +1110,6 @@ enum SegmentOriginalAdmission {
 impl CertifiedSegmentOriginals {
     pub(crate) fn source_selection(&self) -> &CertifiedSourceSelection {
         &self.products.source_selection
-    }
-    pub(crate) fn package_links(&self) -> &PackageLinks {
-        &self.receipt.package_links
     }
     pub(crate) fn value_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
         &self.value_entries
@@ -660,18 +1157,32 @@ impl CertifiedSegmentOriginals {
         )?;
         products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
-        let mut package_availability =
-            inherited_package_witnesses_with_validation(&products.recovery_products, validation)?;
+        let mut package_availability = inherited_package_interfaces_with_validation(
+            &products.recovery_products,
+            validation,
+        )?;
         for (owner, witness) in &receipt.packages {
             if let Some(previous) = package_availability.get(owner) {
-                if previous.sha256 != witness.sha256 {
+                if previous.witness.sha256 != witness.sha256 {
                     return Err(CertificationError::Mismatch(
                         "segment original package selection",
                     ));
                 }
             } else {
                 charge_package_copy(owner, witness, &validation.inventory)?;
-                package_availability.insert(owner.clone(), witness.clone());
+                let custody = package_interfaces
+                    .get(owner)
+                    .filter(|token| token.sha256() == &witness.sha256)
+                    .cloned()
+                    .map(|token| {
+                        InheritedPackageInterface::issued(
+                            witness.clone(),
+                            PackageInterfaceIssuer::CurrentOutput,
+                            token,
+                        )
+                    })
+                    .unwrap_or_else(|| InheritedPackageInterface::legacy(witness.clone()));
+                package_availability.insert(owner.clone(), custody);
             }
         }
         timing.advance("source_membership");
@@ -744,9 +1255,11 @@ impl CertifiedSegmentOriginals {
             ));
         }
         timing.advance("native_availability");
-        validation.inventory.reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
-            artifact_entries.len() + value_entries.len(),
-        )?;
+        validation
+            .inventory
+            .reserve::<Arc<crate::artifact_inventory::ArtifactEntry>>(
+                artifact_entries.len() + value_entries.len(),
+            )?;
         let entries = artifact_entries
             .iter()
             .chain(&value_entries)
@@ -831,6 +1344,9 @@ impl CertifiedSegmentOriginals {
     pub(crate) fn receipt(&self) -> &CertifiedReceipt {
         &self.receipt
     }
+    pub(crate) fn package_links(&self) -> &PackageLinks {
+        &self.receipt.package_links
+    }
     pub(crate) fn recovery_products(
         &self,
     ) -> &[crate::recovery_artifacts::CertifiedRecoveryProduct] {
@@ -839,8 +1355,17 @@ impl CertifiedSegmentOriginals {
 
     pub(crate) fn package_availability(
         &self,
-    ) -> &BTreeMap<(String, String), PackageInterfaceWitness> {
+    ) -> &BTreeMap<(String, String), InheritedPackageInterface> {
         &self.package_availability
+    }
+
+    pub(crate) fn package_witnesses(
+        &self,
+    ) -> BTreeMap<(String, String), PackageInterfaceWitness> {
+        self.package_availability
+            .iter()
+            .map(|(owner, inherited)| (owner.clone(), inherited.witness.clone()))
+            .collect()
     }
 
     pub(crate) fn artifact_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
@@ -896,17 +1421,63 @@ impl CertifiedSegmentOriginals {
         cursor: &mut crate::artifact_inventory::BoundArtifactSelection,
         item: SegmentItemReceipt,
         prepared: &PreparedProgram,
+        program_sha256: &[u8; 32],
         produced: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         validation: &mut PackageInterfaceValidation,
     ) -> CertResult<(
         CertifiedProducts,
         Vec<AcceptedGlobal>,
         BTreeMap<(String, String), PackageInterfaceWitness>,
+        PackageSelection,
     )> {
         if !Arc::ptr_eq(self.operation(), &validation.inventory) {
             return Err(CertificationError::Mismatch(
                 "segment inventory accounting owner",
             ));
+        }
+        if item.selection.stage_id() != self.receipt.package_links.stage_id() {
+            return Err(CertificationError::Mismatch(
+                "item package selection references another stage manifest",
+            ));
+        }
+        if item.selection.program_sha256() != program_sha256 {
+            return Err(CertificationError::Mismatch(
+                "item package selection references another prepared program",
+            ));
+        }
+        check_package_link_range(
+            &item.selection.target_roots,
+            self.receipt.package_links.occurrences.len(),
+        )?;
+        for (key, roots) in &item.selection.home_roots {
+            if key.target != item.selection.target {
+                return Err(CertificationError::Mismatch(
+                    "item HOME roots belong to another target",
+                ));
+            }
+            let group = self
+                .receipt
+                .modules
+                .iter()
+                .filter(|module| module.origin == ProductOrigin::Fresh)
+                .flat_map(|module| {
+                    module.groups.iter().filter_map(move |group| {
+                        (module.unit == key.unit
+                            && module.module == key.module
+                            && group.original_ordinal == key.original_ordinal)
+                            .then_some(group)
+                    })
+                })
+                .next()
+                .ok_or(CertificationError::Mismatch(
+                    "item HOME root is not an issuing fresh group",
+                ))?;
+            if roots.len() != package_slot_count(&group.globals) {
+                return Err(CertificationError::Mismatch(
+                    "item HOME package link count differs from its globals",
+                ));
+            }
+            check_package_link_range(roots, self.receipt.package_links.occurrences.len())?;
         }
         match (&self.products.source_selection.produced_types, produced) {
             (None, None) => {}
@@ -917,7 +1488,6 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
-        let mut additions = BTreeMap::new();
         for (owner, witness) in &item.packages {
             let imported = item.globals.iter().any(|global| match &global.owner {
                 ReceiptImportOwner::Package {
@@ -948,37 +1518,14 @@ impl CertifiedSegmentOriginals {
                     "item package has no target demand",
                 ));
             }
-            match classify_segment_package_addition(
-                owner,
-                witness,
-                &self.receipt.packages,
-                &self.package_availability,
-            )? {
-                SegmentPackageAddition::NewSelection => {
-                    verify_package_interface(validation, witness)?;
-                    additions.insert(owner.clone(), witness.clone());
-                }
-                SegmentPackageAddition::Reuse => {
-                    // The incoming observation re-reads the same authenticated
-                    // bytes at a new path. It is evidence of a retained copy,
-                    // not a new selection: keep the inherited issuance witness
-                    // and re-register its retained bytes under its issued
-                    // logical path so later consumers do not reopen a removed
-                    // transaction location.
-                    verify_package_interface(validation, witness)?;
-                    let inherited = self
-                        .package_availability
-                        .get(owner)
-                        .expect("reused owner retains its inherited witness");
-                    carry_inherited_package_witness(
-                        &self.products.recovery_products,
-                        owner,
-                        inherited,
-                        validation,
-                    )?;
-                }
-            }
         }
+        let reconciled = reconcile_segment_package_additions(
+            &item.packages,
+            &self.receipt.packages,
+            &self.package_availability,
+            validation,
+        )?;
+        let additions = reconciled.into_additions();
         // This segment already authenticated every captured input interface.
         // An item can need an input's type without retaining its runtime value.
         // Only this request's produced interfaces need ordinal narrowing here;
@@ -1054,7 +1601,7 @@ impl CertifiedSegmentOriginals {
             retained_core_products: self.products.retained_core_products.clone(),
             source_selection,
         };
-        Ok((products, item.globals, additions))
+        Ok((products, item.globals, additions, item.selection))
     }
 }
 
@@ -1062,32 +1609,25 @@ impl CertifiedSegmentOriginals {
 /// package interface whose copied location has changed. The inherited witness
 /// keeps its original issuance provenance; only its authenticated bytes are
 /// re-registered under the issued logical path.
-fn carry_inherited_package_witness(
-    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-    owner: &(String, String),
-    inherited: &PackageInterfaceWitness,
+fn retain_inherited_package_custody(
+    inherited: &InheritedPackageInterface,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
-    // Prefer the exact issued token: its retained bytes survive removal of the
-    // original transaction copy without reopening storage.
-    for product in products {
-        let Some(native) = product.original_native() else {
-            continue;
-        };
-        if let Some(token) = native.package_interfaces().get(owner) {
-            if token.sha256() == &inherited.sha256 {
-                return validation
-                    .register_package_interface(&inherited.selected_path, token)
-                    .map_err(package_validation_error);
-            }
+    match inherited.custody() {
+        InheritedPackageInterfaceCustody::Issued { token, .. } => {
+            // The exact token paired with the selected witness survives removal
+            // of the producer copy without reopening storage.
+            validation
+                .register_package_interface(&inherited.witness.selected_path, token)
+                .map_err(package_validation_error)
+        }
+        InheritedPackageInterfaceCustody::Legacy => {
+            // Legacy witnesses have no retained token. Their selected path is
+            // the only byte authority and keeps missing/inaccessible/corrupt
+            // observations as distinct typed refusals.
+            verify_package_interface(validation, &inherited.witness)
         }
     }
-    // A legacy decoded home witness has no retained token. Authenticate its
-    // inherited bytes through the existing capture path and register them
-    // under the issued logical path. Missing, inaccessible or corrupt storage
-    // keeps its typed refusal; the incoming new path is never consumed as
-    // authority.
-    verify_package_interface(validation, inherited)
 }
 
 /// An incoming segment-item package observation, classified against the
@@ -1105,7 +1645,7 @@ fn classify_segment_package_addition(
     owner: &(String, String),
     witness: &PackageInterfaceWitness,
     receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
-    available_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    available_packages: &BTreeMap<(String, String), InheritedPackageInterface>,
 ) -> CertResult<SegmentPackageAddition> {
     // The producer computes item deltas against its emitted receipt. An
     // inherited native witness can independently retain the same package.
@@ -1115,11 +1655,77 @@ fn classify_segment_package_addition(
         ));
     }
     match available_packages.get(owner) {
-        Some(previous) if previous.sha256 != witness.sha256 => Err(CertificationError::Mismatch(
-            "item replaces an inherited package selection",
-        )),
+        Some(previous) if previous.witness.sha256 != witness.sha256 => {
+            Err(CertificationError::Mismatch(
+                "item replaces an inherited package selection",
+            ))
+        }
         Some(_) => Ok(SegmentPackageAddition::Reuse),
         None => Ok(SegmentPackageAddition::NewSelection),
+    }
+}
+
+fn reconcile_segment_package_additions(
+    item_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    available_packages: &BTreeMap<(String, String), InheritedPackageInterface>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<SegmentPackageAdditions> {
+    let mut decisions = Vec::new();
+    for (owner, witness) in item_packages {
+        match classify_segment_package_addition(
+            owner,
+            witness,
+            receipt_packages,
+            available_packages,
+        )? {
+            SegmentPackageAddition::NewSelection => {
+                verify_package_interface(validation, witness)?;
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::New,
+                });
+            }
+            SegmentPackageAddition::Reuse => {
+                verify_package_interface(validation, witness)?;
+                let inherited = available_packages
+                    .get(owner)
+                    .expect("reused owner retains its inherited witness");
+                retain_inherited_package_custody(inherited, validation)?;
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::Reuse {
+                        selected: inherited.witness.clone(),
+                        custody: inherited.custody.clone(),
+                    },
+                });
+            }
+        }
+    }
+    Ok(SegmentPackageAdditions { decisions })
+}
+
+struct SegmentPackageAdditions {
+    decisions: Vec<PackageInterfaceDecision>,
+}
+
+impl SegmentPackageAdditions {
+    fn into_additions(self) -> BTreeMap<(String, String), PackageInterfaceWitness> {
+        self.decisions
+            .into_iter()
+            .filter(|decision| decision.is_new())
+            .map(|decision| {
+                let selected = decision.selected().clone();
+                (decision.owner, selected)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn decisions(&self) -> &[PackageInterfaceDecision] {
+        &self.decisions
     }
 }
 
@@ -1344,8 +1950,12 @@ impl OriginalNativeWitness {
     pub(crate) fn package_interfaces(&self) -> &PackageInterfaceCustody {
         &self.package_interfaces
     }
-    pub(crate) fn validate_package_interfaces(&self, validation: &mut PackageInterfaceValidation) -> CertResult<()> {
-        self.package_interfaces.bind_witnesses(&self.packages, validation)
+    pub(crate) fn validate_package_interfaces(
+        &self,
+        validation: &mut PackageInterfaceValidation,
+    ) -> CertResult<()> {
+        self.package_interfaces
+            .bind_witnesses(&self.packages, validation)
     }
     pub(crate) fn inventory_facts(&self) -> &crate::artifact_inventory::NativeInventoryFacts {
         &self.inventory
@@ -1500,7 +2110,6 @@ pub(crate) fn original_native_group_imports(
     Some(witness.group(original_ordinal)?.imports())
 }
 
-
 fn retain_authenticated_original_native(
     product: crate::recovery_artifacts::CertifiedRecoveryProduct,
     groups: Vec<Arc<AuthenticatedOriginalGroup>>,
@@ -1547,9 +2156,19 @@ fn retain_authenticated_original_native(
             .collect(),
         native_group_ordinals: native_requirements.group_ordinals.clone(),
     };
-    validation.inventory.reserve::<((String,String),[u8;32])>(witness.packages.len())?;
-    for owner in witness.packages.keys() { validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))?; }
-    let expected = witness.packages.iter().map(|(owner,witness)| (owner.clone(),witness.sha256)).collect();
+    validation
+        .inventory
+        .reserve::<((String, String), [u8; 32])>(witness.packages.len())?;
+    for owner in witness.packages.keys() {
+        validation
+            .inventory
+            .charge(owner.0.len().saturating_add(owner.1.len()))?;
+    }
+    let expected = witness
+        .packages
+        .iter()
+        .map(|(owner, witness)| (owner.clone(), witness.sha256))
+        .collect();
     let package_interfaces = interfaces.select(&expected, validation)?;
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
@@ -2063,7 +2682,9 @@ fn owner(value: &Value, binder: &SymbolIdentity) -> CertResult<ReceiptImportOwne
                 generation: number(&row[2])?,
             })
         }
-        "retained-package" => Err(CertificationError::Receipt("retained package owner removed")),
+        "retained-package" => Err(CertificationError::Receipt(
+            "retained package owner removed",
+        )),
         "package" => {
             if row.len() != 5 {
                 return Err(CertificationError::Receipt("package owner arity"));
@@ -2139,7 +2760,7 @@ fn validate_global_witness(
     Ok(selected.owner.clone())
 }
 
-/// Decode the worker's bounded ordinary `TPCERT12` tuple with exact owner rows shared
+/// Decode the worker's bounded ordinary `TPCERT13` tuple with exact owner rows shared
 /// through an immutable dictionary. Older ownership formats are refused.
 /// Original groups and executable targets preserve their ordered witnesses.
 pub fn decode_receipt(bytes: &[u8]) -> CertResult<CertifiedReceipt> {
@@ -2395,8 +3016,31 @@ fn decode_receipt_value_in(
     if coordinates.used.len() != coordinates.rows.len() {
         return Err(CertificationError::Receipt("unreferenced owner coordinate"));
     }
-    let package_links =
-        decode_package_links(package_links_value, &package_products, &targets, operation)?;
+    let home_package_groups = modules
+        .iter()
+        .flat_map(|module| {
+            module.groups.iter().map(move |group| {
+                (
+                    (
+                        module.unit.clone(),
+                        module.module.clone(),
+                        group.original_ordinal,
+                    ),
+                    package_slot_count(&group.globals),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let package_links = decode_package_links(
+        package_links_value,
+        &package_products,
+        match kind {
+            CompleteProductKind::Ordinary => PackageLinkTargets::Exact(&targets),
+            CompleteProductKind::SegmentOriginals => PackageLinkTargets::Stage,
+        },
+        &home_package_groups,
+        operation,
+    )?;
 
     let package_rows = array(packages_value)?;
     if package_rows.len() > PACKAGE_LIMIT {
@@ -2510,11 +3154,11 @@ fn product_receipt_payload(value: &Value) -> CertResult<&[Value]> {
         return Err(CertificationError::Receipt("receipt header"));
     }
     let version = number(&header[1])?;
-    if version != 12 {
+    if version != 13 {
         return Err(CertificationError::UnsupportedVersion {
             format: CertificationFormat::ProductReceipt,
             found: version,
-            expected: 12,
+            expected: 13,
         });
     }
     if header.len() != 3 {
@@ -2556,7 +3200,7 @@ pub(crate) fn decode_segment_item_with_operation(
     }
     let value = operation.decode_value(bytes, limit)?;
     let payload = product_receipt_payload(&value)?;
-    let [tag, globals, packages, package_products] = payload else {
+    let [tag, globals, packages, selection] = payload else {
         return Err(CertificationError::Receipt("segment item output arity"));
     };
     if string(tag)? != "segment-item" {
@@ -2573,11 +3217,11 @@ pub(crate) fn decode_segment_item_with_operation(
         })
         .collect::<CertResult<Vec<_>>>()?;
     let packages = decode_package_rows(packages, operation)?;
-    let package_products = decode_package_product_outputs(package_products, operation)?;
+    let selection = decode_package_selection(selection, operation)?;
     Ok(SegmentItemReceipt {
         globals,
         packages,
-        package_products,
+        selection,
     })
 }
 
@@ -2629,23 +3273,36 @@ fn decode_package_product_outputs(
     Ok(outputs)
 }
 
+enum PackageLinkTargets<'a> {
+    Exact(&'a BTreeMap<String, Vec<AcceptedGlobal>>),
+    Stage,
+}
+
+fn package_slot_count(globals: &[AcceptedGlobal]) -> usize {
+    globals
+        .iter()
+        .filter(|global| matches!(global.owner, ReceiptImportOwner::Package { .. }))
+        .count()
+}
+
 /// Decode the receipt-scoped occurrence/linkage manifest and refuse malformed
-/// linkage at this single typed boundary. A row id is its positional index; a
-/// `Link::Local` occurrence must index `occurrences`; every row envelope must
-/// be an authenticated `package_products` envelope; and two rows may share an
-/// envelope only with distinct ordered imports.
+/// linkage at this single typed boundary. Row ids are positions, every child
+/// and root is an in-range occurrence coordinate, and target/HOME roots are
+/// authenticated against the exact receipt consumer.
 fn decode_package_links(
     value: &Value,
     package_products: &[PackageProductOutput],
-    targets: &BTreeMap<String, Vec<AcceptedGlobal>>,
+    targets: PackageLinkTargets<'_>,
+    home_package_groups: &BTreeMap<(String, String, u32), usize>,
     operation: &InventoryOperation,
 ) -> CertResult<PackageLinks> {
-    let row = sized(value, 4)?;
+    let row = sized(value, 6)?;
     let version = number(&row[0])?;
-    if version != 1 {
+    if version != 3 {
         return Err(CertificationError::Receipt("package links version"));
     }
-    let occurrences_value = array(&row[1])?;
+    let stage_id = bytes32(&row[1])?;
+    let occurrences_value = array(&row[2])?;
     operation.reserve::<PackageOccurrenceRow>(occurrences_value.len())?;
     let mut occurrences = Vec::with_capacity(occurrences_value.len());
     for (index, value) in occurrences_value.iter().enumerate() {
@@ -2678,80 +3335,244 @@ fn decode_package_links(
             imports,
         });
     }
+    for occurrence in &occurrences {
+        check_package_link_range(&occurrence.imports, occurrences.len())?;
+    }
     // Every occurrence must be an authenticated package product envelope.
     let product_envelopes = package_products
         .iter()
         .map(|output| output.sha256)
         .collect::<BTreeSet<_>>();
-    let mut by_envelope: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
-    for (index, occurrence) in occurrences.iter().enumerate() {
+    for occurrence in &occurrences {
         if !product_envelopes.contains(&occurrence.envelope_sha256) {
             return Err(CertificationError::Receipt(
                 "package occurrence envelope is not a package product",
             ));
         }
-        by_envelope
-            .entry(occurrence.envelope_sha256)
-            .or_default()
-            .push(index);
     }
-    for (_, indices) in &by_envelope {
-        for (position, left) in indices.iter().enumerate() {
-            for right in &indices[position + 1..] {
-                if occurrences[*left].imports == occurrences[*right].imports {
-                    return Err(CertificationError::Receipt(
-                        "duplicate package occurrence row",
-                    ));
-                }
-            }
-        }
-    }
-    // Link targets must stay in range, and root keys must be ordinary target keys.
     let mut target_roots = BTreeMap::new();
-    for entry in array(&row[2])? {
+    for entry in array(&row[3])? {
         let entry = sized(entry, 2)?;
         let name = string(&entry[0])?.to_owned();
-        if name.is_empty() {
+        if name.is_empty() || name.contains('\0') {
             return Err(CertificationError::Receipt("package links target name"));
         }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
-        if targets.contains_key(&name) {
-            if target_roots.insert(name, links).is_some() {
-                return Err(CertificationError::Receipt(
-                    "duplicate package links target",
-                ));
+        match &targets {
+            PackageLinkTargets::Exact(targets) => {
+                let globals = targets.get(&name).ok_or(CertificationError::Receipt(
+                    "package links target is not a target",
+                ))?;
+                if links.len() != package_slot_count(globals) {
+                    return Err(CertificationError::Receipt(
+                        "package target link count differs from its globals",
+                    ));
+                }
             }
-        } else {
+            PackageLinkTargets::Stage => {}
+        }
+        if target_roots.insert(name, links).is_some() {
             return Err(CertificationError::Receipt(
-                "package links target is not a target",
+                "duplicate package links target",
             ));
         }
     }
+    match &targets {
+        PackageLinkTargets::Exact(targets)
+            if target_roots.keys().collect::<BTreeSet<_>>()
+                != targets.keys().collect::<BTreeSet<_>>() =>
+        {
+            return Err(CertificationError::Receipt(
+                "package target roots do not cover the receipt targets",
+            ));
+        }
+        _ => {}
+    }
     let mut home_roots = BTreeMap::new();
-    for entry in array(&row[3])? {
+    for entry in array(&row[4])? {
         let entry = sized(entry, 2)?;
-        let owner = sized(&entry[0], 3)?;
-        let unit = string(&owner[0])?.to_owned();
-        let module = string(&owner[1])?.to_owned();
-        let original_ordinal = u32::try_from(number(&owner[2])?)
+        let owner = sized(&entry[0], 4)?;
+        let target = string(&owner[0])?.to_owned();
+        let unit = string(&owner[1])?.to_owned();
+        let module = string(&owner[2])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[3])?)
             .map_err(|_| CertificationError::Receipt("package links home ordinal"))?;
-        if unit.is_empty() || module.is_empty() {
+        if target.is_empty() || unit.is_empty() || module.is_empty() {
             return Err(CertificationError::Receipt("package links home owner"));
         }
         let links = decode_package_links_list(&entry[1], operation)?;
         check_package_link_range(&links, occurrences.len())?;
-        operation.charge(unit.len().saturating_add(module.len()))?;
+        operation.charge(
+            target
+                .len()
+                .saturating_add(unit.len())
+                .saturating_add(module.len()),
+        )?;
+        match &targets {
+            PackageLinkTargets::Exact(_) | PackageLinkTargets::Stage => {
+                let expected = home_package_groups
+                    .get(&(unit.clone(), module.clone(), original_ordinal))
+                    .ok_or(CertificationError::Receipt(
+                        "package HOME root is not an issued receipt group",
+                    ))?;
+                if links.len() != *expected {
+                    return Err(CertificationError::Receipt(
+                        "package HOME link count differs from its issued group",
+                    ));
+                }
+            }
+        }
         if home_roots
-            .insert((unit, module, original_ordinal), links)
+            .insert(
+                PackageHomeRootKey {
+                    target,
+                    unit,
+                    module,
+                    original_ordinal,
+                },
+                links,
+            )
             .is_some()
         {
             return Err(CertificationError::Receipt("duplicate package links home"));
         }
     }
-    Ok(PackageLinks {
-        version: 1,
-        occurrences,
+    let products = decode_package_product_outputs(&row[5], operation)?;
+    if products != package_products {
+        return Err(CertificationError::Receipt(
+            "package links carry another stage product set",
+        ));
+    }
+    let links = PackageLinks {
+        version: 3,
+        stage_id,
+        occurrences: occurrences.into(),
+        target_roots: Arc::new(target_roots),
+        home_roots: Arc::new(home_roots),
+        products: products.into(),
+    };
+    if package_stage_identity(&links, operation)? != stage_id {
+        return Err(CertificationError::Receipt(
+            "package stage identity differs from its manifest",
+        ));
+    }
+    Ok(links)
+}
+
+fn package_stage_identity(
+    links: &PackageLinks,
+    operation: &InventoryOperation,
+) -> CertResult<[u8; 32]> {
+    let encode_link = |link: &PackageLink| {
+        value_array([
+            value_text("local"),
+            Value::Integer((link.occurrence() as u64).into()),
+        ])
+    };
+    let value = value_array([
+        Value::Integer(1.into()),
+        value_array(links.occurrences.iter().map(|occurrence| {
+            value_array([
+                Value::Bytes(occurrence.envelope_sha256.to_vec()),
+                value_text(&occurrence.unit),
+                value_text(&occurrence.module),
+                Value::Bytes(occurrence.defining_interface_sha256.to_vec()),
+                Value::Bytes(occurrence.defining_version_sha256.to_vec()),
+                value_array(occurrence.imports.iter().map(encode_link)),
+            ])
+        })),
+        value_array(links.target_roots.iter().map(|(target, roots)| {
+            value_array([
+                value_text(target),
+                value_array(roots.iter().map(encode_link)),
+            ])
+        })),
+        value_array(links.home_roots.iter().map(|(key, roots)| {
+            value_array([
+                value_array([
+                    value_text(&key.target),
+                    value_text(&key.unit),
+                    value_text(&key.module),
+                    Value::Integer((key.original_ordinal as u64).into()),
+                ]),
+                value_array(roots.iter().map(encode_link)),
+            ])
+        })),
+        value_array(links.products.iter().map(|product| {
+            value_array([
+                value_text(&*product.relative_path.to_string_lossy()),
+                Value::Bytes(product.sha256.to_vec()),
+            ])
+        })),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&value, &mut bytes)
+        .map_err(|_| CertificationError::Receipt("package stage identity encoding"))?;
+    operation.charge(bytes.len())?;
+    Ok(sha(&bytes))
+}
+
+fn decode_package_selection(
+    value: &Value,
+    operation: &InventoryOperation,
+) -> CertResult<PackageSelection> {
+    let row = sized(value, 6)?;
+    if number(&row[0])? != 1 {
+        return Err(CertificationError::Receipt("package selection version"));
+    }
+    let stage_id = bytes32(&row[1])?;
+    let program_sha256 = bytes32(&row[2])?;
+    let target = string(&row[3])?.to_owned();
+    if target.is_empty() || target.contains('\0') {
+        return Err(CertificationError::Receipt("package selection target"));
+    }
+    let target_roots = decode_package_links_list(&row[4], operation)?;
+    let mut home_roots = BTreeMap::new();
+    for entry in array(&row[5])? {
+        let entry = sized(entry, 2)?;
+        let owner = sized(&entry[0], 4)?;
+        let issuer = string(&owner[0])?.to_owned();
+        let unit = string(&owner[1])?.to_owned();
+        let module = string(&owner[2])?.to_owned();
+        let original_ordinal = u32::try_from(number(&owner[3])?)
+            .map_err(|_| CertificationError::Receipt("package selection HOME ordinal"))?;
+        if issuer.is_empty() || unit.is_empty() || module.is_empty() {
+            return Err(CertificationError::Receipt("package selection HOME owner"));
+        }
+        if issuer != target {
+            return Err(CertificationError::Receipt(
+                "package selection HOME belongs to another target",
+            ));
+        }
+        let links = decode_package_links_list(&entry[1], operation)?;
+        operation.charge(
+            issuer
+                .len()
+                .saturating_add(unit.len())
+                .saturating_add(module.len()),
+        )?;
+        if home_roots
+            .insert(
+                PackageHomeRootKey {
+                    target: issuer,
+                    unit,
+                    module,
+                    original_ordinal,
+                },
+                links,
+            )
+            .is_some()
+        {
+            return Err(CertificationError::Receipt(
+                "duplicate package selection HOME",
+            ));
+        }
+    }
+    Ok(PackageSelection {
+        stage_id,
+        program_sha256,
+        target,
         target_roots,
         home_roots,
     })
@@ -2767,7 +3588,6 @@ fn decode_package_links_list(
     for value in links {
         let link = array(value)?;
         decoded.push(match link {
-            [tag] if string(tag)? == "inherited" => PackageLink::Inherited,
             [tag, occurrence] if string(tag)? == "local" => PackageLink::Local {
                 occurrence: u32::try_from(number(occurrence)?)
                     .map_err(|_| CertificationError::Receipt("package link occurrence"))?,
@@ -2779,14 +3599,13 @@ fn decode_package_links_list(
 }
 
 fn check_package_link_range(links: &[PackageLink], occurrences: usize) -> CertResult<()> {
-    for link in links {
-        if let PackageLink::Local { occurrence } = link {
-            if *occurrence as usize >= occurrences {
-                return Err(CertificationError::Receipt(
-                    "package link occurrence out of range",
-                ));
-            }
-        }
+    if links
+        .iter()
+        .any(|link| link.occurrence() as usize >= occurrences)
+    {
+        return Err(CertificationError::Receipt(
+            "package link occurrence out of range",
+        ));
     }
     Ok(())
 }
@@ -2961,12 +3780,24 @@ impl OwnerCoordinates {
                 generation: number(&row[1])?,
             }),
             "package" if row.len() == 2 => {
-                let OwnerCoordinate::Package { unit, module, interface_digest } = self.get(&row[1])?
-                else { return Err(CertificationError::Receipt("owner coordinate kind")); };
-                Ok(ReceiptImportOwner::Package { unit: unit.clone(), module: module.clone(),
-                    interface_digest: *interface_digest, binder: binder.clone() })
+                let OwnerCoordinate::Package {
+                    unit,
+                    module,
+                    interface_digest,
+                } = self.get(&row[1])?
+                else {
+                    return Err(CertificationError::Receipt("owner coordinate kind"));
+                };
+                Ok(ReceiptImportOwner::Package {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                    interface_digest: *interface_digest,
+                    binder: binder.clone(),
+                })
             }
-            "retained-package" => Err(CertificationError::Receipt("retained package owner removed")),
+            "retained-package" => Err(CertificationError::Receipt(
+                "retained package owner removed",
+            )),
             _ => Err(CertificationError::Receipt("import owner tag/arity")),
         }
     }
@@ -4221,7 +5052,9 @@ impl CertifiedSourceSelection {
         Self::new_product_ingress()
     }
 
-    pub(crate) fn native_completions(&self) -> crate::artifact_inventory::NativeSelectionCompletions {
+    pub(crate) fn native_completions(
+        &self,
+    ) -> crate::artifact_inventory::NativeSelectionCompletions {
         match &self.input_origin {
             CertifiedInputOrigin::Continuation(source) => source.native_completions().clone(),
             CertifiedInputOrigin::NewProducts => Default::default(),
@@ -4532,7 +5365,9 @@ impl CertifiedSourceSelection {
             ));
         };
         if product.owner() != owner
-            || !product.original_native().filter(|native| native.matches_original(product))
+            || !product
+                .original_native()
+                .filter(|native| native.matches_original(product))
                 .and_then(|native| native.group(*original_ordinal))
                 .is_some_and(|group| group.group().binders().contains(binder))
         {
@@ -6595,15 +7430,20 @@ impl OriginalBindingSelection {
                     .and_then(|row| row.exact_group_support(binding))
             }
             OriginalBindingExecution::Acquired(_) => {
-                if self.executable(reference, operation)
-                    .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?.is_none()
+                if self
+                    .executable(reference, operation)
+                    .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?
+                    .is_none()
                 {
-                    return Err(evidence("target Original exceeds its exact executable selection"));
+                    return Err(evidence(
+                        "target Original exceeds its exact executable selection",
+                    ));
                 }
                 self.available_group(reference, operation)?
             }
             OriginalBindingExecution::MetadataOnly => {
-                let _ = self.metadata_references(operation)
+                let _ = self
+                    .metadata_references(operation)
                     .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
                 None
             }
@@ -6701,9 +7541,7 @@ fn authenticate_presented_original(
                 observed_original: primary.original().map(|binding| binding.artifact),
                 observed_canonical: Some(primary.interface().artifact),
                 observed_kind: None,
-                ..ArtifactIdentityMismatch::refused(
-                    ArtifactIdentityStage::RequestedIdentityDiffers,
-                )
+                ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::RequestedIdentityDiffers)
             },
         )));
     }
@@ -6839,11 +7677,11 @@ fn original_reference_payload_membership<'a>(
                     .module_interface()
                     .map(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id),
                 observed_original: Some(original_entry.descriptor.id),
-                observed_canonical: Some(crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical)),
+                observed_canonical: Some(
+                    crate::artifact_inventory::ArtifactEntry::canonical_artifact_id(canonical),
+                ),
                 observed_kind: None,
-                ..ArtifactIdentityMismatch::refused(
-                    ArtifactIdentityStage::ModuleInterfaceDiffers,
-                )
+                ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::ModuleInterfaceDiffers)
             },
         )));
     }
@@ -7399,22 +8237,35 @@ fn check_direct_package_agreement_with_validation(
 fn check_direct_package_agreement_with_custody(
     sidecar: &[u8],
     owner: &CachedHomeOwner,
-    packages: &BTreeMap<(String,String), PackageInterfaceWitness>,
+    packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     custody: &PackageInterfaceCustody,
     sidecar_custody: &PackageInterfaceCustody,
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<()> {
     custody.bind_witnesses(packages, validation)?;
     let obligations = crate::recovery_artifacts::decode_package_import_obligations(
-        sidecar, &owner.unit, &owner.module, &owner.skinny_iface_sha256,
-        Path::new("module-package-imports.cbor"), validation,
-    ).map_err(package_validation_error)?;
+        sidecar,
+        &owner.unit,
+        &owner.module,
+        &owner.skinny_iface_sha256,
+        Path::new("module-package-imports.cbor"),
+        validation,
+    )
+    .map_err(package_validation_error)?;
     let roots = crate::recovery_artifacts::validate_package_imports_with_custody(
-        obligations, sidecar_custody, validation,
-    ).map_err(package_validation_error)?;
-    for (key, (_,digest)) in roots.roots() {
-        if packages.get(key).is_some_and(|witness| &hex(&witness.sha256) != digest) {
-            return Err(CertificationError::Mismatch("direct package/receipt selection"));
+        obligations,
+        sidecar_custody,
+        validation,
+    )
+    .map_err(package_validation_error)?;
+    for (key, (_, digest)) in roots.roots() {
+        if packages
+            .get(key)
+            .is_some_and(|witness| &hex(&witness.sha256) != digest)
+        {
+            return Err(CertificationError::Mismatch(
+                "direct package/receipt selection",
+            ));
         }
     }
     Ok(())
@@ -9383,7 +10234,9 @@ fn capture_inherited_product_with_validation<'a>(
 ) -> CertResult<(RawModuleProduct, &'a HomeCertification)> {
     let artifact = input.artifact;
     let witness = &artifact.certification().witness;
-    artifact.package_interfaces().bind_witnesses(&witness.packages, validation)?;
+    artifact
+        .package_interfaces()
+        .bind_witnesses(&witness.packages, validation)?;
     let requirements = crate::prepared_artifact::production_requirements()
         .map_err(|_| CertificationError::Mismatch("production requirements"))?;
     let product = capture_original_product_bytes_with_validation(
@@ -9774,8 +10627,14 @@ pub enum SelectedNativeTargetImport {
         binding: crate::artifact_inventory::NativeGroupBinding,
         value: tidepool_repr::execution_schema::ValueId,
     },
-    RetainedCapture { identity: SymbolIdentity, generation: u64 },
-    Package { identity: SymbolIdentity, interface_digest: [u8; 32] },
+    RetainedCapture {
+        identity: SymbolIdentity,
+        generation: u64,
+    },
+    Package {
+        identity: SymbolIdentity,
+        interface_digest: [u8; 32],
+    },
 }
 
 /// One exact selected occurrence keeps its executable product and ordered links together.
@@ -10513,10 +11372,14 @@ fn certify_owned_uncaptured_products_with_validation(
                 product.product_bytes(),
                 product.package_imports_bytes(),
                 product.certification_bytes(),
-                product.module_interface().ok_or(CertificationError::Mismatch("original canonical companion"))?.package_interfaces(),
+                product
+                    .module_interface()
+                    .ok_or(CertificationError::Mismatch("original canonical companion"))?
+                    .package_interfaces(),
                 &requirements,
                 validation,
-            ).map(|(product,witness,_)| (product,witness))
+            )
+            .map(|(product, witness, _)| (product, witness))
         })
         .collect::<CertResult<Vec<_>>>()?;
     certify_inherited_inventory_with_validation(parsed, current_groups, validation)
@@ -10540,7 +11403,8 @@ fn capture_original_product_with_validation(
         validation,
     )?;
     let witness = verify_home_witness_with_validation(certification_bytes, owner, validation)?;
-    let custody = PackageInterfaceCustody::capture_verified_packages(&witness.packages, validation)?;
+    let custody =
+        PackageInterfaceCustody::capture_verified_packages(&witness.packages, validation)?;
     check_direct_package_agreement_with_custody(
         package_imports_bytes,
         owner,
@@ -10664,7 +11528,9 @@ pub(crate) fn certify_recovery_products_with_validation(
                     })
                 })
                 .collect();
-            let product = retain_authenticated_original_native(product, groups, witness, &custody, validation)?;
+            let product = retain_authenticated_original_native(
+                product, groups, witness, &custody, validation,
+            )?;
             Ok(CertifiedRecoveredOriginal {
                 producer_sha256,
                 product,
@@ -10695,7 +11561,10 @@ pub(crate) fn finalize_original_for_inventory(
         product.product_bytes(),
         product.package_imports_bytes(),
         product.certification_bytes(),
-        product.module_interface().ok_or(CertificationError::Mismatch("original canonical companion"))?.package_interfaces(),
+        product
+            .module_interface()
+            .ok_or(CertificationError::Mismatch("original canonical companion"))?
+            .package_interfaces(),
         &requirements,
         validation,
     )?;
@@ -11615,7 +12484,8 @@ pub(crate) fn certify_products(
     include: &[PathBuf],
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
 ) -> CertResult<CertifiedProducts> {
-    let mut validation = PackageInterfaceValidation::with_inventory(fresh_products.operation().clone());
+    let mut validation =
+        PackageInterfaceValidation::with_inventory(fresh_products.operation().clone());
     let package_interfaces = capture_independent_package_interfaces(receipt, &mut validation)?;
     certify_products_with_validation(
         candidates,
@@ -11860,7 +12730,8 @@ pub(crate) fn certify_products_with_validation(
                         crate::artifact_inventory::ArtifactPayload::Original(product) => {
                             product.module_interface().cloned()
                         }
-                        crate::artifact_inventory::ArtifactPayload::Interface(_, _) | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
+                        crate::artifact_inventory::ArtifactPayload::Interface(_, _)
+                        | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => None,
                     })
                     .collect()
             });
@@ -15693,8 +16564,13 @@ pub(crate) mod tests {
         let mut duplicate = native.groups.to_vec();
         duplicate.push(duplicate[0].clone());
         assert!(matches!(
-            retain_authenticated_original_native(original.clone(), duplicate, witness(),
-                native.package_interfaces(), &mut PackageInterfaceValidation::default()),
+            retain_authenticated_original_native(
+                original.clone(),
+                duplicate,
+                witness(),
+                native.package_interfaces(),
+                &mut PackageInterfaceValidation::default()
+            ),
             Err(CertificationError::Mismatch(
                 "duplicate original native ordinal"
             )),
@@ -15702,8 +16578,13 @@ pub(crate) mod tests {
         let mut wrong_owner = native.groups.to_vec();
         Arc::make_mut(&mut wrong_owner[0]).owner.module_version = ModuleVersion([8; 32]);
         assert!(matches!(
-            retain_authenticated_original_native(original.clone(), wrong_owner, witness(),
-                native.package_interfaces(), &mut PackageInterfaceValidation::default()),
+            retain_authenticated_original_native(
+                original.clone(),
+                wrong_owner,
+                witness(),
+                native.package_interfaces(),
+                &mut PackageInterfaceValidation::default()
+            ),
             Err(CertificationError::Mismatch(
                 "original native witness owner"
             )),
@@ -15715,7 +16596,8 @@ pub(crate) mod tests {
                 original.clone(),
                 native.groups.to_vec(),
                 wrong_witness,
-                native.package_interfaces(), &mut PackageInterfaceValidation::default()
+                native.package_interfaces(),
+                &mut PackageInterfaceValidation::default()
             ),
             Err(CertificationError::Mismatch(
                 "original native witness owner"
@@ -16415,8 +17297,7 @@ pub(crate) mod tests {
         let missing = testing::identity("BoundOriginal", "absent");
         assert!(matches!(resolve(&completed, &owner, interface, original,
                 &missing, &operation), Err(CertificationError::OriginalMembership(reason))
-                    if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing })
-        );
+                    if *reason == OriginalMembershipFailure::MissingSymbol { owner: product.owner().clone(), symbol: missing }));
         let custody = Arc::new(completed.for_source_owners(&BTreeSet::new()).unwrap());
         assert!(custody
             .artifacts()
@@ -16463,7 +17344,8 @@ pub(crate) mod tests {
         let primary = source.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
         let original = primary.original().unwrap();
-        let crate::artifact_inventory::ArtifactPayload::Original(product) = &primary.entry().payload
+        let crate::artifact_inventory::ArtifactPayload::Original(product) =
+            &primary.entry().payload
         else {
             unreachable!()
         };
@@ -23164,7 +24046,8 @@ pub(crate) mod tests {
             NativeArtifactDemand, NativeGroupKey, NativeOriginalRequirement,
         };
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
-        let producer = CanonicalProducerIdentity::from_producer_bytes(b"mixed-current-historical-key");
+        let producer =
+            CanonicalProducerIdentity::from_producer_bytes(b"mixed-current-historical-key");
         let values_old =
             fixture_module_interface(producer.sha256(), "fixture", "Values", BTreeMap::new());
         let values_new = fixture_module_core(&values_old, b"new captured Values Core".to_vec());
@@ -23326,7 +24209,8 @@ pub(crate) mod tests {
             .snapshot_roles()
             .contains_key(&values_old.descriptor.owner));
         let mut current =
-            CertifiedSourceSelection::from_compiler_inputs(&request, &validation.inventory).unwrap();
+            CertifiedSourceSelection::from_compiler_inputs(&request, &validation.inventory)
+                .unwrap();
         assert!(current
             .current_product(
                 NativeGroupKey {
@@ -23492,9 +24376,13 @@ pub(crate) mod tests {
         assert!(target.artifact_ids().contains(&old_value.artifact));
         assert!(target.artifact_ids().contains(&fresh_value.artifact));
 
-        let issued_groups = crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
-            &target, None, &mut validation,
-        ).unwrap();
+        let issued_groups =
+            crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
+                &target,
+                None,
+                &mut validation,
+            )
+            .unwrap();
         let issued_groups = Arc::new(issued_groups);
         let capture_identity = testing::identity("Values", "value");
         let mut observations = source_target_observations(&[(&g, 7)]);
@@ -23555,8 +24443,10 @@ pub(crate) mod tests {
         let complete = CompilerSourceSupport::close_complete_output(&finished).unwrap();
         let closure = current.selected_original_closure(&target).unwrap();
         let selected = complete.certify_original_closure(&closure).unwrap();
-        let context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap()
-            .extend_issued_compiler_support(&selected).unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&selected)
+            .unwrap();
         let inputs = context
             .capture_world_primary_compiler_inputs(producer.sha256())
             .unwrap();
@@ -23598,23 +24488,45 @@ pub(crate) mod tests {
         let packet = |uses: Vec<Value>, operation: &InventoryOperation| {
             let bytes = encode_value_with_operation(
                 &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
-                CertificationFormat::ProductReceipt, COMPILER_RECEIPT_BYTES_LIMIT, operation,
-            ).unwrap();
+                CertificationFormat::ProductReceipt,
+                COMPILER_RECEIPT_BYTES_LIMIT,
+                operation,
+            )
+            .unwrap();
             NativeDemandPacket::decode(&bytes, operation).unwrap()
         };
-        let first = inputs.resolve_native_demand(
-            &packet(vec![batch_uses[0].clone()], &validation.inventory), &mut validation,
-        ).unwrap();
-        let second = inputs.resolve_native_demand(
-            &packet(vec![batch_uses[1].clone()], &validation.inventory), &mut validation,
-        ).unwrap();
+        let first = inputs
+            .resolve_native_demand(
+                &packet(vec![batch_uses[0].clone()], &validation.inventory),
+                &mut validation,
+            )
+            .unwrap();
+        let second = inputs
+            .resolve_native_demand(
+                &packet(vec![batch_uses[1].clone()], &validation.inventory),
+                &mut validation,
+            )
+            .unwrap();
         let merged = first.groups().merge(second.groups()).unwrap();
-        assert_eq!(merged.selected_rows().keys().copied().collect::<BTreeSet<_>>(), BTreeSet::from([old_r, old_g, fresh_g, fresh_j]));
-        assert_eq!(merged.retained_bindings(), resolved.groups().retained_bindings());
+        assert_eq!(
+            merged
+                .selected_rows()
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([old_r, old_g, fresh_g, fresh_j])
+        );
+        assert_eq!(
+            merged.retained_bindings(),
+            resolved.groups().retained_bindings()
+        );
         let mut foreign_validation = PackageInterfaceValidation::default();
-        let foreign = inputs.resolve_native_demand(
-            &packet(vec![batch_uses[0].clone()], &foreign_validation.inventory), &mut foreign_validation,
-        ).unwrap();
+        let foreign = inputs
+            .resolve_native_demand(
+                &packet(vec![batch_uses[0].clone()], &foreign_validation.inventory),
+                &mut foreign_validation,
+            )
+            .unwrap();
         assert!(merged.merge(foreign.groups()).is_err());
         let rows = resolved.groups().selected_rows();
         assert_eq!(
@@ -26188,13 +27100,19 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(selected, expected);
-        let (owner, witness) = selected.iter().next().unwrap();
+        let available = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let (owner, inherited_package) = available.iter().next().unwrap();
+        let witness = inherited_package.witness();
         assert!(matches!(
-            classify_segment_package_addition(owner, witness, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, witness, &BTreeMap::new(), &available),
             Ok(SegmentPackageAddition::Reuse)
         ));
         assert!(matches!(
-            classify_segment_package_addition(owner, witness, &selected, &selected),
+            classify_segment_package_addition(owner, witness, &selected, &available),
             Err(CertificationError::Mismatch(
                 "item repeats an original package selection"
             ))
@@ -26202,7 +27120,7 @@ pub(crate) mod tests {
         let mut conflicting = witness.clone();
         conflicting.sha256[0] ^= 1;
         assert!(matches!(
-            classify_segment_package_addition(owner, &conflicting, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, &conflicting, &BTreeMap::new(), &available),
             Err(CertificationError::Mismatch(
                 "item replaces an inherited package selection"
             ))
@@ -26210,7 +27128,7 @@ pub(crate) mod tests {
         let mut another_path = witness.clone();
         another_path.selected_path = root.path().join("AnotherExternal.hi");
         assert!(matches!(
-            classify_segment_package_addition(owner, &another_path, &BTreeMap::new(), &selected),
+            classify_segment_package_addition(owner, &another_path, &BTreeMap::new(), &available),
             Ok(SegmentPackageAddition::Reuse),
         ));
         assert!(matches!(
@@ -26218,7 +27136,7 @@ pub(crate) mod tests {
                 &("absent-package".into(), "Absent".into()),
                 &another_path,
                 &BTreeMap::new(),
-                &selected
+                &available
             ),
             Ok(SegmentPackageAddition::NewSelection),
         ));
@@ -26312,6 +27230,305 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn ordinary_package_interfaces_reuse_authenticated_relocated_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("External.hi");
+        let relocated = root.path().join("retained").join("External.hi");
+        let new_selection = root.path().join("New.hi");
+        std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+        std::fs::write(&selected, [0x43]).unwrap();
+        std::fs::write(&relocated, [0x43]).unwrap();
+        std::fs::write(&new_selection, [0x45]).unwrap();
+
+        let selected_witness = PackageInterfaceWitness {
+            selected_path: selected.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let packages = BTreeMap::from([(owner.clone(), selected_witness.clone())]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: owner.0.clone(),
+                    module: owner.1.clone(),
+                    binder: SymbolIdentity {
+                        unit: owner.0.clone(),
+                        ..testing::identity(&owner.1, "entry")
+                    },
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        assert!(issued.original_native().is_some());
+
+        // The issued token survives removal of its producer transaction path.
+        std::fs::remove_file(&selected).unwrap();
+        let relocated_witness = PackageInterfaceWitness {
+            selected_path: relocated.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let new_owner = ("new-package".to_owned(), "New".to_owned());
+        let receipt = BTreeMap::from([
+            (owner.clone(), relocated_witness.clone()),
+            (
+                new_owner.clone(),
+                PackageInterfaceWitness {
+                    selected_path: new_selection,
+                    sha256: sha(&[0x45]),
+                },
+            ),
+        ]);
+        let mut validation = PackageInterfaceValidation::default();
+        let before = crate::recovery_artifacts::package_interface_io();
+        let reconciled = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &receipt,
+            &mut validation,
+        )
+        .unwrap();
+        let after = crate::recovery_artifacts::package_interface_io();
+        assert_eq!((after.0 - before.0, after.1 - before.1), (2, 2));
+        let reuse = reconciled
+            .decisions()
+            .iter()
+            .find(|observation| observation.kind() == PackageInterfaceSelectionKind::Reuse)
+            .unwrap();
+        assert_eq!(reuse.selected(), &selected_witness);
+        assert_eq!(reuse.observed(), &relocated_witness);
+        assert_eq!(reuse.token().map(|token| token.sha256()), Some(&sha(&[0x43])));
+        assert!(reconciled.decisions().iter().any(|observation| {
+            observation.kind() == PackageInterfaceSelectionKind::NewSelection
+                && observation.owner() == &new_owner
+                && observation.selected().selected_path == root.path().join("New.hi")
+        }));
+        assert_eq!(reconciled.inherited()[&owner].witness(), &selected_witness);
+        verify_package_interface(&mut validation, &selected_witness).unwrap();
+
+        // A fresh admission, after the producer path was removed, reaches the
+        // same selected token and reads only the relocated observation.
+        let mut cold = PackageInterfaceValidation::default();
+        let cold_before = crate::recovery_artifacts::package_interface_io();
+        let cold_reconciled = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+            &mut cold,
+        )
+        .unwrap();
+        let cold_after = crate::recovery_artifacts::package_interface_io();
+        assert_eq!(
+            (cold_after.0 - cold_before.0, cold_after.1 - cold_before.1),
+            (1, 1)
+        );
+        assert!(cold_reconciled
+            .decisions()
+            .iter()
+            .all(|decision| !decision.is_new()));
+        assert_eq!(
+            cold_reconciled.inherited()[&owner].witness(),
+            &selected_witness
+        );
+        verify_package_interface(&mut cold, &selected_witness).unwrap();
+
+        // Same bytes at another owner classify as that owner's new selection,
+        // never as reuse of the already selected external-package owner.
+        let wrong_owner = ("other-package".to_owned(), "External".to_owned());
+        let separated = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &BTreeMap::from([(wrong_owner.clone(), relocated_witness.clone())]),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(separated
+            .decisions()
+            .iter()
+            .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
+        assert_eq!(separated.inherited()[&owner].witness(), &selected_witness);
+
+        // A genuine different seal refuses rather than replacing the inherited
+        // selection, even when the incoming observation is readable.
+        std::fs::write(&relocated, [0x44]).unwrap();
+        let changed = PackageInterfaceWitness {
+            selected_path: relocated.clone(),
+            sha256: sha(&[0x44]),
+        };
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner.clone(), changed)]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "exact inherited package selection differs from current target"
+            ))
+        ));
+
+        // Authentication failures remain the existing typed storage failures.
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&relocated, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(
+                reconcile_ordinary_package_interfaces(
+                    std::slice::from_ref(&issued),
+                    &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::Unreadable { .. }
+                ))
+            ));
+            std::fs::set_permissions(&relocated, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::remove_file(&relocated).unwrap();
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner, relocated_witness)]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::Unavailable(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn segment_package_additions_reuse_only_a_genuine_relocation() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("External.hi");
+        let relocated = root.path().join("retained").join("External.hi");
+        std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+        std::fs::write(&selected, [0x43]).unwrap();
+        std::fs::write(&relocated, [0x43]).unwrap();
+
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let selected_witness = PackageInterfaceWitness {
+            selected_path: selected.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let packages = BTreeMap::from([(owner.clone(), selected_witness.clone())]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: owner.0.clone(),
+                    module: owner.1.clone(),
+                    binder: SymbolIdentity {
+                        unit: owner.0.clone(),
+                        ..testing::identity(&owner.1, "entry")
+                    },
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        let item = BTreeMap::from([(
+            owner.clone(),
+            PackageInterfaceWitness {
+                selected_path: relocated.clone(),
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let available = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(&selected).unwrap();
+
+        let mut validation = PackageInterfaceValidation::default();
+        let reconciled = reconcile_segment_package_additions(
+            &item,
+            &BTreeMap::new(),
+            &available,
+            &mut validation,
+        )
+        .unwrap();
+        let [observation] = reconciled.decisions() else {
+            panic!("one segment package observation expected");
+        };
+        assert_eq!(observation.kind(), PackageInterfaceSelectionKind::Reuse);
+        assert_eq!(observation.selected(), &selected_witness);
+        assert_eq!(observation.observed(), &item[&owner]);
+        assert_eq!(
+            observation.token().map(|token| token.sha256()),
+            Some(&sha(&[0x43]))
+        );
+        verify_package_interface(&mut validation, &selected_witness).unwrap();
+
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &item,
+                &item,
+                &available,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "item repeats an original package selection"
+            ))
+        ));
+        let mut conflict = item.clone();
+        conflict.get_mut(&owner).unwrap().sha256[0] ^= 1;
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &conflict,
+                &BTreeMap::new(),
+                &available,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "item replaces an inherited package selection"
+            ))
+        ));
+
+        let wrong_owner = ("other-package".to_owned(), "External".to_owned());
+        let separated = reconcile_segment_package_additions(
+            &BTreeMap::from([(wrong_owner.clone(), item[&owner].clone())]),
+            &BTreeMap::new(),
+            &available,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(separated
+            .decisions()
+            .iter()
+            .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
+        assert_eq!(available[&owner].witness(), &selected_witness);
+
+        std::fs::write(&relocated, [0x44]).unwrap();
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &item,
+                &BTreeMap::new(),
+                &available,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
     }
 
     #[test]
@@ -26486,7 +27703,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn carry_inherited_package_witness_prefers_token_then_legacy_copy() {
+    fn retain_inherited_package_custody_pairs_exact_token_with_legacy_fallbacks() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("External.hi");
         std::fs::write(&path, [0x43]).unwrap();
@@ -26524,42 +27741,55 @@ pub(crate) mod tests {
         );
         assert!(legacy.original_native().is_none());
         let owner = ("external-package".to_owned(), "External".to_owned());
-        let inherited = packages[&owner].clone();
+        let native = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        let legacy = inherited_package_interfaces_with_validation(
+            std::slice::from_ref(&legacy),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
 
         // Native token preferred: retained bytes survive producer removal and
         // re-register under the issued logical path without reopening storage.
         std::fs::remove_file(&path).unwrap();
         let mut native_validation = PackageInterfaceValidation::default();
-        carry_inherited_package_witness(
-            std::slice::from_ref(&issued),
-            &owner,
-            &inherited,
-            &mut native_validation,
-        )
-        .unwrap();
-        assert!(verify_package_interface(&mut native_validation, &inherited).is_ok());
+        retain_inherited_package_custody(&native, &mut native_validation).unwrap();
+        assert!(verify_package_interface(&mut native_validation, &native.witness).is_ok());
 
         // Legacy readable copy re-registers through the existing capture path.
         std::fs::write(&path, [0x43]).unwrap();
         let mut legacy_validation = PackageInterfaceValidation::default();
-        carry_inherited_package_witness(
-            std::slice::from_ref(&legacy),
-            &owner,
-            &inherited,
-            &mut legacy_validation,
-        )
-        .unwrap();
+        retain_inherited_package_custody(&legacy, &mut legacy_validation).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(
+                retain_inherited_package_custody(
+                    &legacy,
+                    &mut PackageInterfaceValidation::default()
+                ),
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::Unreadable { .. }
+                ))
+            ));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         // A removed legacy copy is a typed refusal.
         std::fs::remove_file(&path).unwrap();
         let mut removed_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            carry_inherited_package_witness(
-                std::slice::from_ref(&legacy),
-                &owner,
-                &inherited,
-                &mut removed_validation,
-            ),
+            retain_inherited_package_custody(&legacy, &mut removed_validation),
             Err(CertificationError::CapturedModulePayload(_))
         ));
 
@@ -26567,15 +27797,123 @@ pub(crate) mod tests {
         std::fs::write(&path, [0x44]).unwrap();
         let mut corrupt_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            carry_inherited_package_witness(
-                std::slice::from_ref(&legacy),
-                &owner,
-                &inherited,
-                &mut corrupt_validation,
-            ),
+            retain_inherited_package_custody(&legacy, &mut corrupt_validation),
             Err(CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
             ))
+        ));
+    }
+
+    #[test]
+    fn inherited_package_reuse_keeps_the_token_paired_with_the_selected_product() {
+        let root = tempfile::tempdir().unwrap();
+        let first_path = root.path().join("First.hi");
+        let second_path = root.path().join("Second.hi");
+        std::fs::write(&first_path, [0x43]).unwrap();
+        std::fs::write(&second_path, [0x43]).unwrap();
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let package = |path| {
+            BTreeMap::from([(
+                owner.clone(),
+                PackageInterfaceWitness {
+                    selected_path: path,
+                    sha256: sha(&[0x43]),
+                },
+            )])
+        };
+        let fixture = |module, path| {
+            fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    module,
+                    vec![(
+                        7,
+                        vec![PendingImportOwner::Package {
+                            unit: owner.0.clone(),
+                            module: owner.1.clone(),
+                            binder: SymbolIdentity {
+                                unit: owner.0.clone(),
+                                ..testing::identity(&owner.1, "entry")
+                            },
+                            interface_digest: sha(&[0x43]),
+                        }],
+                    )],
+                    7,
+                    &package(path),
+                    format!("{module} interface").into_bytes(),
+                ),
+                [1; 32],
+            )
+        };
+        let originals = recovered_witness_fixtures(&[
+            fixture("First", first_path.clone()),
+            fixture("Second", second_path.clone()),
+        ]);
+        let first_token = originals[0]
+            .product
+            .original_native()
+            .unwrap()
+            .package_interfaces()
+            .get(&owner)
+            .unwrap()
+            .clone();
+        let second_token = originals[1]
+            .product
+            .original_native()
+            .unwrap()
+            .package_interfaces()
+            .get(&owner)
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&first_token, &second_token));
+
+        let selected = inherited_package_interfaces_with_validation(
+            &[
+                originals[0].product.clone(),
+                originals[1].product.clone(),
+            ],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        assert_eq!(selected.witness.selected_path, first_path);
+        assert!(Arc::ptr_eq(selected.token().unwrap(), &first_token));
+        assert!(!Arc::ptr_eq(selected.token().unwrap(), &second_token));
+        assert!(matches!(
+            selected.issuer(),
+            Some(PackageInterfaceIssuer::Original(issuer))
+                if issuer == originals[0].product.owner()
+        ));
+
+        let legacy_first = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            originals[0].product.owner().clone(),
+            originals[0].product.interface_bytes().to_vec(),
+            originals[0].product.product_bytes().to_vec(),
+            originals[0].product.package_imports_bytes().to_vec(),
+            originals[0].product.certification_bytes().to_vec(),
+        );
+        let legacy_selected = inherited_package_interfaces_with_validation(
+            &[legacy_first, originals[1].product.clone()],
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
+        .remove(&owner)
+        .unwrap();
+        assert!(legacy_selected.token().is_none());
+        assert!(legacy_selected.issuer().is_none());
+
+        std::fs::remove_file(&first_path).unwrap();
+        retain_inherited_package_custody(
+            &selected,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            retain_inherited_package_custody(
+                &legacy_selected,
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(_))
         ));
     }
 
@@ -32019,7 +33357,7 @@ None,
         let item = segment_item_receipt(&SegmentItemReceipt {
             globals: vec![],
             packages: BTreeMap::new(),
-            package_products: vec![],
+            selection: empty_package_selection([7; 32], "target"),
         });
         let decode_originals = |value: &Value| {
             decode_segment_originals_with_operation(
@@ -32151,7 +33489,7 @@ None,
             Err(CertificationError::UnsupportedVersion {
                 format: CertificationFormat::ProductReceipt,
                 found: 9,
-                expected: 12
+                expected: 13
             })
         ));
         let mut trailing = encoded;
@@ -32292,7 +33630,7 @@ None,
         .unwrap();
         let package_coordinate = 1 - source_coordinate;
         for reference in [
-            Value::Integer(2.into()),
+            Value::Integer(1.into()),
             Value::Integer((-1).into()),
             Value::Null,
             Value::Integer(package_coordinate.into()),
@@ -32492,8 +33830,20 @@ None,
             if let ReceiptImportOwner::OriginalBinding { binder, .. } = &mut right.owner {
                 *binder = right.identity.clone();
             }
+            let target_roots = match &left.owner {
+                ReceiptImportOwner::Package {
+                    ..
+                } => vec![PackageLink::Local { occurrence: 0 }],
+                _ => Vec::new(),
+            };
             let item = segment_item_receipt(&SegmentItemReceipt {
-                globals: vec![left.clone()], packages: BTreeMap::new(), package_products: vec![],
+                globals: vec![left.clone()],
+                packages: BTreeMap::new(),
+                selection: PackageSelection {
+                    program_sha256: [0; 32],
+                    target_roots,
+                    ..empty_package_selection([7; 32], "target")
+                },
             });
             let operation = InventoryOperation::new(Default::default());
             let decoded = decode_segment_item_with_operation(&receipt_bytes(&item), &operation).unwrap();
@@ -32764,7 +34114,7 @@ None,
     fn receipt_payload_mut(value: &mut Value) -> &mut Vec<Value> {
         let header = value.as_array_mut().unwrap();
         assert_eq!(header[0], value_text("TPCERT"));
-        assert_eq!(header[1], Value::Integer(12.into()));
+        assert_eq!(header[1], Value::Integer(13.into()));
         header[2].as_array_mut().unwrap()
     }
 
@@ -32774,10 +34124,106 @@ None,
         bytes
     }
 
+    fn empty_package_selection(stage_id: [u8; 32], target: &str) -> PackageSelection {
+        PackageSelection {
+            stage_id,
+            program_sha256: [0; 32],
+            target: target.into(),
+            target_roots: Vec::new(),
+            home_roots: BTreeMap::new(),
+        }
+    }
+
+    fn package_links_value(links: &PackageLinks) -> Value {
+        let stage_id =
+            package_stage_identity(links, &InventoryOperation::new(Default::default())).unwrap();
+        value_array([
+            Value::Integer(3.into()),
+            Value::Bytes(stage_id.to_vec()),
+            value_array(links.occurrences.iter().map(|occurrence| {
+                value_array([
+                    Value::Integer(occurrence.id.into()),
+                    Value::Bytes(occurrence.envelope_sha256.to_vec()),
+                    value_text(&occurrence.unit),
+                    value_text(&occurrence.module),
+                    Value::Bytes(occurrence.defining_interface_sha256.to_vec()),
+                    Value::Bytes(occurrence.defining_version_sha256.to_vec()),
+                    value_array(
+                        occurrence
+                            .imports
+                            .iter()
+                            .map(|link| package_links_local(link.occurrence() as u64)),
+                    ),
+                ])
+            })),
+            value_array(links.target_roots.iter().map(|(target, roots)| {
+                value_array([
+                    value_text(target),
+                    value_array(
+                        roots
+                            .iter()
+                            .map(|link| package_links_local(link.occurrence() as u64)),
+                    ),
+                ])
+            })),
+            value_array(links.home_roots.iter().map(|(key, roots)| {
+                value_array([
+                    value_array([
+                        value_text(&key.target),
+                        value_text(&key.unit),
+                        value_text(&key.module),
+                        Value::Integer((key.original_ordinal as u64).into()),
+                    ]),
+                    value_array(
+                        roots
+                            .iter()
+                            .map(|link| package_links_local(link.occurrence() as u64)),
+                    ),
+                ])
+            })),
+            value_array(links.products.iter().map(|product| {
+                value_array([
+                    value_text(product.relative_path.to_string_lossy()),
+                    Value::Bytes(product.sha256.to_vec()),
+                ])
+            })),
+        ])
+    }
+
+    fn package_selection_value(selection: &PackageSelection) -> Value {
+        value_array([
+            Value::Integer(1.into()),
+            Value::Bytes(selection.stage_id.to_vec()),
+            Value::Bytes(selection.program_sha256.to_vec()),
+            value_text(&selection.target),
+            value_array(
+                selection
+                    .target_roots
+                    .iter()
+                    .map(|link| package_links_local(link.occurrence() as u64)),
+            ),
+            value_array(selection.home_roots.iter().map(|(key, roots)| {
+                value_array([
+                    value_array([
+                        value_text(&key.target),
+                        value_text(&key.unit),
+                        value_text(&key.module),
+                        Value::Integer((key.original_ordinal as u64).into()),
+                    ]),
+                    value_array(
+                        roots
+                            .iter()
+                            .map(|link| package_links_local(link.occurrence() as u64)),
+                    ),
+                ])
+            })),
+        ])
+    }
+
     fn segment_item_receipt(receipt: &SegmentItemReceipt) -> Value {
         value_array([
             value_text("TPCERT"),
-            Value::Integer(12.into()),
+            Value::Integer(13.into()),
             value_array([
                 value_text("segment-item"),
                 value_array(receipt.globals.iter().map(value_global)),
@@ -32789,12 +34235,7 @@ None,
                         value_text(hex(&witness.sha256)),
                     ])
                 })),
-                value_array(receipt.package_products.iter().map(|output| {
-                    value_array([
-                        value_text(output.relative_path.display().to_string()),
-                        Value::Bytes(output.sha256.to_vec()),
-                    ])
-                })),
+                package_selection_value(&receipt.selection),
             ]),
         ])
     }
@@ -32892,16 +34333,59 @@ None,
         header.push(value_array(
             indexed.into_values().map(|(_, coordinate)| coordinate),
         ));
-        header.push(value_array([]));
-        header.push(value_array([
-            Value::Integer(1.into()),
-            value_array([]),
-            value_array([]),
-            value_array([]),
-        ]));
+        let owner_by_identity = array(&array(full).unwrap()[5])
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let row = array(row).unwrap();
+                (receipt_bytes(&row[0]), array(&row[4]).unwrap().to_vec())
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut occurrences = Vec::new();
+        let mut target_roots = Vec::new();
+        let mut products = Vec::new();
+        for target in array(&array(full).unwrap()[3]).unwrap() {
+            let target = array(target).unwrap();
+            let mut roots = Vec::new();
+            for identity in array(&target[1]).unwrap() {
+                let owner = &owner_by_identity[&receipt_bytes(identity)];
+                if string(&owner[0]).unwrap() != "package" {
+                    continue;
+                }
+                let index = occurrences.len() as u64;
+                let envelope = [(index as u8).saturating_add(1); 32];
+                occurrences.push(value_array([
+                    Value::Integer(index.into()),
+                    Value::Bytes(envelope.to_vec()),
+                    owner[1].clone(),
+                    owner[2].clone(),
+                    owner[3].clone(),
+                    Value::Bytes([0x55; 32].to_vec()),
+                    value_array([]),
+                ]));
+                roots.push(package_links_local(index));
+                products.push(PackageProductOutput {
+                    relative_path: PathBuf::from(format!("packages/{index:08}.cbor")),
+                    sha256: envelope,
+                });
+            }
+            target_roots.push(value_array([target[0].clone(), value_array(roots)]));
+        }
+        header.push(value_array(products.iter().map(|product| {
+            value_array([
+                value_text(&*product.relative_path.to_string_lossy()),
+                Value::Bytes(product.sha256.to_vec()),
+            ])
+        })));
+        header.push(package_links_manifest(
+            &products,
+            occurrences,
+            target_roots,
+            vec![],
+        ));
         let payload =
             value_array(std::iter::once(value_text("ordinary")).chain(header[2..].iter().cloned()));
-        value_array([value_text("TPCERT"), Value::Integer(12.into()), payload])
+        value_array([value_text("TPCERT"), Value::Integer(13.into()), payload])
     }
 
     fn test_dictionary(globals: &[AcceptedGlobal]) -> GlobalDictionary {
@@ -33353,37 +34837,77 @@ None,
     fn removed_cached_package_owner_routes_refuse_v11_and_home6() {
         let global = dictionary_test_global();
         let legacy = value_array([
-            value_text("retained-package"), value_text(&global.identity.unit),
-            value_text(&global.identity.module), value_text(hex(&[4; 32])),
-            value_identity(&global.identity), Value::Integer(7.into()),
+            value_text("retained-package"),
+            value_text(&global.identity.unit),
+            value_text(&global.identity.module),
+            value_text(hex(&[4; 32])),
+            value_identity(&global.identity),
+            Value::Integer(7.into()),
         ]);
-        assert!(matches!(owner(&legacy, &global.identity),
-            Err(CertificationError::Receipt("retained package owner removed"))));
+        assert!(matches!(
+            owner(&legacy, &global.identity),
+            Err(CertificationError::Receipt(
+                "retained package owner removed"
+            ))
+        ));
         let coordinates = value_array([value_array([
-            value_text("package"), value_text(&global.identity.unit),
-            value_text(&global.identity.module), value_text(hex(&[4; 32])),
+            value_text("package"),
+            value_text(&global.identity.unit),
+            value_text(&global.identity.module),
+            value_text(hex(&[4; 32])),
         ])]);
         let mut dictionary = OwnerCoordinates::decode(&coordinates).unwrap();
-        assert!(matches!(dictionary.owner(&value_array([
-            value_text("retained-package"), Value::Integer(0.into()), Value::Integer(7.into()),
-        ]), &global.identity), Err(CertificationError::Receipt("retained package owner removed"))));
+        assert!(matches!(
+            dictionary.owner(
+                &value_array([
+                    value_text("retained-package"),
+                    Value::Integer(0.into()),
+                    Value::Integer(7.into()),
+                ]),
+                &global.identity
+            ),
+            Err(CertificationError::Receipt(
+                "retained package owner removed"
+            ))
+        ));
         let mut encoded_global = value_global(&global);
         encoded_global.as_array_mut().unwrap()[4] = legacy;
-        let item = value_array([value_text("TPCERT"), Value::Integer(12.into()), value_array([
-            value_text("segment-item"), value_array([encoded_global]), value_array([]), value_array([]),
-        ])]);
-        assert!(matches!(decode_segment_item_with_operation(&receipt_bytes(&item),
-            &InventoryOperation::new(Default::default())),
-            Err(CertificationError::Receipt("retained package owner removed"))));
-        let current = encode_home_certification(&inherited_owner("Original"), &[], &BTreeMap::new()).unwrap();
+        let item = value_array([
+            value_text("TPCERT"),
+            Value::Integer(13.into()),
+            value_array([
+                value_text("segment-item"),
+                value_array([encoded_global]),
+                value_array([]),
+                value_array([]),
+                value_text("target"),
+                package_links_value(&PackageLinks::empty_for_target("target")),
+            ]),
+        ]);
+        assert!(matches!(
+            decode_segment_item_with_operation(
+                &receipt_bytes(&item),
+                &InventoryOperation::new(Default::default())
+            ),
+            Err(CertificationError::Receipt(
+                "retained package owner removed"
+            ))
+        ));
+        let current =
+            encode_home_certification(&inherited_owner("Original"), &[], &BTreeMap::new()).unwrap();
         let mut value: Value = ciborium::de::from_reader(current.as_slice()).unwrap();
         let fields = value.as_array_mut().unwrap();
         assert_eq!(fields.len(), 9);
         assert_eq!(number(&fields[1]).unwrap(), 6);
         fields[1] = Value::Integer(5.into());
-        assert!(matches!(decode_home_witness(&receipt_bytes(&value)),
-            Err(CertificationError::UnsupportedVersion { format: CertificationFormat::HomeOwners,
-                found: 5, expected: 6 })));
+        assert!(matches!(
+            decode_home_witness(&receipt_bytes(&value)),
+            Err(CertificationError::UnsupportedVersion {
+                format: CertificationFormat::HomeOwners,
+                found: 5,
+                expected: 6
+            })
+        ));
     }
 
     #[test]
@@ -33765,8 +35289,19 @@ None,
         );
         let product = fixture_finalized_product(product, [1; 32]);
         let cold = decode_home_witness(product.certification_bytes()).unwrap();
-        let custody = PackageInterfaceCustody::capture_verified_packages(&cold.packages, &mut PackageInterfaceValidation::default()).unwrap();
-        let retained = retain_authenticated_original_native(product, vec![], cold, &custody, &mut PackageInterfaceValidation::default()).unwrap();
+        let custody = PackageInterfaceCustody::capture_verified_packages(
+            &cold.packages,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        let retained = retain_authenticated_original_native(
+            product,
+            vec![],
+            cold,
+            &custody,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         assert_eq!(
             original_interface_requirements(&retained).unwrap(),
             requirements
@@ -33815,7 +35350,7 @@ None,
 
     #[test]
     fn certificate_versions_refuse_legacy_ownership_without_reinterpretation() {
-        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
             let mut receipt = dictionary_receipt(&empty_product_facts());
             let Value::Array(rows) = &mut receipt else {
                 unreachable!()
@@ -33825,7 +35360,7 @@ None,
                 decode_receipt(&receipt_bytes(&receipt)),
                 Err(CertificationError::UnsupportedVersion {
                     format: CertificationFormat::ProductReceipt,
-                    expected: 12,
+                    expected: 13,
                     ..
                 })
             ));
@@ -33850,15 +35385,43 @@ None,
     }
 
     fn package_links_manifest(
+        products: &[PackageProductOutput],
         occurrences: Vec<Value>,
         target_roots: Vec<Value>,
         home_roots: Vec<Value>,
     ) -> Value {
-        value_array([
+        let identity_occurrences = occurrences
+            .iter()
+            .map(|occurrence| {
+                let row = array(occurrence).unwrap();
+                value_array(row[1..].iter().cloned())
+            })
+            .collect::<Vec<_>>();
+        let identity = value_array([
             Value::Integer(1.into()),
+            value_array(identity_occurrences),
+            value_array(target_roots.clone()),
+            value_array(home_roots.clone()),
+            value_array(products.iter().map(|product| {
+                value_array([
+                    value_text(product.relative_path.to_string_lossy()),
+                    Value::Bytes(product.sha256.to_vec()),
+                ])
+            })),
+        ]);
+        let stage_id = sha(&receipt_bytes(&identity));
+        value_array([
+            Value::Integer(3.into()),
+            Value::Bytes(stage_id.to_vec()),
             value_array(occurrences),
             value_array(target_roots),
             value_array(home_roots),
+            value_array(products.iter().map(|product| {
+                value_array([
+                    value_text(product.relative_path.to_string_lossy()),
+                    Value::Bytes(product.sha256.to_vec()),
+                ])
+            })),
         ])
     }
 
@@ -33878,12 +35441,63 @@ None,
         value_array([value_text("local"), Value::Integer(occurrence.into())])
     }
 
-    fn package_links_inherited() -> Value {
-        value_array([value_text("inherited")])
+    #[test]
+    fn package_selection_binds_stage_and_prepared_program() {
+        let occurrence = |id| PackageOccurrenceRow {
+            id,
+            envelope_sha256: [id as u8 + 1; 32],
+            unit: "pkg".into(),
+            module: format!("Pkg{id}"),
+            defining_interface_sha256: [id as u8 + 3; 32],
+            defining_version_sha256: [id as u8 + 5; 32],
+            imports: Vec::new(),
+        };
+        let home_key = PackageHomeRootKey {
+            target: "item".into(),
+            unit: "home".into(),
+            module: "Home".into(),
+            original_ordinal: 7,
+        };
+        let stage = PackageLinks {
+            version: 3,
+            stage_id: [0; 32],
+            occurrences: Arc::from([occurrence(0), occurrence(1)]),
+            target_roots: Arc::new(BTreeMap::from([(
+                "item".into(),
+                vec![PackageLink::Local { occurrence: 0 }],
+            )])),
+            home_roots: Arc::new(BTreeMap::from([(
+                home_key.clone(),
+                vec![PackageLink::Local { occurrence: 1 }],
+            )])),
+            products: Arc::from([]),
+        };
+        let selection = PackageSelection {
+            stage_id: [0; 32],
+            program_sha256: [1; 32],
+            target: "item".into(),
+            target_roots: vec![PackageLink::Local { occurrence: 0 }],
+            home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
+        };
+        assert!(BoundPackageSelection::item(&stage, &selection, [1; 32]).is_ok());
+        assert!(BoundPackageSelection::item(&stage, &selection, [2; 32]).is_err());
+        let mut crossed_stage = selection.clone();
+        crossed_stage.stage_id = [3; 32];
+        assert!(BoundPackageSelection::item(&stage, &crossed_stage, [1; 32]).is_err());
+        let mut crossed_target = selection.clone();
+        crossed_target.target = "other".into();
+        assert!(BoundPackageSelection::item(&stage, &crossed_target, [1; 32]).is_err());
+        let mut crossed_roots = selection.clone();
+        crossed_roots.target_roots = vec![PackageLink::Local { occurrence: 1 }];
+        assert!(BoundPackageSelection::item(&stage, &crossed_roots, [1; 32]).is_err());
+        let mut crossed_home = selection;
+        crossed_home.home_roots.values_mut().next().unwrap()[0] =
+            PackageLink::Local { occurrence: 0 };
+        assert!(BoundPackageSelection::item(&stage, &crossed_home, [1; 32]).is_err());
     }
 
     #[test]
-    fn package_links_decoder_accepts_exact_local_and_inherited_links() {
+    fn package_links_decoder_accepts_exact_links() {
         let operation = InventoryOperation::new(Default::default());
         let products = vec![
             PackageProductOutput {
@@ -33895,10 +35509,14 @@ None,
                 sha256: [2; 32],
             },
         ];
-        let targets = BTreeMap::from([("target".to_owned(), vec![])]);
+        let fresh_home_groups = BTreeMap::from([
+            (("home".to_owned(), "Home".to_owned(), 3), 1),
+            (("home".to_owned(), "Home".to_owned(), 9), 1),
+        ]);
         let manifest = package_links_manifest(
+            &products,
             vec![
-                package_links_occurrence(0, [1; 32], value_array([package_links_inherited()])),
+                package_links_occurrence(0, [1; 32], value_array([])),
                 package_links_occurrence(1, [2; 32], value_array([package_links_local(0)])),
             ],
             vec![value_array([
@@ -33908,6 +35526,7 @@ None,
             vec![
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(3.into()),
@@ -33916,23 +35535,43 @@ None,
                 ]),
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(9.into()),
                     ]),
-                    value_array([package_links_inherited()]),
+                    value_array([package_links_local(1)]),
                 ]),
             ],
         );
-        let decoded = decode_package_links(&manifest, &products, &targets, &operation).unwrap();
-        assert_eq!(decoded.version(), 1);
+        let decoded = decode_package_links(
+            &manifest,
+            &products,
+            PackageLinkTargets::Stage,
+            &fresh_home_groups,
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(decoded.version, 3);
         assert_eq!(decoded.occurrences().len(), 2);
         assert_eq!(decoded.occurrences()[0].id(), 0);
         assert_eq!(decoded.occurrences()[1].id(), 1);
-        assert_eq!(decoded.target_links("target").unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home", 3).unwrap().len(), 1);
-        assert_eq!(decoded.home_links("home", "Home", 9).unwrap().len(), 1);
-        assert!(decoded.home_links("home", "Home", 7).is_none());
+        assert_eq!(
+            decoded.target_roots.get("target").map(Vec::as_slice),
+            Some(&[PackageLink::Local { occurrence: 1 }][..])
+        );
+        assert_eq!(
+            decoded
+                .home_roots
+                .get(&PackageHomeRootKey {
+                    target: "target".into(),
+                    unit: "home".into(),
+                    module: "Home".into(),
+                    original_ordinal: 3,
+                })
+                .map(Vec::as_slice),
+            Some(&[PackageLink::Local { occurrence: 0 }][..])
+        );
     }
 
     #[test]
@@ -33942,19 +35581,77 @@ None,
             relative_path: PathBuf::from("pkg/envelope"),
             sha256: [1; 32],
         }];
-        let targets = BTreeMap::from([("target".to_owned(), vec![])]);
-        let decode = |value: &Value| decode_package_links(value, &products, &targets, &operation);
+        let identity = tidepool_repr::execution_schema::testing::identity("Pkg.Mod", "entry");
+        let targets = BTreeMap::from([(
+            "target".to_owned(),
+            vec![AcceptedGlobal {
+                identity: identity.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Package {
+                    unit: "pkg".into(),
+                    module: "Pkg.Mod".into(),
+                    binder: identity,
+                    interface_digest: [21; 32],
+                },
+            }],
+        )]);
+        let decode = |value: &Value| {
+            decode_package_links(
+                value,
+                &products,
+                PackageLinkTargets::Stage,
+                &BTreeMap::new(),
+                &operation,
+            )
+        };
 
         // Wrong version.
-        let mut wrong_version = package_links_manifest(vec![], vec![], vec![]);
+        let mut wrong_version = package_links_manifest(&products, vec![], vec![], vec![]);
         wrong_version.as_array_mut().unwrap()[0] = Value::Integer(0.into());
         assert!(matches!(
             decode(&wrong_version),
             Err(CertificationError::Receipt("package links version"))
         ));
+        let mut wrong_stage = package_links_manifest(
+            &products,
+            vec![package_links_occurrence(0, [1; 32], value_array([]))],
+            vec![],
+            vec![],
+        );
+        wrong_stage.as_array_mut().unwrap()[1] = Value::Bytes(vec![8; 32]);
+        assert!(matches!(
+            decode(&wrong_stage),
+            Err(CertificationError::Receipt(
+                "package stage identity differs from its manifest"
+            ))
+        ));
+        let mut mutated_roots = package_links_manifest(
+            &products,
+            vec![package_links_occurrence(0, [1; 32], value_array([]))],
+            vec![value_array([
+                value_text("target"),
+                value_array([package_links_local(0)]),
+            ])],
+            vec![],
+        );
+        assert!(decode(&mutated_roots).is_ok());
+        mutated_roots.as_array_mut().unwrap()[3]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1] = value_array([package_links_local(0), package_links_local(0)]);
+        assert!(matches!(
+            decode(&mutated_roots),
+            Err(CertificationError::Receipt(
+                "package stage identity differs from its manifest"
+            ))
+        ));
 
         // Row id is its position; a nonzero first id refuses.
         let bad_position = package_links_manifest(
+            &products,
             vec![package_links_occurrence(1, [1; 32], value_array([]))],
             vec![],
             vec![],
@@ -33968,10 +35665,12 @@ None,
 
         // A Local link must index an occurrence row.
         let out_of_range = package_links_manifest(
+            &products,
             vec![package_links_occurrence(0, [1; 32], value_array([]))],
             vec![],
             vec![value_array([
                 value_array([
+                    value_text("target"),
                     value_text("home"),
                     value_text("Home"),
                     Value::Integer(7.into()),
@@ -33988,6 +35687,7 @@ None,
 
         // A foreign envelope is not an authenticated package product.
         let foreign = package_links_manifest(
+            &products,
             vec![package_links_occurrence(0, [9; 32], value_array([]))],
             vec![],
             vec![],
@@ -33999,8 +35699,9 @@ None,
             ))
         ));
 
-        // Two rows may share an envelope only with distinct ordered imports.
+        // Distinct coordinates may have byte-identical row contents.
         let duplicate = package_links_manifest(
+            &products,
             vec![
                 package_links_occurrence(0, [1; 32], value_array([])),
                 package_links_occurrence(1, [1; 32], value_array([])),
@@ -34008,34 +35709,38 @@ None,
             vec![],
             vec![],
         );
-        assert!(matches!(
-            decode(&duplicate),
-            Err(CertificationError::Receipt(
-                "duplicate package occurrence row"
-            ))
-        ));
+        assert!(decode(&duplicate).is_ok());
 
-        // A root key must name an ordinary receipt target.
+        // An ordinary root key must name an exact receipt target.
         let unknown_target = package_links_manifest(
+            &products,
             vec![],
             vec![value_array([value_text("other"), value_array([])])],
             vec![],
         );
         assert!(matches!(
-            decode(&unknown_target),
+            decode_package_links(
+                &unknown_target,
+                &products,
+                PackageLinkTargets::Exact(&targets),
+                &BTreeMap::new(),
+                &operation,
+            ),
             Err(CertificationError::Receipt(
                 "package links target is not a target"
             ))
         ));
 
-        // A HOME owner key is (unit, module, original ordinal); a duplicate
+        // A HOME owner key is (target, unit, module, original ordinal); a duplicate
         // ordinal refuses, while distinct ordinals of one module are allowed.
         let duplicate_home = package_links_manifest(
+            &products,
             vec![],
             vec![],
             vec![
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(7.into()),
@@ -34044,6 +35749,7 @@ None,
                 ]),
                 value_array([
                     value_array([
+                        value_text("target"),
                         value_text("home"),
                         value_text("Home"),
                         Value::Integer(7.into()),
@@ -34053,7 +35759,13 @@ None,
             ],
         );
         assert!(matches!(
-            decode(&duplicate_home),
+            decode_package_links(
+                &duplicate_home,
+                &products,
+                PackageLinkTargets::Stage,
+                &BTreeMap::from([(("home".to_owned(), "Home".to_owned(), 7), 0)]),
+                &operation,
+            ),
             Err(CertificationError::Receipt("duplicate package links home"))
         ));
     }

@@ -63,3 +63,32 @@ IDs with equal contents are legal; duplicate IDs are not.
 The real historical reader still needs exact old/current edges, semantic
 results, disposable-output removal and cold/eviction evidence. Do not call a
 new ordinary smoke pass completion of that gate.
+
+## Repair checkpoint controls
+
+The `g2-repair/p3-20261021` checkpoint replaces the lossy observations above
+with:
+
+- finite issued-graph records keyed by exact `ArtifactBinding`, preserving
+  ordered edges and cycles without a depth cutoff;
+- exact HOME-root cardinality, issued ordinal, exported fixture binder and
+  cross-ordinal absence;
+- a repeated-Fresh HOME history with `result` and `result2`, including reversed
+  target order and exact prior-binding reuse;
+- a real package-using World item followed by a later cell consuming its
+  captured value;
+- a real direct identity/child-history pair from `sortInts` and `sortStrings`.
+  The direct package owner, interface, envelope and body agree while the
+  ordered child bindings differ.
+
+The first truthful run executes seven passes and two failures: the World item
+stops at `target package slot lacks package links`, and repeated Fresh HOME
+stops at `finite targets disagree on a physical native product`. These are
+producer/consumer construction failures, not oracle failures.
+
+Crossing the serialized program/package pair for refusal and adding a second
+compatible inherited graph remain unqualified until P exposes the
+receipt-issued `BoundPackageSelection` constructor. No test-only constructor is
+introduced to bypass that dependency. A scanned set of current ordinary
+receipts found no equal-envelope rows with distinct non-empty import histories;
+that relationship remains explicitly unqualified.

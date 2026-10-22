@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries, packageOccurrenceCanonicalization, homeRootResolutionAgreement, homeRootFreshRestriction) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -22,7 +22,6 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString as BS
-import Data.Word (Word)
 import GHC (findModule, getModuleInfo, modInfoExports, mkModuleName, getSessionDynFlags)
 import GHC.Driver.Backend (backendGeneratesCode)
 import GHC.Driver.Session (backend, gopt, GeneralFlag(Opt_ByteCode), parseDynamicFilePragma)
@@ -37,7 +36,9 @@ import System.Directory (copyFile, createDirectory, doesDirectoryExist, doesFile
 import System.FilePath ((</>), takeFileName, takeDirectory)
 import Test.QuickCheck
 import Tidepool.CompilerProducts
-  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory, writeCertifiedProductsKeepingWithOriginals )
+  ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory
+  , writeCertifiedProductsKeepingWithOriginals, writeCertifiedSegmentProducts
+  , writeCertifiedSegmentItemProductsWithInputs )
 import Tidepool.CompilerRequest
 import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
@@ -49,9 +50,9 @@ import Tidepool.ExactScope (decodeWorldSources)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
-  , PackageLink(..), PackageOccurrence(..), RawOccurrence(..), RawLink(..)
-  , canonicalizeOccurrences, resolveHomeRoots, restrictFreshHomeRoots )
+  , validatePackageTargetRoots )
 import Tidepool.ArtifactBytes (artifactSha256, artifactBytes, captureArtifactBytes)
+import qualified Crypto.Hash.SHA256 as SHA256
 
 -- The Rust receipt consumer expects null/text, independently of the execution
 -- schema's tagged optional parent. The joined World test exercises the actual
@@ -67,125 +68,17 @@ nativeReceiptIdentityChecks = forM_ [Nothing, Just (Text.pack "Record")] $ \pare
     Right (remaining, actual) | BL.null remaining && actual == expected -> pure ()
     other -> fail ("compiler receipt symbol grammar changed: " ++ show other)
 
--- Exact cross-target occurrence canonicalization: two targets sharing an
--- identical parent+child graph collapse to shared rows, while a sibling with
--- the same parent envelope but a different child partition stays distinct.
-packageOccurrenceCanonicalization :: IO ()
-packageOccurrenceCanonicalization = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      interface = BS.replicate 32 1
-      version = BS.replicate 32 2
-      raw envelope imports = RawOccurrence envelope unit moduleNameText interface version imports
-      raws =
-        [ raw (BS.pack [80]) [RawLinkLocal 1]   -- target A parent
-        , raw (BS.pack [67]) []                 -- target A child
-        , raw (BS.pack [80]) [RawLinkLocal 3]   -- target B identical parent
-        , raw (BS.pack [67]) []                 -- target B identical child
-        , raw (BS.pack [80]) [RawLinkLocal 5]   -- sibling: same envelope, different child
-        , raw (BS.pack [68]) []                 -- sibling child
-        ]
-      expectedRows =
-        [ PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 1]
-        , PackageOccurrence (BS.pack [67]) unit moduleNameText interface version []
-        , PackageOccurrence (BS.pack [80]) unit moduleNameText interface version [PackageLinkLocal 3]
-        , PackageOccurrence (BS.pack [68]) unit moduleNameText interface version []
-        ]
-      expectedIndex = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1), (4, 2), (5, 3)]
-      (rows, indexMap) = canonicalizeOccurrences raws
-  unless (rows == expectedRows)
-    (fail ("package occurrence canonicalization changed rows: " ++ show rows))
-  unless (indexMap == expectedIndex)
-    (fail ("package occurrence canonicalization changed ids: " ++ show indexMap))
-  -- A supported finite cycle must terminate and collapse to one self-referring
-  -- row rather than hang or emit a second distinct occurrence.
-  let cycleRaws =
-        [ RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 1]
-        , RawOccurrence (BS.pack [69]) unit moduleNameText interface version [RawLinkLocal 0]
-        ]
-      expectedCycleRows =
-        [ PackageOccurrence (BS.pack [69]) unit moduleNameText interface version [PackageLinkLocal 0]
-        ]
-      (cycleRows, _) = canonicalizeOccurrences cycleRaws
-  unless (cycleRows == expectedCycleRows)
-    (fail ("package occurrence cyclic canonicalization changed rows: " ++ show cycleRows))
-
--- HOME root links resolve through each target's own occurrence map; a
--- T2-only binder and reversed target order must not change the agreed links,
--- and disagreeing targets must refuse rather than merge.
-homeRootResolutionAgreement :: IO ()
-homeRootResolutionAgreement = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      binderA = SymbolIdentity (Text.pack "u") (Text.pack "A") (Text.pack "v") (Text.pack "a") Nothing
-      binderB = SymbolIdentity (Text.pack "u") (Text.pack "B") (Text.pack "v") (Text.pack "b") Nothing
-      binderC = SymbolIdentity (Text.pack "u") (Text.pack "C") (Text.pack "v") (Text.pack "c") Nothing
-      indexMap = Map.fromList [(0, 0), (1, 1), (2, 0), (3, 1)]
-      owners = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(binderA, 0), (binderB, 1)])
-        , (Text.pack "t2", Map.fromList [(binderA, 2), (binderC, 3)]) ]
-      home1 = (unit, moduleNameText, 0 :: Word)
-      home2 = (unit, moduleNameText, 1 :: Word)
-      importsForward = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
-        , (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])]) ]
-      importsReversed = Map.fromList
-        [ (Text.pack "t2", Map.fromList [(home1, [binderA]), (home2, [binderC])])
-        , (Text.pack "t1", Map.fromList [(home1, [binderA])]) ]
-      disagreeing = Map.fromList
-        [ (Text.pack "t1", Map.fromList [(home1, [binderA])])
-        , (Text.pack "t2", Map.fromList [(home1, [binderB])]) ]
-      expected = Map.fromList
-        [ (home1, [PackageLinkLocal 0])
-        , (home2, [PackageLinkLocal 1]) ]
-  case resolveHomeRoots indexMap owners importsForward of
-    Right actual | actual == expected -> pure ()
-    other -> fail ("HOME root resolution changed: " ++ show other)
-  case resolveHomeRoots indexMap owners importsReversed of
-    Right actual | actual == expected -> pure ()
-    other -> fail ("reversed HOME root resolution changed: " ++ show other)
-  case resolveHomeRoots indexMap owners disagreeing of
-    Left _ -> pure ()
-    Right actual -> fail ("disagreeing HOME roots were silently merged: " ++ show actual)
-  -- A symbol exported by two targets at one canonical occurrence resolves to
-  -- that shared occurrence; at two distinct occurrences it refuses.
-  let sharedOwners = Map.fromList
-        [ (Text.pack "t1", Map.singleton binderA 0)
-        , (Text.pack "t2", Map.singleton binderA 1) ]
-      sharedIndex = Map.fromList [(0, 0), (1, 0)]
-      sharedImports = Map.fromList
-        [ (Text.pack "t1", Map.singleton home1 [binderA])
-        , (Text.pack "t2", Map.singleton home1 [binderA]) ]
-      ambiguousIndex = Map.fromList [(0, 0), (1, 1)]
-  case resolveHomeRoots sharedIndex sharedOwners sharedImports of
-    Right actual | actual == Map.singleton home1 [PackageLinkLocal 0] -> pure ()
-    other -> fail ("shared HOME occurrence did not collapse: " ++ show other)
-  case resolveHomeRoots ambiguousIndex sharedOwners sharedImports of
-    Left reason | "multiple occurrences" `isInfixOf` reason -> pure ()
-    other -> fail ("ambiguous HOME occurrence was not refused: " ++ show other)
-  let missingIndex = Map.singleton (Text.pack "t1")
-        (Map.singleton binderA 99)
-      onlyFirstTarget = Map.singleton (Text.pack "t1")
-        (Map.singleton home1 [binderA])
-  case resolveHomeRoots indexMap missingIndex onlyFirstTarget of
-    Left reason | "canonical occurrence" `isInfixOf` reason -> pure ()
-    other -> fail ("missing canonical occurrence was not refused: " ++ show other)
-
--- A non-fresh HOME group with package imports must not emit a home_roots
--- entry; only fresh HOME groups publish their links in this receipt.
-homeRootFreshRestriction :: IO ()
-homeRootFreshRestriction = do
-  let unit = Text.pack "unit"
-      moduleNameText = Text.pack "Module"
-      freshKey = (unit, moduleNameText, 0 :: Word)
-      retainedKey = (unit, moduleNameText, 1 :: Word)
-      roots = Map.fromList
-        [ (freshKey, [PackageLinkLocal 0])
-        , (retainedKey, [PackageLinkLocal 1]) ]
-      fresh = Set.singleton freshKey
-      expected = Map.singleton freshKey [PackageLinkLocal 0]
-  unless (restrictFreshHomeRoots fresh roots == expected)
-    (fail ("non-fresh HOME root was not dropped: " ++ show (restrictFreshHomeRoots fresh roots)))
+packageTargetRootDriftRefusal :: IO ()
+packageTargetRootDriftRefusal = do
+  let expected = Map.fromList [(Text.pack "item", [0, 1])]
+      mutated = Map.fromList [(Text.pack "item", [0, 2])]
+  case validatePackageTargetRoots expected expected of
+    Right () -> pure ()
+    Left reason -> fail ("unchanged target roots refused: " ++ reason)
+  case validatePackageTargetRoots expected mutated of
+    Left reason
+      | "target package roots changed" `isInfixOf` reason -> pure ()
+    other -> fail ("target root mutation was not refused: " ++ show other)
 
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
@@ -784,10 +677,45 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 (fail "native certificate omitted an emitted package product")
             captured <- listDirectory (work </> "package-interfaces")
             unless (not (null captured)) (fail "native writer omitted captured package interfaces")
-            packageRows <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
-              Right (rest,TList [TString "TPCERT",TInt 12,TList
-                [TString "ordinary",_,_,TList rows,_,_,_,_,_,_]]) | BL.null rest -> pure rows
+            (packageRows,packageLinks) <- case deserialiseFromBytes decodeTerm (BL.fromStrict certificate) of
+              Right (rest,TList [TString "TPCERT",TInt 13,TList
+                [TString "ordinary",_,_,TList rows,_,_,_,_,_,links]]) | BL.null rest -> pure (rows,links)
               _ -> fail "native writer emitted a malformed package witness table"
+            ordinaryStageId <- case packageLinks of
+              TList [TInt 3,TBytes stageId,TList occurrences,TList roots,TList _,TList products] -> do
+                let packageRoots = case roots of
+                      [TList [TString "__result",TList ids]] -> ids
+                      _ -> []
+                unless (BS.length stageId == 32
+                    && length products == length paths
+                    && (not wantsCode || not (null packageRoots))
+                    && all (validOccurrence (length occurrences)) packageRoots)
+                  (fail "native writer emitted crossed or out-of-range package links")
+                pure stageId
+              _ -> fail "native writer emitted a malformed package-link manifest"
+            when wantsCode $ case artifacts of
+              artifact:_ -> do
+                let segmentDirectory = work </> "segment"
+                    itemDirectory = segmentDirectory </> "item-0"
+                createDirectory segmentDirectory
+                staged <- writeCertifiedSegmentProducts [work] interfaces segmentDirectory prepared products
+                packageTarget <- maybe (fail "native artifact lost its paired package projection") pure
+                  (paPackageTarget artifact)
+                createDirectory itemDirectory
+                writeCertifiedSegmentItemProductsWithInputs prepared staged itemDirectory packageTarget
+                  >>= \(_,inputs) -> unless (Set.null inputs)
+                    (fail "source-only item acquired retained value inputs")
+                itemCertificate <- BS.readFile (itemDirectory </> "certified-products.cbor")
+                case deserialiseFromBytes decodeTerm (BL.fromStrict itemCertificate) of
+                  Right (rest,TList [TString "TPCERT",TInt 13,TList
+                    [TString "segment-item",_,_,TList
+                      [TInt 1,TBytes stageId,TBytes programSha,TString target,TList _,TList _]]])
+                    | BL.null rest
+                    , stageId == ordinaryStageId
+                    , programSha == SHA256.hash (paBytes artifact)
+                    , target == "__result" -> pure ()
+                  other -> fail ("segment-item package selection is not stage- or program-bound: " ++ show other)
+              [] -> fail "native package fixture has no item target"
             witnesses <- forM packageRows $ \row -> case row of
               TList [TString unit,TString name,TString path,TString seal] -> do
                 unless (takeDirectory (Text.unpack path) == work </> "package-interfaces")
@@ -833,6 +761,10 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
               [] -> fail "native output omitted all selected package witnesses"
 
   where
+    validOccurrence count value = case value of
+      TList [TString "local",TInt occurrence] ->
+        occurrence >= 0 && occurrence < fromIntegral count
+      _ -> False
     cases =
       [("NativePackageTarget",
         ["module NativePackageTarget where", "import Data.List (reverse)"
