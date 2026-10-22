@@ -558,7 +558,7 @@ mod program_source_support_history {
                             owner.clone(),
                             ProgramSourceSupportRow {
                                 imports: edges.iter().cloned().collect::<Vec<_>>(),
-                                produced: None,
+                                physical_product: None,
                             }
                         ))
                         .collect()

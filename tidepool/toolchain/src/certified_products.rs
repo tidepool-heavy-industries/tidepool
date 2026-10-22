@@ -4212,6 +4212,10 @@ pub(crate) struct CertifiedSourceSelection {
     private_advertised: crate::declaration_context::AdvertisedNativeOriginals,
     input_origin: CertifiedInputOrigin,
     original_bindings: Option<OriginalBindingSelection>,
+    // Exact same-program producers consulted by this stage's metadata/target
+    // contracts. Canonical compiler roles and executable choices stay separate.
+    prior_program_products:
+        Arc<[Arc<crate::declaration_context::CompletedNativeProductAvailability>]>,
 }
 
 /// A physically bound product of this selection's completed compiler request.
@@ -4246,6 +4250,15 @@ impl<'a> CompletedTargetProductRef<'a> {
     ) -> Option<&crate::artifact_inventory::IssuedNativeOffer> {
         self.receipt.support(self.key, binding)
     }
+}
+
+/// An actual Source target distinguishes physical current output, the exact
+/// same-program producer, and a selected request input. Nominal membership alone
+/// cannot enter the request-input permission path.
+pub(crate) enum TargetSourceOrigin<'a> {
+    Current(CurrentProductRef<'a>),
+    PriorProgram(CompletedTargetProductRef<'a>),
+    SelectedInput,
 }
 
 /// A normalized nominal import borrowed from one authenticated current group.
@@ -4349,6 +4362,32 @@ impl<'a> CurrentProductRef<'a> {
         let owner = self
             .nominal_source_owner(reference, None)
             .map_err(evidence)?;
+        if let Some(completed) = self
+            .selection
+            .prior_program_product(unit, module, Some(&owner.module_version))
+            .map_err(evidence)?
+        {
+            if !self
+                .selection
+                .prior_nominal_member(owner, *original_ordinal, binder)
+            {
+                return Err(evidence(CertificationError::Mismatch(
+                    "prior Source binder membership",
+                )));
+            }
+            return Ok(
+                match completed.choose_own_group(
+                    NativeGroupKey {
+                        artifact: completed.row().original_artifact_id(),
+                        original_ordinal: *original_ordinal,
+                    },
+                    operation,
+                )? {
+                    Some(support) => CurrentSourceDependency::Issued(support),
+                    None => CurrentSourceDependency::Unavailable,
+                },
+            );
+        }
         let native = self
             .selection
             .modules
@@ -4991,6 +5030,116 @@ impl NativeGroupCandidates {
 }
 
 impl CertifiedSourceSelection {
+    fn prior_program_product(
+        &self,
+        unit: &str,
+        module: &str,
+        version: Option<&ModuleVersion>,
+    ) -> CertResult<Option<&Arc<crate::declaration_context::CompletedNativeProductAvailability>>>
+    {
+        let Some(product) = self.prior_program_products.iter().find(|product| {
+            let owner = product.row().original_owner();
+            owner.unit == unit && owner.module == module
+        }) else {
+            return Ok(None);
+        };
+        if version.is_some_and(|version| version != &product.row().original_owner().module_version)
+        {
+            return Err(CertificationError::Mismatch("prior Source module version"));
+        }
+        Ok(Some(product))
+    }
+
+    fn prior_nominal_member(
+        &self,
+        owner: &CachedHomeOwner,
+        ordinal: u32,
+        binder: &SymbolIdentity,
+    ) -> bool {
+        self.prior_program_products
+            .iter()
+            .find(|product| product.row().original_owner() == owner)
+            .and_then(|completed| completed.row().target_original(owner))
+            .and_then(|entry| match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Original(product) => product
+                    .original_native()
+                    .filter(|native| native.matches_original(product)),
+                _ => None,
+            })
+            .and_then(|native| native.group(ordinal))
+            .is_some_and(|group| group.group().binders().contains(binder))
+    }
+
+    fn retain_consulted_prior_sources(
+        &mut self,
+        inputs: &crate::declaration_context::ProductCompilerInputs<'_>,
+        receipt: &CertifiedReceipt,
+        operation: &InventoryOperation,
+    ) -> CertResult<()> {
+        operation.reserve::<(&str, &str)>(receipt.modules.len())?;
+        let current: BTreeSet<_> = receipt
+            .modules
+            .iter()
+            .map(|module| (module.unit.as_str(), module.module.as_str()))
+            .collect();
+        let mut products = Vec::new();
+        for reference in receipt
+            .modules
+            .iter()
+            .flat_map(|module| &module.groups)
+            .flat_map(|group| &group.globals)
+            .chain(receipt.targets.values().flatten())
+        {
+            let ReceiptImportOwner::Source {
+                unit,
+                module,
+                module_version,
+                ..
+            } = &reference.owner
+            else {
+                continue;
+            };
+            if current.contains(&(unit.as_str(), module.as_str())) {
+                continue;
+            }
+            let owner = crate::declaration_join::ExactModuleIdentity {
+                unit: unit.clone(),
+                module: module.clone(),
+            };
+            operation.charge(unit.len() + module.len())?;
+            let Some(product) = inputs.prior_source_product(&owner)? else {
+                continue;
+            };
+            if module_version
+                .as_ref()
+                .is_some_and(|version| version != &product.row().original_owner().module_version)
+            {
+                return Err(CertificationError::Mismatch("prior Source module version"));
+            }
+            if products
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, product))
+            {
+                continue;
+            }
+            if products
+                .iter()
+                .any(|existing| existing.row().original_owner() == product.row().original_owner())
+            {
+                return Err(CertificationError::Mismatch(
+                    "competing prior Source physical issuers",
+                ));
+            }
+            operation
+                .reserve::<Arc<crate::declaration_context::CompletedNativeProductAvailability>>(
+                    1,
+                )?;
+            products.push(Arc::clone(product));
+        }
+        self.prior_program_products = products.into();
+        Ok(())
+    }
+
     pub(crate) fn produced_types(
         &self,
     ) -> Option<&crate::checked_cell::ProducedValueTypeInterfaces> {
@@ -5120,6 +5269,7 @@ impl CertifiedSourceSelection {
             private_advertised: Default::default(),
             input_origin: CertifiedInputOrigin::NewProducts,
             original_bindings: None,
+            prior_program_products: Arc::from([]),
         }
     }
 
@@ -5370,11 +5520,13 @@ impl CertifiedSourceSelection {
             return Err(CertificationError::Mismatch("target Source reference kind"));
         };
         let owner = self.receipt_source_member(unit, module, module_version.as_ref())?;
-        let entry = self
-            .target_original(owner)?
-            .ok_or(CertificationError::Mismatch(
-                "target Source lacks its issued original",
-            ))?;
+        let entry = match self.prior_program_product(unit, module, module_version.as_ref())? {
+            Some(product) => product.row().target_original(owner).cloned(),
+            None => self.target_original(owner)?,
+        }
+        .ok_or(CertificationError::Mismatch(
+            "target Source lacks its issued original",
+        ))?;
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
             return Err(CertificationError::Mismatch(
                 "target Source original payload",
@@ -5394,6 +5546,20 @@ impl CertifiedSourceSelection {
         Ok((entry, *original_ordinal))
     }
 
+    pub(crate) fn target_source_origin<'a>(
+        &'a self,
+        key: crate::artifact_inventory::NativeGroupKey,
+        entry: &'a Arc<crate::artifact_inventory::ArtifactEntry>,
+    ) -> CertResult<TargetSourceOrigin<'a>> {
+        if let Some(current) = self.current_product(key, entry)? {
+            return Ok(TargetSourceOrigin::Current(current));
+        }
+        if let Some(prior) = self.target_prior_produced_group(key, entry)? {
+            return Ok(TargetSourceOrigin::PriorProgram(prior));
+        }
+        Ok(TargetSourceOrigin::SelectedInput)
+    }
+
     /// Prior-stage Source selects only the actual producer's own completed
     /// offer. Initial request inputs cannot acquire this provenance.
     pub(crate) fn target_prior_produced_group<'a>(
@@ -5406,6 +5572,24 @@ impl CertifiedSourceSelection {
                 "prior Source original payload",
             ));
         };
+        if let Some(receipt) = self.prior_program_product(
+            &product.owner().unit,
+            &product.owner().module,
+            Some(&product.owner().module_version),
+        )? {
+            if key.artifact != entry.descriptor.id
+                || receipt.row().original_artifact_id() != key.artifact
+                || receipt
+                    .row()
+                    .target_original(product.owner())
+                    .is_none_or(|issued| issued.as_ref() != entry.as_ref())
+            {
+                return Err(CertificationError::Mismatch(
+                    "prior Source differs from its produced owner",
+                ));
+            }
+            return Ok(Some(CompletedTargetProductRef { key, receipt }));
+        }
         let Some(ReceiptSourceSelection::Native { native, .. }) = self
             .modules
             .get(&(product.owner().unit.clone(), product.owner().module.clone()))
@@ -6182,6 +6366,27 @@ impl CertifiedSourceSelection {
                 )));
             }
             return Ok(&selected.owner);
+        }
+        if let Some(product) = self.prior_program_product(unit, module, version)? {
+            let owner = product.row().original_owner();
+            if ordinal.is_some_and(|ordinal| {
+                product
+                    .row()
+                    .target_original(owner)
+                    .and_then(|entry| match &entry.payload {
+                        crate::artifact_inventory::ArtifactPayload::Original(product) => {
+                            product.original_native()
+                        }
+                        _ => None,
+                    })
+                    .and_then(|native| native.group(ordinal))
+                    .is_none()
+            }) {
+                return Err(CertificationError::Mismatch(
+                    "prior Source original ordinal",
+                ));
+            }
+            return Ok(owner);
         }
         let version = version.ok_or(CertificationError::Mismatch(
             "unversioned source lacks compiler selection",
@@ -7831,6 +8036,11 @@ fn resolve_receipt_owner_with_validation(
                 sources
                     .get(&(owner.clone(), original_ordinal, binder.clone()))
                     .map(|(owner, _)| owner)
+                    .or_else(|| {
+                        selection
+                            .prior_nominal_member(owner, original_ordinal, &binder)
+                            .then_some(owner)
+                    })
                     .ok_or_else(|| {
                         source_closure_mismatch(
                             "receipt_selected_source",
@@ -7922,6 +8132,7 @@ fn authenticate_source_receipt_metadata<'a>(
     if sources
         .get(&(owner.clone(), original_ordinal, binder.clone()))
         .is_none()
+        && !selection.prior_nominal_member(owner, original_ordinal, binder)
     {
         return Err(source_closure_mismatch(
             "receipt_source_metadata",
@@ -13415,6 +13626,9 @@ pub(crate) fn certify_products_with_validation(
         }
         None => CertifiedSourceSelection::new_product_ingress(),
     };
+    if let Some(inputs) = compiler_inputs.as_ref() {
+        source_selection.retain_consulted_prior_sources(inputs, receipt, &validation.inventory)?;
+    }
     for interface in &module_interfaces {
         source_selection.admit_interface(
             &crate::artifact_inventory::ArtifactEntry::canonical(interface.clone()),

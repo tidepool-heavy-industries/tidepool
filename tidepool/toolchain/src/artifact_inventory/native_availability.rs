@@ -242,39 +242,45 @@ pub(super) fn select_target_group(
                 artifact: entry.descriptor.id,
                 original_ordinal: ordinal,
             };
-            if !selection.permits_native_group(key.artifact, product.owner(), ordinal) {
-                return Err(native_admission_failure(
-                    key,
-                    NativeAdmissionRefusal::InputPermissionDenied {
-                        body_present: entry.native_group_ordinals.contains(&ordinal),
-                        selected_original: physical
-                            .lease
-                            .selection
-                            .namespace
-                            .get(&key.artifact)
-                            .copied(),
-                    },
-                ));
-            }
-            if let Some(current) = selection.current_product(key, &entry).map_err(evidence)? {
-                let completed = current.completed_for_target(physical)?;
-                let (binding, offer) = completed_target_group(&completed)?;
-                (binding, offer, true)
-            } else if let Some(completed) = selection
-                .target_prior_produced_group(key, &entry)
+            match selection
+                .target_source_origin(key, &entry)
                 .map_err(evidence)?
             {
-                let (binding, offer) = completed_target_group(&completed)?;
-                (binding, offer, false)
-            } else {
-                let binding = verified_root_choice(selection, key, product.owner(), &entry)?;
-                let support = selection
-                    .native_group_support(key, product.owner(), binding)
-                    .ok_or_else(|| failure("target input group lost its chosen contribution"))?;
-                let CertifiedNativeGroupSupport::Issued(offer) = support else {
-                    return Err(failure("target input group lacks issued availability"));
-                };
-                (binding, offer.clone(), false)
+                crate::certified_products::TargetSourceOrigin::Current(current) => {
+                    let completed = current.completed_for_target(physical)?;
+                    let (binding, offer) = completed_target_group(&completed)?;
+                    (binding, offer, true)
+                }
+                crate::certified_products::TargetSourceOrigin::PriorProgram(completed) => {
+                    let (binding, offer) = completed_target_group(&completed)?;
+                    (binding, offer, false)
+                }
+                crate::certified_products::TargetSourceOrigin::SelectedInput => {
+                    if !selection.permits_native_group(key.artifact, product.owner(), ordinal) {
+                        return Err(native_admission_failure(
+                            key,
+                            NativeAdmissionRefusal::InputPermissionDenied {
+                                body_present: entry.native_group_ordinals.contains(&ordinal),
+                                selected_original: physical
+                                    .lease
+                                    .selection
+                                    .namespace
+                                    .get(&key.artifact)
+                                    .copied(),
+                            },
+                        ));
+                    }
+                    let binding = verified_root_choice(selection, key, product.owner(), &entry)?;
+                    let support = selection
+                        .native_group_support(key, product.owner(), binding)
+                        .ok_or_else(|| {
+                            failure("target input group lost its chosen contribution")
+                        })?;
+                    let CertifiedNativeGroupSupport::Issued(offer) = support else {
+                        return Err(failure("target input group lacks issued availability"));
+                    };
+                    (binding, offer.clone(), false)
+                }
             }
         }
         _ => return Err(failure("target native reference kind")),
@@ -786,7 +792,7 @@ pub(super) fn verified_root_choice(
             return Err(match root_evidence_refusal(&identity, cause) {
                 Ok(refusal) => root_refusal(key, refusal),
                 Err(_) => CompileError::CompilerEvidence(Box::new(error)),
-            })
+            });
         }
         Err(error) => return Err(CompileError::CompilerEvidence(Box::new(error))),
     };
@@ -4312,7 +4318,8 @@ mod normalized_dependency_tests {
                         );
                         assert!(empty.dependency_support(key, product.owner()).is_none());
                         assert!(
-                            exhaustive_group_supports(empty.rows(), key, product.owner()).is_empty()
+                            exhaustive_group_supports(empty.rows(), key, product.owner())
+                                .is_empty()
                         );
                     }
                 }
@@ -4507,9 +4514,13 @@ mod normalized_dependency_tests {
             .unwrap();
         assert_ne!(receiving.namespace()[&canonical_id], hidden_pair.1);
         assert!(
-            NativeOriginalRequirement::from_issued_group_custody(hidden_id, canonical_id, &receiving)
-                .unwrap()
-                .is_none(),
+            NativeOriginalRequirement::from_issued_group_custody(
+                hidden_id,
+                canonical_id,
+                &receiving
+            )
+            .unwrap()
+            .is_none(),
             "new Full qualification cannot borrow another canonical scope"
         );
         let unrelated = Arc::new(ArtifactEntry::canonical(

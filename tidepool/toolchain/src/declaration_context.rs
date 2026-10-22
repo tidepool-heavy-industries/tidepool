@@ -7889,7 +7889,7 @@ struct ProgramSourceSupport {
 #[derive(Clone, Debug)]
 struct ProgramSourceSupportRow {
     imports: Vec<ExactModuleIdentity>,
-    produced: Option<Arc<CompletedNativeProductAvailability>>,
+    physical_product: Option<Arc<CompletedNativeProductAvailability>>,
 }
 
 // The completed Arc identifies this live physical issuance, including its exact
@@ -7897,7 +7897,7 @@ struct ProgramSourceSupportRow {
 impl PartialEq for ProgramSourceSupportRow {
     fn eq(&self, other: &Self) -> bool {
         self.imports == other.imports
-            && match (&self.produced, &other.produced) {
+            && match (&self.physical_product, &other.physical_product) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 _ => false,
@@ -7908,8 +7908,8 @@ impl PartialEq for ProgramSourceSupportRow {
 impl Eq for ProgramSourceSupportRow {}
 
 impl ProgramSourceSupportRow {
-    fn matches_entry(&self, entry: &Arc<ArtifactEntry>) -> bool {
-        let Some(receipt) = &self.produced else {
+    fn matches_original_entry(&self, entry: &Arc<ArtifactEntry>) -> bool {
+        let Some(receipt) = &self.physical_product else {
             return false;
         };
         let ArtifactPayload::Original(product) = &entry.payload else {
@@ -7926,6 +7926,22 @@ impl ProgramSourceSupportRow {
                 .target_original(product.owner())
                 .is_some_and(|actual| actual.as_ref() == entry.as_ref())
     }
+
+    fn matches_domain_entry(&self, entry: &Arc<ArtifactEntry>) -> bool {
+        let Some(receipt) = &self.physical_product else {
+            return false;
+        };
+        match &entry.payload {
+            ArtifactPayload::Canonical(interface) => {
+                interface.source_imports().is_some()
+                    && entry.descriptor.id == receipt.row().canonical
+                    && entry.descriptor.owner.unit == receipt.row().original_owner().unit
+                    && entry.descriptor.owner.module == receipt.row().original_owner().module
+            }
+            ArtifactPayload::Original(_) => self.matches_original_entry(entry),
+            _ => false,
+        }
+    }
 }
 
 impl ProgramSourceSupport {
@@ -7933,7 +7949,7 @@ impl ProgramSourceSupport {
         retained: &mut imbl::OrdMap<ExactModuleIdentity, ProgramSourceSupportRow>,
         owner: ExactModuleIdentity,
         mut imports: Vec<ExactModuleIdentity>,
-        produced: Option<Arc<CompletedNativeProductAvailability>>,
+        physical_product: Option<Arc<CompletedNativeProductAvailability>>,
     ) -> Result<(), CompileError> {
         imports.sort();
         imports.dedup();
@@ -7941,7 +7957,7 @@ impl ProgramSourceSupport {
             if previous.imports != imports {
                 return Err(failure("program support changed its original import graph"));
             }
-            match (&previous.produced, &produced) {
+            match (&previous.physical_product, &physical_product) {
                 (Some(previous), Some(incoming)) if !Arc::ptr_eq(previous, incoming) => {
                     return Err(failure(
                         "program support changed its completed source issuer",
@@ -7951,7 +7967,13 @@ impl ProgramSourceSupport {
                 (None, Some(_)) => {}
             }
         }
-        retained.insert(owner, ProgramSourceSupportRow { imports, produced });
+        retained.insert(
+            owner,
+            ProgramSourceSupportRow {
+                imports,
+                physical_product,
+            },
+        );
         Ok(())
     }
 
@@ -7983,22 +8005,15 @@ impl ProgramSourceSupport {
         let mut retained =
             previous.map_or_else(imbl::OrdMap::new, |value| value.imports.as_ref().clone());
         for (owner, requirements) in imports {
-            let mut row = ProgramSourceSupportRow {
+            let row = ProgramSourceSupportRow {
                 imports: requirements,
-                produced: physical.produced_source(&owner)?,
+                physical_product: physical.produced_source(&owner)?,
             };
-            if let Some(produced) = &row.produced {
+            if let Some(produced) = &row.physical_product {
                 let entry = incoming.implementation_entry(&owner).ok_or_else(|| {
                     failure("produced program source lacks its compiler support entry")
                 })?;
-                if matches!(&entry.payload, ArtifactPayload::Canonical(interface)
-                    if interface.source_imports().is_some()
-                        && entry.descriptor.id == produced.row().canonical)
-                {
-                    // Canonical SOURCE support retains its imports without
-                    // selecting the separately available physical Original.
-                    row.produced = None;
-                } else if !row.matches_entry(entry) {
+                if !row.matches_domain_entry(entry) {
                     return Err(failure(&format!(
                         "produced program source changed its physical entry; owner={owner:?}; incoming={:?}; incoming_kind={:?}; physical={:?}; physical_canonical={:?}",
                         entry.descriptor.id,
@@ -8008,7 +8023,7 @@ impl ProgramSourceSupport {
                     )));
                 }
             }
-            Self::retain_imports(&mut retained, owner, row.imports, row.produced)?;
+            Self::retain_imports(&mut retained, owner, row.imports, row.physical_product)?;
         }
         Ok(Self {
             compiler_support,
@@ -8895,6 +8910,35 @@ impl<'a> ProductCompilerInputs<'a> {
         self
     }
 
+    pub(crate) fn prior_source_product(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<
+        Option<&Arc<CompletedNativeProductAvailability>>,
+        crate::certified_products::CertificationError,
+    > {
+        let Some(support) = self.program_support else {
+            return Ok(None);
+        };
+        let Some(row) = support.imports.get(owner) else {
+            return Ok(None);
+        };
+        let Some(receipt) = &row.physical_product else {
+            return Ok(None);
+        };
+        let actual = support.compiler_support.implementation_entry(owner);
+        let selected = self.source_support.implementation_entry(owner);
+        if actual.is_none_or(|entry| !row.matches_domain_entry(entry))
+            || selected.is_none_or(|entry| !row.matches_domain_entry(entry))
+            || !receipt.matches_direct_canonical_binding(self.source_support.artifacts())
+        {
+            return Err(crate::certified_products::CertificationError::Mismatch(
+                "prior program Source has another physical issuer",
+            ));
+        }
+        Ok(Some(receipt))
+    }
+
     pub(crate) fn produced_source(
         &self,
         entry: &Arc<ArtifactEntry>,
@@ -8908,7 +8952,7 @@ impl<'a> ProductCompilerInputs<'a> {
         let Some(row) = support.imports.get(&entry.descriptor.owner) else {
             return Ok(None);
         };
-        let Some(receipt) = &row.produced else {
+        let Some(receipt) = &row.physical_product else {
             return Ok(None);
         };
         if !receipt.matches_direct_canonical_binding(self.source_support.artifacts())
@@ -8916,13 +8960,13 @@ impl<'a> ProductCompilerInputs<'a> {
                 .compiler_support
                 .implementation_entry(&entry.descriptor.owner)
                 .is_none_or(|actual| actual.as_ref() != entry.as_ref())
-            || !row.matches_entry(entry)
+            || !row.matches_original_entry(entry)
         {
             return Err(crate::certified_products::CertificationError::Mismatch(
                 "prior program Source has another physical issuer",
             ));
         }
-        Ok(row.produced.as_ref())
+        Ok(row.physical_product.as_ref())
     }
 
     /// Carry the semantic support a demanded owner projected from its own
@@ -11758,9 +11802,26 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 .as_ref()
                 .unwrap();
             assert!(
-                support.imports.values().all(|row| row.produced.is_none()),
-                "the executable first stage has no importable produced Source"
+                support
+                    .imports
+                    .values()
+                    .any(|row| row.physical_product.is_some()),
+                "canonical SOURCE support retains the actual completed producer"
             );
+            for (owner, row) in support.imports.iter() {
+                let Some(_) = &row.physical_product else {
+                    continue;
+                };
+                let entry = support
+                    .compiler_support
+                    .implementation_entry(owner)
+                    .unwrap();
+                assert!(
+                    matches!(entry.payload, ArtifactPayload::Canonical(_)),
+                    "retaining the physical proof does not select an Original compiler role"
+                );
+                assert!(row.matches_domain_entry(entry));
+            }
         }
         let (continuation, first_source) = segment.finish();
         let mut next = decode_world_source_receipt(program, 1).unwrap();
@@ -11859,15 +11920,19 @@ pub(crate) fn assert_world_repeated_source_refusals(
                     ).unwrap();
                     let mut rows = Vec::new();
                     for (owner, row) in support.imports.iter() {
-                        let Some(receipt) = &row.produced else { continue };
-                        let physical = output.produced_source(owner).unwrap().unwrap();
+                        let Some(receipt) = &row.physical_product else { continue };
+                        let Some(physical) = output.produced_source(owner).unwrap() else {
+                            assert!(Arc::ptr_eq(initial_inputs.prior_source_product(owner).unwrap().unwrap(), receipt),
+                                "carried canonical SOURCE keeps its prior physical issuer");
+                            continue;
+                        };
                         assert!(Arc::ptr_eq(receipt, &physical));
                         let entry = support.compiler_support.implementation_entry(owner).unwrap();
-                        assert!(row.matches_entry(entry));
+                        assert!(row.matches_domain_entry(entry));
                         assert!(initial_inputs.produced_source(entry).unwrap().is_none(),
                             "incoming stage inputs cannot claim its new Source production");
                         assert!(Arc::ptr_eq(
-                            carried.imports[owner].produced.as_ref().unwrap(), receipt,
+                            carried.imports[owner].physical_product.as_ref().unwrap(), receipt,
                         ), "ordinary support extension preserves the exact completed issuer");
                         rows.push((Arc::clone(receipt), Arc::clone(entry)));
                     }

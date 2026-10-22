@@ -164,14 +164,14 @@ pub(super) fn assert_actual_prior_source_inputs(
         let Some(receipt) = program
             .imports
             .get(&owner)
-            .and_then(|row| row.produced.as_ref())
+            .and_then(|row| row.physical_product.as_ref())
         else {
             continue;
         };
-        let expected_entry = program
-            .compiler_support
-            .implementation_entry(&owner)
+        let compiler_entry = program.compiler_support.implementation_entry(&owner)
             .expect("actual produced Source has its held compiler entry");
+        let expected_entry = receipt.row().target_original(receipt.row().original_owner())
+            .expect("actual produced Source retains its physical Original");
         let ArtifactPayload::Original(product) = &expected_entry.payload else {
             panic!("actual produced Source has its Original payload");
         };
@@ -194,7 +194,14 @@ pub(super) fn assert_actual_prior_source_inputs(
             "actual prior Source owns an available occurrence"
         );
         assert_eq!(prior.groups().collect::<BTreeSet<_>>(), expected);
-        assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
+        assert!(matches!(selection.target_source_origin(key, &entry).unwrap(),
+            crate::certified_products::TargetSourceOrigin::PriorProgram(_)));
+        if matches!(compiler_entry.payload, ArtifactPayload::Canonical(_)) {
+            assert!(!selection.permits_native_group(key.artifact, product.owner(), ordinal),
+                "a canonical compiler role does not gain native permission from prior membership");
+        } else {
+            assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
+        }
         for binding in expected {
             assert!(std::ptr::eq(
                 prior
@@ -214,7 +221,7 @@ pub(super) fn assert_actual_prior_source_inputs(
         }
         assert!(matches!(
             selection.target_source_entry(&wrong_version),
-            Err(CertificationError::Mismatch("source module version"))
+            Err(CertificationError::Mismatch("source module version" | "prior Source module version"))
         ));
         let mut wrong_binder = reference.clone();
         if let ReceiptImportOwner::Source { binder, .. } = &mut wrong_binder {
@@ -271,7 +278,7 @@ pub(super) fn assert_actual_prior_source_inputs(
         assert!(matches!(
             carried.target_source_entry(reference),
             Err(CertificationError::Mismatch(
-                "missing cached source version"
+                "missing cached source version" | "unversioned source lacks compiler selection"
             ))
         ));
         assert!(carried
