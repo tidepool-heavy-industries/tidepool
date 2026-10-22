@@ -1196,7 +1196,7 @@ pub(crate) fn link_native_target(
     crate::host_work::checkpoint()?;
     let roots = (0..plans.len()).collect::<Vec<_>>();
     let linked = NativeCodeComponent::link(&plans, &roots, operation)
-        .map_err(|error| failure(&format!("native linked code rejected: {error}")))?;
+        .map_err(crate::linked_native::linked_code_error)?;
     crate::host_work::checkpoint()?;
     let mut nodes = held_nodes;
     for (index, row) in home_rows.iter().enumerate() {

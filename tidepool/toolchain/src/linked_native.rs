@@ -421,12 +421,7 @@ impl AcquiredNativeClosure {
                 })
                 .collect(),
         });
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(recorded.as_ref(), &mut bytes)
-            .map_err(|error| refusal(&format!("acquired closure encoding: {error}")))?;
-        operation
-            .charge(bytes.len())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let bytes = encode_record(recorded.as_ref(), operation)?;
         let mut hash = Sha256::new();
         hash.update(b"Tidepool acquired native closure v1\0");
         hash.update(&bytes);
@@ -712,6 +707,55 @@ pub(crate) fn resolve_package_import(
         ));
     }
     resolve_package_export(child, global, code.definitions(), witness.sha256())
+}
+
+/// Preserve operational budget refusals through compiler admission classification.
+pub(crate) fn linked_code_error(
+    error: tidepool_repr::native_code::NativeCodeError,
+) -> CompileError {
+    match error {
+        tidepool_repr::native_code::NativeCodeError::Budget(error) => {
+            CompileError::CompilerEvidence(Box::new(error.into()))
+        }
+        error => refusal(&format!("native linked code rejected: {error}")),
+    }
+}
+
+fn encode_record(
+    recorded: &NativeAcquiredClosureFacts,
+    operation: &InventoryOperation,
+) -> Result<Vec<u8>, CompileError> {
+    struct Writer<'a> {
+        operation: &'a InventoryOperation,
+        bytes: Vec<u8>,
+        budget_error: Option<tidepool_repr::execution_schema::ParseError>,
+    }
+    impl std::io::Write for Writer<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Err(error) = self.operation.charge(bytes.len()) {
+                self.budget_error = Some(error);
+                return Err(std::io::Error::other(
+                    "native acquisition record budget exhausted",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer {
+        operation,
+        bytes: Vec::new(),
+        budget_error: None,
+    };
+    let result = ciborium::ser::into_writer(recorded, &mut writer);
+    if let Some(error) = writer.budget_error {
+        return Err(CompileError::CompilerEvidence(Box::new(error.into())));
+    }
+    result.map_err(|error| refusal(&format!("acquired closure encoding: {error}")))?;
+    Ok(writer.bytes)
 }
 
 #[cfg(test)]

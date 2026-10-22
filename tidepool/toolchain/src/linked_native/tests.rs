@@ -7,6 +7,20 @@ use tidepool_repr::native_code::NativeCodeComponentFacts;
 pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
     let operation = InventoryOperation::new(Default::default());
     let actual = target.closure();
+    let exhausted =
+        InventoryOperation::new(tidepool_repr::execution_schema::InventoryDecodeLimits {
+            max_work: 0,
+            ..Default::default()
+        });
+    assert!(
+        matches!(encode_record(target.closure().recorded_facts(), &exhausted),
+            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
+                crate::certified_products::CertificationError::Product(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded(_)
+                ))
+        ),
+        "record byte admission preserves a typed operational refusal"
+    );
     let nodes = actual
         .occurrences
         .values()

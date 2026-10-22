@@ -225,9 +225,7 @@ pub(crate) fn restore_acquired_native_closures(
             Arc::clone(cached)
         } else {
             let component = NativeCodeComponent::restore(facts, node_bodies, &external, &operation)
-                .map_err(|error| {
-                    refusal(&format!("recorded native component rejected: {error}"))
-                })?;
+                .map_err(linked_code_error)?;
             if component.identity() != &identity {
                 return Err(refusal("recorded native component commitment differs"));
             }

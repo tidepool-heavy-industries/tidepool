@@ -214,8 +214,8 @@ pub struct PackageProductOutput {
 
 /// One producer-local occurrence/linkage manifest. It is receipt-scoped: an
 /// `OccurrenceId` is valid only under the authenticated output that issued it,
-/// and never becomes durable authority by itself. Executable authority remains
-/// with the checked native acquisition.
+/// and never becomes durable authority by itself. Demanded acquired code retains
+/// only its authenticated selected projection beside canonical code references.
 ///
 /// Wire (one paired value, version 4):
 /// ```text
