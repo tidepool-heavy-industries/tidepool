@@ -1,12 +1,12 @@
 # Complete the compiler-native architecture
 
-Current continuation (2026-10-21):
+Current continuation (2026-10-22):
 [DeepSeek G2 closeout: current private/native join](deepseek-g2-closeout/README.md).
 Its [state](deepseek-g2-closeout/STATE.md),
 [contracts](deepseek-g2-closeout/CONTRACTS.md) and worker plans govern the active
 wave. G2 is not accepted. Reviewed implementation base is
-`5c759554c6f9478bc2344ef17ee026c6ec23fed0` on
-`g2-closeout/deepseek-20261021`; `integration/compiler-query-warm-final` remains
+`29231ed3236bb4dd6d13b6e459315533cd171a3e` on
+`root/g2-final-20261021`; `integration/compiler-query-warm-final` remains
 the broader consolidation destination. Reconcile current refs before promotion.
 
 The [G2 contract](g2-completion.md) owns acceptance and semantic boundaries.
@@ -36,8 +36,8 @@ their recorded source. The current map and exact receipts live in
 [the compiler map](../../../docs/compiler-work-map.md) and
 [the verification ledger](tests/verification-ledger.md).
 
-The current repair fronts are coherent private-state progression and exact
-selected native support through package/source narrowing. The active review and
+The current repair fronts are cumulative private-state progression, admitted
+compiler origin/certification evidence, and exact selected native/source ownership. The active review and
 plan replace the old per-symptom dispatch; completed occurrence-format, witness,
 logging and role-census changes are retained. Required ordinary activation,
 cold/eviction and joined bundle evidence remain incomplete.
@@ -50,7 +50,7 @@ closed-support, HOME census, affine initialization or logging work.
 ## Ownership and integration
 
 The [current worker tree](deepseek-g2-closeout/README.md#worker-tree) assigns private
-state and native/package owners, bounded actor/producer leaves, support narrowing,
+state, compiler evidence and native/package owners, bounded actor leaves, support narrowing,
 production-history tests, independent review and qualification. Its supervisor
 maintains actual owner,
 branch, dependency and evidence state; a proposed role is not a running worker.
@@ -67,7 +67,7 @@ integration checkpoints labelled with their actual qualification state.
 
 ## Sequence and gates
 
-1. Follow NEXT-WAVE's current-state and exact-support contracts; preserve H/D WIP.
+1. Follow NEXT-WAVE's current-state and exact-support contracts; preserve P/T/N patches and older H/D WIP.
    Do not restart already integrated prerequisites.
 2. Join reviewed tranches and compile production plus test consumers early.
    Run accepted-result reuse, parked Job, cached/transitive HOME and actual source
@@ -75,7 +75,8 @@ integration checkpoints labelled with their actual qualification state.
 3. Run unchanged Discovery/notebook and required activation/cold/eviction, cutoff,
    private-input, reload/caller-loss and uncertain-END controls on the joined tip.
 4. Freeze and qualify one matched bundle, reconcile the map, publish the candidate
-   and deliver a fresh Persona conversation. C investigation does not block B.
+   and deliver a fresh Persona conversation. Speculative research stays separate;
+   required ordinary-workflow repairs remain gating.
 5. Complete G3 and reconcile/push reviewed release/main checkpoints under their
    integration policy; do not claim main containment from local replication.
 

@@ -6,11 +6,13 @@ route survives, and make all claims traceable to exact commands/artifacts.
 
 ## Joined-review gates before broad qualification
 
-The controlling source review is [REVIEW-5c759554](REVIEW-5c759554.md), with the
-sequence in [NEXT-WAVE](NEXT-WAVE.md). The incoming nine-case package pass and
-one-pass/five-failure actor cohort have narrower scope than G2. See STATE for
-exact retained evidence. Do not restart completed logging/witness migrations;
-qualify their actual joined callers.
+The controlling source review is [REVIEW-29231ed3](REVIEW-29231ed3.md), with
+sequence in [NEXT-WAVE](NEXT-WAVE.md) and current selectors/premises in
+[TEST-GATES](TEST-GATES.md). Historical actor 5/9 and expanded package 8/11 evidence
+have narrower scope than G2. The old five-case notebook failure used a producer
+without the joined package repair. See STATE for provenance; rerun the joined
+target before treating it as a remaining defect. Do not restart completed logging
+or witness migrations; qualify their actual joined callers.
 
 Prepare these small joined gates first, using each repair's actual production
 constructors and current declared resources:
@@ -28,7 +30,7 @@ constructors and current declared resources:
 | Accepted result -> next private cell | Text is usable before publication; a parked Job completes its original program before host deltas apply |
 | Checked start -> freeze | In-flight/failed work cannot publish as Unchanged |
 | Whole authored program -> internal item | Declaration-only starts and later items retain one advancement owner across effects |
-| Caller A -> recipient B activation | Exact original input/renderer authority survives World-backed mount and publication; both old finite gates disappear |
+| Caller A -> recipient B activation | One pending owner; exact input/renderer authority survives mount and actual World-backed publication; cleanup refusal retains owner |
 | Interface copy -> catalog | Ordinary and segment reuse retain original selected witness |
 | Diagnostic transport | Malformed record with a valid level stays malformed |
 
@@ -38,7 +40,7 @@ only compilation, admission, execution, publication or recovery. A single
 aggregate target pass is not the number of executed cases.
 
 Do not wait for every leaf before compiling joined consumers. P and N return
-coherent subtrees; H/W/Q can join as reviewed. Separate source-review findings,
+coherent subtrees; C/H/T can join as reviewed. Separate source-review findings,
 retained failures, newly executed regressions and measured performance.
 
 ## Prepare immediately
@@ -46,7 +48,7 @@ retained failures, newly executed regressions and measured performance.
 Read the current AGENTS, `docs/swarm-builds.md`, `build/package/README.md`, the
 G2 contract and declared test targets. Browser inputs are required for
 exomonad-host/bundle builds even if a selected test opens no browser. Coordinate
-actual resources with S/R; do not start cold lanes from an old free-space number.
+actual resources with the supervisor; do not start cold lanes from an old free-space number.
 
 Historical command arrays are under
 `/srv/swarm/evidence/inanna/latent-original-stage-join-20261020/morning-review55-commands.json`.
@@ -76,7 +78,9 @@ cold/cutoff/private/reload selectors from actual targets and command manifests.
    history. Linking or metadata generation isn't a test pass. Record actual
    selected/executed counts and first failure.
 2. **Joined package/native/witness checkpoint:** run Discovery and all four
-   notebook cases unchanged in semantic purpose. The latter need both W and N;
+   currently registered notebook cases unchanged in semantic purpose. Deliberately
+   register the preserved fifth parked-Job case as specified in TEST-GATES, then
+   report the actual count. These need the joined compiler and private lifecycle;
    treat progress to a new frontier as a failure with better diagnosis. Include
    P's producer→decoder→install control rather than waiting for a giant suite.
 3. **Required G2 histories:** query/status, ordinary activation, historical/cold, actual eviction
@@ -102,7 +106,7 @@ cold/cutoff/private/reload selectors from actual targets and command manifests.
 
 Run independent admitted targets concurrently when resource measurements support
 it. A full bundle per leaf wastes the shared budget. Once qualification freezes,
-later unrelated C/quality proposals become separately published followups; only
+later unrelated speculative/quality proposals become separately published followups; only
 a required repair restarts affected qualification. A known ordinary-workflow bug
 still blocks G2, even if exploratory execution would produce interesting data.
 
@@ -136,7 +140,7 @@ speedup based only on smaller code or fewer lookups.
 
 Review the joined source for surviving old fallback entrypoints, test-only
 authority constructors, source-less native publication gaps and catalogue
-overwrite paths. Reuse P/R reviews but inspect changed joined consumers directly.
+overwrite paths. Reuse independent lane reviews but inspect changed joined consumers directly.
 Run current formatting, documentation/link checks and `git diff --check`.
 
 Run `scripts/integration-status.py --strict` under the documented command owner;

@@ -4,8 +4,9 @@ These constraints replace the earlier v12 supplement. That supplement permitted
 a manifest-less segment item and a bare Inherited marker while requiring exact
 roots downstream. Do not preserve those contradictions for compatibility.
 Concrete names below describe obligations, not required public API spelling.
-The 5c759554 review keeps these distinctions and refines their implementation in
-[PRIVATE-STATE](PRIVATE-STATE.md) and [PACKAGE-CLOSEOUT](PACKAGE-CLOSEOUT.md).
+The [29231ed3 review](REVIEW-29231ed3.md) keeps these distinctions and refines
+their implementation in [PRIVATE-STATE](PRIVATE-STATE.md),
+[PACKAGE-CLOSEOUT](PACKAGE-CLOSEOUT.md) and [COMPILER-EVIDENCE](COMPILER-EVIDENCE.md).
 [NEXT-WAVE](NEXT-WAVE.md) owns current assignments and sequencing.
 
 ## 1. Program and selected imports travel together
@@ -153,7 +154,11 @@ Record started/pending/completed/refused progress where that transition occurs.
 A freeze-time comparison cannot establish no work started. Keep immutable birth
 authority separate from the current preparation snapshot. One authored program
 owns advancement across its items and parked effects; preparation alone grants
-no advancement ownership.
+no advancement ownership. A local cursor proves that program against its immediate
+predecessor; the private owner's settled frontier proves cumulative progress from
+birth. Do not reconstruct the latter from the former. Readiness issues any selected
+hidden operand and its snapshot together. Freeze uses transient exclusion, validates
+the exact candidate, then seals; refusal cannot consume a valid parked continuation.
 
 A visible retained host result carries real binding/type evidence. Synchronous
 acceptance after the existing cancellation fence records its exact delta; at a

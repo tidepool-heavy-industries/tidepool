@@ -1,5 +1,8 @@
 # G2 review candidate `29231ed3`
 
+Incoming checkpoint record; retain its historical evidence. The current peer review
+and steering are [REVIEW-29231ed3](REVIEW-29231ed3.md) and [NEXT-WAVE](NEXT-WAVE.md).
+
 This is the single peer-review branch requested after the 2026-10-21 closeout
 wave. It contains the first coherent H, P, T and N repair candidates and remains
 explicitly unqualified.
