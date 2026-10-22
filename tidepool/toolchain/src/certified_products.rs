@@ -27758,7 +27758,6 @@ pub(crate) mod tests {
         let fixed = inventory
             .bind_segment(&physical, vec![native.clone()], &selection, &mut validation)
             .unwrap();
-        let selection = fixed.source_selection();
         let definitions = original_native_group_definitions(product, 7).unwrap();
         let contracts = definitions
             .export_contracts()
