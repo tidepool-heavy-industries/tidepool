@@ -1070,10 +1070,18 @@ scenario = do
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assertProjectionEquivalent context closure
     liftIO $ do
-      -- All HOME bodies are fresh in this recovery fixture; no issued HOME
-      -- product or cached candidate contributes an external HOME coordinate.
-      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context Map.empty [] Set.empty
+      -- The target embeds its selected fresh HOME bodies, while package
+      -- dependencies retain their separately projected module products.
+      let homeProducts = Map.fromList
+            [ (owner, Map.fromList [(projectedOriginalOrdinal group, group) | group <- groups])
+            | (owner, Right groups) <- Projection.preparedModuleProductOutcomes
+                (projectPreparedModuleProducts context (closureHomeModules closure)) ]
+      assert (Map.size homeProducts == length (closureHomeModules closure))
+        "every fresh HOME owner has its actual projected product"
+      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context homeProducts [] Set.empty
         (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
+      assert (null (Projection.packageTargetHomeImports paired))
+        "fresh embedded HOME bodies require no external HOME coordinate"
       let exports = Set.fromList [identity | product <- packageTargetGroups paired
             , identity <- projectedBinders (projectedGroupEncodingInput (projectedPackageEncoding product))]
           target = packageTargetProgram paired
