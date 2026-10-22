@@ -787,7 +787,7 @@ compilerDefaultRecipeChecks = do
         ++ preambleDefaultDeclaration ++ "{{TURN}}\n__result = ()\n"
   declarationPlan <- analyzeOrderedCellWithFlags flags declarationTemplate
     "import Data.List (sort)\ndata Shadow = Shadow\n" >>= either (fail . show) pure
-  unless (any ((== RetainedGeneratedImport) . locatedImportIntent)
+  unless (any ((== ProtectedCompilerImport) . locatedImportIntent)
       (prologueImports (cellPlanPrologue declarationPlan))) $
     fail "declaration default regression lacks its generated imports"
   let declarationSource = DeclarationSource (cellPlanPrologue declarationPlan) (cellPlanDeclarationBase declarationPlan)
@@ -3205,7 +3205,7 @@ automaticGenericPlans flags = do
       declaration : _ -> do
         let rendered = cellAnalysisSource declaration
         assertEqual "generated helper imports retain exact intent"
-          [RetainedGeneratedImport | _ <- prologueImports (cellPlanPrologue plan)]
+          [ProtectedCompilerImport | _ <- prologueImports (cellPlanPrologue plan)]
           (map locatedImportIntent (prologueImports (cellPlanPrologue plan)))
         assertContains "parameterized data instance" "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" rendered
         assertContains "parameterized newtype instance" "deriving instance TidepoolCompilerGeneric.Generic (Wrapper a)" rendered

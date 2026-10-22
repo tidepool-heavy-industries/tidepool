@@ -2,7 +2,7 @@
 -- owner before the whole cell is checked. The checking module imports those
 -- declarations; it never creates substitute Names for them.
 module Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, plannedModule, plannedSource, plannedCheckPlan
+  ( PlannedDeclaration, plannedModule, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan
   , PlannedDeclarationRejection(..), preparePlannedDeclaration, replaceTemplateModuleHeader
   , originalDeclarationWrapper
   , PlannedDeclarationInventory, plannedExports, plannedInstances
@@ -41,7 +41,8 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..), ImportIntent(..)
-  , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplate )
+  , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplateWithImports )
+import Tidepool.TurnSource (ImportRendering, importRenderingSource)
 import Tidepool.DeclarationJoin
   ( DeclarationExport(..), DeclarationKind(..), ExportNamespace(..), ExportIdentity(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
@@ -59,6 +60,8 @@ import Tidepool.Session
 data PlannedDeclaration = PlannedDeclaration
   { plannedModule :: String
   , plannedSource :: String
+  , plannedSourceImports :: ImportRendering
+  , plannedSourceLineOffset :: Int
   , plannedCheckPlan :: CellSourcePlan
   , authoredHeads :: [(DeclarationKind, ExportNamespace, String, Maybe String)]
   } deriving (Eq, Show)
@@ -169,8 +172,8 @@ preparePlannedDeclaration reserved wrapper plan = do
   let header = "module " ++ reserved ++ " (" ++ intercalate ", " (map renderExport exports) ++ ") where"
   originalWrapper <- either (Left . InvalidOriginalHeader) Right
     (replaceTemplateModuleHeader header wrapper)
-  source <- either (Left . InvalidOriginalRendering) Right
-    (renderDeclarationForTemplate originalWrapper
+  (source,lineOffset) <- either (Left . InvalidOriginalRendering) Right
+    (renderDeclarationForTemplateWithImports originalWrapper
       (DeclarationSource (cellPlanPrologue plan) (cellAnalysisSource declaration)))
   let cleared item
         | sbKind (cellAnalysisVerdict item) == KDecl = item {cellAnalysisSource = ""}
@@ -180,13 +183,13 @@ preparePlannedDeclaration reserved wrapper plan = do
         { cellPlanItems = map cleared (cellPlanItems plan)
         , cellPlanPrologue = prologue
             { prologueImports = prologueImports prologue ++
-                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved) RetainedGeneratedImport [mkModuleName reserved]] }
+                [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ reserved) ProtectedCompilerImport [mkModuleName reserved]] }
         , cellPlanDeclarationBase = ""
         , cellPlanGenericDeclarations = []
         , cellPlanStructuralDisplayDeclarations = ""
         , cellPlanStructuralDisplayTargets = []
         }
-  pure (PlannedDeclaration reserved source check heads)
+  pure (PlannedDeclaration reserved (importRenderingSource source) source lineOffset check heads)
   where
     occurrences needle = length . filter (needle `isPrefixOf`) . tails
     exportHead (EValue name) = (ValueDeclaration, ValueNamespace, name, Nothing)

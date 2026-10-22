@@ -108,7 +108,7 @@ import Data.Char (digitToInt)
 import Data.List (intercalate, sortOn)
 import System.Directory (createDirectoryIfMissing, canonicalizePath)
 import System.FilePath ((</>), makeRelative, isAbsolute, splitDirectories)
-import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeBool)
+import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeBool, encodeInt)
 import Codec.CBOR.Write (toStrictByteString)
 import qualified Codec.CBOR.Decoding as D
 import Codec.CBOR.Read (deserialiseFromBytes)
@@ -1459,7 +1459,7 @@ prepareWorldCellQuestion bound question = do
             moduleRow ((unit,name,boot),edges) = encodeListLen 4
               <> text unit <> text name <> encodeBool boot
               <> encodeListLen (fromIntegral (length edges)) <> foldMap importRow edges
-            sourceEnvelope = toStrictByteString (encodeListLen 11 <> text "TPCWSOURCE3"
+            sourceEnvelope = toStrictByteString (encodeListLen 12 <> text "TPCWSOURCE4"
               <> encodeBytes base <> encodeBytes planDigest <> encodeBytes admission
               <> identity
               <> fileRef sourceName <> fileRef (stageName "dependencies.json") <> fileRef (stageName "module-package-imports.cbor")
@@ -1467,7 +1467,11 @@ prepareWorldCellQuestion bound question = do
               <> foldMap moduleRow (worldCellExactImports inputFacts)
               <> encodeSourceSelectedOriginals (worldCellSourceSelection inputFacts)
               <> encodeListLen (fromIntegral (length (worldCellSourceRootAliases inputFacts)))
-              <> foldMap text (worldCellSourceRootAliases inputFacts))
+              <> foldMap text (worldCellSourceRootAliases inputFacts)
+              <> encodeListLen (fromIntegral (length (worldCellSourceImportRoles inputFacts)))
+              <> foldMap (\(qualifier,name,boot,unit,role) -> encodeListLen 5
+                <> text qualifier <> text name <> encodeBool boot <> text unit <> encodeInt role)
+                  (worldCellSourceImportRoles inputFacts))
             sourceReceiptName = stageName "world-source.cbor"
         BS.writeFile (directory </> sourceReceiptName) sourceEnvelope
         let receiptRef = encodeListLen 2 <> text sourceReceiptName <> encodeBytes (SHA256.hash sourceEnvelope)

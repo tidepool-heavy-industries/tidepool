@@ -18,6 +18,12 @@ module Tidepool.TurnSource
   , preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker, importQualifierNamespaces
   , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
   , ImportOrigin(..)
+  , ImportRendering, literalImportRendering, locatedImportRendering, appendImportRendering
+  , replaceImportRendering, importRenderingSource, importRenderingOrigins
+  , spliceImportRendering
+  , qualifyCompilerDefaultRendering, prepareDeclarationTemplateWithImports
+  , renderPreparedDeclarationWithImports
+  , preparedDeclarationImportOffset
   ) where
 
 import GHC (GhcPs, ImportDecl(..), ModuleName, hsmodImports, hsmodName, unLoc, moduleNameString, mkModuleName)
@@ -49,6 +55,54 @@ import Tidepool.ExtractUtil (shaHex)
 -- syntax. It classifies source reachability, never TYPE or native permission.
 data ImportOrigin = AuthoredCurrent | InheritedLexical | ProtectedCompiler
   deriving (Eq, Ord, Show)
+
+-- Physical decoded-character ranges move with the source edits that render
+-- imports. GHC's BufPos uses these offsets, independently of LINE pragmas.
+data ImportRendering = ImportRendering String [(Int, Int, ImportOrigin)]
+  deriving (Eq, Show)
+
+literalImportRendering :: String -> ImportRendering
+literalImportRendering source = ImportRendering source []
+
+locatedImportRendering :: ImportOrigin -> String -> ImportRendering
+locatedImportRendering origin source = ImportRendering source [(0, length source, origin)]
+
+importRenderingSource :: ImportRendering -> String
+importRenderingSource (ImportRendering source _) = source
+
+importRenderingOrigins :: ImportRendering -> [(Int, Int, ImportOrigin)]
+importRenderingOrigins (ImportRendering _ origins) = origins
+
+appendImportRendering :: ImportRendering -> ImportRendering -> ImportRendering
+appendImportRendering (ImportRendering left before) (ImportRendering right after) =
+  ImportRendering (left ++ right)
+    (before ++ [(start + length left, end + length left, origin) | (start,end,origin) <- after])
+
+replaceImportRendering :: String -> ImportRendering -> ImportRendering -> Either String ImportRendering
+replaceImportRendering marker (ImportRendering replacement added) (ImportRendering source existing) = do
+  let (before, after) = T.breakOn (T.pack marker) (T.pack source)
+      suffix = T.drop (length marker) after
+      start = length (T.unpack before)
+      end = start + length marker
+      delta = length replacement - length marker
+      move (first,last',origin)
+        | last' <= start = Right (first,last',origin)
+        | first >= end = Right (first+delta,last'+delta,origin)
+        | otherwise = Left "source rendering edit crosses an issued import occurrence"
+  if null marker || T.null after || T.pack marker `T.isInfixOf` suffix
+    then Left "checked recipe marker is missing or duplicated"
+    else do
+      moved <- mapM move existing
+      pure (ImportRendering (T.unpack before ++ replacement ++ T.unpack suffix)
+        (moved ++ [(first+start,last'+start,origin) | (first,last',origin) <- added]))
+
+spliceImportRendering :: ImportRendering -> String -> String -> Either String ImportRendering
+spliceImportRendering (ImportRendering template origins) body binders = do
+  let boundaries = [length (T.unpack before) | marker <- ["{{TURN_STMT}}","{{TURN}}","{{BINDERS}}"]
+        , let (before,after) = T.breakOn (T.pack marker) (T.pack template), not (T.null after)]
+  if any (\(_,end,_) -> any (< end) boundaries) origins
+    then Left "authored body insertion precedes an issued import occurrence"
+    else pure (ImportRendering (spliceTemplate template body binders) origins)
 
 -- The import slot and protected default recipe have independent Rust/Haskell
 -- ABI markers. Installer templates need imports without primitive defaulting.
@@ -110,8 +164,14 @@ qualifyCompilerDefault :: CompilerDefaultRecipe -> [ModuleName] -> String -> Eit
 qualifyCompilerDefault recipe namespaces template = fst <$> qualifyCompilerDefaultWithLineOffset recipe namespaces template
 
 qualifyCompilerDefaultWithLineOffset :: CompilerDefaultRecipe -> [ModuleName] -> String -> Either String (String,Int)
-qualifyCompilerDefaultWithLineOffset NoCompilerDefault _ template = Right (template,0)
-qualifyCompilerDefaultWithLineOffset (PrimitiveCompilerDefault templateNamespaces) importedNamespaces template = do
+qualifyCompilerDefaultWithLineOffset recipe namespaces template = do
+  (rendered, offset) <- qualifyCompilerDefaultRendering recipe namespaces (literalImportRendering template)
+  pure (importRenderingSource rendered, offset)
+
+qualifyCompilerDefaultRendering :: CompilerDefaultRecipe -> [ModuleName] -> ImportRendering
+  -> Either String (ImportRendering,Int)
+qualifyCompilerDefaultRendering NoCompilerDefault _ template = Right (template,0)
+qualifyCompilerDefaultRendering (PrimitiveCompilerDefault templateNamespaces) importedNamespaces template = do
   let occupied = Set.fromList (templateNamespaces ++ importedNamespaces)
       fresh candidate namespaces
         | candidate `Set.member` namespaces = fresh (mkModuleName (moduleNameString candidate ++ "X")) namespaces
@@ -122,40 +182,59 @@ qualifyCompilerDefaultWithLineOffset (PrimitiveCompilerDefault templateNamespace
       primitive alias name = "import qualified " ++ show (unitString (moduleUnit (nameModule name)))
         ++ " " ++ moduleNameString (moduleName (nameModule name)) ++ " as " ++ moduleNameString alias ++ "\n"
       qualified alias name = moduleNameString alias ++ "." ++ occNameString (nameOccName name)
-      replacement = primitive intAlias intTyConName ++ primitive doubleAlias doubleTyConName
-        ++ "import qualified \"text\" Data.Text as " ++ moduleNameString textAlias ++ "\n"
-        ++ preambleImportMarker ++ preambleDefaultMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
-        ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"
-  prepared <- replaceTemplateMarker preambleDefaultDeclaration replacement template
+      imports = foldl appendImportRendering (literalImportRendering "")
+        (map (locatedImportRendering ProtectedCompiler)
+          [primitive intAlias intTyConName, primitive doubleAlias doubleTyConName
+          ,"import qualified \"text\" Data.Text as " ++ moduleNameString textAlias ++ "\n"])
+      replacement = appendImportRendering imports (literalImportRendering
+        (preambleImportMarker ++ preambleDefaultMarker ++ "default (" ++ qualified intAlias intTyConName ++ ", " ++ qualified doubleAlias doubleTyConName
+        ++ ", " ++ moduleNameString textAlias ++ ".Text)\n"))
+  prepared <- replaceImportRendering preambleDefaultDeclaration replacement template
   let prefix = "{-# LANGUAGE PackageImports #-}\n"
-  pure (prefix ++ prepared, length (filter (== '\n') prefix))
+  pure (appendImportRendering (literalImportRendering prefix) prepared, length (filter (== '\n') prefix))
 
 -- The header transition owns both import placement and default qualification.
 -- Body rendering cannot qualify the default again or move imports past it.
-newtype PreparedDeclarationTemplate = PreparedDeclarationTemplate String
+data PreparedDeclarationTemplate = PreparedDeclarationTemplate ImportRendering Int
+
+preparedDeclarationImportOffset :: PreparedDeclarationTemplate -> Int
+preparedDeclarationImportOffset (PreparedDeclarationTemplate _ offset) = offset
 
 prepareDeclarationTemplate
   :: CompilerDefaultRecipe -> [ModuleName] -> String -> String
   -> Either String PreparedDeclarationTemplate
 prepareDeclarationTemplate recipe namespaces imports template
-  | T.pack "{{CELL_IMPORTS}}" `T.isInfixOf` T.pack template = do
-      withImports <- replaceTemplateMarker "{{CELL_IMPORTS}}" imports template
-      PreparedDeclarationTemplate <$> qualifyCompilerDefault recipe namespaces withImports
+  = prepareDeclarationTemplateWithImports recipe namespaces (literalImportRendering imports) template
+
+prepareDeclarationTemplateWithImports
+  :: CompilerDefaultRecipe -> [ModuleName] -> ImportRendering -> String
+  -> Either String PreparedDeclarationTemplate
+prepareDeclarationTemplateWithImports recipe namespaces imports source
+  | T.pack "{{CELL_IMPORTS}}" `T.isInfixOf` T.pack source = do
+      withImports <- replaceImportRendering "{{CELL_IMPORTS}}" imports template
+      uncurry PreparedDeclarationTemplate <$> qualifyCompilerDefaultRendering recipe namespaces withImports
   | otherwise = case recipe of
       PrimitiveCompilerDefault _ -> do
-        withImports <- replaceTemplateMarker preambleImportMarker
-          (imports ++ preambleImportMarker) template
-        PreparedDeclarationTemplate <$> qualifyCompilerDefault recipe namespaces withImports
+        withImports <- replaceImportRendering preambleImportMarker
+          (appendImportRendering imports (literalImportRendering preambleImportMarker)) template
+        uncurry PreparedDeclarationTemplate <$> qualifyCompilerDefaultRendering recipe namespaces withImports
       NoCompilerDefault
-        | null imports -> Right (PreparedDeclarationTemplate template)
-        | T.pack preambleImportMarker `T.isInfixOf` T.pack template ->
-            PreparedDeclarationTemplate <$> replaceTemplateMarker preambleImportMarker
-              (imports ++ preambleImportMarker) template
+        | null (importRenderingSource imports) -> Right (PreparedDeclarationTemplate template 0)
+        | T.pack preambleImportMarker `T.isInfixOf` T.pack source ->
+            (\rendered -> PreparedDeclarationTemplate rendered 0) <$> replaceImportRendering preambleImportMarker
+              (appendImportRendering imports (literalImportRendering preambleImportMarker)) template
         | otherwise -> Left "declaration template with imports lacks {{CELL_IMPORTS}} or a protected preamble import marker"
+  where template = literalImportRendering source
+
 
 renderPreparedDeclaration :: PreparedDeclarationTemplate -> String -> String
-renderPreparedDeclaration (PreparedDeclarationTemplate template) body =
-  spliceTemplate template body ""
+renderPreparedDeclaration template body = importRenderingSource (renderPreparedDeclarationWithImports template body)
+
+renderPreparedDeclarationWithImports :: PreparedDeclarationTemplate -> String -> ImportRendering
+renderPreparedDeclarationWithImports (PreparedDeclarationTemplate (ImportRendering template origins) _) body =
+  -- Declaration templates put authored declarations after their import header;
+  -- source matching later checks every retained physical import range.
+  ImportRendering (spliceTemplate template body "") origins
 
 -- | Give generated turn scaffolds a stable owner name. The length-prefixed
 -- UTF-8 fields make the identity independent of concatenation boundaries and

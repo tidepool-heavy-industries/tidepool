@@ -4,7 +4,7 @@
 
 module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
-  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
+  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), compilationSource, SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
@@ -97,7 +97,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isAlreadyExistsError, isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
@@ -1432,11 +1432,14 @@ extendSourceSelectedOriginals (Just selected) scope = do
 data ExactCompilation = ExactCompilation
   { compilationScope :: ExactScope
   , compilationTransaction :: Word64
-  , compilationSource :: FilePath
+  , compilationSourceImports :: IssuedSourceImports
   -- | Direct imports to retained exact owners, excluded from fresh source lookup.
   , compilationExactImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
   , compilationSourceSelection :: Maybe SourceSelectedOriginals
   } deriving (Eq, Show)
+
+compilationSource :: ExactCompilation -> FilePath
+compilationSource = fst . sourceImportsSnapshot . compilationSourceImports
 
 scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
 scopeValueInterfaces scope = case scopePurpose scope of
@@ -2247,11 +2250,13 @@ captureExactCompilationReceipt compilation evidence = do
       moduleRow ((unit, name, boot), edges) = encodeArray
         [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
       receipt snapshot = toStrictByteString $ encodeArray
-        [text "TPEXACTCOMPILE", text "3", text (scopeRequestSha256 scope)
+        [text "TPEXACTCOMPILE", text "4", text (scopeRequestSha256 scope)
         , text (scopeSemanticSha256 scope), text path, text (digest bytes)
         , text snapshot, text (renderDependencyEvidence evidence)
         , encodeArray (map moduleRow imports)
-        , encodeSourceSelectedOriginals (compilationSourceSelection compilation)]
+        , encodeSourceSelectedOriginals (compilationSourceSelection compilation)
+        , encodeArray [encodeArray [text qualifier,text name,E.encodeBool boot,text unit,E.encodeInt role]
+            | (qualifier,name,boot,unit,role) <- sourceImportsHomeRoles (compilationSourceImports compilation)]]
   pure (ExactCompilationReceipt parent transaction bytes receipt)
 
 publishExactCompilationReceipt :: ExactCompilationReceipt -> IO ()

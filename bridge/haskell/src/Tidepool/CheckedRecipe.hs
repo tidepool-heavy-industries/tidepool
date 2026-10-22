@@ -1,5 +1,6 @@
 module Tidepool.CheckedRecipe
   ( checkedItemCompilePurpose, checkedRecipeSource, checkedRecipeSourceWithLineOffset
+  , checkedRecipeSourceWithImports
   , replaceRecipeMarker, writeCheckedItemReceipt
   ) where
 
@@ -18,8 +19,8 @@ import Tidepool.ExactScope
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.GhcPipeline (CompilePurpose(..))
 import Tidepool.TurnSource
-  ( spliceTemplate, replaceTemplateMarker
-  , CompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset )
+  ( replaceTemplateMarker, CompilerDefaultRecipe, ImportRendering, literalImportRendering
+  , importRenderingSource, replaceImportRendering, qualifyCompilerDefaultRendering, spliceImportRendering )
 
 checkedRecipeAnnotations :: CheckedItemAdmission -> [(String,CheckedSignature)]
 checkedRecipeAnnotations admission =
@@ -41,22 +42,29 @@ checkedRecipeSource defaults namespaces admission template source =
 
 checkedRecipeSourceWithLineOffset :: CompilerDefaultRecipe -> [ModuleName] -> CheckedItemAdmission
   -> String -> String -> IO (String,Int)
-checkedRecipeSourceWithLineOffset defaults namespaces admission template source = case itemKind admission of
+checkedRecipeSourceWithLineOffset defaults namespaces admission template source = do
+  (rendered,offset) <- checkedRecipeSourceWithImports defaults namespaces admission (literalImportRendering template) source
+  pure (importRenderingSource rendered,offset)
+
+checkedRecipeSourceWithImports :: CompilerDefaultRecipe -> [ModuleName] -> CheckedItemAdmission
+  -> ImportRendering -> String -> IO (ImportRendering,Int)
+checkedRecipeSourceWithImports defaults namespaces admission template source = case itemKind admission of
   "bind" -> do
-    unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
+    unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` importRenderingSource template)
       (fail "checked bind requires canonical recipe version one")
     let aliases = checkedRecipeAnnotations admission
         declarations = intercalate "; " [alias ++ " :: (); "
           ++ alias ++ " = " ++ binder | ((alias,_),binder) <- zip aliases (itemBinders admission)]
         result = intercalate ", " (map fst aliases)
-    amended <- if null aliases then pure template else replaceRecipeMarker "{{TURN_STMT}}"
-      ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n") template
-    (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultWithLineOffset defaults namespaces amended)
-    pure (spliceTemplate prepared source result,lineOffset)
+    amended <- if null aliases then pure template else either fail pure (replaceImportRendering "{{TURN_STMT}}"
+      (literalImportRendering ("{{TURN_STMT}}\n; let { " ++ declarations ++ " }\n")) template)
+    (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultRendering defaults namespaces amended)
+    rendered <- either fail pure (spliceImportRendering prepared source result)
+    pure (rendered,lineOffset)
   "expr" -> case checkedRecipeAnnotations admission of
     [(alias,_)] -> do
       observation <- maybe (fail "checked expression has no owning observation name") pure (itemObservationName admission)
-      unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` template)
+      unless ("__result = do {\n{{TURN_STMT}}" `isInfixOf` importRenderingSource template)
         (fail "checked expression capture requires canonical bind recipe version two")
       let liftStatement = case itemExpressionLift admission of
             Just "effectful" -> "__tidepool_checked_captured_value <- " ++ alias
@@ -66,8 +74,9 @@ checkedRecipeSourceWithLineOffset defaults namespaces admission template source 
       when (null liftStatement) (fail "checked expression has no certified lift plan")
       let statement = "let { " ++ alias ++ " :: (); "
             ++ alias ++ " = (\n" ++ source ++ "\n) }\n; " ++ liftStatement
-      (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultWithLineOffset defaults namespaces template)
-      pure (spliceTemplate prepared statement observation,lineOffset)
+      (prepared,lineOffset) <- either fail pure (qualifyCompilerDefaultRendering defaults namespaces template)
+      rendered <- either fail pure (spliceImportRendering prepared statement observation)
+      pure (rendered,lineOffset)
     _ -> fail "checked expression has no unique full signature"
   _ -> fail "checked declaration lacks an original identity certificate"
 

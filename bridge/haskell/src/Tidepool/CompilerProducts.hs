@@ -83,7 +83,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
 import Tidepool.ExactScope
-  ( WorldOriginalReference, WorldInputFacts, worldInputsProducer, worldInputsProfile, ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( WorldOriginalReference, WorldInputFacts, worldInputsProducer, worldInputsProfile, ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), compilationSource, ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication

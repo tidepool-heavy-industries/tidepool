@@ -39,6 +39,7 @@ module Tidepool.Binders
   , declarationSourceWithTemplate
   , declarationSourceWithTemplateFlags
   , renderDeclarationForTemplate
+  , renderDeclarationForTemplateWithImports, locatedImportsRendering
   , splitCellWithFlags
   , CellAnalysisItem(..), CellBindingForm(..)
   , CellAnalysisSourceItem(..)
@@ -47,6 +48,7 @@ module Tidepool.Binders
   , analyzeOrderedCell, analyzeOrderedCellWithFlags
   , defaultParserDynFlags, templateParserFlags, sourceModuleFlags
   , renderCellCheckSource, renderCellCheckSourceWithLineOffset
+  , renderCellCheckSourceWithImports
   , PreparedTypedSegmentSource(..), prepareTypedSegmentSource, prepareTypedSegmentSourceAvoiding
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
   , CheckedBinderPin(..)
@@ -111,9 +113,12 @@ import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 import Tidepool.TurnSource
   ( CompilerDefaultRecipe, emptyCompilerDefaultRecipe
-  , captureCompilerDefaultRecipe, qualifyCompilerDefaultWithLineOffset
+  , captureCompilerDefaultRecipe
   , importQualifierNamespaces
-  , prepareDeclarationTemplate, renderPreparedDeclaration )
+  , ImportOrigin(..), ImportRendering, literalImportRendering, locatedImportRendering
+  , appendImportRendering, replaceImportRendering, importRenderingSource
+  , qualifyCompilerDefaultRendering, prepareDeclarationTemplateWithImports
+  , renderPreparedDeclarationWithImports, preparedDeclarationImportOffset )
 
 -- | A binder a declaration introduces.
 --
@@ -319,7 +324,8 @@ data LocatedPragma = LocatedPragma
 -- Imports installed by checking/program scaffolds retain their exact owners.
 data ImportIntent
   = AuthoredSourceImport ModuleName RawPkgQual
-  | RetainedGeneratedImport
+  | InheritedLexicalImport
+  | ProtectedCompilerImport
 
 instance Eq ImportIntent where
   AuthoredSourceImport leftOwner leftQualifier == AuthoredSourceImport rightOwner rightQualifier =
@@ -328,14 +334,16 @@ instance Eq ImportIntent where
       sameQualifier NoRawPkgQual NoRawPkgQual = True
       sameQualifier (RawPkgQual left) (RawPkgQual right) = left == right
       sameQualifier _ _ = False
-  RetainedGeneratedImport == RetainedGeneratedImport = True
+  InheritedLexicalImport == InheritedLexicalImport = True
+  ProtectedCompilerImport == ProtectedCompilerImport = True
   _ == _ = False
 
 instance Show ImportIntent where
   show (AuthoredSourceImport owner qualifier) =
     "AuthoredSourceImport " ++ moduleNameString owner ++ " "
       ++ showSDocOneLine defaultSDocContext (ppr qualifier)
-  show RetainedGeneratedImport = "RetainedGeneratedImport"
+  show InheritedLexicalImport = "InheritedLexicalImport"
+  show ProtectedCompilerImport = "ProtectedCompilerImport"
 
 data LocatedImport = LocatedImport
   { locatedImportSpan :: CellSourceSpan
@@ -658,10 +666,10 @@ analyzeCellWithGrouping ordered dflags template source = do
         targets = filter ((`elem` map genericDeclarationTarget generated) . structuralDisplayTargetName)
           (structuralDisplayTargets effective classified)
         generatedImports =
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias) RetainedGeneratedImport
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified GHC.Generics as " ++ genericAlias) ProtectedCompilerImport
               [mkModuleName "GHC.Generics", mkModuleName genericAlias]
           | not (null generated) ] ++
-          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection.Display as " ++ displayAlias) RetainedGeneratedImport
+          [ LocatedImport (CellSourceSpan 1 1 1 1) ("import qualified Tidepool.Inspection.Display as " ++ displayAlias) ProtectedCompilerImport
               [mkModuleName "Tidepool.Inspection.Display", mkModuleName displayAlias]
           | not (null targets) ]
         plan = CellSourcePlan
@@ -956,20 +964,32 @@ declarationSourceWithTemplateFlags dflags template source = do
     pure (DeclarationSource (prologue { prologueCompilerDefault = defaults }) (blankBeforeLine firstBodyLine source))
 
 renderDeclarationForTemplate :: String -> DeclarationSource -> Either String String
-renderDeclarationForTemplate template source = do
+renderDeclarationForTemplate template source =
+  importRenderingSource . fst <$> renderDeclarationForTemplateWithImports template source
+
+locatedImportsRendering :: [LocatedImport] -> ImportRendering
+locatedImportsRendering = foldl appendImportRendering (literalImportRendering "") . map render
+  where
+    render imported = locatedImportRendering (case locatedImportIntent imported of
+      AuthoredSourceImport _ _ -> AuthoredCurrent
+      InheritedLexicalImport -> InheritedLexical
+      ProtectedCompilerImport -> ProtectedCompiler) (locatedImportSource imported ++ "\n")
+
+renderDeclarationForTemplateWithImports :: String -> DeclarationSource -> Either String (ImportRendering,Int)
+renderDeclarationForTemplateWithImports template source = do
   let (beforeModule, afterModule) = break moduleHeader (lines template)
   case afterModule of
     [] -> Left "declaration template has no module header"
     _ ->
       let pragmas = concatMap ((++ "\n") . locatedPragmaSource)
             (prologuePragmas (declarationPrologue source))
-          imports = concatMap ((++ "\n") . locatedImportSource)
-            (prologueImports (declarationPrologue source))
+          imports = locatedImportsRendering (prologueImports (declarationPrologue source))
           withPragmas = unlines beforeModule ++ pragmas ++ unlines afterModule
        in do
-          prepared <- prepareDeclarationTemplate (prologueCompilerDefault (declarationPrologue source))
+          prepared <- prepareDeclarationTemplateWithImports (prologueCompilerDefault (declarationPrologue source))
             (concatMap locatedImportNamespaces (prologueImports (declarationPrologue source))) imports withPragmas
-          Right (renderPreparedDeclaration prepared (declarationBody source))
+          Right (renderPreparedDeclarationWithImports prepared (declarationBody source),
+            length (filter (== '\n') pragmas) + preparedDeclarationImportOffset prepared)
   where
     moduleHeader line = "module " `isPrefixOf` dropWhile isSpace line
 
@@ -988,6 +1008,7 @@ data PreparedTypedSegmentSource = PreparedTypedSegmentSource
   , preparedTypedSegmentTemplate :: String
   , preparedTypedSegmentLineOffset :: Int
   , preparedTypedSegmentOperations :: GeneratedSegmentOperations
+  , preparedTypedSegmentImports :: ImportRendering
   }
 
 prepareTypedSegmentSource :: String -> CellSourcePlan -> String
@@ -1035,11 +1056,13 @@ prepareTypedSegmentSourceAvoiding unavailable template sourcePlan reservation sl
     "{{CELL_PRAGMAS}}\n{-# LANGUAGE PackageImports #-}" template
     >>= replaceOnce "{{CELL_IMPORTS}}"
       ("import qualified \"tidepool-resume\" Tidepool.Internal.Resume as " ++ moduleNameString qualifier ++ "\n{{CELL_IMPORTS}}")
-  (rendered, generatedLineOffset) <- renderCellSourceWithLineOffset False protected sourcePlan
-  renamedRoot <- replaceOnce "__tidepool_cell_check ::" (root ++ " ::") rendered
-    >>= replaceOnce "__tidepool_cell_check =" (root ++ " =")
-  let sealed = renamedRoot ++ "\n-- tidepool-typed-segment-plan-v1 " ++ typedSegmentPlanDigest plan ++ "\n"
-  pure (PreparedTypedSegmentSource plan sealed protected generatedLineOffset (GeneratedSegmentOperations qualifier))
+  (rendered, generatedLineOffset) <- renderCellSourceWithImports False protected sourcePlan
+  renamedRoot <- replaceImportRendering "__tidepool_cell_check ::" (literalImportRendering (root ++ " ::")) rendered
+    >>= replaceImportRendering "__tidepool_cell_check =" (literalImportRendering (root ++ " ="))
+  let sealed = appendImportRendering renamedRoot (literalImportRendering
+        ("\n-- tidepool-typed-segment-plan-v1 " ++ typedSegmentPlanDigest plan ++ "\n"))
+  pure (PreparedTypedSegmentSource plan (importRenderingSource sealed) protected generatedLineOffset
+    (GeneratedSegmentOperations qualifier) sealed)
 
 renderCellCheckSource :: String -> CellSourcePlan -> Either String String
 renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffset template plan
@@ -1047,21 +1070,29 @@ renderCellCheckSource template plan = fst <$> renderCellCheckSourceWithLineOffse
 renderCellCheckSourceWithLineOffset :: String -> CellSourcePlan -> Either String (String,Int)
 renderCellCheckSourceWithLineOffset = renderCellSourceWithLineOffset True
 
+renderCellCheckSourceWithImports :: String -> CellSourcePlan -> Either String (ImportRendering,Int)
+renderCellCheckSourceWithImports = renderCellSourceWithImports True
+
 renderCellSourceWithLineOffset :: Bool -> String -> CellSourcePlan -> Either String (String,Int)
 renderCellSourceWithLineOffset checking template plan = do
-  withPragmas <- replaceOnce "{{CELL_PRAGMAS}}" pragmas template
-  withImports <- replaceOnce "{{CELL_IMPORTS}}" imports withPragmas
-  (prepared, defaultLineOffset) <- qualifyCompilerDefaultWithLineOffset (prologueCompilerDefault (cellPlanPrologue plan))
+  (rendered, offset) <- renderCellSourceWithImports checking template plan
+  pure (importRenderingSource rendered, offset)
+
+renderCellSourceWithImports :: Bool -> String -> CellSourcePlan -> Either String (ImportRendering,Int)
+renderCellSourceWithImports checking template plan = do
+  withPragmas <- replaceImportRendering "{{CELL_PRAGMAS}}" (literalImportRendering pragmas) (literalImportRendering template)
+  withImports <- replaceImportRendering "{{CELL_IMPORTS}}" imports withPragmas
+  (prepared, defaultLineOffset) <- qualifyCompilerDefaultRendering (prologueCompilerDefault (cellPlanPrologue plan))
     (concatMap locatedImportNamespaces (prologueImports (cellPlanPrologue plan))) withImports
-  withDecls <- replaceOnce "{{CELL_DECLS}}" declarations prepared
+  withDecls <- replaceImportRendering "{{CELL_DECLS}}" (literalImportRendering declarations) prepared
   renderedBody <- body
-  rendered <- replaceOnce "{{CELL_BODY}}" renderedBody withDecls
+  rendered <- replaceImportRendering "{{CELL_BODY}}" (literalImportRendering renderedBody) withDecls
   pure (rendered, length (filter (== '\n') pragmas) + defaultLineOffset)
   where
     items = cellPlanItems plan
     prologue = cellPlanPrologue plan
     pragmas = concatMap ((++ "\n") . locatedPragmaSource) (prologuePragmas prologue)
-    imports = concatMap ((++ "\n") . locatedImportSource) (prologueImports prologue)
+    imports = locatedImportsRendering (prologueImports prologue)
     declarations = concat
       [ linePragma item ++ cellAnalysisSource item ++ trailingNewline (cellAnalysisSource item)
       | item <- items

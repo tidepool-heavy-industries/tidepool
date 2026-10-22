@@ -35,9 +35,13 @@ module Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, generatedCheckingTemplateRecipe
   , generatedScaffoldRecipeWithProtectedImports, generatedCheckingTemplateRecipeWithProtectedImports
   , generatedTypedSegmentRecipeWithProtectedImports
+  , generatedCheckingTemplateRecipeWithImportRendering, generatedTypedSegmentRecipeWithImportRendering
+  , generatedScaffoldRecipeWithImportRendering
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsRoot
+  , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
@@ -57,6 +61,9 @@ import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, isSpace, toLower)
 import Data.Maybe (isJust, isNothing)
+import Data.Bits ((.|.))
+import Data.List (sortOn)
+import GHC.Data.Strict qualified as Strict
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
@@ -97,7 +104,7 @@ import GHC.Unit.Module.ModSummary (ModSummary(..))
 import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.SourceText (sl_fs)
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
-import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, mkRealSrcLoc)
+import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, mkRealSrcLoc, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
 import GHC.Types.Avail (availNames)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -134,7 +141,7 @@ import Numeric (showHex)
 import System.Directory (canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
 import System.IO (fixIO)
-import Tidepool.TurnSource (preambleImportMarker)
+import Tidepool.TurnSource (preambleImportMarker, ImportOrigin(..), ImportRendering, importRenderingSource, importRenderingOrigins)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -331,7 +338,7 @@ data RenderedProtectedTemplateImports = RenderedProtectedTemplateImports
 
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
   [(CheckedTemplateInterface,Int,TemplateImportShape)] [CheckedTemplateInterface]
-  GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose
+  GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose [(Int,Int,ImportOrigin,TemplateImportShape)]
   deriving (Eq)
 
 newtype TemplateImportShape = TemplateImportShape String
@@ -358,7 +365,7 @@ isTypedSegmentPurpose TypedSegmentTemplate{} = True
 isTypedSegmentPurpose _ = False
 
 instance Show GeneratedScaffoldRecipe where
-  show (GeneratedScaffoldRecipe path name _ line interfaces _ _ role) =
+  show (GeneratedScaffoldRecipe path name _ line interfaces _ _ role _) =
     "GeneratedScaffoldRecipe " ++ show (path,name,line,interfaces,role)
 
 parseTemplateImport :: DynFlags -> String -> Maybe (String, TemplateImportShape)
@@ -445,7 +452,36 @@ generatedScaffoldRecipeWithProtectedImportsFor :: GeneratedScaffoldPurpose -> Dy
   -> RenderedProtectedTemplateImports -> String -> String -> FilePath -> String
   -> IO (Either String GeneratedScaffoldRecipe)
 generatedScaffoldRecipeWithProtectedImportsFor purpose flags
-    (CheckedTemplateImports roots interfaces) mapped protectedTemplate rendered path name = do
+    imports mapped protectedTemplate rendered path name =
+  generatedScaffoldRecipeWithOriginsFor purpose flags imports mapped protectedTemplate rendered [] path name
+
+generatedScaffoldRecipeWithImportRendering :: DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> ImportRendering -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeWithImportRendering = generatedScaffoldRecipeWithRenderingFor NativeTurnTemplate
+
+generatedCheckingTemplateRecipeWithImportRendering :: DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> ImportRendering -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedCheckingTemplateRecipeWithImportRendering = generatedScaffoldRecipeWithRenderingFor CheckingCellTemplate
+
+generatedTypedSegmentRecipeWithImportRendering :: GeneratedSegmentOperations -> DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> ImportRendering -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedTypedSegmentRecipeWithImportRendering operations = generatedScaffoldRecipeWithRenderingFor (TypedSegmentTemplate operations)
+
+generatedScaffoldRecipeWithRenderingFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> ImportRendering -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeWithRenderingFor purpose flags imports mapped protected rendering =
+  generatedScaffoldRecipeWithOriginsFor purpose flags imports mapped protected
+    (importRenderingSource rendering) (importRenderingOrigins rendering)
+
+generatedScaffoldRecipeWithOriginsFor :: GeneratedScaffoldPurpose -> DynFlags -> CheckedTemplateImports
+  -> RenderedProtectedTemplateImports -> String -> String -> [(Int,Int,ImportOrigin)] -> FilePath -> String
+  -> IO (Either String GeneratedScaffoldRecipe)
+generatedScaffoldRecipeWithOriginsFor purpose flags
+    (CheckedTemplateImports roots interfaces) mapped protectedTemplate rendered origins path name = do
   canonical <- canonicalizePath path
   let compilerImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as "
         ++ moduleNameString (generatedScaffoldQualifier purpose)
@@ -471,6 +507,19 @@ generatedScaffoldRecipeWithProtectedImportsFor purpose flags
   pure $ do
     unless (mappedSource == protectedTemplate)
       (Left "protected template occurrence map belongs to another source")
+    mapM_ mappedOccurrence mappedOccurrences
+    let lineStart line = sum (map ((+1) . length) (take (line-1) (lines rendered)))
+        protectedOrigins = [(lineStart line,lineStart line+length source,ProtectedCompiler,shape)
+          | (_,line,source,shape) <- mappedOccurrences]
+    insertedOrigins <- forM origins $ \(start,end,origin) -> do
+      unless (start >= 0 && end > start && end <= length rendered)
+        (Left "rendered import occurrence leaves its captured source")
+      (_,shape) <- maybe (Left "rendered import occurrence is not one parsed import") Right
+        (parseTemplateImport flags (take (end-start) (drop start rendered)))
+      pure (start,end,origin,shape)
+    let census = sortOn (\(start,_,_,_) -> start) (protectedOrigins ++ insertedOrigins)
+    unless (and [end <= next | ((_,end,_,_),(next,_,_,_)) <- zip census (drop 1 census)])
+      (Left "rendered import occurrences overlap")
     let rootSet = Set.fromList roots
         graphOwners = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
     unless (length roots == Set.size rootSet && all (`elem` graphOwners) roots)
@@ -489,9 +538,9 @@ generatedScaffoldRecipeWithProtectedImportsFor purpose flags
     unless (Map.size graph == length interfaces) (Left "duplicate checked template interface")
     closure <- reachable Map.empty [key interface | (interface,_,_) <- selected]
     case (purpose,compilerImportLines) of
-      (TypedSegmentTemplate _,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
-      (NativeTurnTemplate,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose)
-      (CheckingCellTemplate,[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose)
+      (TypedSegmentTemplate _,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose census)
+      (NativeTurnTemplate,[line]) -> Right (GeneratedScaffoldRecipe canonical name bytes line selected closure ImportedTemplateInstances purpose census)
+      (CheckingCellTemplate,[]) -> Right (GeneratedScaffoldRecipe canonical name bytes 0 selected closure ImportedTemplateInstances purpose census)
       _ -> Left "generated scaffold support import differs from its template role"
 
 -- Only the activation admission supplies this complete original instance
@@ -505,7 +554,7 @@ generatedActivationPreviewRecipe flags interfaces originalOwner protectedTemplat
   recipe <- generatedScaffoldRecipe flags imports protectedTemplate rendered path name
   pure $ do
     original <- recipe
-    let GeneratedScaffoldRecipe canonical target bytes line selected _ _ role = original
+    let GeneratedScaffoldRecipe canonical target bytes line selected _ _ role census = original
         owners = Set.fromList [(templateInterfaceUnit interface,templateInterfaceModule interface)
           | interface <- interfaces]
     unless (all (all (`Set.member` owners) . templateInterfaceImports) interfaces)
@@ -514,27 +563,118 @@ generatedActivationPreviewRecipe flags interfaces originalOwner protectedTemplat
         , (templateInterfaceUnit interface,templateInterfaceModule interface) == originalOwner] of
       [interface] -> Right interface
       _ -> Left "activation preview lacks its sealed original target"
-    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget) role)
+    pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget) role census)
 
 data CapturedGeneratedScaffoldSource = CapturedGeneratedScaffoldSource FilePath BS.ByteString
+  [(Int,Int,ImportOrigin,TemplateImportShape)]
 
 capturedGeneratedScaffoldBytes :: CapturedGeneratedScaffoldSource -> BS.ByteString
-capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes) = bytes
+capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes _) = bytes
 
 capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
-capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _) = path
+capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
 
 captureGeneratedScaffoldSource :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String CapturedGeneratedScaffoldSource)
-captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ _) requested = do
+captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ _ census) requested = do
   canonical <- canonicalizePath requested
   actual <- BS.readFile canonical
   pure $ if canonical == path && actual == expected
-    then Right (CapturedGeneratedScaffoldSource path expected)
+    then Right (CapturedGeneratedScaffoldSource path expected census)
     else Left "generated scaffold target differs from its protected recipe"
 
 captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
 captureGeneratedScaffoldTarget recipe requested =
   fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
+
+-- The source and its classification have one owner. Only the compiler's actual
+-- parsed target can issue this value; rendering origins alone are not claims.
+data IssuedSourceImports = IssuedSourceImports
+  FilePath BS.ByteString BS.ByteString (String,String)
+  [((String,String,Bool),Int)] [(String,String,Bool,String,Int)]
+  deriving (Eq)
+
+instance Show IssuedSourceImports where
+  show (IssuedSourceImports path _ _ root occurrences roles) =
+    "IssuedSourceImports " ++ show (path,root,length occurrences,length roles)
+
+sourceImportsSnapshot :: IssuedSourceImports -> (FilePath,BS.ByteString)
+sourceImportsSnapshot (IssuedSourceImports path _ digest _ _ _) = (path,digest)
+
+sourceImportsRoot :: IssuedSourceImports -> (String,String)
+sourceImportsRoot (IssuedSourceImports _ _ _ root _ _) = root
+
+sourceImportsHomeRoles :: IssuedSourceImports -> [(String,String,Bool,String,Int)]
+sourceImportsHomeRoles (IssuedSourceImports _ _ _ _ _ roles) = roles
+
+issueSourceImports :: Maybe GeneratedScaffoldRecipe -> ParsedModule -> [(String,String,Bool,String)]
+  -> IO (Either String IssuedSourceImports)
+issueSourceImports recipe parsed homeEdges = do
+  let summary = pm_mod_summary parsed
+  captured <- case recipe of
+    Just protected -> case ml_hs_file (ms_location summary) of
+      Nothing -> pure (Left "source import census lacks its source path")
+      Just path -> captureGeneratedScaffoldSource protected path
+    Nothing -> case ml_hs_file (ms_location summary) of
+      Nothing -> pure (Left "source import census lacks its source path")
+      Just path -> do
+        canonical <- canonicalizePath path
+        bytes <- BS.readFile canonical
+        pure (Right (CapturedGeneratedScaffoldSource canonical bytes []))
+  observation <- case captured of
+    Left _ -> pure Nothing
+    Right (CapturedGeneratedScaffoldSource path _ _) -> Just <$> sourceEvidenceWithFingerprint path
+  pure $ do
+    CapturedGeneratedScaffoldSource path bytes census <- captured
+    (observed,fingerprint) <- maybe (Left "source import census lacks its captured observation") Right observation
+    let digest = SHA256.hash bytes
+    unless (fingerprint == ms_hs_hash summary && dependencySourceSha256 observed == hexBytes digest)
+      (Left "source import census differs from its parsed snapshot")
+    let declarations = hsmodImports (unLoc (pm_parsed_source parsed))
+        physical located = case getBufSpan (getLocA located) of
+          Strict.Just span' -> Right (bufPos (bufSpanStart span'),bufPos (bufSpanEnd span'))
+          Strict.Nothing -> Left "parsed source import lacks a physical range"
+        roleBit AuthoredCurrent = 1
+        roleBit InheritedLexical = 2
+        roleBit ProtectedCompiler = 4
+        qualifier NoPkgQual = "none"
+        qualifier (ThisPkg unit) = "this:" ++ unitString unit
+        qualifier (OtherPkg unit) = "other:" ++ unitString unit
+    checked <- forM declarations $ \located -> do
+      let declaration = unLoc located
+          name = ideclName declaration
+          boot = ideclSource declaration == IsBoot
+          shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+      (start,end) <- physical located
+      (origin,used) <- case recipe of
+        Nothing -> Right (AuthoredCurrent,Nothing)
+        Just _ -> case [(origin,index) | (index,(first,last',origin,expected)) <- zip [0::Int ..] census
+            , first <= start, end <= last', expected == shape] of
+          [(origin,index)] -> Right (origin,Just index)
+          _ -> Left "parsed source import differs from its rendered origin census"
+      selected <- case [qualifier raw | (isBoot,imports) <- [(False,ms_textual_imps summary),(True,ms_srcimps summary)]
+          , isBoot == boot, (raw,imported) <- imports, getLoc imported == getLocA name] of
+        [raw] -> Right raw
+        _ -> Left "parsed source import has another consumed import occurrence"
+      pure (((selected,moduleNameString (unLoc name),boot),roleBit origin),used)
+    unless (case recipe of
+        Nothing -> True
+        Just _ -> sortOn id [index | (_,Just index) <- checked] == [0..length census-1])
+      (Left "rendered source import census has an unused or repeated occurrence")
+    let root = ms_mod summary
+    bindSourceHomeImports homeEdges (IssuedSourceImports path bytes digest
+      (unitString (moduleUnit root),moduleNameString (moduleName root)) (map fst checked) [])
+
+-- HOME resolution comes from the already-consumed graph, never another Finder
+-- lookup. Package occurrences stay in the private complete syntactic census.
+bindSourceHomeImports :: [(String,String,Bool,String)] -> IssuedSourceImports -> Either String IssuedSourceImports
+bindSourceHomeImports edges (IssuedSourceImports path bytes digest root occurrences _) = do
+  let syntax = Map.fromListWith (.|.) occurrences
+      unique = Map.fromList [(edge,()) | edge <- edges]
+  roles <- forM (Map.keys unique) $ \(qualifier,name,boot,unit) -> do
+    role <- maybe (Left "consumed HOME import lacks its issued occurrence role") Right
+      (Map.lookup (qualifier,name,boot) syntax)
+    pure (qualifier,name,boot,unit,role)
+  pure (IssuedSourceImports path bytes digest root occurrences roles)
 
 data GeneratedScaffoldOwner
   = NativeScaffoldOwner ExecutionSourceIdentity
@@ -567,7 +707,7 @@ readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionS
   -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
 readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
-    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph instanceScope purpose) parsed sourceGraph env = do
+    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph instanceScope purpose _) parsed sourceGraph env = do
   checked <- captureGeneratedScaffoldTarget recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph

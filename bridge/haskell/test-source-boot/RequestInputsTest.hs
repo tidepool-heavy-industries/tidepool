@@ -2082,7 +2082,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                             _ -> fail "World stage omitted its file reference"
                         source <- BS.readFile (directory </> "stage-0" </> "world-source.cbor")
                         case deserialiseFromBytes decodeTerm (BL.fromStrict source) of
-                          Right (tailBytes,TList (TString "TPCWSOURCE3":_:_:_:actualIdentity:_))
+                          Right (tailBytes,TList (TString "TPCWSOURCE4":_:_:_:actualIdentity:_))
                             | BL.null tailBytes,actualIdentity == identity -> pure ()
                           _ -> fail "World stage source receipt changed its issued identity"
                         pure sha
