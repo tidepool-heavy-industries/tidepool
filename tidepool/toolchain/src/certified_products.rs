@@ -53,6 +53,7 @@ use crate::cache::{DependencyEvidence, ProductAvailability};
 use crate::module_candidates::CandidateSet;
 use crate::prepared_artifact::BoundPackageProgram;
 use crate::recovery_artifacts::PackageInterfaceValidation;
+use crate::CompileError;
 
 /// Durable compiler records have an independent bound from scope descriptors
 /// and canonical per-module certificates. Their reads and decoding still share

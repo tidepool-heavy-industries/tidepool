@@ -829,8 +829,6 @@ fn certify_admitted_planned_declaration(
     includes: &[PathBuf],
     inventory_json: &[u8],
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
-    let sealed_artifacts = output.artifacts();
-    let source_selection = output.source_selection();
     let source_admission = admission.source();
     let module_name = module.module_name();
     let source_sha256: [u8; 32] = Sha256::digest(normalized_source.as_bytes()).into();

@@ -984,7 +984,7 @@ fn prepare_world_cell_program_inner(
                     &validation.inventory,
                 )
                 .map_err(compiler_evidence_failure)?;
-                let (certified, globals, packages, item_selection) = segment
+                let (certified, _, packages, item_selection) = segment
                     .originals
                     .select_item(
                         &mut artifacts,
@@ -4300,9 +4300,7 @@ fn seal_turn_outputs_with_validation(
             (products, None, None, None)
         }
     };
-    let accepted = if let Some(globals) = &item_globals {
-        globals.as_slice()
-    } else {
+    if item_globals.is_none() {
         let receipt = ordinary_receipt.as_ref().expect("ordinary receipt");
         ensure_ready_module_inventory(&receipt.modules, valid)?;
         if receipt.targets.len() != 1 {
@@ -4310,14 +4308,10 @@ fn seal_turn_outputs_with_validation(
                 "turn target product receipt count".into(),
             ));
         }
-        receipt
-            .targets
-            .get(target)
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("turn target product receipt missing".into())
-            })?
-            .as_slice()
-    };
+        receipt.targets.get(target).ok_or_else(|| {
+            CompileError::ExtractFailed("turn target product receipt missing".into())
+        })?;
+    }
     let receipt_packages = item_packages
         .as_ref()
         .or_else(|| ordinary_receipt.as_ref().map(|receipt| &receipt.packages))
@@ -6436,7 +6430,7 @@ fn compile_invocation_inner(
             .map(|inputs| inputs.compiler_source_support().clone())
             .unwrap_or_else(crate::artifact_inventory::CompilerSourceSupport::empty);
         for (name, target) in &mut artifacts.targets {
-            let accepted = receipt.targets.get(name).ok_or_else(|| {
+            receipt.targets.get(name).ok_or_else(|| {
                 CompileError::ExtractFailed("target product receipt missing".into())
             })?;
             if valid_evidence.is_some() {

@@ -204,7 +204,7 @@ fn validate_package_row(
         let ArtifactPayload::PackageCode(target) = &target.payload else {
             return Err(invalid(PackageCodeRefusal::WrongKind));
         };
-        package_code::validate_import(artifact, product, *global_index as usize, target)?;
+        crate::linked_native::resolve_package_import(product, *global_index as usize, target)?;
     }
     Ok(())
 }
