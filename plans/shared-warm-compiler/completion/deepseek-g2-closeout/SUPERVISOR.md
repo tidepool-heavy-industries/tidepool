@@ -1,164 +1,112 @@
-# Campaign supervisor: execute, review and consolidate
+# S: next-wave execution and review
 
-Your task is to implement B and qualify G2, with C investigation kept parallel.
-You own technical decisions within [CONTRACTS](CONTRACTS.md), not just routing.
-Read critical diffs and actual consumers. A pile of completed leaves, a clean
-tree or many component passes is not delivery.
+Implement the controlling contracts and qualify G2. Keep C research separate.
+Read critical diffs and actual callers; statuses and passing counts do not
+replace technical judgment. This is a repair of the integrated c910d1 candidate,
+not a restart of the old work pack.
 
-## First actions
+## Begin
 
-1. Read the checkout's current AGENTS/build guide, this pack and the evidence
-   index. Verify branch, HEAD, WIP, jobs and remote URLs. If another owner has
-   moved the branch, inspect and incorporate that delta; do not reset it.
-2. Record the actual documentation tip containing this pack. Preserve D's WIP.
-   Start W, N, Q, H, C and resource investigation immediately in separate source
-   checkouts. P1/P2/P3 can trace and prepare controls while P freezes the contract.
-3. Merge `402528b8322615ab635adb8fca1cfc719a684523` into the campaign branch as a
-   distinct reviewed prerequisite. Inspect its defining-Name/re-export behavior
-   and conflict resolution; it is based before the logging reapply. Do not hold
-   this tiny prerequisite behind the entire package migration. Q4 supplies the
-   corresponding Rust deletion and focused controls.
-4. Give P the concrete new base. P fills the wire/identity decisions in CONTRACTS
-   and gets S/P3 review before incompatible producer/consumer edits. A bounded
-   probe resolving a concrete contract uncertainty is useful; another broad
-   architectural survey is not needed.
-5. Give V ownership of exact gate commands and resource footprints immediately.
-   Preserve a warm build checkout where safe. Do not wait for all code to finish
-   before discovering missing test inputs or stale selectors.
+1. Read root/nested AGENTS, STATE, REVIEW-c910d1 and CONTRACTS. Verify current
+   HEAD/WIP/remotes and incorporate newer work without resetting anybody.
+   Preserve H/D WIP before reusing their checkouts.
+2. Reuse the context-loaded DeepSeek owners where possible, with the new
+   documentation tip and reviewed implementation OID. An old task file or idle
+   thread is not an active assignment. Obtain acknowledgement and first action.
+3. Start P, N, H, W, Q and V independently; R-P/R-N begin source tracing.
+   P/P3 must freeze the cross-language ordinary/item/HOME contract before
+   producer/reader code diverges. N freezes ownership/hunks for N1/N2.
+4. Run small discriminators early: a package-using World item, repeated Fresh
+   HOME across two targets, and unchanged native A after source-publishing B.
+   Do not wait for another whole-bundle attempt to test the joins.
+5. Record every actual worker, branch, base, source hunk, dependency, next gate
+   and evidence path. Keep implementation/review/qualification separate.
 
-## Assignments and events
+## How to use the parallelism
 
-Every leaf gets a written assignment containing role, parent, exact source OID,
-isolated checkout/branch, owned paths or hunks, dependency contract version,
-primary goal, two or three adjacent review questions, acceptance and escalation.
-Require an acknowledgement with its observed base and first concrete action.
-"Idle", "waiting for task", a dispatch RPC return, or an unconsumed task file
-is not evidence of a running worker. Correct failed dispatches explicitly.
+P is a working contract/integration owner with P1/P2/P3. N is a working
+publication owner with N1/N2; N owns any shared persistent/admission hunks.
+H and W are independent except for named toolchain hunks; coordinate them with P.
+Q is small and can merge early. V prepares current commands/inputs/resources,
+then runs exact joined gates. Reviewers examine candidate tips and their tests.
 
-Children report proposal, contract-question, first-counterexample, review-ready
-and settled events to their parent. Include commit and evidence paths, not only
-chat prose. Use the actual harness's parent notification/wake mechanism: some
-send-message operations do not start an idle turn. Verify how continuation works
-once. Use a supported event wait when nothing is ready; do not make every node
-poll every minute or invent a native Codex goal loop.
+One source writer per checkout. For shared files, assign functions, not vague
+subsystems: P2 owns complete_native_selection and linkage decoding; H owns
+world_stage_fragment/support narrowing; W owns package catalog reuse; N owns
+the final paired publication call path. Cross-owner API changes require a
+recorded contract and direct notification. No published integration rebases.
 
-Parents continue the unblocked frontier, review promptly and integrate it. If a
-child stops at capacity, preserve its branch and handoff, then wake or replace it.
-Do not reinterpret stopped workers as successful or spawn a new speculative
-implementation for the same unresolved contract.
+Children send proposal/contract-question/first-counterexample/review-ready/
+settled events with commit and evidence to parents. Verify the harness's
+notification/wake semantics. Use event waits when no work is ready; do not make
+every supervisor poll once a minute. Resume capacity-stopped owners from their
+handoffs. Do not spawn multiple implementations of the same unresolved question.
 
-Keep [STATE](STATE.md) current. The assignment artifact and Git are recovery
-sources when volatile context or messaging is lost.
+## Editorial checkpoints
 
-## Branches and shared source
+At proposal review, ask:
+- Which issuer already knows the choice? Why is any downstream census necessary?
+- Does the type carry the program and its imports, or can callers mix them?
+- Does a proposed validation conflate selected state with bytes in custody?
+- Is a new enum recording a transition, or merely naming an inference from absence?
+- Does deletion preserve the precise old/current and cancellation distinctions?
 
-Use one source writer per checkout. Reuse safe isolated warm checkouts or create
-real Git checkouts under `/srv/swarm/checkouts/`; provision Buck storage before
-building. Record base/tip and owned paths. Avoid creating a cold output tree for
-every reviewer: read-only review needs no separate build products.
+At code review trace construction, actual caller, freeze/commit, error/drop and
+reopen. Check old APIs are removed and no public alternate constructor bypasses
+the invariant. Inspect a consumer beyond the modified function. Require a test
+that asserts the adversarial premise and would reject the known old mechanism.
+Each reviewer also checks redundant work, obsolete surface and evidence quality.
 
-P owns a consolidation branch for P1/P2/P3. Merge its reviewed producer/consumer
-cutover as one coherent tranche; do not put a half-version change on campaign.
-W and N each return independently reviewable candidates. Q and H merge as soon
-as their exact dependencies and review are satisfied. C stays separate unless
-explicitly admitted before the qualification cutoff.
+Examples of insufficient repairs:
+- Passing a different baseline while still replacing the latest selection.
+- Replacing target_name=None with a guessed scaffold/HOME key.
+- Picking a unique result from a broader inventory instead of carrying a choice.
+- Recomputing every HOME body to recover metadata already known earlier.
+- Classifying started work Unchanged because no successor exists yet.
+- Renaming nonempty smoke assertions as exact-history coverage.
 
-Shared-file hazards to coordinate:
+## Integrate continuously, qualify deliberately
 
-- `certified_products.rs`: P's exact-link decoder, W's interface witness policy,
-  Q4's Original membership refusal. Use named function/hunk ownership; merge
-  independent sections in sequence and review the joined call chain.
-- `CertifiedProducts.hs`: P output/link emission versus W's optional producer
-  carry-forward. W's default custody-owner repair avoids independently redesigning
-  P's output format.
-- `GhcPipeline.hs`: structural prerequisite, Q3 diagnostic aggregation, D trace
-  instrumentation and optional C demand changes. Preserve protocol events and
-  don't resurrect the facade fallback while resolving conflicts.
-- `LoggingTest.hs`: Q1 owns both logger checks and partial-acquisition cleanup.
-- New Haskell fixtures: P3 coordinates ownership with P1. V registers/discovers
-  existing targets; it does not change a test's semantic expectation unaudited.
+P and N consolidate their own joined code/tests before returning candidates.
+Merge a versioned producer/reader cutover together. Merge reviewed independent
+H/W/Q parcels promptly. After each tranche R inspects the joined caller and V
+compiles affected consumers; no full bundle per leaf. Keep all accepted work
+reachable from the campaign branch and push checkpoints to the explicit github
+remote, verifying ls-remote OIDs. origin is local replication.
 
-Feature branches may be rebased with their sole owner before handoff. Never
-rewrite published shared integration history or force-push away another owner.
-Commit checkpoints and push the explicit `github` remote; verify `ls-remote`.
-Local `origin` publication is not remote delivery. Do not leave accepted parcels
-or useful C evidence orphaned after the campaign.
+Correct tests structurally where needed, preserving real failure cases.
+Don't weaken a test just because a more precise invariant exposed a stale
+fixture premise. Preserve failed inputs and receipt identity. A later failure
+is progress in diagnosis, not acceptance.
 
-## Review gates
+Once joined gates pass, freeze one matched bundle and run V's qualification.
+Do not repeatedly restart it for optional C changes. A real ordinary-workflow
+defect still blocks G2; an exploratory user run and qualification are distinct.
 
-At proposal review ask: which owner knows this fact first, who actually needs
-it, and can this step disappear? Are selection, storage and progress still
-distinct? Is a broad inventory compensating for information lost earlier?
-Could this type still be constructed in the invalid combination being repaired?
+## Resource ownership
 
-At candidate review inspect the exact base-to-tip diff, production constructors,
-callers, error/drop paths, recovery and tests. Check removal of obsolete APIs and
-deletion of their callers. A private enum plus a public unchecked constructor
-does not enforce the boundary. No rendered error text should select control flow.
+Use the pinned just/Buck path through swarm-build; local-only remains the
+admitted route. Measure aggregate RAM, cgroups, pressure, scratch and expected
+growth before each additional lane. Reuse safe warm outputs; don't allocate a
+cold build tree for each read-only reviewer. Provision genuine new checkouts
+through swarm-checkout-storage.
 
-P3 reviews P1/P2; R reviews P's joined authority path and P3's oracles. R reviews
-W/N. Reuse finished Q/C workers for independent Q/H review. Give corrections to
-the context-loaded owner; after substantial repair require a fresh exact-tip
-review. Review isn't a substitute for compilation or executed controls.
+No arbitrary Buck-file deletion, broad cache clear or shared daemon restart.
+Preserve source/WIP/evidence/products and follow supported retirement with
+idle/retention verification. Historical free-space numbers are not reservations.
 
-For a failure, first identify the issuing owner and the first violated contract.
-Do not have everyone patch the final error. Separate product defects, obsolete
-fixture premises and test infrastructure failures. Reproduce the claim through
-the actual production entry point. Retain the useful refusal when replacing a
-test that assumed custody granted execution.
+## Completion and escalation
 
-## Resources: many agents, bounded builds
+Report exact tip/diff, production constructors/callers changed, obsolete APIs
+removed, commands/counts/outcomes, first unqualified boundary, review disposition
+and cleanup certainty. Keep incidental findings confirmed/hypothesis/intentional
+exception distinct. Reuse completed investigators for bounded follow-ups.
 
-R resources inventories top consumers and active output users, then proposes
-scoped retirements under the server guide. Preserve source, WIP, Git metadata,
-evidence, selected standalone products, credentials and live runs. Inspect exact
-jobs/leases/owned daemons; use supported archive/retire commands only after the
-required retention and idle checks. No arbitrary file deletion inside Buck
-outputs, broad cache clear, shared-service restart, or silent admission bypass.
+A genuinely unresolved single-projection identity or publication semantic
+conflict needs a minimized production counterexample, two alternatives and a
+recommendation. Complete the independent frontier and consolidate before
+returning it. Ordinary repairs within CONTRACTS do not require another planning
+round. Do not silently replace the chosen design with a fallback.
 
-The last 102 GiB scratch observation leaves only about 2 GiB beyond the reserve.
-Recheck reservations and expected growth before every heavy admission. Use
-`swarm-build` and the pinned local-only, lease-aware just workflow. Configure the
-actual revision, including browser dependencies for exomonad-host/bundles. An
-output mount or free RAM alone is not build admission.
-
-Permit parallel focused lanes once measured aggregate RAM, cgroups, pressure
-and disk growth support them. Read-only analysis, code editing and source review
-can proceed meanwhile. Do not queue all tests behind an artificial global
-single-lane rule, nor launch redundant cold builds to occupy workers.
-
-## Finish and escalation
-
-Run the order in [V](V-qualification.md), then update map/ledger and publish the
-candidate with exact qualification. Do not claim main is clean/passing without
-actual containment, remote-ref and gate evidence. Main promotion follows the
-existing integration policy; publishing a labelled candidate is useful earlier.
-
-If a strategy decision genuinely exceeds the accepted design, finish all other
-unblocked work and consolidate it. Return a minimized counterexample, exact
-source/artifacts, the violated invariant, alternatives, recommendation and the
-remaining tests. No looping escalation tree. Ordinary implementation and fixture
-repairs within the contract should be completed autonomously.
-
-## Assignment / completion template
-
-Use these fields in each worker's task file and returned report:
-
-```text
-Role and parent:
-Base / checkout / branch / contract version:
-Primary outcome and owned paths:
-Adjacent review questions:
-Known counterexample and evidence:
-Dependencies; first action; escalation condition:
-Acceptance commands and meaningful positive/refusal controls:
-
-Candidate tip and cumulative diff:
-What changed; owner/dataflow; APIs removed:
-Exact commands, selected/executed counts, outcomes and artifact hashes:
-First failure or unqualified boundary:
-Review findings and disposition:
-Resource/process cleanup certainty:
-Incidental findings: confirmed / hypothesis / intentional exception:
-Next owner and action:
-```
+At handoff update STATE, V's map/verification ledger, and handoff.tmp.md.
+Include outstanding dirty work and deferred C evidence; no orphaned branches.

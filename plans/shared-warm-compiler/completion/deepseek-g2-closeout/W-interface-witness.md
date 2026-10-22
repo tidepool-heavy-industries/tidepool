@@ -1,65 +1,60 @@
-# W: preserve interface selection across retained copies
+# W: finish selected-interface reuse on both admission routes
 
-Primary outcome: reusing the same selected package interface through a retained
-copy does not masquerade as replacing the selection. Secondary questions:
-preserve origin versus location, remove duplicate authentication policy, and
-ensure missing/inaccessible/corrupt storage remains distinguishable.
+Primary outcome: authenticated retained copies preserve their selected witness.
+Adjacent questions: catalog precedence, immutable token lifetime and typed
+missing/inaccessible/corrupt failures.
 
-## Confirmed counterexample
+The segment repair at d2b6899f71 is integrated and source-reviewed favorably.
+Do not reimplement it. Close the ordinary sibling and prove both real callers.
 
-Two real notebook cases stop in
-`certified_products.rs::check_segment_package_addition` around 923–944.
-`PackageInterfaceWitness` equality includes `selected_path` and SHA. Incoming
-GHC.Tuple names a Nix interface; inherited evidence names a transaction copy.
-Both files were independently read and have seal
-`422dc5ab45c301194958fcf77f3cd85da1cf06ca83509c92f84036298a292af8`.
+## Remaining ordinary defect
 
-Read `peer-review-package-witnesses.md` and its JSON evidence for exact paths.
-This is independent of package-code occurrence selection. Keep both failures
-visible until each is repaired.
+package_availability_with_validation in artifacts.rs still merges current and
+inherited witnesses with full Eq. Equal owner/seal and different capture paths
+refuse. Both ordinary target promotion and compile_invocation use it.
 
-## Chosen repair boundary
+Deleting the inequality is insufficient: PackageInterfaceCatalog.current has
+precedence over interfaces, so the current copy would still replace inherited
+selection. Classify/authenticate reuse before constructing overriding additions,
+as the repaired segment select_item path does.
 
-Use the existing certified interface/custody owner to classify an authenticated
-incoming observation as reuse of an already-issued selected interface or a new
-selection. Preserve the inherited witness on reuse. Catalogue additions have
-precedence, so merely relaxing the guard would replace the carried witness.
+Use the existing certified interface/custody owner to return the selected
+witness with its retained immutable token, or a genuinely new selection.
+Share that decision between consumers. Do not weaken global Eq, globally
+canonicalize paths, scan every Original again after already selecting a token,
+or add a second registry. Preserve exact producer/source/owner authority.
 
-Existing owners to reuse:
+Incoming observation authentication remains required. Retained-token reuse
+need not reopen an old mutable path; legacy path-only evidence must be read.
+Keep absent, inaccessible and corrupt distinct.
 
-- `CertifiedPackageInterface` for captured unit/module/seal/bytes.
-- `PackageInterfaceCustody::bind_witness` in package_code.rs.
-- `PackageInterfaceValidation::register_package_interface` in recovery.rs.
-- `check_direct_package_agreement_with_custody` in certified_products.rs.
+## Production controls
 
-The result should carry the selected authority and its byte evidence together.
-Do not have callers redo equality, reopen paths and decide whether to overwrite
-the catalogue. Keep constructor access narrow and consume this result at the
-existing admission boundary. Same bytes alone do not authorize a new selection.
+The existing classifier/helper tests do not prove select_item's additions map
+or ordinary catalog precedence. Add small histories through those real owners.
 
-Trace the Haskell source too: `captureSelectedPackageWitnesses` copies bytes and
-rewrites receipt paths. Later item capture can fall back to ambient GHC when
-the current stage lacks an inherited witness. Record those facts accurately;
-do not infer that a new path means a new compiler choice.
+- Capture a package-dependent native Original; inherit it through a relocated
+  authenticated interface copy; admit another ordinary request. Assert original
+  selected provenance and exact byte token, not merely successful compilation.
+- A later segment omits a direct package row; its item demands that owner.
+  Reuse, repeat and inspect actual selected additions/catalog.
+- Remove test-owned disposable original outputs, cold reopen and execute.
+- Fresh owner succeeds. A segment-item delta repeating an owner already in its
+  segment originals, or a genuinely duplicated serialized row, still refuses.
+  Ordinary full-receipt overlap with inherited same-owner/same-seal selection
+  is authenticated reuse; do not copy the delta-duplicate rule into that path.
+  A conflicting seal still refuses.
+- Wrong owner/source/compiler, corrupt/absent/inaccessible incoming observation
+  refuse with precise causes. A retained token works after old-path removal;
+  a legacy path-only record refuses after removal.
 
-A producer carry-forward repair is an alternative only if the selected-owner
-classification cannot retain the actual provenance. It must carry bytes when
-old transaction paths disappear, and coordinate P's writer changes. Do not
-create a global path registry or rehydrate every historical interface eagerly.
+Independently compare bytes before asserting relocation. Do not reconstruct
+expected witness identity from the catalog being tested. A mutation returning
+all incoming item rows as overriding additions must be detected.
 
-## Acceptance and review
+Coordinate certified_products.rs hunks with P2. Compile actual toolchain and
+affected test consumers. R-P reviews ordinary plus segment joined callers.
+The original two notebook cases remain required once P/N unblock their path.
 
-Use original capture → retained copy → later item → repeat → producer removal
-and cold reopen through real admission. Include positive relocation and wrong
-owner/seal/source/compiler selection, absent, inaccessible and corrupt bytes.
-An incoming duplicate row must not silently override inherited evidence.
-
-The old helper test that rejects every different path encodes the wrong premise.
-Replace that setup with a production-issued history; keep genuine different
-selection refusals. Don't just reverse its assertion or globally change Eq.
-
-Run the two unchanged notebook histories once joined with the defining-Name
-prerequisite. Record other blockers separately. Compile production plus affected
-test consumers and request R review before integration. In the report show the
-old and new dataflow, where selection is issued, where the copied location lives,
-and which obsolete validation route was removed.
+Delete duplicated classification/carry logic when the shared owner supplies the
+paired selection/token. A generic public path framework is outside scope.

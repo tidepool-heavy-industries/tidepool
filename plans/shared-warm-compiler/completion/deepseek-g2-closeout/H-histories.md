@@ -1,56 +1,92 @@
-# H: finish the real cold and eviction histories
+# H: retain exact historical edges without selecting from custody
 
-Primary: qualify the required G2 history through actual issuers, retention and
-reacquisition. Adjacent: preserve D's unfinished diagnostic work, repair obsolete
-test premises, and ensure source/output removal is real rather than narrated.
+Primary outcome: replace the owner-census role repair and finish the real
+historical/cold/eviction gate. Adjacent questions: partial group permissions,
+narrowing costs and whether test expectations mistake namespace for authority.
 
-## Preserve before moving
+The integrated 45c2c165a9 role repair is rejected by joined review. Its history
+test work is useful and should be preserved. Read witness-roles-review.md under
+g2-peer-review-c910d1-20261021 and preserve the dirty H/D work listed in STATE.
 
-Inspect `/srv/swarm/checkouts/tidepool-g2-leaf-d-20261021`, HEAD `575fc4e485`, and
-its three dirty files recorded in STATE. Save exact base plus patch or a diagnostic
-commit before integration/rebase. Keep useful measurements, migrate only human
-debug output to the logger, and coordinate Q3's GhcPipeline changes. Do not merge
-temporary diagnostics blindly into production.
+## Correct the owner relationship first
 
-## Correct oracle
+world_stage_fragment now enumerates metadata.artifacts, chooses one Original
+per module owner, and follows that body's requirements. This can follow unused
+B while the selected role is A, or promote an InterfaceOnly/RetainedCore row
+just because a body is held. Delete original_by_owner and that closure prepass.
 
-Earlier cold history reached reader 41 and exact R→G→H before a stale public-role
-assertion. Required later 99, producer removal, reopen and 41099 were not thereby
-proved. Assert the exact native dependency authority and the semantic execution
-result, not a facade's listing role or complete inventory contents.
+Existing authoritative owners:
+- IssuedOriginalOutput carries CertifiedSourceSelection and
+  Arc<OriginalCompilerInputs>.
+- A role with an Original provides the selected carrier; compiler_primary_input,
+  implementation_entry and target_source_entry expose exact selection.
+- target_original(CachedHomeOwner), current_product/produced_source_receipt,
+  target_prior_produced_group and continuation_input cover their actual issuers.
+- ArtifactView native_binding_requirements_from_roots/original_group_children
+  traverse binding-aware exact edges; use the chosen roots.
+- A RetainedCore receipt carries native selection while deliberately emitting
+  no Original compiler namespace row. The existing retained-generation test
+  positively asserts this.
 
-Retained custody can contain alternatives that are not selected for a particular
-execution. Interface-only metadata does not imply missing retained bytes, and
-custody does not grant execution. Use the actual production request/issuer to
-construct both positive histories and meaningful refusal cases.
+First retain the exact selected carrier and dependent payloads through support
+narrowing WITHOUT changing namespace roles. This directly tests whether the
+earlier NativeRootOutsideView was lost custody. Only if a real compiler
+continuation requires an Original role should its source/input issuer project
+that exact carrier/canonical pair. Do not broaden every native availability row.
 
-## Required evidence
+Historical child versions may coexist in custody while only one compiler
+namespace version is selected. Keep namespace requirements, native group
+edges and source roles distinct. A narrow private borrow from the existing
+issuer is appropriate; a module-only lookup or fresh authority reissuance is not.
 
-- Complete the real historical chain and retained callable/result behavior,
-  not a hand-assembled graph or a simple Int substitute for effectful provenance.
-- Prove actual private-World pressure/eviction and B reacquisition. Distinguish
-  Complete+1 versus Complete+2 and a resident-hit control; a cache size or an
-  eviction-shaped command alone does not show the relevant realization left.
-- Remove the test-owned disposable producer outputs at the declared boundary,
-  retain required immutable custody, reopen, and exercise the selected history.
-  Do not delete real Buck artifacts to emulate this test.
-- Captured-A cutoff, private input, caller loss and uncertain END must preserve
-  their actual ownership/refusal semantics. Uncertain execution cannot publish
-  or execute merely because reopen found bytes.
-- Retain source OID, actual program/compiler/profile identity, selected/executed
-  counts, per-stage observations and terminal cleanup. Silence in an unenabled
-  trace is not proof that work did not run.
+Coordinate named hunks in compiler_projection.rs with P2. Do not make P's fresh
+package-link code responsible for inventing HOME source authority.
 
-Reuse the current finite-history and production test owners. If a missing API
-appears necessary only to manufacture test authority, stop and find the real
-constructor. Add a production-path regression or a small independent event model,
-not another test framework. Keep fixed Haskell source in declared fixture files.
+## Small discriminators before the long history
 
-H can prepare fixtures and oracles before P/W/N finish. Execute newly reachable
-parts as soon as their dependencies land; record a later blocker truthfully.
-Have a different reviewer inspect the semantic oracle and output-removal evidence.
-V owns final joined/frozen execution; H's component result is not that result.
+Use production issuer/World paths:
+1. Select A -> G_A -> H_A, retain unused same-interface B with another closure.
+   First assert complete interface equality, distinct A/B implementation
+   identities, and different exact child bindings from the real issuers.
+   Adding/removing/reordering B cannot change A's chosen role, edges or result.
+2. Reverse actual selection to B while retaining A. Assert exact issued bindings,
+   not only owner names or payload presence.
+3. Keep a genuinely interface-only/type-only root while native bytes are held.
+   It stays interface-only. Test a real direct source import separately.
+4. Preserve RetainedCore execution with its original exact edges; no implicit
+   Original namespace promotion.
+5. Partial IssuedGroups permission retains a demanded group but does not acquire
+   an unrelated available group.
 
-Full force/fork/callback/process-recovery matrices remain G3, but the G2-required
-cold, actual eviction/reacquisition, cutoff, caller-loss and uncertain-END controls
-cannot be relabelled G3 to make this wave appear complete.
+Capture expected bindings from the original issuer before broadening custody.
+Do not use the new census to compute the oracle. Prefer a small semantic
+counterexample over a general graph-testing framework.
+
+## Finish the existing historical gate
+
+The real reader currently fails at P's segment-item roots. Keep that evidence;
+do not replace the test with an ordinary compiler-only case. After P/H/N join:
+- Preserve original/current values and exact accepted-join/native edges.
+- Re-establish the equal-interface premise explicitly if claiming it; logging
+  payload equality or artifact presence is not an assertion of that premise.
+- Delete only test-owned disposable producer products, cold reopen and execute.
+- Exercise actual compiler eviction/reacquisition separately from merely
+  closing a client or deleting a local reference.
+- Preserve captured-A cutoff, private input, reload, caller-loss and uncertain
+  END relationships under the existing G2 contract.
+
+Snapshot-only publication helpers with world=None do not qualify the World
+path. Use the real accepted join, freeze, restage and attempt_public_manifest.
+Do not substitute facade listings for selected executable evidence.
+
+Record exact source/commands/counts, first failing boundary, artifact IDs,
+cleanup certainty and pending gates. A real later refusal is diagnosis,
+not completion. Hand V only evidence applicable to the joined candidate.
+
+## Costs and deletion
+
+The owner census performs unbudgeted whole-inventory allocation before the
+existing charged traversal. Removing it should also remove its map/pending/set
+work. The replacement walks demanded exact roots, with existing operation
+checkpoints/accounting before expansion. Preserve partial permissions and
+failure distinctions. No new cache or broad inventory snapshot.

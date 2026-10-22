@@ -4,6 +4,37 @@ Primary outcome: qualify the actual joined candidate and one frozen bundle.
 Secondary: correct the compiler map after changes, verify no obsolete access
 route survives, and make all claims traceable to exact commands/artifacts.
 
+## Joined-review gates before broad qualification
+
+The controlling source review is [REVIEW-c910d1](REVIEW-c910d1.md).
+Existing six-case ordinary passes are smoke evidence; they do not qualify the
+segment-item or exact-history contract. N's boolean table does not qualify
+publication progress. Q1's Haskell logging pass does not qualify its Rust decoder.
+
+Prepare these small joined gates first, using each repair's actual production
+constructors and current declared resources:
+
+| Boundary | Required discriminator |
+|---|---|
+| Stage -> item -> native admission | Package-using World item retains its own roots after scaffold naming |
+| First -> second target | Shared Fresh HOME with prior completion keeps exact package imports |
+| Selected scope -> graph owner | Unused competing projection cannot affect selected roots/children |
+| Support narrowing -> compiler roles | Unused historical Original cannot replace or change selected A's closure |
+| Public B -> finishing private A | Runtime selection and World both preserve B's exact selected source |
+| Native output -> next cell | Retained host value and type survive publication/private retirement |
+| Checked start -> freeze | In-flight/failed work cannot publish as Unchanged |
+| Interface copy -> catalog | Ordinary and segment reuse retain original selected witness |
+| Diagnostic transport | Malformed record with a valid level stays malformed |
+
+These are early feedback gates, not replacements for the existing historical,
+reload, cleanup, cold and frozen-bundle acceptance. Record where a case reaches
+only compilation, admission, execution, publication or recovery. A single
+aggregate target pass is not the number of executed cases.
+
+Do not wait for every leaf before compiling joined consumers. P and N return
+coherent subtrees; H/W/Q can join as reviewed. Separate source-review findings,
+retained failures, newly executed regressions and measured performance.
+
 ## Prepare immediately
 
 Read the current AGENTS, `docs/swarm-builds.md`, `build/package/README.md`, the
@@ -84,9 +115,13 @@ generic profile fallback. No new provider architecture is part of this wave.
 ## Map and delivery review
 
 Update `docs/compiler-work-map.md` and the completion verification ledger from
-the final code and terminal receipts. Map the three changed seams explicitly:
+the final code and terminal receipts. Map the package, custody, witness and publication seams explicitly:
 who issues a choice/progress fact, how it travels, which consumer uses it and
-which exact recovery path restores it. Remove obsolete scans/reconstruction
+which exact recovery path restores it. Include ordinary versus segment-item
+constructor coverage, selected occurrence closure before graph issuance,
+unchanged runtime selection alongside unchanged World, and actual host-write/
+started-work progress. The latest plan alone is not evidence the map matches
+the implementation. Remove obsolete scans/reconstruction
 claims and mark remaining measured/unmeasured work. Do not call this a measured
 speedup based only on smaller code or fewer lookups.
 

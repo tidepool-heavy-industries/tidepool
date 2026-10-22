@@ -1,102 +1,87 @@
-# DeepSeek G2 closeout: B, with C investigated in parallel
+# G2 closeout after the joined c910d1 review
 
-Accepted direction, 2026-10-21. This is the controlling **next-wave work pack**.
-The user selected G2 correctness plus bounded boundary/quality cleanup, with
-producer-demand simplification investigated alongside it. Cheap inference is a
-reason to parallelize independent work and review; it is not evidence that a
-candidate is correct or that cold-build capacity is unlimited.
+This is the controlling next DeepSeek work pack. Accepted direction remains
+**B: correctness and bounded quality repair, with C investigated separately**.
+The reviewed implementation is c910d1aae0e64c76449bef8170b53400133cbd23.
+The documentation commit containing this revision does not qualify that code.
 
-Start with [STATE](STATE.md), [the shared contracts](CONTRACTS.md), and
-[the supervisor runbook](SUPERVISOR.md). The existing
-[G2 acceptance contract](../g2-completion.md) still applies. This pack supersedes
-the older takeover's task assignments, status and no-format-change assumption.
-It does not supersede exact historical dependencies, cancellation, publication,
-authority or cleanup requirements.
+Read [STATE](STATE.md), [the joined review](REVIEW-c910d1.md),
+[CONTRACTS](CONTRACTS.md), and [SUPERVISOR](SUPERVISOR.md). This revision replaces
+the earlier assignments and contradictory occurrence supplement. Git retains
+their history. Do not restart already integrated Q2/Q3/Q4 implementations.
 
-## Outcome
+## Outcome and current judgment
 
-Consolidate and publish a reviewed G2 candidate, then qualify one matched frozen
-bundle and a fresh DeepSeek Persona conversation. Preserve Persona's authored
-files and durable memory. Verify the actual Persona spec, tools and rendered
-initial memory; never substitute a generic root or stale binary.
+Deliver a reviewed, passing G2 candidate through the existing live compiler,
+then qualify one matched frozen bundle and a fresh DeepSeek Persona session.
+Preserve Persona's authored files and memory. Verify selected spec, installed
+tools and rendered initial memory before calling the launch ready.
 
-There are **three independent correctness fronts**:
+**G2 is not accepted.** The historical reader's segment-item failure is a
+producer/consumer pairing loss, not missing package bytes. The joined review
+also found source-selection rollback, reconstructed historical choices,
+an uncompleted interface-witness migration and weak test oracles.
 
-1. Package products lose the relation between a particular consumer and its
-   selected package occurrence before Rust admission.
-2. A retained interface copy is mistaken for a new package selection because
-   its storage path differs from the original observation.
-3. Publication demands a checked-cell prefix after an installed native tool
-   invocation that did not compile a cell.
+Keep the useful work: producer-local occurrence data, finite graph issuance,
+the segment witness repair, cancellation/commit ownership, bounded logging,
+census shortcuts, trace aggregation and deletion of facade-Original substitution.
+Repair their actual joins; do not replace the live compiler architecture.
 
-The defining-Name candidate is an approved prerequisite, not a solution to all
-three. Existing closed-support, HOME census, affine initialization and logging
-work should be retained, not reimplemented.
+## Working tree
 
-## Worker tree
+DeepSeek workers run in the caller's harness. These are assignments to launch,
+not claims that any such worker is running. Reuse context-loaded owners at a
+verified new base. A useful maximum is 12–15 active workers, including reviewers
+and supervisors; compiler/build concurrency depends on measured resources.
 
-Use DeepSeek workers. The caller is expected to launch them in its own harness;
-this plan's existence does not mean any worker has been launched. Aim for
-12–16 productive workers plus the campaign root when the harness permits it.
-Queue lower-priority bodies if capacity is smaller. One task owner may spawn
-bounded helpers, but register them before dispatch so the total remains visible.
-
-| Role | Primary work | Parent / start condition |
+| Role | Outcome | Start and owner |
 |---|---|---|
-| S campaign | Integration, technical judgment, resource admission, release | Root; [runbook](SUPERVISOR.md) |
-| P join | Freeze the package contract; consolidate producer, consumer and controls | S; [package plan](P-package-linkage.md) |
-| P1 producer | Preserve target and fresh-HOME package occurrence choices | P; trace immediately, edit after contract freeze |
-| P2 consumer | Decode exact links and use existing issued graphs | P; trace immediately, edit after contract freeze |
-| P3 oracle/review | Independent producer histories and cross-language review | P; design controls immediately |
-| W interface | Distinguish selected interface from retained copy | S; [witness plan](W-interface-witness.md), immediate |
-| N publication | Carry actual compiler progress through native publication | S; [publication plan](N-publication.md), immediate |
-| Q1 diagnostics | Logging contract, transport, partial-acquire test cleanup | S; [quality plan](Q-quality.md), immediate |
-| Q2 census | Remove full-payload comparison from census maintenance | S; quality plan, immediate |
-| Q3 trace | Remove repeated per-owner diagnostic graph scans | S; quality plan, immediate |
-| Q4 Original | Delete obsolete Rust facade-authority reconstruction | S; after structural candidate lands |
-| H histories | Preserve D and finish real cold/eviction/reacquisition controls | S; [history plan](H-histories.md), immediate |
-| C1 schema | Compare the actual package metadata meanings independently | S; [C investigation](C-producer-demand.md), read-only first |
-| C2 demand | Trace why that metadata was demanded and who consumes it | S; C investigation, read-only first |
-| R boundary | Independent W/N and joined-authority review | S; trace now, review exact candidates as they arrive |
-| R resources | Storage inventory, retention decisions and scoped cleanup | S; runbook, immediate |
-| V qualification | Prepare exact commands, run joined gates, reconcile map | S; [qualification](V-qualification.md), prepare immediately |
+| S | Technical decisions, exact integration, gates | Campaign root; [runbook](SUPERVISOR.md) |
+| P | Paired package projection contract and consolidated implementation | Working supervisor; [P](P-package-linkage.md) |
+| P1 | Producer preserves ordinary, item and fresh-HOME choices | P; implementation after one cross-language contract review |
+| P2 | Bound Rust selection, demanded graph issuance, exact reuse | P; same contract |
+| P3 | Independent discriminating controls through actual consumers | P; design now, implement against agreed constructors |
+| N | Atomic runtime/World publication and execution progress | Working supervisor; [N](N-publication.md) |
+| N1 | Original/private/latest runtime-selection composition | N; BindingTable owner first |
+| N2 | Real started/completed and retained-host-write evidence | N; coordinate shared publication hunks with N1 |
+| H | Exact historical custody/role repair and joined recovery history | S; [H](H-histories.md), immediate |
+| W | Finish authenticated interface reuse on ordinary and segment routes | S; [W](W-interface-witness.md), immediate |
+| Q | Typed logging decoder and fixture-policy cleanup | S; [Q](Q-quality.md), immediate |
+| R-P | Independent P/H/W joined review and oracle challenge | S; trace now, review exact candidates |
+| R-N | Independent N/Q review, cancellation/recovery controls | S; trace now |
+| V | Compile/gate preparation, joined qualification and map | S; [V](V-qualification.md), immediate |
 
-P is a working supervisor: it reads the producer/consumer join, resolves the
-contract and integrates its subtree. S directly owns the small quality leaves;
-do not add a supervisor whose only work is forwarding status. Reuse completed
-Q/C workers as independent reviewers of other candidates. A worker cannot
-independently approve its own implementation or test oracle.
+S or V owns resource accounting; a separate resource helper is justified only
+by actual storage work. Finished reviewers may take bounded implementation in
+another subtree; independent final acceptance must come from somebody else.
+Do not add routing-only supervisors.
 
-## Delivery sequence
+## First useful milestones
 
-1. Verify STATE, preserve D's dirty work, start the independent frontier, merge
-   the reviewed defining-Name candidate into the campaign branch as a distinct
-   prerequisite, and record the package wire/identity contract.
-2. P consolidates the cross-language package change. W and N proceed independently.
-   Integrate Q/H parcels as reviewed; do not hold unrelated finished work behind P.
-3. Compile affected production and test consumers early. Replay the actual
-   discriminating histories; run Discovery and all four notebook cases on the
-   joined source. A later failure is new information, not a passing test.
-4. Close required G2 histories, independently review the joined consumers,
-   reconcile the map, and freeze/qualify one bundle. Publish exact GitHub refs.
-5. Start the fresh Persona run from that bundle. Keep G3 obligations and any C
-   proposal separate and explicit.
+1. P records the concrete paired ordinary/item/HOME wire and owner interfaces.
+   P3/R-P challenge them before P1/P2 diverge. In parallel N1 demonstrates
+   unchanged A after selected-source B, H removes owner-census selection, W
+   repairs ordinary reuse, and Q replaces the handwritten JSON scanner.
+2. P lands producer and consumer together on its consolidation branch. Execute
+   a small package-using World item immediately, plus the repeated-Fresh
+   multi-target history. Do not wait for the entire historical reader.
+3. N joins selection/progress/host-write changes and executes the real retained
+   output and concurrent-publication controls. Integrate reviewed W/H/Q work
+   promptly; keep every accepted parcel reachable from campaign.
+4. Run Discovery, all four notebook cases and required G2 histories on the joined
+   candidate. Inspect first failures rather than changing expectations to match.
+5. Reconcile the compiler map, freeze one bundle, qualify it, then launch Persona.
+   Publish exact candidate/release/main refs at the existing ownership boundary.
 
-C is not a release prerequisite. S may admit one small, independently proved
-C repair before qualification freezes; otherwise retain its proposal, evidence
-and branch for the next tranche. Do not restart qualification repeatedly for
-new speculative improvements.
+C reports remain useful research, not permission to redesign package metadata,
+compile whole packages, or defer G2 correctness. A new unrelated optimization
+must not restart an already frozen qualification run.
 
-## What good work looks like
+## Design taste
 
-Pass the owner's decision forward instead of rediscovering it. Make coupled
-facts one value; keep custody, selection and execution distinct. Delete replaced
-routes. Prefer an existing typed owner and one production path over another
-registry, framework, flag combination or test-only issuer. Optimize work that
-has no consumer before optimizing its lookup. Retain complete original failures
-and cleanup uncertainty; render concise diagnostics at the reporting boundary.
-
-Each pass has one primary goal and two or three adjacent questions. Record
-incidental findings with source and evidence, but do not silently widen its
-implementation. No new research is required to rediscover facts already proved
-in [the reviewed evidence index](STATE.md).
+Carry a decision from the owner that made it. Keep selection, retained bytes,
+interface compatibility and execution permission separate. Couple a program
+with its selected imports so forgetting one is not representable. Walk demanded
+exact edges, not all available bodies. Delete reconstruction helpers when their
+facts are carried correctly. Tests must discriminate the promised relationship,
+not merely observe a nonempty result.

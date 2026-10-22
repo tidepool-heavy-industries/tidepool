@@ -1,130 +1,86 @@
-# Q leaves: bounded quality work that removes obligations
+# Q: bounded quality repairs; keep accepted simplifications
 
-These are four independent assignments, coordinated directly by S. Each has one
-primary outcome and nearby review questions. Use separate checkouts, agree shared
-hunks and return small candidates. Do not turn an aesthetic pass into a framework
-migration. Each parcel must improve one axis without quietly weakening another.
+Primary outcome: use the existing typed JSON ecosystem for logging and give
+the historical fixture an honest ownership contract.
+Adjacent questions: cancellation/error fidelity, diagnostic-only overhead,
+and tests that mirror incidental implementation.
 
-## Q1 — Logging contract and scoped acquisition
+Q2 census, Q3 aggregation and Q4 fallback deletion are already integrated and
+source-reviewed. Do not restart those parcels. Their evidence limits remain in
+REVIEW-c910d1 and tests-quality-review.md.
 
-Primary: make the existing structured logger's guarantees match its public
-surface and actual Rust transport. Adjacent: remove unused exported helpers,
-protect partial acquisition, preserve asynchronous cancellation.
+## Q1 follow-up: delete the handwritten scanner
 
-Read `peer-review-quality.md`, `Logging.hs`, `LoggingTest.hs`,
-`ExtractUtil.hs::trySynchronous`, and the consuming daemon's stderr routing.
-Existing production logs are trace events with small static field lists. There
-is no demonstrated production memory/cancellation incident; don't inflate one.
+In extract-cmd daemon.rs, structured_log_level/json_string_at returns after
+recognizing level without validating the rest of JSON. An unterminated object
+containing a valid error level is classified Error rather than malformed.
+Escaped valid keys/values also behave inconsistently.
 
-Current text fields are capped, but field count, total event size and arbitrary
-Integer rendering are not. Prefer a small finite diagnostic value vocabulary and
-a field-count bound with a stated operational purpose. Derive/document its total
-worst-case encoding bound, including JSON escaping, before claiming bounded
-events. Use current maximum thirteen fields and finite Int-derived counts as
-the workload basis. Avoid a complex exact-byte budget manager if simple finite
-inputs suffice. If a cap would discard useful fields, make omission explicit.
-Disabled trace must avoid constructing/rendering expensive observations.
+Replace it with complete serde decoding of a small typed record/closed level.
+Validate the schema/required shape the producer actually emits. Preserve the
+original line. Any decode/shape failure takes the existing debug/malformed
+diagnostic arm; it must never alter compiler outcome.
+Use the existing dependency family, declare the production dependency if
+needed, and regenerate owning Buck inputs. Delete the scanner and its callers,
+rather than patching individual syntax cases.
 
-Default transport direction: preserve declared severity in the existing Rust
-tracing owner with a small typed record decoder and exhaustive level mapping.
-Retain the compiler target/event/fields and useful malformed-line evidence;
-malformed diagnostics must not change compile success or become source errors.
-Keep the existing structured-trace versus pane filtering policy explicit. Do not
-claim every RUST_LOG directive controls a sink that actually uses its own filter.
-No async appender, mutable global logger registry or diagnostic policy engine.
+Test through log_compile_timing and the real subscriber: normal levels,
+malformed-after-valid-level, truncated object, valid JSON escaping,
+unsupported schema, duplicate level and unknown level according to the
+explicit contract. Define duplicate handling rather than silently choosing
+first/last. Keep timing/END/reuse protocol parsing unchanged.
 
-Use the real emission boundary in tests. `logEventTo`, `renderLogEvent` and
-`newLogger` currently have test-only external consumers; remove unneeded public
-surface where the actual logger can be exercised, without creating a second
-logger/test-support API. Keeping a justified compiler-internal constructor is
-better than a new elaborate hiding mechanism; state its real consumer.
+Preserve Haskell's 32-field/event byte bound, disabled-trace early exit,
+SomeAsyncException propagation, synchronous sink-failure behavior and corrected
+partial-acquisition bracket. Do not turn cancellation into ordinary logging
+failure. The default pane threshold is warn; document/test whether Error/Warn
+events should surface there without inventing a new sink.
 
-The test helper's `openTempFile` then `hClose` occurs before its outer bracket
-owns release. Protect the partially acquired pair with an existing helper or
-nested bracket/onException, retaining primary error and cleanup evidence.
-Existing production hook/view-directory scopes already bracket their resources;
-do not rewrite them without a concrete defect. Keep `SomeAsyncException` escape.
+## Frozen fixture ownership
 
-Acceptance: actual sink emission and suppression, declared bounds/omission,
-ordinary emission failure not replacing the compiler result, an async exception
-escaping the emission path, typed severity and malformed-record routing, and
-partial-acquire cleanup. Preserve direct/resident launch and environment override
-checks. Compile Rust and Haskell consumers; use existing test targets.
+The committed historical CBOR/HI corpus is genuine authenticated transport,
+not a current compiler issuer. Its test directly restores/individually issues
+graphs and does not qualify the new occurrence reader. Coordinate P3's rename
+and replacement current-compiler controls.
 
-## Q2 — Census updates use census facts
+When P2 deletes resolve_held_package_binding, remove the frozen test's calls to
+that obsolete selector too. Retarget it to actual versioned byte/product restore,
+decoded identity and hash/provenance refusals. Do not retain an implementation
+solely for its ambiguity test. Call it graph recovery only if it actually
+materializes and reopens the issued graph.
 
-Primary: remove full `ArtifactPayload` equality from `ViewLease::insert_payload`
-when deciding whether owner/classification counts change. Adjacent: replacement
-and retirement consistency; no coupling of census shortcuts to admission.
+Keep this exact counterexample until a replacement is accepted. Approved
+bounded direction: retain it ONLY as a frozen reader/recovery regression, with
+a narrow documented exception to generated-artifact policy at the owning
+fixture boundary. Do not broaden that exception to current prepared corpora.
 
-The census depends on old/new owner and kind, not equality of the full retained
-program. Keep authentication/admission separate. Derive the minimal old/new
-census key from actual payload variants, update only changed contributions, and
-delete the expensive comparison if no other consumer needs it. Reuse the kind
-representation introduced by the existing HOME/package fix.
+Add committed provenance and a typed, validated manifest: capture source/
+command where established, otherwise the exact durable capture receipt and
+explicit unknowns; content hashes; accepted wire/ABI/compiler profile; test
+purpose; migration/removal rule. Validate schema/kind/identity fields currently
+ignored by the loader. Missing provenance is not permission to invent it.
+Old bytes are never restamped with the current compiler to make tests pass.
 
-Use the existing independent recomputation property over insert, identical
-replacement, different payload/same classification, changed owner/kind, removal
-and retirement. Include overlapping HOME/package ownership. Keep generic owner
-queries and HOME-specific semantics distinct. Do not introduce another index,
-cache, public testing factory or owner-name heuristic.
+Current compiler/selection qualification must enter declared fixture producers
+and the production receipt reader. A frozen reader regression cannot substitute
+for a current multi-target or World-item history. If compatibility is intentionally
+broken, preserve evidence and explicitly retire/migrate that reader test;
+do not silently regenerate its expected digests.
 
-Report structural work removed separately from timing. A benchmark is optional
-unless making a latency claim; meaningful census histories are mandatory.
+## Small optional follow-ups, after required repairs
 
-## Q3 — Trace work should not rescan the graph per owner
+Q3 retains full lists where only the first two path/observation labels are
+displayed. A bounded prefix plus actual total/set facts can reduce retention
+without changing meaning. Only do this if exact order/duplicate semantics are
+maintained and a small independent enumeration control proves them.
+No measured latency benefit is claimed.
 
-Primary: eliminate repeated full observation/dependency scans while building
-finalized-owner trace events in `GhcPipeline.hs`. Adjacent: disabled-trace
-laziness, stable diagnostic meaning and D's timing protocol.
+Q2's repeated census test oracle can share one independent recomputation helper;
+do not expose new test authority APIs. Q4's remaining exact-payload helper
+comment should describe its narrower custody check, not the deleted facade
+authority reconstruction.
 
-The reviewed loop around 6707–6744 scans graphs/modules/sources/prepared modules
-for each owner. Prefer one request-local aggregation of immutable facts under
-the enabled-trace branch, or emit already-known facts at their existing owner.
-Do not retain a mutable cross-request cache. Preserve the actual meaning of each
-count, including duplicates/order where the prior count intentionally includes
-them; don't optimize by changing the metric unnoticed.
-
-Coordinate D's dirty trace hunks before editing. Human debug lines can move into
-the logger. Consumed timing/reuse/memo/retention/phase records retain their current
-protocol owner unless their consumer migrates in the same candidate.
-
-Acceptance: compare trace values to an independent enumeration over a bounded
-real history, verify disabled tracing does not demand the aggregation, and keep
-actual production diagnostics usable. Record count/work reduction, not an
-unmeasured speedup. No new general profiling framework.
-
-## Q4 — Delete Original authority reconstruction
-
-Primary: after `402528b832` lands, remove the Rust attempt to reinterpret a
-facade Original as another defining owner. Adjacent: re-export behavior, precise
-typed mismatch errors, dead helper/caller deletion.
-
-`authenticate_original_binding_membership` in certified_products.rs searches
-selected modules and retained inventory when the claimed owner differs from the
-binder's defining module. This compensates for the producer defect being removed.
-The consumer should authenticate the exact presented Original or refuse; it
-must not find a different authority for the caller.
-
-Keep actual direct Original, HOME re-export and package re-export behavior through
-the corrected producer. A malformed owner/binder pair refuses. A facade remains
-valid listing provenance, but cannot lend its implementation identity to a
-definition it exports. Remove the search, dead diagnostics and APIs with no
-remaining production consumer. Do not add another global resolver.
-
-Coordinate distinct certified_products.rs hunks with P/W and have P or R review
-the joined chain. Tests must enter through the real defining-Name production
-path; don't merely construct a now-valid enum in the test.
-
-## Cross-parcel quality review
-
-Use finished workers to review other parcels for stale callers, duplicate owner
-logic, error strings driving branches, full-snapshot copying, obsolete tests and
-unnecessary exports. Each report separates confirmed defects, useful deletion,
-deliberate behavior and untested hypotheses. A broad grep with no hits is not a
-proof that a replacement is the sole production path.
-
-Stop at these bounded repairs. Larger capability rewrites, an async logger,
-changes to the initialization scheduler and new test frameworks are outside B.
-Preserve the existing single closed-support owner and affine initialization
-guard; don't undo successful simplification while cleaning nearby code.
+These are optional edits, not reasons to postpone a frozen release. Report
+any incidental category findings separately with source and counterexample.
+Compile affected production/test targets, run precise routing/logging controls,
+format and inspect deleted surface. R-N independently reviews the candidate.
