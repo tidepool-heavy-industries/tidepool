@@ -17,8 +17,10 @@ Do not add counts from different checkpoints into one passing suite.
 3. Run affected issuance/representation/retirement controls, package linkage11,
    real crossed-target installer refusal followed by honest execution, and the
    newly added package lifetime/prior Source histories.
-4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner5,
-   typed segment semantics18 after validating/migrating their positive premises.
+4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner6,
+   typed segment World semantics18 plus separately registered finite component3.
+   PACKAGE owner/lifetime component4, closed runtime vacancy1 and abort composition
+   complement the required authored notebook history; they do not replace it.
 5. Ordinary query/discovery/status; successful/frozen/cancelled/caller-loss default
    reload and explicit force refusal; uncertain END; package/source and historical
    Original recovery; declaration/lifetime/durable publication; captured caller

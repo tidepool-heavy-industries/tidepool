@@ -1,6 +1,7 @@
 # Current G2 campaign state
 
-**Implementation active; G2 unqualified.** Accepted implementation base:
+**Implementation active; G2 unqualified.** Current reviewed joined code checkpoint:
+`a4184a6064` (compile pending). Accepted implementation base:
 `ac2440926ea64a4e2a99ee20f4ec3b98d48407f5`, branch `root/g2-final-20261021`,
 checkout `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
 Root owns integration/push to `github`; `origin` is local replication.
@@ -24,11 +25,19 @@ frozen Persona qualification or deployment is established by this tranche.
 
 ## Implementing
 
-A/B: codegen instance lifecycle and runtime installation.
-P/C: Rust source evidence and Haskell prior dependency projection.
-T: production fixtures and source-conflict/disposal histories.
+A/B: production repair, component lifetime properties and closed runtime controls integrated; await compilation/execution.
+P/C: physical Source proof, prior HOME projection and explicit-contract consumer repair integrated; actual later-demand/mixed-use controls in progress.
+T: World semantic18 migration, separate finite3, cancellation, source-conflict and disposal histories integrated; Haskell package fixture ownership repair in progress.
 V: measured resources, exact joined compilation/execution and qualification.
 Root: shared contracts, critical reviews, consolidation, source pins and delivery.
+
+## Current validation
+
+`1176857` host/runtime units compiled; cancellation reached its semantic assertions but failed an incorrect zero-scope retirement expectation, repaired in the current tree.
+`7857` worker and four affected Haskell test binaries compiled; Rust Arc-map iteration failed and is repaired.
+`34cf` aggregate failed only on the disposal test importing a private module; current code uses the existing public timing reexports. No joined behavioral pass is claimed.
+
+Root review: `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/reviews/root-wave2-review.md`.
 
 ## Existing evidence
 
@@ -40,7 +49,7 @@ private-host retirement, original product/package projection and recovered corpu
 They span multiple checkpoints and are not one final-revision passing suite.
 
 Current declared cohorts: notebook5, publication14, package linkage11, custody3,
-runtime owner5. Host test consumers and broader ordinary histories remain pending.
+runtime owner6, semantic World18 and separate finite3. PACKAGE component4 and runtime vacancy1 plus pure abort-composition control are registered. Host test consumers and broader ordinary histories remain pending.
 Original/package projection leaves passed at bb357a1b18/ac2440926e respectively.
 The withdrawn type-alias emptiness fixture is not acceptance evidence.
 
@@ -48,7 +57,7 @@ The withdrawn type-alias emptiness fixture is not acceptance evidence.
 
 Last planning sample: 109.31 GiB scratch available, 100 GiB floor. Recheck before
 admission and include prospective growth. Existing warm outputs are preserved;
-owned Buck daemon was stopped. Ordinary compilation may restart it in build.slice.
+the current owned Buck daemon is active in build.slice; do not restart it during validation.
 The installed swarm-build lacks staged reservation switches; inspect before use.
 
 One interrupted diagnostic retained 76 last-observed compiler GC roots without a
