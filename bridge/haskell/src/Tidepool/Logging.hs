@@ -182,12 +182,12 @@ boundedFields fields =
       (kept, duplicate) = dedupe window
   in (reverse kept, duplicate || not (null later))
   where
-    dedupe = go Set.empty []
+    dedupe = go Set.empty [] False
       where
-        go _ kept [] = (kept, False)
-        go seen kept ((name, value):rest)
-          | name' `Set.member` seen = go seen kept rest
-          | otherwise = go (Set.insert name' seen) ((name', value):kept) rest
+        go _ kept truncated [] = (kept, truncated)
+        go seen kept truncated ((name, value):rest)
+          | name' `Set.member` seen = go seen kept True rest
+          | otherwise = go (Set.insert name' seen) ((name', value):kept) truncated rest
           where
             name' = boundedText 128 name
 

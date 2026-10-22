@@ -31,6 +31,7 @@ runLoggingTests = do
   checkEscaping
   checkBoundedValue
   checkFieldCap
+  checkDuplicateTruncation
   checkWorstCaseBound
   checkHandles
   checkEnvironment
@@ -115,6 +116,23 @@ checkFieldCap = withScratch $ \path -> do
     (fail "field cap did not encode fixed-width truncation")
   unless ("field32" `isInfixOf` capped)
     (fail "field cap dropped a field inside the retained window")
+
+-- A duplicate name inside the retained window is itself a truncation: the
+-- first value wins, the later duplicate is dropped, and the fixed-width
+-- marker records the omission without a second unbounded scan.
+checkDuplicateTruncation :: IO ()
+checkDuplicateTruncation = withScratch $ \path -> do
+  let logger = newLogger "target" LogTrace
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace "duplicate-name"
+      [ ("stage", LogText "first")
+      , ("stage", LogText "second")
+      ]
+  rendered <- readFile' path
+  unless ("\"fields_truncated\":true" `isInfixOf` rendered)
+    (fail "duplicate field name inside the window did not set the truncation marker")
+  unless ("first" `isInfixOf` rendered && not ("second" `isInfixOf` rendered))
+    (fail "duplicate field name did not keep the first value and drop the later one")
 
 -- Exercise the declared ceiling through the actual UTF-8 sink. Every bounded
 -- input is longer than its rendered prefix and uses control characters, the
