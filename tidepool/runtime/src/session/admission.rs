@@ -419,7 +419,26 @@ impl CertifiedPrivateValueProof {
     }
 }
 
-/// One fresh thin-interface slot shared by original inputs and host builders.
+enum BindingInterfaceTarget {
+    Fresh,
+    Activation {
+        execution: Arc<PrivateExecutionAdmission>,
+        predecessor: ActivationBindingPredecessor,
+    },
+}
+
+enum ActivationBindingPredecessor {
+    Fresh,
+    ReplaceInherited {
+        id: tidepool_repr::SessionVarId,
+        scope: ScopeId,
+        module: tidepool_repr::SessionModule,
+        identity: SymbolIdentity,
+        root_id: u64,
+    },
+}
+
+/// One thin-interface slot with its issued native binding target.
 /// Issuance cannot consume this reservation or publish a binding.
 pub struct RuntimeBindingInterfaceReservation {
     owner: Arc<RuntimeAdmissionOwner>,
@@ -433,6 +452,7 @@ pub struct RuntimeBindingInterfaceReservation {
     pub(super) prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     digest: [u8; 32],
     consumed: std::sync::atomic::AtomicBool,
+    target: BindingInterfaceTarget,
 }
 
 impl RuntimeBindingInterfaceReservation {
@@ -503,11 +523,90 @@ impl PersistentSession {
         prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
         authority_digest: [u8; 32],
     ) -> Result<Arc<RuntimeBindingInterfaceReservation>, SessionError> {
+        if self
+            .source_lease_in(scope)?
+            .private_lifecycle
+            .get()
+            .is_some()
+        {
+            return Err(SessionError::WorldCellRequiresServicePreparation);
+        }
+        self.admit_binding_interface_target(
+            scope,
+            binding,
+            prototype,
+            authority_digest,
+            BindingInterfaceTarget::Fresh,
+        )
+    }
+
+    pub(super) fn admit_activation_binding_interface(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        snapshot: &PrivatePreparationSnapshot,
+        prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+        authority_digest: [u8; 32],
+    ) -> Result<Arc<RuntimeBindingInterfaceReservation>, SessionError> {
+        execution.ensure_snapshot_current(snapshot)?;
+        if !Arc::ptr_eq(&snapshot.execution, &execution)
+            || !Arc::ptr_eq(
+                &self.current_private_world_association(&execution)?,
+                snapshot.association(),
+            )
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let binding = super::resident::RuntimeActivationInput::binding_name().to_owned();
+        let predecessor = match self.resolve_in(execution.private_scope(), &binding) {
+            None => ActivationBindingPredecessor::Fresh,
+            Some(entry)
+                if entry.scope != execution.private_scope()
+                    && execution
+                        .admitted_public()?
+                        .bindings
+                        .iter()
+                        .any(|(name, id)| name == &binding && *id == entry.id) =>
+            {
+                ActivationBindingPredecessor::ReplaceInherited {
+                    id: entry.id,
+                    scope: entry.scope,
+                    module: entry.module,
+                    identity: entry.value.identity.clone(),
+                    root_id: entry.value.handle.raw().0,
+                }
+            }
+            Some(_) => {
+                return Err(SessionError::HostBindingNameCollision {
+                    scope: execution.private_scope(),
+                    binding,
+                })
+            }
+        };
+        self.admit_binding_interface_target(
+            execution.private_scope(),
+            binding,
+            prototype,
+            authority_digest,
+            BindingInterfaceTarget::Activation {
+                execution,
+                predecessor,
+            },
+        )
+    }
+
+    fn admit_binding_interface_target(
+        &mut self,
+        scope: ScopeId,
+        binding: String,
+        prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+        authority_digest: [u8; 32],
+        target: BindingInterfaceTarget,
+    ) -> Result<Arc<RuntimeBindingInterfaceReservation>, SessionError> {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         self.admit_source_work_in(scope)?;
-        self.validate_fresh_host_binding_in(scope, &binding)?;
+        self.validate_binding_target(scope, &binding, &target)?;
         let (generation, _) = self.reserve_value_generations(1)?;
         let visibility = self
             .public_visibility_snapshot_in(scope)
@@ -544,6 +643,7 @@ impl PersistentSession {
             prototype,
             digest: *digest.finalize().as_bytes(),
             consumed: std::sync::atomic::AtomicBool::new(false),
+            target,
         }))
     }
 
@@ -587,17 +687,81 @@ impl PersistentSession {
         {
             return Err(SessionError::WorldCellRequiresServicePreparation);
         }
-        let reservation = self.admit_binding_interface(
+        let reservation = self.admit_binding_interface_target(
             scope,
             binding,
             prototype.compiler().clone(),
             prototype.authority_digest(),
+            BindingInterfaceTarget::Fresh,
         )?;
         Ok(Arc::new(RuntimeHostBindingAdmission {
             reservation,
             prototype,
             private_preparation,
         }))
+    }
+
+    fn validate_binding_target(
+        &self,
+        scope: ScopeId,
+        binding: &str,
+        target: &BindingInterfaceTarget,
+    ) -> Result<(), SessionError> {
+        let BindingInterfaceTarget::Activation {
+            execution,
+            predecessor,
+        } = target
+        else {
+            return self.validate_fresh_host_binding_in(scope, binding);
+        };
+        execution.ensure_open()?;
+        if binding != super::resident::RuntimeActivationInput::binding_name()
+            || scope != execution.private_scope()
+            || !Arc::ptr_eq(&execution.owner, self.admission_owner())
+            || execution.owner_epoch != self.admission_owner().epoch()
+            || self
+                .lib()
+                .current_declarations_in(scope)
+                .iter()
+                .any(|(item, _)| item.value_names().any(|name| name == binding))
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        self.current_private_world_association(execution)?;
+        let current = self.resolve_in(scope, binding);
+        let valid = match (predecessor, current) {
+            (ActivationBindingPredecessor::Fresh, None) => true,
+            (
+                ActivationBindingPredecessor::ReplaceInherited {
+                    id,
+                    scope: expected_scope,
+                    module,
+                    identity,
+                    root_id,
+                },
+                Some(entry),
+            ) => {
+                entry.id == *id
+                    && entry.scope == *expected_scope
+                    && entry.scope != scope
+                    && entry.module == *module
+                    && entry.value.identity == *identity
+                    && entry.value.handle.raw().0 == *root_id
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(SessionError::StaleStagedDeclaration)
+        }
+    }
+
+    pub(super) fn validate_binding_interface_target(
+        &self,
+        admission: &RuntimeBindingInterfaceReservation,
+    ) -> Result<(), SessionError> {
+        self.validate_binding_target(admission.scope, &admission.binding, &admission.target)
     }
 
     pub(super) fn validate_binding_interface(
@@ -621,7 +785,7 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        Ok(())
+        self.validate_binding_interface_target(admission)
     }
 
     pub(super) fn consume_binding_interface(

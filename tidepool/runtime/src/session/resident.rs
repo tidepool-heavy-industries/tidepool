@@ -1015,6 +1015,18 @@ enum HostBindingReservation<'a> {
 }
 
 impl HostBindingReservation<'_> {
+    fn validate_target(
+        &self,
+        state: &PersistentSession,
+        scope: ScopeId,
+        binding: &str,
+    ) -> Result<(), SessionError> {
+        match self {
+            Self::Interface(reservation) => state.validate_binding_interface_target(reservation),
+            Self::Carrier(_) => state.validate_fresh_host_binding_in(scope, binding),
+        }
+    }
+
     fn matches(self, scope: ScopeId, generation: Generation, binder: &BoundBinder) -> bool {
         match self {
             Self::Interface(reservation) => {
@@ -1710,6 +1722,10 @@ pub struct RuntimeActivationInputAdmission {
     input: RuntimeActivationInput,
     reservation: Arc<super::RuntimeBindingInterfaceReservation>,
     run_context: SessionRunContext,
+    private: Option<(
+        Arc<super::PrivateExecutionAdmission>,
+        Arc<super::PrivatePreparationSnapshot>,
+    )>,
 }
 
 impl RuntimeActivationInputAdmission {
@@ -4482,6 +4498,31 @@ where
         scope: ScopeId,
         input: RuntimeActivationInput,
     ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
+        self.admit_activation_input_impl(scope, input, None)
+    }
+
+    pub fn admit_activation_input_for_execution(
+        &mut self,
+        execution: &Arc<super::PrivateExecutionAdmission>,
+        snapshot: &Arc<super::PrivatePreparationSnapshot>,
+        input: RuntimeActivationInput,
+    ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
+        self.admit_activation_input_impl(
+            execution.private_scope(),
+            input,
+            Some((execution, snapshot)),
+        )
+    }
+
+    fn admit_activation_input_impl(
+        &mut self,
+        scope: ScopeId,
+        input: RuntimeActivationInput,
+        private: Option<(
+            &Arc<super::PrivateExecutionAdmission>,
+            &Arc<super::PrivatePreparationSnapshot>,
+        )>,
+    ) -> Result<RuntimeActivationInputAdmission, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&input.custody.cleanup.0, &self.custody_cleanup) {
             return Err(ResidentError::ForeignCustody);
@@ -4508,16 +4549,25 @@ where
         digest.update(&self.run_context.resource_scope.0.to_le_bytes());
         digest.update(&self.run_context.principal.identity.to_le_bytes());
         digest.update(&self.run_context.principal.incarnation.to_le_bytes());
-        let reservation = self.state.admit_binding_interface(
-            scope,
-            RuntimeActivationInput::binding_name().into(),
-            input.prototype.clone(),
-            *digest.finalize().as_bytes(),
-        )?;
+        let reservation = match private {
+            Some((execution, snapshot)) => self.state.admit_activation_binding_interface(
+                execution.clone(),
+                snapshot,
+                input.prototype.clone(),
+                *digest.finalize().as_bytes(),
+            ),
+            None => self.state.admit_binding_interface(
+                scope,
+                RuntimeActivationInput::binding_name().into(),
+                input.prototype.clone(),
+                *digest.finalize().as_bytes(),
+            ),
+        }?;
         Ok(RuntimeActivationInputAdmission {
             input,
             reservation,
             run_context: self.run_context,
+            private: private.map(|(execution, snapshot)| (execution.clone(), snapshot.clone())),
         })
     }
 
@@ -6351,7 +6401,15 @@ where
         interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MountedActivationInput, ResidentError> {
-        self.mount_activation_input_impl(owner, interface, settlement, None)
+        let private = owner.private.clone();
+        self.mount_activation_input_impl(
+            owner,
+            interface,
+            settlement,
+            private
+                .as_ref()
+                .map(|(execution, snapshot)| (execution, snapshot)),
+        )
     }
 
     /// Mount a request input into the exact current private preparation.
@@ -6363,7 +6421,17 @@ where
         execution: &Arc<super::PrivateExecutionAdmission>,
         snapshot: &Arc<super::PrivatePreparationSnapshot>,
     ) -> Result<MountedActivationInput, ResidentError> {
-        self.mount_activation_input_impl(owner, interface, settlement, Some((execution, snapshot)))
+        if owner
+            .private
+            .as_ref()
+            .is_none_or(|(original_execution, original_snapshot)| {
+                !Arc::ptr_eq(original_execution, execution)
+                    || !Arc::ptr_eq(original_snapshot, snapshot)
+            })
+        {
+            return Err(SessionError::StaleStagedDeclaration.into());
+        }
+        self.mount_activation_input(owner, interface, settlement)
     }
 
     fn mount_activation_input_impl(
@@ -6434,8 +6502,7 @@ where
             })
             .transpose()?;
         self.state.validate_new_binding_ids([binding])?;
-        self.state
-            .validate_fresh_host_binding_in(scope, &binder.name)?;
+        self.state.validate_binding_interface_target(reservation)?;
         let raw = owner.input.custody.handle.ok_or_else(invalid)?;
         let handle = self
             .state
@@ -9100,8 +9167,8 @@ where
         if let PreparedBindingInstall::Host(host) = &install {
             let valid = bound.len() == 1 && host.reservation.matches(scope, generation, bound[0].0);
             let fresh = if valid {
-                self.state
-                    .validate_fresh_host_binding_in(scope, &bound[0].0.name)
+                host.reservation
+                    .validate_target(&self.state, scope, &bound[0].0.name)
             } else {
                 Err(SessionError::StaleStagedDeclaration)
             };
@@ -9198,6 +9265,7 @@ where
         }
         if let PreparedBindingInstall::Host(HostBindingInstall {
             private_input: Some(private_input),
+            reservation,
             ..
         }) = &install
         {
@@ -9207,7 +9275,9 @@ where
                 || execution.owner_epoch != self.state.admission_owner().epoch()
                 || entries.len() != 1
                 || self.state.bindings().get(entries[0].id).is_some()
-                || self.state.resolve_in(scope, &entries[0].name.0).is_some()
+                || reservation
+                    .validate_target(&self.state, scope, &entries[0].name.0)
+                    .is_err()
             {
                 if let Some(engine) = self.state.prepared_mut() {
                     engine.release_all(entries.into_iter().map(|entry| entry.value.handle));

@@ -10491,7 +10491,11 @@ where
                         .map_err(ResidentError::Session)?;
                     reject_activation_declaration(session, context.placement.lexical_scope)?;
                     let owner = session
-                        .admit_activation_input_in(context.placement.lexical_scope, input)
+                        .admit_activation_input_for_execution(
+                            &_private_owner.admission,
+                            &snapshot,
+                            input,
+                        )
                         .map_err(ResidentActorWorkbenchError::Resident)?;
                     let reservation = owner.reservation();
                     let interface = tidepool_toolchain::artifacts::issue_host_binding_interface(
