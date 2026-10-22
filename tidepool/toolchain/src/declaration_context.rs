@@ -32,7 +32,9 @@ mod source_admission;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;
-pub(crate) use source_admission::{CompilerDependencies, RootSourceImportRoles, SourceAdmissionBundle};
+pub(crate) use source_admission::{
+    CompilerDependencies, RootSourceImportRoles, SourceAdmissionBundle,
+};
 pub use source_admission::{
     SourceAdmissionBoundary, SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
 };
@@ -11029,11 +11031,12 @@ impl ProductInputFacts<'_> {
             &source_path,
             &edges,
             import_roles,
-            |owner| context.source_lexical_node(owner).is_some()
-                || self.program_support
+            |owner| {
+                self.program_support
                     .and_then(|support| support.imports.get(owner))
                     .and_then(|row| row.admission.as_ref())
-                    .is_some_and(|admission| admission.admits_lexical(owner)),
+                    .is_some_and(|admission| admission.admits_lexical(owner))
+            },
             &validation.inventory,
         )?;
         let compilation_root = roles.root.clone();
@@ -11142,7 +11145,6 @@ impl ProductInputFacts<'_> {
                 include,
                 fresh: &evidence,
                 roots: &source_selection_roots,
-                compilation_root: &compilation_root,
                 import_roles: &roles,
                 independent: &independent,
                 source_less: &source_less,
@@ -12861,7 +12863,8 @@ fn decode_source_import_roles(
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Vec<source_admission::RawSourceImportRole>, CompileError> {
     let rows = list(value, 65536)?;
-    operation.reserve::<source_admission::RawSourceImportRole>(rows.len())
+    operation
+        .reserve::<source_admission::RawSourceImportRole>(rows.len())
         .map_err(|error| compiler_evidence_failure(error.into()))?;
     let mut decoded = Vec::with_capacity(rows.len());
     for value in rows {
@@ -12878,15 +12881,37 @@ fn decode_source_import_roles(
         if !(1..=7).contains(&mask) || module.is_empty() || unit.is_empty() {
             return Err(failure("source import role row has an invalid field"));
         }
-        operation.charge(qualifier.len().saturating_add(module.len()).saturating_add(unit.len()))
+        operation
+            .charge(
+                qualifier
+                    .len()
+                    .saturating_add(module.len())
+                    .saturating_add(unit.len()),
+            )
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         let decoded_row = source_admission::RawSourceImportRole {
-            qualifier: qualifier.to_owned(), module: module.to_owned(), boot, unit: unit.to_owned(), mask,
+            qualifier: qualifier.to_owned(),
+            module: module.to_owned(),
+            boot,
+            unit: unit.to_owned(),
+            mask,
         };
-        if decoded.last().is_some_and(|previous: &source_admission::RawSourceImportRole| {
-            (&previous.qualifier, &previous.module, previous.boot, &previous.unit)
-                >= (&decoded_row.qualifier, &decoded_row.module, decoded_row.boot, &decoded_row.unit)
-        }) {
+        if decoded
+            .last()
+            .is_some_and(|previous: &source_admission::RawSourceImportRole| {
+                (
+                    &previous.qualifier,
+                    &previous.module,
+                    previous.boot,
+                    &previous.unit,
+                ) >= (
+                    &decoded_row.qualifier,
+                    &decoded_row.module,
+                    decoded_row.boot,
+                    &decoded_row.unit,
+                )
+            })
+        {
             return Err(failure("source import role rows are not sorted unique"));
         }
         decoded.push(decoded_row);
@@ -19233,6 +19258,7 @@ mod tests {
         value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        value.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &value);
         let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
         assert_eq!(
@@ -19510,7 +19536,7 @@ mod tests {
             .collect();
         let value = Value::Array(vec![
             text("TPEXACTCOMPILE"),
-            text("3"),
+            text("4"),
             text(&request.request_sha256),
             text(hex(&request.semantic_sha256)),
             path_value(&target).unwrap(),
@@ -19519,6 +19545,13 @@ mod tests {
             text(serde_json::to_string(&evidence).unwrap()),
             Value::Array(edges),
             Value::Array(vec![Value::Array(vec![]), Value::Null]),
+            Value::Array(vec![Value::Array(vec![
+                text("none"),
+                text("InstanceRelay"),
+                Value::Bool(false),
+                text("fixture"),
+                Value::Integer(1.into()),
+            ])]),
         ]);
         write_receipt(&receipt, &value);
         receipt
@@ -27571,6 +27604,7 @@ mod tests {
         value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        value.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &value);
         let admission = request
             .validate_receipt(&receipt, None, request.context())
@@ -27638,7 +27672,7 @@ mod tests {
         };
         let value = Value::Array(vec![
             text("TPEXACTCOMPILE"),
-            text("3"),
+            text("4"),
             text(&request.request_sha256),
             text(hex(&request.semantic_sha256)),
             path_value(&path).unwrap(),
@@ -27657,6 +27691,13 @@ mod tests {
                 ])]),
             ])]),
             Value::Array(vec![Value::Array(vec![]), Value::Null]),
+            Value::Array(vec![Value::Array(vec![
+                text(qualifier),
+                text(imported),
+                Value::Bool(boot),
+                text(unit),
+                Value::Integer(1.into()),
+            ])]),
         ]);
         let receipt = directory.join("receipt.cbor");
         let mut bytes = Vec::new();
@@ -27784,17 +27825,178 @@ mod tests {
     }
 
     #[test]
-    fn world_source_v3_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
+    fn source_import_role_rows_require_shape_range_order_and_budget() {
+        use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
+        let operation = InventoryOperation::new(Default::default());
+        let role = |module: &str, mask: u8| {
+            Value::Array(vec![
+                text("none"),
+                text(module),
+                Value::Bool(false),
+                text("fixture"),
+                Value::Integer(mask.into()),
+            ])
+        };
+        for mask in 1..=7 {
+            assert_eq!(
+                decode_source_import_roles(&Value::Array(vec![role("A", mask)]), &operation)
+                    .unwrap()[0]
+                    .mask,
+                mask
+            );
+        }
+        for malformed in [
+            Value::Null,
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![role("A", 0)]),
+            Value::Array(vec![role("A", 8)]),
+            Value::Array(vec![role("A", 1), role("A", 4)]),
+            Value::Array(vec![role("B", 1), role("A", 1)]),
+        ] {
+            assert!(decode_source_import_roles(&malformed, &operation).is_err());
+        }
+        let exhausted = InventoryOperation::new(InventoryDecodeLimits {
+            max_work: 0,
+            ..Default::default()
+        });
+        assert!(decode_source_import_roles(&Value::Array(vec![role("A", 1)]), &exhausted).is_err());
+    }
+
+    #[test]
+    fn source_import_roles_bind_root_coverage_and_preserve_authored_overlap() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(directory.path(), empty.clone());
+        let receipt = support_receipt(directory.path(), &request);
+        let original = read_receipt(&receipt);
+        for mask in [1, 4, 5] {
+            let mut value = original.clone();
+            value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[4] = Value::Integer(mask.into());
+            write_receipt(&receipt, &value);
+            let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
+            let mut receiving = request.clone();
+            receiving
+                .admit_fixture_support(
+                    empty.clone(),
+                    &support_offer(&[
+                        support_product("InstanceOwner"),
+                        support_product("InstanceRelay"),
+                    ]),
+                    &[admission],
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                receiving.program_source_lexical().len(),
+                if mask == 4 { 0 } else { 2 }
+            );
+        }
+        for mask in [2, 6] {
+            let mut value = original.clone();
+            value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[4] = Value::Integer(mask.into());
+            write_receipt(&receipt, &value);
+            assert!(request
+                .validate_receipt(&receipt, None, &empty)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("already-admitted lexical owner"));
+        }
+        let mut missing = original.clone();
+        missing.as_array_mut().unwrap()[10] = Value::Array(vec![]);
+        write_receipt(&receipt, &missing);
+        assert!(request
+            .validate_receipt(&receipt, None, &empty)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("root HOME edges"));
+        let mut old = original.clone();
+        old.as_array_mut().unwrap()[1] = text("3");
+        write_receipt(&receipt, &old);
+        assert!(request.validate_receipt(&receipt, None, &empty).is_err());
+        let mut old = original.clone();
+        old.as_array_mut().unwrap().pop();
+        write_receipt(&receipt, &old);
+        assert!(request.validate_receipt(&receipt, None, &empty).is_err());
+        write_receipt(&receipt, &original);
+        assert!(request.validate_receipt(&receipt, None, &empty).is_ok());
+        let unpermitted = import_receipt(directory.path(), &request, "Unadmitted");
+        let mut value = read_receipt(&unpermitted);
+        value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[4] = Value::Integer(4.into());
+        write_receipt(&unpermitted, &value);
+        assert!(matches!(
+            request.validate_receipt(&unpermitted, None, &empty),
+            Err(CompileError::ExactImportWitness(_))
+        ));
+    }
+
+    #[test]
+    fn projected_source_receipts_compare_checked_import_role_owners() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let request = program_request(directory.path(), empty);
+        let receipt = support_receipt(directory.path(), &request);
+        let original = read_receipt(&receipt);
+        let output = directory.path().join("outputs");
+        for (name, mask) in [("first", 1), ("second", 5)] {
+            let root = output.join(".exact-compilations").join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let snapshot = root.join("source.hs");
+            std::fs::copy(
+                original.as_array().unwrap()[6].as_text().unwrap(),
+                &snapshot,
+            )
+            .unwrap();
+            let mut value = original.clone();
+            value.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
+            value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[4] = Value::Integer(mask.into());
+            write_receipt(&root.join("receipt.cbor"), &value);
+        }
+        let segment = request.admit_program_segment(&output).unwrap();
+        let mut evidence: crate::cache::DependencyEvidence =
+            serde_json::from_str(original.as_array().unwrap()[7].as_text().unwrap()).unwrap();
+        evidence.cache_safe = false;
+        evidence.selection_complete = false;
+        let evidence = serde_json::to_vec(&evidence).unwrap();
+        let input = directory.path().join("Target.hs");
+        let operation =
+            tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+        let refusal = segment
+            .product_admission(
+                &request,
+                &input,
+                "module Target where\n",
+                &evidence,
+                &operation,
+            )
+            .err()
+            .unwrap();
+        assert!(refusal
+            .to_string()
+            .contains("projected segment source receipts disagree"));
+    }
+
+    #[test]
+    fn world_source_v4_refuses_old_envelopes_and_bounds_ordered_alias_copies() {
         use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
 
-        let mut header = vec![Value::Null; 11];
-        header[0] = text("TPCWSOURCE3");
+        let mut header = vec![Value::Null; 12];
+        header[0] = text("TPCWSOURCE4");
         assert!(world_source_header(&Value::Array(header.clone())).is_ok());
-        header[0] = text("TPCWSOURCE2");
+        header[0] = text("TPCWSOURCE3");
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
         header.pop();
         assert!(world_source_header(&Value::Array(header.clone())).is_err());
-        header[0] = text("TPCWSOURCE3");
+        header[0] = text("TPCWSOURCE4");
         assert!(world_source_header(&Value::Array(header)).is_err());
 
         let aliases = Value::Array(vec![text("/held/second"), text("/held/first")]);
@@ -27878,6 +28080,7 @@ mod tests {
         // Start with a complete control that claims no retained import.
         let modules = value.as_array_mut().unwrap()[8].as_array_mut().unwrap();
         modules[0].as_array_mut().unwrap()[3] = Value::Array(vec![]);
+        value.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &value);
         request.validate_receipt(&receipt, None, &context).unwrap();
 
@@ -28622,6 +28825,18 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 Value::Bool(false),
                 text(&mounted.unit),
             ]));
+        fields[10].as_array_mut().unwrap().push(Value::Array(vec![
+            text("none"),
+            text(&mounted.module),
+            Value::Bool(false),
+            text(&mounted.unit),
+            Value::Integer(1.into()),
+        ]));
+        fields[10].as_array_mut().unwrap().sort_by(|a, b| {
+            let a = a.as_array().unwrap();
+            let b = b.as_array().unwrap();
+            (a[0].as_text(), a[1].as_text()).cmp(&(b[0].as_text(), b[1].as_text()))
+        });
         fields[9] = Value::Array(vec![
             Value::Array(vec![Value::Array(vec![
                 text("main"),
@@ -29176,6 +29391,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .find(|module| module.module == "Target")
             .unwrap();
         target.imports.clear();
+        fields[10] = Value::Array(vec![]);
         evidence.modules = vec![
             crate::cache::ModuleEvidence {
                 unit: unit.into(),
@@ -30673,6 +30889,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 text("fixture"),
             ])]),
         ])]);
+        fields[10].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[4] = Value::Integer(2.into());
         write_receipt(&receipt, &value);
         let later = request
             .receipt_admission()
@@ -30944,9 +31163,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let path = directory.path().join("Resume.hs");
         let source = "module Tidepool.Internal.Resume where\n";
         std::fs::write(&path, source).unwrap();
-        evidence
-            .sources
-            .retain(|source| source.path == directory.path().join("Target.hs"));
+        evidence.sources.clear();
         evidence.sources.push(crate::cache::SourceEvidence {
             path: path.clone(),
             sha256: sha256(source.as_bytes()),
@@ -30955,11 +31172,15 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             unit: "main".into(),
             module: "Tidepool.Internal.Resume".into(),
             boot: false,
-            source: path,
+            source: path.clone(),
             imports: vec![],
             product: crate::cache::ProductAvailability::Ready,
         }];
         evidence.resolutions.clear();
+        fields[4] = path_value(&path).unwrap();
+        fields[5] = text(sha256(source.as_bytes()));
+        std::fs::write(fields[6].as_text().unwrap(), source).unwrap();
+        fields[10] = Value::Array(vec![]);
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
         fields[8] = Value::Array(vec![Value::Array(vec![
             text("main"),
@@ -31313,6 +31534,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        receipt.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         let output = directory
             .path()
             .join("later-segment/.exact-compilations/first");
@@ -31484,6 +31706,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        receipt.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         let output = directory.path().join("segment/.exact-compilations/first");
         std::fs::create_dir_all(&output).unwrap();
         write_receipt(&output.join("receipt.cbor"), &receipt);
@@ -32190,6 +32413,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        value.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &value);
         request.validate_receipt(&receipt, None, &hidden).unwrap();
 
@@ -32597,6 +32821,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        receipt.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         let output = directory.path().join("outputs");
         for name in ["first", "second"] {
             let root = output.join(".exact-compilations").join(name);
@@ -32787,6 +33012,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        receipt.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         let output = directory.path().join("outputs");
         let receipts = ["first", "second"].map(|name| {
             let root = output.join(".exact-compilations").join(name);
@@ -33657,6 +33883,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             false,
             &source,
         );
+        let mut value = read_receipt(&receipt);
+        value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[4] = Value::Integer(4.into());
+        write_receipt(&receipt, &value);
         let admitted = request.validate_receipt(&receipt, None, &context).unwrap();
         assert_eq!(
             admitted.scaffold_roots.get(&0),

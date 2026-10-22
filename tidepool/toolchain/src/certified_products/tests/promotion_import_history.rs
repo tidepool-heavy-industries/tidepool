@@ -346,7 +346,7 @@ fn certify_promotion(
     std::fs::write(&snapshot, target_source).unwrap();
     let exact_receipt = value_array([
         value_text("TPEXACTCOMPILE"),
-        value_text("3"),
+        value_text("4"),
         value_text(&request.request_sha256),
         value_text(hex(&request.semantic_sha256)),
         value_text(input.to_string_lossy()),
@@ -360,6 +360,7 @@ fn certify_promotion(
             value_array([]),
         ])]),
         value_array([value_array([]), Value::Null]),
+        Value::Array(vec![]),
     ]);
     std::fs::write(
         receipt_root.join("receipt.cbor"),
@@ -573,7 +574,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     std::fs::write(&snapshot, target_source).unwrap();
     let exact_receipt = value_array([
         value_text("TPEXACTCOMPILE"),
-        value_text("3"),
+        value_text("4"),
         value_text(&request.request_sha256),
         value_text(hex(&request.semantic_sha256)),
         value_text(input.to_string_lossy()),
@@ -587,6 +588,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             value_array([]),
         ])]),
         value_array([value_array([]), Value::Null]),
+        Value::Array(vec![]),
     ]);
     std::fs::write(
         receipt_root.join("receipt.cbor"),

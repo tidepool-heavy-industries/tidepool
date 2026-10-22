@@ -31403,26 +31403,44 @@ pub(crate) mod tests {
             .prepare_compilation(&root.path().join("exact-inputs"), &producer)
             .unwrap();
         if exact_mode {
+            worker.modules.push(crate::cache::ModuleEvidence {
+                unit: "main".into(),
+                module: "Target".into(),
+                boot: false,
+                source: input.clone(),
+                imports: vec![],
+                product: crate::cache::ProductAvailability::Ready,
+            });
+            evidence_bytes = serde_json::to_vec(&worker).unwrap();
             let receipt_root = root.path().join(".exact-compilations/original");
             std::fs::create_dir_all(&receipt_root).unwrap();
             let snapshot = receipt_root.join("source.hs");
             std::fs::write(&snapshot, source).unwrap();
             let exact_receipt = Value::Array(vec![
                 Value::Text("TPEXACTCOMPILE".into()),
-                Value::Text("3".into()),
+                Value::Text("4".into()),
                 Value::Text(request.request_sha256.clone()),
                 Value::Text(hex(&request.semantic_sha256)),
                 Value::Text(input.to_string_lossy().into_owned()),
                 Value::Text(hex(&sha(source.as_bytes()))),
                 Value::Text(snapshot.to_string_lossy().into_owned()),
                 Value::Text(String::from_utf8(evidence_bytes.clone()).unwrap()),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("main".into()),
-                    Value::Text("Fresh".into()),
-                    Value::Bool(false),
-                    Value::Array(vec![]),
-                ])]),
+                Value::Array(vec![
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text("Fresh".into()),
+                        Value::Bool(false),
+                        Value::Array(vec![]),
+                    ]),
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text("Target".into()),
+                        Value::Bool(false),
+                        Value::Array(vec![]),
+                    ]),
+                ]),
                 Value::Array(vec![Value::Array(vec![]), Value::Null]),
+                Value::Array(vec![]),
             ]);
             let mut encoded = Vec::new();
             ciborium::ser::into_writer(&exact_receipt, &mut encoded).unwrap();
@@ -32247,7 +32265,7 @@ pub(crate) mod tests {
             std::fs::write(&snapshot, source).unwrap();
             let exact_receipt = value_array([
                 value_text("TPEXACTCOMPILE"),
-                value_text("3"),
+                value_text("4"),
                 value_text(&request.request_sha256),
                 value_text(hex(&request.semantic_sha256)),
                 value_text(input.to_string_lossy()),
@@ -32261,6 +32279,7 @@ pub(crate) mod tests {
                     value_array([]),
                 ])]),
                 value_array([value_array([]), Value::Null]),
+                Value::Array(vec![]),
             ]);
             std::fs::write(
                 receipt_root.join("receipt.cbor"),
@@ -33699,6 +33718,14 @@ None,
             );
             let mut worker = admitted.clone();
             worker.sources[1].path = input.clone();
+            worker.modules.push(crate::cache::ModuleEvidence {
+                unit: "main".into(),
+                module: "Target".into(),
+                boot: false,
+                source: input.clone(),
+                imports: vec![],
+                product: crate::cache::ProductAvailability::Ready,
+            });
             let complete_evidence = serde_json::to_vec(&worker).unwrap();
             let receipt_root = directory.join(".exact-compilations/current");
             std::fs::create_dir_all(&receipt_root).unwrap();
@@ -33706,20 +33733,29 @@ None,
             std::fs::write(&snapshot, source).unwrap();
             let exact_receipt = Value::Array(vec![
                 Value::Text("TPEXACTCOMPILE".into()),
-                Value::Text("3".into()),
+                Value::Text("4".into()),
                 Value::Text(request.request_sha256.clone()),
                 Value::Text(hex(&request.semantic_sha256)),
                 Value::Text(input.to_string_lossy().into_owned()),
                 Value::Text(hex(&sha(source.as_bytes()))),
                 Value::Text(snapshot.to_string_lossy().into_owned()),
                 Value::Text(String::from_utf8(complete_evidence).unwrap()),
-                Value::Array(vec![Value::Array(vec![
-                    Value::Text("main".into()),
-                    Value::Text("Fresh".into()),
-                    Value::Bool(false),
-                    Value::Array(vec![]),
-                ])]),
+                Value::Array(vec![
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text("Fresh".into()),
+                        Value::Bool(false),
+                        Value::Array(vec![]),
+                    ]),
+                    Value::Array(vec![
+                        Value::Text("main".into()),
+                        Value::Text("Target".into()),
+                        Value::Bool(false),
+                        Value::Array(vec![]),
+                    ]),
+                ]),
                 Value::Array(vec![Value::Array(vec![]), Value::Null]),
+                Value::Array(vec![]),
             ]);
             std::fs::write(
                 receipt_root.join("receipt.cbor"),

@@ -215,7 +215,7 @@ pub(super) fn issue_planned_original_with_retained_child(
     worker.sources[0].path = input.clone();
     let exact_receipt = value_array([
         value_text("TPEXACTCOMPILE"),
-        value_text("3"),
+        value_text("4"),
         value_text(&request.request_sha256),
         value_text(hex(&request.semantic_sha256)),
         value_text(input.to_string_lossy()),
@@ -234,6 +234,13 @@ pub(super) fn issue_planned_original_with_retained_child(
             ])]),
         ])]),
         value_array([value_array([]), Value::Null]),
+        value_array([value_array([
+            value_text("none"),
+            value_text(&child.module),
+            Value::Bool(false),
+            value_text(&child.unit),
+            Value::Integer(1.into()),
+        ])]),
     ]);
     std::fs::write(
         receipt_root.join("receipt.cbor"),
@@ -404,7 +411,7 @@ pub(super) fn issue_planned_original_with_source_value(
     worker.sources[0].path = input.clone();
     let exact_receipt = value_array([
         value_text("TPEXACTCOMPILE"),
-        value_text("3"),
+        value_text("4"),
         value_text(&request.request_sha256),
         value_text(hex(&request.semantic_sha256)),
         value_text(input.to_string_lossy()),
@@ -418,6 +425,7 @@ pub(super) fn issue_planned_original_with_source_value(
             value_array([]),
         ])]),
         value_array([value_array([]), Value::Null]),
+        Value::Array(vec![]),
     ]);
     std::fs::write(
         receipt_root.join("receipt.cbor"),
