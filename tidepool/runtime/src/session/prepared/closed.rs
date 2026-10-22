@@ -150,13 +150,16 @@ impl NativeInstantiationPlan {
             {
                 programs.insert(
                     *id,
-                    Arc::new(PreparedNativeCode::prepare(
-                        node.clone(),
-                        &[],
-                        &Default::default(),
-                        &Default::default(),
-                        registry,
-                    )?),
+                    Arc::new(
+                        PreparedNativeCode::prepare(
+                            node.clone(),
+                            &[],
+                            &Default::default(),
+                            &Default::default(),
+                            registry,
+                        )
+                        .map_err(PreparedRuntimeError::Compile)?,
+                    ),
                 );
             }
         }
@@ -171,13 +174,16 @@ impl NativeInstantiationPlan {
             )?;
             programs.insert(
                 *id,
-                Arc::new(PreparedNativeCode::prepare(
-                    node.clone(),
-                    &owners,
-                    &packages,
-                    &sources,
-                    registry,
-                )?),
+                Arc::new(
+                    PreparedNativeCode::prepare(
+                        node.clone(),
+                        &owners,
+                        &packages,
+                        &sources,
+                        registry,
+                    )
+                    .map_err(PreparedRuntimeError::Compile)?,
+                ),
             );
         }
         let (owners, packages, sources) = Self::literal_inputs(
@@ -191,7 +197,8 @@ impl NativeInstantiationPlan {
             &packages,
             &sources,
             registry,
-        )?;
+        )
+        .map_err(PreparedRuntimeError::Compile)?;
         Ok(Self {
             linked: Arc::clone(linked),
             programs,

@@ -24,9 +24,9 @@ use super::resident::NativeSourceCustody;
 use tidepool_codegen::machine_state::MachineFailure;
 use tidepool_codegen::prepared_program::{
     BatchImport, BatchLeaseRequest, BatchProgram, CompileError, CompiledProgram, DefinitionFacts,
-    DemandError, DemandedImage, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder,
-    ManagedField, ManagedNode, NativeInstanceAttachment, NativeInstanceLease, PackageLiteral,
-    Parcel, ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
+    DemandError, ExecutionError, ImageRegistry, ImportBindings, ManagedBuilder, ManagedField,
+    ManagedNode, NativeInstanceAttachment, NativeInstanceLease, PackageLiteral, Parcel,
+    ParkRequest, PreparedCallOptions, PreparedFrameEvidence, PreparedHandle, PreparedInput,
     PreparedMachine, PreparedMachineOptions, PreparedOuter as CodegenPreparedOuter,
     PreparedReplyEvidence, PreparedResult, PreparedResultBatch, ProgramId, RunOptions,
     SourceBinder, SourceLiteral, MAX_ANSWER_DEPTH,
@@ -39,10 +39,10 @@ pub use tidepool_codegen::machine::MachineDisposition;
 use tidepool_codegen::suspension::ContinuationId;
 pub use tidepool_codegen::suspension::{RealmId, ValueHandle};
 use tidepool_repr::execution_schema::{
-    link_program, CachedHomeOwner, CertifiedGroup, ConstructorIdentity, ConstructorReply,
-    DefinitionsView, Group, HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError,
-    MachineImports, ParseError, PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow,
-    SymbolIdentity, TypeIdentity, TypeNodeId, TypeVersion, ValueId,
+    link_program, CachedHomeOwner, ConstructorIdentity, ConstructorReply, DefinitionsView, Group,
+    HeapRhs, ImportOwner, ImportedValue, JsonLayout, LinkError, MachineImports, ParseError,
+    PreparedProgram, RuntimeRep, Signature, SiteDelivery, SiteRow, SymbolIdentity, TypeIdentity,
+    TypeNodeId, TypeVersion, ValueId,
 };
 use tidepool_repr::type_graph::{
     DataView, DeclarationForm as GraphDeclarationForm, GraphLimits, TypeCursor, TypeEdge,
@@ -4927,6 +4927,8 @@ pub(crate) fn assert_parked_receive_schema(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use tidepool_codegen::prepared_program::DemandedImage;
+    use tidepool_repr::execution_schema::CertifiedGroup;
 
     #[test]
     fn physical_current_source_requires_its_actual_runtime_output_owner() {

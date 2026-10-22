@@ -29,7 +29,7 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{DataCon, DataConTable, Generation, SessionModule, SessionVarId, VarId};
 
 use tidepool_codegen::binding_table::BoundValue;
-use tidepool_repr::execution_schema::{CachedHomeOwner, PreparedProgram, SymbolIdentity};
+use tidepool_repr::execution_schema::{PreparedProgram, SymbolIdentity};
 
 use super::binding_table::{BindRecord, BindingIndex};
 use super::prepared::{PreparedEngine, PreparedRuntimeError};
@@ -5231,6 +5231,7 @@ mod staged_interface_tests {
 #[cfg(test)]
 mod checkpoint_scope_tests {
     use super::*;
+    use tidepool_repr::execution_schema::CachedHomeOwner;
 
     #[test]
     fn scoped_prepared_inventory_keeps_historical_roots_and_excludes_sibling_instances() {
