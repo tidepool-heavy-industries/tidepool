@@ -34,6 +34,17 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
     .expect("actual acquired rows pass the same live/restore gate");
     assert_eq!(reissued.identity(), actual.identity());
 
+    if let Some(package) = nodes
+        .iter()
+        .find(|node| matches!(node.occurrence, NativeOccurrenceId::Package { .. }))
+    {
+        let mut data = serde_json::to_value(package.occurrence).unwrap();
+        data["Package"]["unrecognized"] = serde_json::Value::Bool(true);
+        assert!(
+            serde_json::from_value::<NativeOccurrenceId>(data).is_err(),
+            "persisted occurrence selectors reject unknown proof fields"
+        );
+    }
     let components = target
         .acquired()
         .map(|selected| {

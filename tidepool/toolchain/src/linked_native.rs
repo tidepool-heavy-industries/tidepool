@@ -23,11 +23,13 @@ use tidepool_repr::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NativeOccurrenceId {
     Home(NativeGroupBinding),
     Package { stage_id: [u8; 32], occurrence: u32 },
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NativeGrantSelector {
     Code(NativeOccurrenceId),
     Retained { binding: ArtifactBinding },
