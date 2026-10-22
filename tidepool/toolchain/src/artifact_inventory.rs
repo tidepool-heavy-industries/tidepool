@@ -628,6 +628,7 @@ impl CertifiedTargetNativeInputs {
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
         selection: crate::certified_products::BoundPackageSelection,
         inherited: &CompilerSourceSupport,
+        source_selection: &crate::certified_products::CertifiedSourceSelection,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
         let prepared = Arc::clone(
@@ -646,6 +647,7 @@ impl CertifiedTargetNativeInputs {
         )?;
         let completed = compiler_projection::complete_native_selection(
             &sources,
+            source_selection,
             output,
             packages,
             selection,
@@ -737,10 +739,11 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
         if !self.target.groups().contains(&binding) {
             return Err(failure("native source row is outside its resolved target"));
         }
-        self.groups.issued_row(binding).map(|row| row.product())
+        self.groups
+            .issued_row(binding)
+            .map(|row| row.product())
             .ok_or_else(|| failure("selected native binding lacks its exact certified product"))
     }
-
 }
 
 #[derive(Clone, Copy, Debug)]

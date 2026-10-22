@@ -1032,6 +1032,7 @@ fn append_native_completion_rows(
 /// and unused captured package products do not become executable roots.
 pub(crate) fn complete_native_selection(
     sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
+    source_selection: &crate::certified_products::CertifiedSourceSelection,
     output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
     products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
     selection: crate::certified_products::BoundPackageSelection,
@@ -1168,6 +1169,9 @@ pub(crate) fn complete_native_selection(
             .ok_or_else(|| failure("native completion lacks its source target"))?,
     );
     let mut source_associations = BTreeMap::new();
+    let original_packages: crate::certified_products::CheckedOriginalPackageAssociations =
+        selection.checked_original_packages(source_selection, operation)?;
+    let mut consumed_original_slots = BTreeSet::new();
     let mut selected_package_roots = Vec::new();
     operation
         .reserve::<CompletedNativeSourceRow>(sources.groups().count())
@@ -1292,7 +1296,7 @@ pub(crate) fn complete_native_selection(
         for (index, (link, global)) in imports.iter().zip(definitions.globals()).enumerate() {
             if let SelectedNativeImport::Package {
                 identity,
-                interface_digest: _,
+                interface_digest,
             } = link
             {
                 if identity != &global.identity {
@@ -1300,16 +1304,40 @@ pub(crate) fn complete_native_selection(
                         "package obligation differs from its physical global",
                     ));
                 }
+                let exact_slot = (
+                    row.binding(),
+                    u32::try_from(index)
+                        .map_err(|_| failure("native package slot is out of range"))?,
+                );
+                let original_link = original_packages
+                    .slot(exact_slot.0, exact_slot.1, identity, interface_digest)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+                if original_link.is_some() {
+                    consumed_original_slots.insert(exact_slot);
+                }
+                let home_link = match fresh_links {
+                    Some(links) => {
+                        let link = links
+                            .get(fresh_slot)
+                            .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
+                        fresh_slot += 1;
+                        Some(link)
+                    }
+                    None => None,
+                };
+                if home_link
+                    .zip(original_link)
+                    .is_some_and(|(home, original)| home != original)
+                {
+                    return Err(failure(
+                        "HOME and Original package choices conflict on an exact native slot",
+                    ));
+                }
+                let current_link = home_link.or(original_link);
                 let selected = match prior.map(|row| &row.imports[index]) {
                     Some(CompletedNativeImport::Package { binding, .. }) => {
                         check_product(binding.product())?;
-                        if fresh_links.is_some() {
-                            let slot = fresh_links
-                                .and_then(|links| links.get(fresh_slot))
-                                .ok_or_else(|| {
-                                    failure("fresh HOME group has too few package links")
-                                })?;
-                            fresh_slot += 1;
+                        if let Some(slot) = current_link {
                             if !fresh_occurrence_matches(
                                 slot.occurrence(),
                                 binding,
@@ -1329,21 +1357,17 @@ pub(crate) fn complete_native_selection(
                     }
                     Some(_) => return Err(failure("completed HOME slot changed its import kind")),
                     None => {
-                        let slot = fresh_links
-                            .ok_or_else(|| {
-                                failure(&format!(
-                                    "HOME package slot lacks either prior completion or current \
+                        let slot = current_link.ok_or_else(|| {
+                            failure(&format!(
+                                "HOME package slot lacks either prior completion or current \
                                      links: owner={:?} ordinal={} binding={:?} package={:?} \
                                      selected_home_roots={selected_home_keys:?}",
-                                    row.group().owner(),
-                                    row.group().group().original_ordinal(),
-                                    row.binding(),
-                                    identity,
-                                ))
-                            })?
-                            .get(fresh_slot)
-                            .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
-                        fresh_slot += 1;
+                                row.group().owner(),
+                                row.group().group().original_ordinal(),
+                                row.binding(),
+                                identity,
+                            ))
+                        })?;
                         SelectedPackageRoot::Occurrence(slot.occurrence())
                     }
                 };
@@ -1360,6 +1384,11 @@ pub(crate) fn complete_native_selection(
                 row.binding().original_ordinal,
             ));
         }
+    }
+    if original_packages.coordinates().collect::<BTreeSet<_>>() != consumed_original_slots {
+        return Err(failure(
+            "Original package associations exceed the selected exact native slots",
+        ));
     }
     if consumed_home_keys != expected_home_keys {
         return Err(failure(

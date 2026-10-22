@@ -4688,6 +4688,7 @@ fn admit_native_target_products(
                 packages,
                 package_selection,
                 inherited,
+                &certified.source_selection,
                 &validation.inventory,
             )?,
         certified_groups: Arc::clone(selected_groups.groups()),
@@ -6502,6 +6503,7 @@ fn compile_invocation_inner(
                         &package_products,
                         package_selection,
                         &inherited_completion_support,
+                        &certified.source_selection,
                         &validation.inventory,
                     )?;
                 artifacts.artifact_view = artifacts

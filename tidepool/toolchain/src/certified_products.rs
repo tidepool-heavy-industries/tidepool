@@ -16,8 +16,8 @@ use tidepool_repr::execution_schema::{
     ProjectedGroup, RawModuleProduct, ResultContract, RuntimeRep, Signature, SymbolIdentity,
 };
 
-mod package_code;
 mod original_packages;
+mod package_code;
 pub(crate) use original_packages::CheckedOriginalPackageAssociations;
 pub(crate) use package_code::PackageInterfaceCustody;
 pub use package_code::{
@@ -215,9 +215,9 @@ pub struct PackageProductOutput {
 /// and never becomes durable authority by itself. Runtime binding authority
 /// stays with `IssuedPackageCodeGraph` / `ScopeProofV3`.
 ///
-/// Wire (one paired value, version 3):
+/// Wire (one paired value, version 4):
 /// ```text
-/// [3, stage_id, occurrences, target_roots, home_roots, package_products]
+/// [4, stage_id, occurrences, target_roots, home_roots, original_use_roots, package_products]
 /// occurrence = [id, envelope_sha256, unit, module,
 ///               defining_interface_sha256, defining_version_sha256, imports]
 /// link = ["local", occurrence]
@@ -238,7 +238,7 @@ pub(crate) struct PackageLinks {
 }
 
 impl PackageLinks {
-    /// Empty, version-2 manifest used only by fixtures with no selected package
+    /// Empty, version-4 manifest used only by fixtures with no selected package
     /// occurrence. Production construction is the bounded decoder below.
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
@@ -455,13 +455,21 @@ impl BoundPackageSelection {
                 "item package HOME roots differ from its stage manifest",
             ));
         }
-        let stage_original_roots = links.original_use_roots.iter()
-            .filter(|(key, _)| key.target == selection.target).collect::<BTreeMap<_, _>>();
+        let stage_original_roots = links
+            .original_use_roots
+            .iter()
+            .filter(|(key, _)| key.target == selection.target)
+            .collect::<BTreeMap<_, _>>();
         if stage_original_roots.len() != selection.original_use_roots.len()
-            || selection.original_use_roots.iter().any(|(key, roots)|
-                stage_original_roots.get(key).is_none_or(|stage| *stage != roots))
+            || selection.original_use_roots.iter().any(|(key, roots)| {
+                stage_original_roots
+                    .get(key)
+                    .is_none_or(|stage| *stage != roots)
+            })
         {
-            return Err(CertificationError::Receipt("item Original package uses differ from its stage manifest"));
+            return Err(CertificationError::Receipt(
+                "item Original package uses differ from its stage manifest",
+            ));
         }
         Ok(Self {
             mode: BoundPackageSelectionState::Item {
@@ -837,10 +845,12 @@ pub(crate) fn inherited_package_witnesses_with_validation(
     products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
     validation: &mut PackageInterfaceValidation,
 ) -> CertResult<BTreeMap<(String, String), PackageInterfaceWitness>> {
-    Ok(inherited_package_interfaces_with_validation(products, validation)?
-        .into_iter()
-        .map(|(owner, inherited)| (owner, inherited.witness))
-        .collect())
+    Ok(
+        inherited_package_interfaces_with_validation(products, validation)?
+            .into_iter()
+            .map(|(owner, inherited)| (owner, inherited.witness))
+            .collect(),
+    )
 }
 
 fn inherited_package_interfaces_with_validation(
@@ -930,9 +940,7 @@ impl OrdinaryPackageInterfaces {
     }
 
     #[cfg(test)]
-    pub(crate) fn inherited(
-        &self,
-    ) -> &BTreeMap<(String, String), InheritedPackageInterface> {
+    pub(crate) fn inherited(&self) -> &BTreeMap<(String, String), InheritedPackageInterface> {
         &self.inherited
     }
 
@@ -1159,10 +1167,8 @@ impl CertifiedSegmentOriginals {
         )?;
         products.source_selection.produced_types = produced.cloned();
         timing.advance("package_availability");
-        let mut package_availability = inherited_package_interfaces_with_validation(
-            &products.recovery_products,
-            validation,
-        )?;
+        let mut package_availability =
+            inherited_package_interfaces_with_validation(&products.recovery_products, validation)?;
         for (owner, witness) in &receipt.packages {
             if let Some(previous) = package_availability.get(owner) {
                 if previous.witness.sha256 != witness.sha256 {
@@ -1361,9 +1367,7 @@ impl CertifiedSegmentOriginals {
         &self.package_availability
     }
 
-    pub(crate) fn package_witnesses(
-        &self,
-    ) -> BTreeMap<(String, String), PackageInterfaceWitness> {
+    pub(crate) fn package_witnesses(&self) -> BTreeMap<(String, String), PackageInterfaceWitness> {
         self.package_availability
             .iter()
             .map(|(owner, inherited)| (owner.clone(), inherited.witness.clone()))
@@ -3440,7 +3444,9 @@ fn decode_package_links(
     let original_use_roots = original_packages::decode_roots(&row[5], operation)?;
     for (key, roots) in &original_use_roots {
         if !target_roots.contains_key(&key.target) {
-            return Err(CertificationError::Receipt("Original package use names another target"));
+            return Err(CertificationError::Receipt(
+                "Original package use names another target",
+            ));
         }
         for (_, link) in roots {
             check_package_link_range(std::slice::from_ref(link), occurrences.len())?;
@@ -3581,7 +3587,9 @@ fn decode_package_selection(
     }
     let original_use_roots = original_packages::decode_roots(&row[6], operation)?;
     if original_use_roots.keys().any(|key| key.target != target) {
-        return Err(CertificationError::Receipt("item Original package use belongs to another target"));
+        return Err(CertificationError::Receipt(
+            "item Original package use belongs to another target",
+        ));
     }
     Ok(PackageSelection {
         stage_id,
@@ -27364,7 +27372,10 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(reuse.selected(), &selected_witness);
         assert_eq!(reuse.observed(), &relocated_witness);
-        assert_eq!(reuse.token().map(|token| token.sha256()), Some(&sha(&[0x43])));
+        assert_eq!(
+            reuse.token().map(|token| token.sha256()),
+            Some(&sha(&[0x43]))
+        );
         assert!(reconciled.decisions().iter().any(|observation| {
             observation.kind() == PackageInterfaceSelectionKind::NewSelection
                 && observation.owner() == &new_owner
@@ -27928,10 +27939,7 @@ pub(crate) mod tests {
         assert!(!Arc::ptr_eq(&first_token, &second_token));
 
         let selected = inherited_package_interfaces_with_validation(
-            &[
-                originals[0].product.clone(),
-                originals[1].product.clone(),
-            ],
+            &[originals[0].product.clone(), originals[1].product.clone()],
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap()
@@ -27964,11 +27972,8 @@ pub(crate) mod tests {
         assert!(legacy_selected.issuer().is_none());
 
         std::fs::remove_file(&first_path).unwrap();
-        retain_inherited_package_custody(
-            &selected,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
+        retain_inherited_package_custody(&selected, &mut PackageInterfaceValidation::default())
+            .unwrap();
         assert!(matches!(
             retain_inherited_package_custody(
                 &legacy_selected,
@@ -34203,7 +34208,7 @@ None,
         let stage_id =
             package_stage_identity(links, &InventoryOperation::new(Default::default())).unwrap();
         value_array([
-            Value::Integer(3.into()),
+            Value::Integer(4.into()),
             Value::Bytes(stage_id.to_vec()),
             value_array(links.occurrences.iter().map(|occurrence| {
                 value_array([
@@ -34246,6 +34251,7 @@ None,
                     ),
                 ])
             })),
+            original_packages::encode_roots(&links.original_use_roots),
             value_array(links.products.iter().map(|product| {
                 value_array([
                     value_text(product.relative_path.to_string_lossy()),
@@ -34257,7 +34263,7 @@ None,
 
     fn package_selection_value(selection: &PackageSelection) -> Value {
         value_array([
-            Value::Integer(1.into()),
+            Value::Integer(2.into()),
             Value::Bytes(selection.stage_id.to_vec()),
             Value::Bytes(selection.program_sha256.to_vec()),
             value_text(&selection.target),
@@ -34282,6 +34288,7 @@ None,
                     ),
                 ])
             })),
+            original_packages::encode_roots(&selection.original_use_roots),
         ])
     }
 
@@ -35463,10 +35470,11 @@ None,
             })
             .collect::<Vec<_>>();
         let identity = value_array([
-            Value::Integer(1.into()),
+            Value::Integer(2.into()),
             value_array(identity_occurrences),
             value_array(target_roots.clone()),
             value_array(home_roots.clone()),
+            value_array([]),
             value_array(products.iter().map(|product| {
                 value_array([
                     value_text(product.relative_path.to_string_lossy()),
@@ -35476,11 +35484,12 @@ None,
         ]);
         let stage_id = sha(&receipt_bytes(&identity));
         value_array([
-            Value::Integer(3.into()),
+            Value::Integer(4.into()),
             Value::Bytes(stage_id.to_vec()),
             value_array(occurrences),
             value_array(target_roots),
             value_array(home_roots),
+            value_array([]),
             value_array(products.iter().map(|product| {
                 value_array([
                     value_text(product.relative_path.to_string_lossy()),
@@ -35535,6 +35544,7 @@ None,
                 home_key.clone(),
                 vec![PackageLink::Local { occurrence: 1 }],
             )])),
+            original_use_roots: Arc::new(BTreeMap::new()),
             products: Arc::from([]),
         };
         let operation = InventoryOperation::new(Default::default());
