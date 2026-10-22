@@ -11981,12 +11981,6 @@ mod tests {
             .new_product_native_requirements()
             .next()
             .is_none());
-        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-            chosen_request.compiler_inputs().compiler_source_support(),
-        );
-        assert!(matches!(carried.physical_cohort(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "exact declaration context: target requires its actual physical output cohort"));
         // This target has no new outputs. Its real empty physical cohort consumes
         // the chosen carried request while retaining the broader prefix custody.
         let fixed = inventory
@@ -19881,12 +19875,6 @@ mod tests {
             .prepare_compilation(request_directory.path(), producer)
             .unwrap();
         let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let carried = crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-            request.compiler_inputs().compiler_source_support(),
-        );
-        assert!(matches!(carried.physical_cohort(),
-            Err(CompileError::ExtractFailed(message))
-                if message == "exact declaration context: target requires its actual physical output cohort"));
         let certified = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             request.compiler_inputs(),
             &validation.inventory,

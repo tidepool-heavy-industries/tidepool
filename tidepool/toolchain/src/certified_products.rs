@@ -18141,7 +18141,7 @@ pub(crate) mod tests {
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let completed = Arc::new(CompilerSourceSupport::close_complete_output(&output).unwrap());
+        let completed = Arc::new(CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap());
         let owner = entry.descriptor.owner.clone();
         let primary = completed.compiler_primary_input(&owner).unwrap().unwrap();
         let interface = primary.interface();
@@ -18657,7 +18657,7 @@ pub(crate) mod tests {
             )),
         )
         .unwrap();
-        let row = issued.native_availability().issued_row(fresh_id).unwrap();
+        let row = issued.compiler_inputs().native_availability().issued_row(fresh_id).unwrap();
         for ordinal in [2, 4, 5] {
             assert!(row.permits(ordinal), "supported local closure {ordinal}");
         }
@@ -18766,7 +18766,7 @@ pub(crate) mod tests {
                 .collect::<BTreeSet<_>>(),
             expected_roots
         );
-        let closed = CompilerSourceSupport::close_complete_output(&issued).unwrap();
+        let closed = CompilerSourceSupport::close_complete_output(issued.compiler_inputs()).unwrap();
         let published = closed.certify_original_closure(&publication).unwrap();
         let canonical = ArtifactEntry::canonical_artifact_id(
             publication.products()[0].module_interface().unwrap(),
@@ -18914,12 +18914,12 @@ pub(crate) mod tests {
             None,
             17,
         );
-        let empty_support = CompilerSourceSupport::close_complete_output(&empty_output)
+        let empty_support = CompilerSourceSupport::close_complete_output(empty_output.compiler_inputs())
             .unwrap()
             .certify_original_closure(&empty_publication)
             .unwrap();
         let empty_row = empty_output
-            .native_availability()
+            .compiler_inputs().native_availability()
             .issued_row(empty_id)
             .unwrap();
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = empty_support
@@ -19012,7 +19012,7 @@ pub(crate) mod tests {
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let issued = output.native_availability();
+        let issued = output.compiler_inputs().native_availability();
         assert_eq!(
             selected
                 .compiler_projection_from_metadata(&metadata, &BTreeSet::new())
@@ -19066,7 +19066,7 @@ pub(crate) mod tests {
             panic!("completed current product owns its issued proof");
         };
         let offered = output
-            .native_offers()
+            .compiler_inputs().native_offers()
             .iter()
             .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
             .unwrap();
@@ -19161,7 +19161,7 @@ pub(crate) mod tests {
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let issued = output.native_availability();
+        let issued = output.compiler_inputs().native_availability();
         assert!(Arc::ptr_eq(
             issued
                 .issued_row(entry.descriptor.id)
@@ -19190,7 +19190,7 @@ pub(crate) mod tests {
             panic!("completed current product owns its issued proof");
         };
         let offered = output
-            .native_offers()
+            .compiler_inputs().native_offers()
             .iter()
             .find(|offer| offer.original() == entry.descriptor.id && offer.proof().is_some())
             .unwrap();
@@ -21050,17 +21050,17 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(
-            matches!(completed.role_projection().snapshot_roles()[&original.descriptor.owner],
+            matches!(completed.compiler_inputs().role_projection().snapshot_roles()[&original.descriptor.owner],
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { interface }
                 if interface == ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id),
             "RetainedCore availability does not select a compiler Original"
         );
         assert_eq!(
-            completed.native_availability().snapshot_facts().unwrap()[&original.descriptor.id].mode,
+            completed.compiler_inputs().native_availability().snapshot_facts().unwrap()[&original.descriptor.id].mode,
             crate::declaration_context::NativeTransportMode::Full
         );
         let closed =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed)
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(completed.compiler_inputs())
                 .unwrap();
         let retained_owner = original.descriptor.owner.clone();
         let world_roles = closed
@@ -21071,7 +21071,7 @@ pub(crate) mod tests {
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
         ));
         let world_availability = completed
-            .native_availability()
+            .compiler_inputs().native_availability()
             .for_compiler_roles(&world_roles, completed.issued_artifacts())
             .unwrap();
         let retained_row = world_availability
@@ -21616,7 +21616,7 @@ pub(crate) mod tests {
                     let outcome = match &completed {
                         Ok(completed) => {
                             let rows = completed
-                                .native_availability()
+                                .compiler_inputs().native_availability()
                                 .rows()
                                 .map(|row| {
                                     (
@@ -21631,8 +21631,8 @@ pub(crate) mod tests {
                                 .collect::<Vec<_>>();
                             format!(
                                 "success roles={:?} rows={rows:?} offers={} selected_groups={}",
-                                completed.role_projection().snapshot_roles(),
-                                completed.native_offers().len(),
+                                completed.compiler_inputs().role_projection().snapshot_roles(),
+                                completed.compiler_inputs().native_offers().len(),
                                 completed.issued_artifacts().selected_native_groups().len()
                             )
                         }
@@ -21649,7 +21649,7 @@ pub(crate) mod tests {
                 } else {
                     let completed = completed.unwrap();
                     assert!(
-                        matches!(completed.role_projection().snapshot_roles()[&output_entry.descriptor.owner],
+                        matches!(completed.compiler_inputs().role_projection().snapshot_roles()[&output_entry.descriptor.owner],
                         CompilerInputRole::InterfaceOnly { interface }
                             if interface == ArtifactEntry::canonical(output_product.module_interface().unwrap().clone()).descriptor.id),
                         "RetainedCore output availability does not grant Original selection"
@@ -21677,7 +21677,7 @@ pub(crate) mod tests {
                         }
                     }
                     assert_eq!(
-                        completed.native_availability().snapshot_facts().unwrap()
+                        completed.compiler_inputs().native_availability().snapshot_facts().unwrap()
                             [&output_entry.descriptor.id]
                             .mode,
                         NativeTransportMode::Full
@@ -21687,7 +21687,7 @@ pub(crate) mod tests {
                         .selected_native_groups()
                         .is_empty());
                     let completed_offer = completed
-                        .native_offers()
+                        .compiler_inputs().native_offers()
                         .iter()
                         .find(|offer| offer.original() == output_entry.descriptor.id)
                         .expect("actual completed C has its issued native offer")
@@ -21741,7 +21741,7 @@ pub(crate) mod tests {
                             &root.join("completed"),
                             endpoint.identity().producer_bytes(),
                             None,
-                            Some(completed),
+                            Some(completed.compiler_inputs().as_ref().clone()),
                         )
                         .unwrap();
                     assert!(next
@@ -25352,15 +25352,15 @@ pub(crate) mod tests {
             r_entry.descriptor.id,
             g_entry.descriptor.id,
             output
-                .native_availability()
+                .compiler_inputs().native_availability()
                 .issued_row(r_entry.descriptor.id)
                 .is_some(),
             output
-                .native_availability()
+                .compiler_inputs().native_availability()
                 .issued_row(g_entry.descriptor.id)
                 .is_some(),
         );
-        let completed = CompilerSourceSupport::close_complete_output(&output).unwrap();
+        let completed = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
         let support = completed.certify_original_closure(&closure).unwrap_or_else(|error| {
             panic!(
                 "initial closure transfer: {error:?}; R={:?} G={:?} Rcanonical={:?} Gcanonical={:?}; roles={:?}; receiving_groups={:?}; closure_groups={:?}",
@@ -25650,7 +25650,7 @@ pub(crate) mod tests {
 
         // The World demand owner must retain both exact G occurrences too;
         // their equal logical key cannot erase either dependency history.
-        let complete = CompilerSourceSupport::close_complete_output(&finished).unwrap();
+        let complete = CompilerSourceSupport::close_complete_output(finished.compiler_inputs()).unwrap();
         let closure = current.selected_original_closure(&target).unwrap();
         let selected = complete.certify_original_closure(&closure).unwrap();
         let context = ExactDeclarationContext::new(&[], &[], vec![])

@@ -10939,8 +10939,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
                     &mut validation,
                 )
                 .unwrap();
-                assert!(output.physical_cohort().is_ok());
-                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
                     .unwrap()
             })
             .unwrap(),
@@ -10997,11 +10996,6 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
         Err(crate::certified_products::CertificationError::MissingRetainedCustody { artifact })
             if artifact == id
     ));
-    assert!(matches!(
-        OriginalCompilerInputs::from_selection(&raw_selection, &view),
-        Err(CompileError::ExtractFailed(detail))
-            if detail.contains("current native products lack physical cohort issuance")
-    ));
     drop(raw_selection);
 
     // Equal payloads in a separately issued scope do not supply this request's binding.
@@ -11041,8 +11035,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     );
     assert_eq!(*entry, reference);
     let calls = original_entry_construction_calls();
-    let issued = OriginalCompilerInputs::from_selection(&selection, &view).unwrap();
-    assert!(issued.physical_cohort().is_err());
+    let issued = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     assert_eq!(original_entry_construction_calls() - calls, 0);
     assert!(Arc::ptr_eq(
         &entry,
@@ -11069,7 +11062,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
         .all(|edge| issued.artifacts.binding_dependencies().contains(edge)));
 
     let fresh_output_calls = original_entry_construction_calls();
-    (|| -> Result<OriginalCompilerInputs, CompileError> {
+    (|| -> Result<crate::declaration_context::CapturedCompilerStage, CompileError> {
         let fixture_products: &[CertifiedRecoveryProduct] = &[native.clone()];
         let entries = fixture_products
             .iter()

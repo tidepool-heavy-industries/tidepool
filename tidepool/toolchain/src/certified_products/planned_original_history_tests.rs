@@ -34,30 +34,14 @@ pub(super) struct IssuedOriginal {
 
 impl IssuedOriginal {
     pub(super) fn complete_native_availability(mut self, producer: &[u8]) -> Self {
-        let physical = crate::declaration_context::certified_product_artifact_view(
+        let stage = crate::declaration_context::issue_certified_product_native_availability(
             CanonicalProducerIdentity::from_producer_bytes(producer).sha256(),
-            &self.certified.recovery_products,
-            &self.certified.module_interfaces,
-            Some(self.request.context()),
+            &mut self.certified,
+            Some(self.request.compiler_inputs().artifacts()),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let issued_view =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut self.certified.source_selection,
-                self.request.compiler_inputs().artifacts(),
-                physical.entries(),
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap()
-            .issued_artifacts()
-            .clone();
-        self.completed_output = Some(
-            crate::declaration_context::IssuedOriginalOutput::issue(
-                self.certified.source_selection.clone(),
-                issued_view,
-            )
-            .unwrap(),
-        );
+        self.completed_output = Some(stage.output().clone());
         self
     }
 

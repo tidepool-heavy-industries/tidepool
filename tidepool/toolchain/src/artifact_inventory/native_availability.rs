@@ -4234,7 +4234,7 @@ mod normalized_dependency_tests {
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let complete = CompilerSourceSupport::close_complete_output(&inputs).unwrap();
+        let complete = CompilerSourceSupport::close_complete_output(inputs.compiler_inputs()).unwrap();
         let root_owner = ExactModuleIdentity {
             unit: products[1].owner().unit.clone(),
             module: products[1].owner().module.clone(),
@@ -4779,7 +4779,7 @@ mod normalized_dependency_tests {
         )
         .unwrap();
         assert!(completed
-            .native_availability()
+            .compiler_inputs().native_availability()
             .issued_row(entry.descriptor.id)
             .is_some());
         (entry, selection)

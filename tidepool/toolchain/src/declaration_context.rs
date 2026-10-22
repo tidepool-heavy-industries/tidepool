@@ -18885,7 +18885,7 @@ mod tests {
             .first()
             .and_then(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
-        let output = (|| -> Result<OriginalCompilerInputs, CompileError> {
+        let output = (|| -> Result<CapturedCompilerStage, CompileError> {
             let mut validation = PackageInterfaceValidation::default();
             let entries = products
                 .iter()
@@ -18921,7 +18921,7 @@ mod tests {
         })()
         .unwrap();
         let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&output)
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
                 .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
