@@ -3505,13 +3505,13 @@ impl SealedOriginalEvidence {
         target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
     ) -> Result<Self, CompileError> {
         let context = admission.original_execution_context(output.compiler_inputs())?;
-        let completed = target.completed_selection().ok_or_else(|| {
+        let completed = target.linked_native_target().ok_or_else(|| {
             CompileError::ExtractFailed("exact native target lacks its issued completion".into())
         })?;
         let execution = Arc::new(
             Arc::unwrap_or_clone(context)
                 .retain_native_target_custody(target)?
-                .retain_completed_native_selection(completed)?,
+                .retain_linked_native_target(completed)?,
         );
         target
             .resolve()?
@@ -3605,10 +3605,10 @@ impl<'a> ResolvedNativeSourceProduct<'a> {
 }
 
 impl<'a> ResolvedNativeSourceProducts<'a> {
-    pub fn completed_selection(
+    pub fn linked_native_target(
         &self,
-    ) -> Option<&'a Arc<crate::artifact_inventory::CompletedNativeSelection>> {
-        self._resolved.completed_selection()
+    ) -> Option<&'a Arc<crate::linked_native::LinkedNativeTarget>> {
+        self._resolved.linked_native_target()
     }
 
     pub(crate) fn acquired_artifacts(&self) -> &crate::artifact_inventory::ArtifactView {
@@ -3632,13 +3632,13 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
 
     pub fn validate_source_target(
         &self,
-        selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
+        selection: &Arc<crate::linked_native::LinkedNativeTarget>,
     ) -> Result<(), CompileError> {
-        let own = self.completed_selection().ok_or_else(|| {
+        let own = self.linked_native_target().ok_or_else(|| {
             CompileError::ExtractFailed("native target lacks its completed source selection".into())
         })?;
         if !Arc::ptr_eq(own, selection)
-            || !std::ptr::eq(self.prepared, selection.source_target().as_ref())
+            || !std::ptr::eq(self.prepared, selection.prepared().as_ref())
         {
             return Err(CompileError::ExtractFailed(
                 "native source receipt belongs to another prepared target".into(),
@@ -3651,25 +3651,33 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
     /// from code custody or another target's equal linkage completion.
     pub fn physical_current_for<'s>(
         &self,
-        selection: &'s Arc<crate::artifact_inventory::CompletedNativeSelection>,
-        selected: &crate::artifact_inventory::CompletedNativeSourceRow,
+        selection: &'s Arc<crate::linked_native::LinkedNativeTarget>,
+        selected: &crate::linked_native::AcquiredNativeCode,
     ) -> Result<Option<PhysicalCurrentNativeGroup<'s>>, CompileError> {
         self.validate_source_target(selection)?;
-        match selection.source_association(selected.binding()) {
-            Some(crate::artifact_inventory::SelectedNativeSourceAssociation::Current(group)) => {
-                if !group.same_issuance(selected.product()) {
+        if !Arc::ptr_eq(selection.closure(), selected.closure()) {
+            return Err(CompileError::ExtractFailed(
+                "native source receipt names another acquired closure".into(),
+            ));
+        }
+        let crate::linked_native::NativeCodeGrant::Home {
+            binding, product, ..
+        } = selected.grant()
+        else {
+            return Err(CompileError::ExtractFailed(
+                "native source receipt is not HOME code".into(),
+            ));
+        };
+        match selection.sources.get(&binding) {
+            Some(group) => {
+                if !group.same_issuance(product) {
                     return Err(CompileError::ExtractFailed(
                         "native source receipt names another physical row".into(),
                     ));
                 }
                 Ok(Some(PhysicalCurrentNativeGroup { group }))
             }
-            Some(crate::artifact_inventory::SelectedNativeSourceAssociation::Historical) => {
-                Ok(None)
-            }
-            None => Err(CompileError::ExtractFailed(
-                "selected HOME row lacks its target source association".into(),
-            )),
+            None => Ok(None),
         }
     }
 
@@ -3720,10 +3728,8 @@ impl TargetArtifact {
 
     /// Borrow the completion issued for this exact physical target. It is
     /// separate from broader Original availability and retained byte custody.
-    pub fn completed_native_selection(
-        &self,
-    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
-        self.native_inputs.as_ref()?.completed_selection()
+    pub fn linked_native_target(&self) -> Option<&Arc<crate::linked_native::LinkedNativeTarget>> {
+        self.native_inputs.as_ref()?.linked_native_target()
     }
 
     pub fn native_source_products(
@@ -3739,10 +3745,8 @@ impl TargetArtifact {
 
 impl SealedTurnProducts {
     /// Borrow this output's already issued target links without resolving them again.
-    pub fn completed_native_selection(
-        &self,
-    ) -> Option<&Arc<crate::artifact_inventory::CompletedNativeSelection>> {
-        self.target.completed_selection()
+    pub fn linked_native_target(&self) -> Option<&Arc<crate::linked_native::LinkedNativeTarget>> {
+        self.target.linked_native_target()
     }
 
     pub(crate) fn target_native_inputs(
@@ -4439,7 +4443,7 @@ fn seal_turn_outputs_with_validation(
         }
         None => match original_compile_input.as_ref() {
             Some(proof) => {
-                let completed = target_native.completed_selection().ok_or_else(|| {
+                let completed = target_native.linked_native_target().ok_or_else(|| {
                     CompileError::ExtractFailed(
                         "ordinary native target lacks its issued completion".into(),
                     )
@@ -4447,7 +4451,7 @@ fn seal_turn_outputs_with_validation(
                 let execution = Arc::new(
                     Arc::unwrap_or_clone(proof.issued_original_execution())
                         .retain_native_target_custody(&target_native)?
-                        .retain_completed_native_selection(completed)?,
+                        .retain_linked_native_target(completed)?,
                 );
                 SealedOriginalEvidence::Ordinary {
                     execution,
@@ -6482,11 +6486,11 @@ fn compile_invocation_inner(
                 artifacts.artifact_view = artifacts
                     .artifact_view
                     .retain_custody(native_inputs.artifacts())?;
-                let completed = native_inputs.completed_selection().ok_or_else(|| {
+                let completed = native_inputs.linked_native_target().ok_or_else(|| {
                     CompileError::ExtractFailed("finite target lacks its issued completion".into())
                 })?;
                 inherited_completion_support =
-                    inherited_completion_support.with_native_selection_completion(completed)?;
+                    inherited_completion_support.with_linked_native_target(completed)?;
                 target.native_inputs = Some(native_inputs);
             }
         }
@@ -9439,7 +9443,7 @@ mod module_product_tests {
                     completed.push(Arc::clone(
                         products
                             .target_native_inputs()
-                            .completed_selection()
+                            .linked_native_target()
                             .expect("actual World target completion")
                             .completion(),
                     ));

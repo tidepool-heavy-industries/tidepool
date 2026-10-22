@@ -23,11 +23,6 @@ pub use compiler_projection::{
     CompletedNativeSourceRow, CompletedNativeTargetImport, IssuedNativeSelectionCompletion,
     PublicationNativeAuthority,
 };
-pub(crate) use compiler_projection::{
-    CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
-    IssuedInputNativeDecisions, NativeCompletionSnapshotFacts, NativeSelectionCompletions,
-    RecordedCompilerRole, RecordedInputNativeDecision, SelectedNativeSourceAssociation,
-};
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
     NativeOfferContribution, ValidatedFreshNativeAvailability,

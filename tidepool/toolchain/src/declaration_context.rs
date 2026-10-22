@@ -532,7 +532,7 @@ enum OriginalInputDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
-    native_completions: crate::artifact_inventory::NativeSelectionCompletions,
+    native_completions: crate::artifact_inventory::AcquiredNativeClosures,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -1198,7 +1198,7 @@ impl OriginalCompilerInputs {
 
     pub(crate) fn issued_native_completions(
         &self,
-    ) -> &crate::artifact_inventory::NativeSelectionCompletions {
+    ) -> &crate::artifact_inventory::AcquiredNativeClosures {
         &self.native_completions
     }
 
@@ -3550,32 +3550,42 @@ impl DemandNativeInputs {
             BTreeMap::<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>::new(
             );
         for contribution in &selected_contributions {
-            let mut previous = BTreeMap::new();
+            let mut held_products = BTreeMap::new();
             for id in contribution.originals() {
                 for binding in contribution.original_groups(*id) {
-                    let held = self
+                    let held_owner = self
                         .cold
                         .source_support
                         .native_completions()
-                        .group_product(binding, &operation)?;
-                    let local = certified.get(&binding).map(|row| row.product());
+                        .group_owner(binding, &operation)?;
+                    let held = held_owner.as_ref().and_then(|owner| match owner.grant() {
+                        crate::linked_native::NativeCodeGrant::Home { product, .. } => {
+                            Some(product)
+                        }
+                        crate::linked_native::NativeCodeGrant::Package { .. } => None,
+                    });
+                    let local = certified.get(&binding).map(|row| row.issued.product());
                     if let (Some(held), Some(local)) = (held, local) {
                         if !held.same_issuance(local) {
                             return Err(failure(
-                                "selected HOME binding changed its completed occurrence",
+                                "selected HOME binding changed its acquired occurrence",
                             ));
                         }
                     }
-                    if let Some(product) = held.map(Arc::as_ref).or(local) {
+                    if let Some(product) = held.or(local) {
                         budget.reserve::<(
                             crate::artifact_inventory::NativeGroupBinding,
-                            &PendingCertifiedGroup,
+                            Arc<PendingCertifiedGroup>,
                             [usize; 4],
                         )>(1)?;
-                        previous.insert(binding, product);
+                        held_products.insert(binding, Arc::clone(product));
                     }
                 }
             }
+            let previous = held_products
+                .iter()
+                .map(|(binding, product)| (*binding, product.as_ref()))
+                .collect();
             let certification = group_validation
                 .certify_selected_scope(
                     crate::certified_products::SelectedOriginalGroupScope::Contribution(
@@ -4398,7 +4408,10 @@ impl RequestCompilerInputs {
         let support = self
             .source_support
             .with_native_completions_from(issued.compiler_source_support())?;
-        if support.native_completions() == self.source_support.native_completions() {
+        if support
+            .native_completions()
+            .same_held_owners(self.source_support.native_completions())
+        {
             return Ok(WorldPrimaryProgramSupport {
                 inputs: Arc::clone(self),
                 context: Arc::clone(primary),
@@ -4622,15 +4635,6 @@ impl RequestCompilerInputs {
         &self,
     ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
         Arc::clone(&self.source_support)
-    }
-
-    /// Immutable native completion custody acquired by this exact context.
-    /// These references do not add compiler roles or executable target demand.
-    pub fn issued_native_completions(
-        &self,
-    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>>
-    {
-        self.compiler_source_support().native_completions().iter()
     }
 
     pub(crate) fn compiler_source_support(
@@ -13172,13 +13176,13 @@ impl ExactDeclarationContext {
             .retain_custody(target.artifacts())?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
-    pub(crate) fn retain_completed_native_selection(
+    pub(crate) fn retain_linked_native_target(
         self,
-        completed: &crate::artifact_inventory::CompletedNativeSelection,
+        completed: &crate::linked_native::LinkedNativeTarget,
     ) -> Result<Self, CompileError> {
         let support = self
             .compiler_source_support()
-            .with_native_selection_completion(completed)?;
+            .with_linked_native_target(completed)?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
 
