@@ -1299,7 +1299,9 @@ impl ProjectedGroup {
 
     /// Contracts for the exact certified export suffix. Helper definitions are
     /// private to this group even when their representation is compatible.
-    fn export_contracts(&self) -> impl Iterator<Item = Result<ExportContract<'_>, ParseError>> {
+    pub(crate) fn export_contracts(
+        &self,
+    ) -> impl Iterator<Item = Result<ExportContract<'_>, ParseError>> {
         let definitions = self.definitions();
         self.exported_tops()
             .map(move |top| definitions.top_export_contract(top))
