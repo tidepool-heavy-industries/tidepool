@@ -1363,6 +1363,56 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
         .unwrap();
     assert_eq!(session.observed(), [23, 23]);
     session.assert_no_compiler_since_last_effect();
+
+    // This Original captures a value published by a previous World. Its later
+    // consumer names only the Original, so loading it must retain the value's
+    // interface transitively across the declaration preparation phase.
+    let before_capture = Arc::clone(&session.trace);
+    session
+        .execute_observed(
+            "previous_world_value_through_original",
+            include_str!("fixtures/typed-segment-previous-world-original.hs"),
+            CellDeclarationExpectation::Total(1),
+            SemanticChecks::None,
+            &SourceImports::new(),
+            None,
+            |program| {
+                assert_eq!(
+                    before_capture.lock().as_slice(),
+                    &[23, 23],
+                    "preparing the new Original cannot execute its later consumer"
+                );
+                assert_eq!(program.items().len(), 3);
+                assert!(program.items()[1]
+                    .checked_item()
+                    .planned_declaration()
+                    .is_some());
+                let unrelated = program.items()[0]
+                    .native()
+                    .expect("the unrelated binding is a real preceding staged value");
+                let later = program.items()[2]
+                    .native()
+                    .expect("the later stage consumes the new Original");
+                assert!(
+                    later.required_native_imports().all(|(symbol, generation)| {
+                        symbol.occurrence != "unrelatedBeforeOriginal"
+                            || generation != unrelated.generation()
+                    }),
+                    "the new Original consumer must not demand the unrelated staged value"
+                );
+            },
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [23, 23, 23]);
+    session
+        .execute(
+            "previous_world_original_fresh_consumer",
+            "segmentRecord previousWorldCapture",
+            0,
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [23, 23, 23, 23]);
+    session.assert_no_compiler_since_last_effect();
 }
 
 #[test]
