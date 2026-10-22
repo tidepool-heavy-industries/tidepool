@@ -6,7 +6,7 @@
 module Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..)
   , HostBindingAuthorities
-  , resolveHostBindingAuthorities
+  , resolveHostBindingAuthorities, hostBindingOriginsRequired
   , HostBindingRepresentation
   , hostBindingRepresentationForType
   , HostBindingDecision(..), HostBindingRefusal(..), HostRepresentationRefusal(..)
@@ -70,6 +70,12 @@ shippedCommandTypesSource = BS.pack $(do
 -- | Resolve only authorities whose spelling occurs at a binding root. The
 -- cheap candidate scan is deliberately before every module-finder and source
 -- read: an ordinary @Int@ notebook bind must do no host-authority I/O.
+-- Text is package-owned; only JSON and Job require HOME source origins.
+-- Test this before obtaining the operation's selected TYPE origin context.
+hostBindingOriginsRequired :: [Type] -> Bool
+hostBindingOriginsRequired = any (\ty -> hasRoot "Tidepool.Aeson.Value" "Value" ty
+  || hasRoot "Tidepool.Command.Types" "Job" ty)
+
 resolveHostBindingAuthorities :: [Type] -> HscEnv
   -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO HostBindingAuthorities
 resolveHostBindingAuthorities roots env admitted = do

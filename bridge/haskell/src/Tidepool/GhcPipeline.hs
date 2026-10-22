@@ -114,7 +114,7 @@ import GHC.Tc.Errors.Types
 import GHC.Tc.Errors.Types qualified as TcError
 import GHC.Utils.Logger (LogAction, makeThreadSafe)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
-  pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
+  pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, typedItemCaptures, typedCaptureType, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, moduleInputOccurrences, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
   , ParsedModuleDemand, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
@@ -250,6 +250,7 @@ import Tidepool.CheckedPrefixImports
   , transformCompletedValueImports, refineParsedDeclarationImports, refineOriginalDeclarationImports, selectedImportNames
   , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases )
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
+import Tidepool.HostBindingAuthority (hostBindingOriginsRequired)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.Logging
@@ -4955,7 +4956,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             -- diagnostic. This request owns the preparation callback's exact
             -- refusal or cancellation, independently of source diagnostics.
             (hydrated, globals, interfaces) <- (do
-              admitted <- originAdmissions
+              let roots = [stabilizeEffectRows (typedCaptureType captured)
+                    | item <- pendingSegmentItems segment, captured <- typedItemCaptures item]
+              admitted <- if hostBindingOriginsRequired roots then originAdmissions else pure Map.empty
               prepare env admitted segment)
               `catch` \(failure :: SomeException) -> do
                 writeIORef typedPreparationFailureRef (Just failure)
