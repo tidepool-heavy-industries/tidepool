@@ -4,7 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use petgraph::{algo::kosaraju_scc, graph::DiGraph};
+use petgraph::{
+    algo::kosaraju_scc,
+    graph::{DiGraph, NodeIndex},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -70,12 +73,17 @@ impl NativeCodeBody {
                 operation.charge(owner.unit.len().saturating_add(owner.module.len()))?;
                 let mut definitions = Vec::new();
                 for symbol in code.binders() {
-                    operation.charge(
-                        symbol.unit.len()
-                            + symbol.module.len()
-                            + symbol.namespace.len()
-                            + symbol.occurrence.len()
-                            + symbol.record_parent.as_ref().map_or(0, String::len),
+                    charge_text_copies(
+                        [
+                            symbol.unit.as_str(),
+                            symbol.module.as_str(),
+                            symbol.namespace.as_str(),
+                            symbol.occurrence.as_str(),
+                        ]
+                        .into_iter()
+                        .chain(symbol.record_parent.as_deref()),
+                        1,
+                        operation,
                     )?;
                     definitions.push(NativeSymbolKey {
                         unit: symbol.unit.clone(),
@@ -85,7 +93,7 @@ impl NativeCodeBody {
                         record_parent: symbol.record_parent.clone(),
                     });
                 }
-                definitions.sort();
+                definitions.sort_unstable();
                 (
                     NativeCodeNominalKey::Package {
                         owner: NativePackageOwnerKey {
@@ -360,11 +368,80 @@ pub enum NativeCodeError {
     #[error("native linked graph encoding failed: {0}")]
     Encoding(String),
 }
-fn encode(value: &impl Serialize) -> Result<Vec<u8>, NativeCodeError> {
+fn encode(
+    facts: &NativeCodeComponentFacts,
+    operation: &InventoryOperation,
+) -> Result<Vec<u8>, NativeCodeError> {
+    struct Writer<'a> {
+        bytes: &'a mut Vec<u8>,
+        operation: &'a InventoryOperation,
+    }
+    impl ciborium_io::Write for Writer<'_> {
+        type Error = ParseError;
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), ParseError> {
+            self.operation.charge(bytes.len())?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes)
-        .map_err(|error| NativeCodeError::Encoding(error.to_string()))?;
+    ciborium::ser::into_writer(
+        facts,
+        Writer {
+            bytes: &mut bytes,
+            operation,
+        },
+    )
+    .map_err(|error| match error {
+        ciborium::ser::Error::Io(error) => NativeCodeError::Budget(error),
+        ciborium::ser::Error::Value(error) => NativeCodeError::Encoding(error),
+    })?;
     Ok(bytes)
+}
+
+fn discover(
+    plans: &[NativeCodePlan],
+    occurrence: usize,
+    indices: &mut BTreeMap<usize, NodeIndex>,
+    graph: &mut DiGraph<usize, ()>,
+    pending: &mut Vec<NodeIndex>,
+    operation: &InventoryOperation,
+) -> Result<NodeIndex, NativeCodeError> {
+    operation.charge(1)?;
+    if let Some(index) = indices.get(&occurrence) {
+        return Ok(*index);
+    }
+    let plan = plans
+        .get(occurrence)
+        .ok_or(NativeCodeError::MissingOccurrence)?;
+    if plan.imports.len() != plan.body.definitions().globals().len() {
+        return Err(NativeCodeError::ImportCount);
+    }
+    operation.reserve::<petgraph::graph::Node<usize>>(1)?;
+    operation.reserve::<(usize, NodeIndex, [usize; 3])>(1)?;
+    operation.reserve::<NodeIndex>(1)?;
+    let node = graph
+        .try_add_node(occurrence)
+        .map_err(|_| NativeCodeError::NoncanonicalComponent)?;
+    indices.insert(occurrence, node);
+    pending.push(node);
+    Ok(node)
+}
+
+fn charge_text_copies<'a>(
+    texts: impl IntoIterator<Item = &'a str>,
+    copies: usize,
+    operation: &InventoryOperation,
+) -> Result<(), ParseError> {
+    let bytes = texts
+        .into_iter()
+        .try_fold(0_usize, |sum, text| sum.checked_add(text.len()))
+        .and_then(|sum| sum.checked_mul(copies))
+        .ok_or(ParseError::LimitExceeded("work"))?;
+    operation.charge(bytes)
 }
 impl NativeCodeComponent {
     pub fn identity(&self) -> &[u8; 32] {
@@ -393,119 +470,145 @@ impl NativeCodeComponent {
         roots: &[usize],
         operation: &InventoryOperation,
     ) -> Result<Vec<NativeCodeRef>, NativeCodeError> {
-        operation.reserve::<Option<petgraph::graph::NodeIndex>>(plans.len())?;
-        operation.reserve::<Option<NativeCodeRef>>(plans.len())?;
-        let mut indices = vec![None; plans.len()];
+        operation.reserve::<NativeCodeRef>(roots.len())?;
+        let mut occurrence_indices = BTreeMap::new();
         let mut graph = DiGraph::<usize, ()>::new();
-        let mut pending = roots.to_vec();
-        while let Some(index) = pending.pop() {
-            operation.charge(1)?;
-            let plan = plans.get(index).ok_or(NativeCodeError::MissingOccurrence)?;
-            if indices[index].is_some() {
-                continue;
-            }
-            operation.reserve::<(usize, usize, usize)>(1)?;
-            indices[index] = Some(graph.add_node(index));
-            if plan.imports.len() != plan.body.definitions().globals().len() {
-                return Err(NativeCodeError::ImportCount);
-            }
-            for import in &plan.imports {
-                if let NativeCodePlanImport::Local { occurrence, .. } = import {
-                    pending.push(*occurrence);
-                }
-            }
+        let mut pending = Vec::new();
+        for root in roots {
+            discover(
+                plans,
+                *root,
+                &mut occurrence_indices,
+                &mut graph,
+                &mut pending,
+                operation,
+            )?;
         }
-        for node in graph.node_indices().collect::<Vec<_>>() {
+        while let Some(node) = pending.pop() {
             for import in &plans[graph[node]].imports {
                 operation.charge(1)?;
                 if let NativeCodePlanImport::Local { occurrence, .. } = import {
-                    let target = indices
-                        .get(*occurrence)
-                        .copied()
-                        .flatten()
-                        .ok_or(NativeCodeError::MissingOccurrence)?;
-                    operation.reserve::<(usize, usize, usize)>(1)?;
-                    graph.add_edge(node, target, ());
+                    let target = discover(
+                        plans,
+                        *occurrence,
+                        &mut occurrence_indices,
+                        &mut graph,
+                        &mut pending,
+                        operation,
+                    )?;
+                    operation.reserve::<petgraph::graph::Edge<()>>(1)?;
+                    graph
+                        .try_add_edge(node, target, ())
+                        .map_err(|_| NativeCodeError::NoncanonicalComponent)?;
                 }
             }
         }
-        // Both DFS passes are iterative; account for their temporary storage.
-        operation.reserve::<usize>(
-            graph
-                .node_count()
-                .saturating_mul(8)
-                .saturating_add(graph.edge_count().saturating_mul(2)),
-        )?;
+        // The iterative SCC passes retain DFS frontier/order, two bitsets and
+        // the output component vectors. None is sized by available inventory.
+        operation.reserve::<NodeIndex>(graph.node_count().saturating_mul(3))?;
+        operation
+            .reserve::<(NodeIndex, bool)>(graph.node_count().saturating_add(graph.edge_count()))?;
+        operation.reserve::<Vec<NodeIndex>>(graph.node_count())?;
+        operation.reserve::<u32>(graph.node_count().div_ceil(32).saturating_mul(2))?;
         let components = kosaraju_scc(&graph);
-        let mut component_of = vec![usize::MAX; plans.len()];
+        operation.reserve::<usize>(graph.node_count())?;
+        let mut component_of = vec![usize::MAX; graph.node_count()];
         for (component, nodes) in components.iter().enumerate() {
             for node in nodes {
-                component_of[graph[*node]] = component;
+                operation.charge(1)?;
+                component_of[node.index()] = component;
             }
         }
-        let mut dependencies = vec![BTreeSet::new(); components.len()];
+        operation.reserve::<usize>(components.len())?;
+        operation.reserve::<Vec<usize>>(components.len())?;
+        let mut remaining_dependencies = vec![0_usize; components.len()];
         let mut dependents = vec![Vec::new(); components.len()];
         for (component, nodes) in components.iter().enumerate() {
+            let mut dependencies = BTreeSet::new();
             for node in nodes {
-                for import in &plans[graph[*node]].imports {
-                    if let NativeCodePlanImport::Local { occurrence, .. } = import {
-                        let target = component_of[*occurrence];
-                        if target != component {
-                            dependencies[component].insert(target);
-                        }
+                for neighbor in graph.neighbors(*node) {
+                    operation.charge(1)?;
+                    let target = component_of[neighbor.index()];
+                    if target != component && !dependencies.contains(&target) {
+                        operation.reserve::<(usize, [usize; 3])>(1)?;
+                        dependencies.insert(target);
                     }
                 }
             }
-            for dependency in &dependencies[component] {
-                dependents[*dependency].push(component);
+            remaining_dependencies[component] = dependencies.len();
+            for dependency in dependencies {
+                operation.reserve::<usize>(1)?;
+                dependents[dependency].push(component);
             }
         }
-        let mut ready = dependencies
-            .iter()
-            .enumerate()
-            .filter_map(|(index, deps)| deps.is_empty().then_some(index))
-            .collect::<BTreeSet<_>>();
-        let mut linked: Vec<Option<NativeCodeRef>> = vec![None; plans.len()];
+        operation.reserve::<usize>(components.len())?;
+        let mut ready = Vec::with_capacity(components.len());
+        for (index, count) in remaining_dependencies.iter().enumerate() {
+            operation.charge(1)?;
+            if *count == 0 {
+                ready.push(index);
+            }
+        }
+        operation.reserve::<Option<NativeCodeRef>>(graph.node_count())?;
+        operation.reserve::<u32>(graph.node_count())?;
+        let mut linked: Vec<Option<NativeCodeRef>> = vec![None; graph.node_count()];
+        let mut member_of = vec![0_u32; graph.node_count()];
         let mut count = 0;
-        while let Some(component_index) = ready.pop_first() {
-            let mut ordered: BTreeMap<NativeCodeBodyKey, Vec<usize>> = BTreeMap::new();
+        while let Some(component_index) = ready.pop() {
+            let mut ordered: BTreeMap<NativeCodeBodyKey, Vec<NodeIndex>> = BTreeMap::new();
             for node in &components[component_index] {
+                operation.charge(1)?;
                 let index = graph[*node];
-                ordered
-                    .entry(plans[index].body.key(operation)?)
-                    .or_default()
-                    .push(index);
+                let key = plans[index].body.key(operation)?;
+                let occurrences = match ordered.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        operation.reserve::<(NativeCodeBodyKey, Vec<NodeIndex>, [usize; 3])>(1)?;
+                        entry.insert(Vec::new())
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                };
+                operation.reserve::<NodeIndex>(1)?;
+                occurrences.push(*node);
             }
             if ordered.len() > u32::MAX as usize {
                 return Err(NativeCodeError::NoncanonicalComponent);
             }
-            let mut nominal = BTreeMap::new();
+            let mut previous: Option<&NativeCodeBodyKey> = None;
             for key in ordered.keys() {
-                if nominal
-                    .insert(key.nominal.clone(), key.definitions_sha256)
-                    .is_some_and(|previous| previous != key.definitions_sha256)
-                {
+                operation.charge(1)?;
+                if previous.is_some_and(|previous| {
+                    previous.nominal == key.nominal
+                        && previous.definitions_sha256 != key.definitions_sha256
+                }) {
                     return Err(NativeCodeError::ConflictingDefinition);
                 }
+                previous = Some(key);
             }
-            let mut local = BTreeMap::new();
             for (member, indices) in ordered.values().enumerate() {
-                for index in indices {
-                    local.insert(*index, member as u32);
+                for node in indices {
+                    operation.charge(1)?;
+                    member_of[node.index()] = member as u32;
                 }
             }
-            let mut members = Vec::new();
-            let mut records = Vec::new();
+            operation.reserve::<NativeCodeNode>(ordered.len())?;
+            operation.reserve::<NativeCodeNodeFacts>(ordered.len())?;
+            let mut members = Vec::with_capacity(ordered.len());
+            let mut records = Vec::with_capacity(ordered.len());
             for (key, indices) in ordered {
-                let first = indices[0];
+                let first = graph[indices[0]];
                 let mut chosen: Option<(Vec<ComponentImport>, Vec<NativeCodeEdgeFacts>)> = None;
-                for index in indices {
+                for node in indices {
+                    operation.charge(1)?;
+                    let index = graph[node];
                     if plans[first].body != plans[index].body {
                         return Err(NativeCodeError::CommitmentCollision);
                     }
-                    let mut imports = Vec::new();
-                    let mut facts = Vec::new();
+                    operation.reserve::<ComponentImport>(plans[index].imports.len())?;
+                    operation.reserve::<NativeCodeEdgeFacts>(plans[index].imports.len())?;
+                    let mut imports = Vec::with_capacity(plans[index].imports.len());
+                    let mut facts = Vec::with_capacity(plans[index].imports.len());
                     for (slot, import) in plans[index].imports.iter().enumerate() {
+                        operation.charge(1)?;
                         let declaration = &plans[index].body.definitions().globals()[slot];
                         let (edge, fact) = match import {
                             NativeCodePlanImport::Local { occurrence, value } => {
@@ -516,19 +619,23 @@ impl NativeCodeComponent {
                                     plans[index].body.definitions(),
                                     operation,
                                 )?;
-                                if let Some(member) = local.get(occurrence) {
+                                let target = *occurrence_indices
+                                    .get(occurrence)
+                                    .ok_or(NativeCodeError::MissingOccurrence)?;
+                                if component_of[target.index()] == component_index {
+                                    let member = member_of[target.index()];
                                     (
                                         ComponentImport::Local {
-                                            member: *member,
+                                            member,
                                             value: *value,
                                         },
                                         NativeCodeEdgeFacts::Local {
-                                            member: *member,
+                                            member,
                                             value: value.0,
                                         },
                                     )
                                 } else {
-                                    let code = linked[*occurrence]
+                                    let code = linked[target.index()]
                                         .clone()
                                         .ok_or(NativeCodeError::NoncanonicalComponent)?;
                                     let fact = NativeCodeEdgeFacts::External {
@@ -570,6 +677,19 @@ impl NativeCodeComponent {
                                 {
                                     return Err(NativeCodeError::ImportContract);
                                 }
+                                let symbol = &requirement.identity;
+                                charge_text_copies(
+                                    [
+                                        symbol.unit.as_str(),
+                                        symbol.module.as_str(),
+                                        symbol.namespace.as_str(),
+                                        symbol.occurrence.as_str(),
+                                    ]
+                                    .into_iter()
+                                    .chain(symbol.record_parent.as_deref()),
+                                    2,
+                                    operation,
+                                )?;
                                 (
                                     ComponentImport::Retained(requirement.clone()),
                                     NativeCodeEdgeFacts::Retained(requirement.facts()),
@@ -588,6 +708,7 @@ impl NativeCodeComponent {
                     }
                 }
                 let (imports, facts) = chosen.ok_or(NativeCodeError::NoncanonicalComponent)?;
+                operation.reserve::<ComponentImport>(imports.len())?;
                 records.push(NativeCodeNodeFacts {
                     body: key,
                     imports: facts,
@@ -601,8 +722,13 @@ impl NativeCodeComponent {
                 version: 1,
                 nodes: records,
             };
-            let bytes = encode(&facts)?;
+            let bytes = encode(&facts, operation)?;
+            // Freeze Vec-backed storage into its immutable Arc owners only
+            // after reserving the additional destination allocations.
             operation.charge(bytes.len())?;
+            operation.reserve::<NativeCodeComponent>(1)?;
+            operation.reserve::<NativeCodeComponentFacts>(1)?;
+            operation.reserve::<NativeCodeNode>(members.len())?;
             let mut hash = Sha256::new();
             hash.update(b"Tidepool linked native component v1\0");
             hash.update(&bytes);
@@ -612,29 +738,38 @@ impl NativeCodeComponent {
                 record_bytes: bytes.into(),
                 nodes: members.into(),
             });
-            for (index, member) in local {
-                linked[index] = Some(NativeCodeRef::new(Arc::clone(&owner), member));
+            for node in &components[component_index] {
+                operation.charge(1)?;
+                linked[node.index()] = Some(NativeCodeRef::new(
+                    Arc::clone(&owner),
+                    member_of[node.index()],
+                ));
             }
             count += 1;
             for dependent in &dependents[component_index] {
-                dependencies[*dependent].remove(&component_index);
-                if dependencies[*dependent].is_empty() {
-                    ready.insert(*dependent);
+                operation.charge(1)?;
+                remaining_dependencies[*dependent] -= 1;
+                if remaining_dependencies[*dependent] == 0 {
+                    ready.push(*dependent);
                 }
             }
         }
         if count != components.len() {
             return Err(NativeCodeError::NoncanonicalComponent);
         }
-        roots
-            .iter()
-            .map(|root| {
-                linked
-                    .get(*root)
-                    .and_then(Clone::clone)
-                    .ok_or(NativeCodeError::MissingOccurrence)
-            })
-            .collect()
+        let mut result = Vec::with_capacity(roots.len());
+        for root in roots {
+            operation.charge(1)?;
+            let node = occurrence_indices
+                .get(root)
+                .ok_or(NativeCodeError::MissingOccurrence)?;
+            result.push(
+                linked[node.index()]
+                    .clone()
+                    .ok_or(NativeCodeError::MissingOccurrence)?,
+            );
+        }
+        Ok(result)
     }
 
     /// Reissue exact acquired bodies and decoded references through the same
@@ -645,62 +780,71 @@ impl NativeCodeComponent {
         external: &BTreeMap<NativeCodeLocation, NativeCodeRef>,
         operation: &InventoryOperation,
     ) -> Result<Arc<Self>, NativeCodeError> {
-        if facts.version != 1
-            || facts.nodes.is_empty()
-            || bodies.len() != facts.nodes.len()
-            || facts
-                .nodes
-                .windows(2)
-                .any(|pair| pair[0].body >= pair[1].body)
-        {
+        if facts.version != 1 || facts.nodes.is_empty() || bodies.len() != facts.nodes.len() {
             return Err(NativeCodeError::NoncanonicalComponent);
         }
-        let mut plans = Vec::new();
-        for (record, body) in facts.nodes.iter().zip(bodies) {
-            if body.key(operation)? != record.body {
-                return Err(NativeCodeError::CommitmentCollision);
+        for pair in facts.nodes.windows(2) {
+            operation.charge(1)?;
+            if pair[0].body >= pair[1].body {
+                return Err(NativeCodeError::NoncanonicalComponent);
             }
-            let imports = record
-                .imports
-                .iter()
-                .map(|edge| match edge {
-                    NativeCodeEdgeFacts::Local { member, value } => {
-                        Ok(NativeCodePlanImport::Local {
-                            occurrence: *member as usize,
-                            value: ValueId(*value),
-                        })
-                    }
+        }
+        operation.reserve::<NativeCodePlan>(facts.nodes.len())?;
+        let mut plans = Vec::with_capacity(facts.nodes.len());
+        for (record, body) in facts.nodes.iter().zip(bodies) {
+            operation.charge(1)?;
+            operation.reserve::<NativeCodePlanImport>(record.imports.len())?;
+            let mut imports = Vec::with_capacity(record.imports.len());
+            for edge in &record.imports {
+                operation.charge(1)?;
+                let import = match edge {
+                    NativeCodeEdgeFacts::Local { member, value } => NativeCodePlanImport::Local {
+                        occurrence: *member as usize,
+                        value: ValueId(*value),
+                    },
                     NativeCodeEdgeFacts::External { code, value } => {
                         let reference = external
                             .get(code)
                             .filter(|reference| reference.location() == *code)
                             .ok_or(NativeCodeError::MissingOccurrence)?;
-                        Ok(NativeCodePlanImport::External {
+                        NativeCodePlanImport::External {
                             code: reference.clone(),
                             value: ValueId(*value),
-                        })
+                        }
                     }
                     NativeCodeEdgeFacts::Retained(requirement) => {
                         let (unit, module, namespace, occurrence, record_parent) =
                             &requirement.symbol;
-                        Ok(NativeCodePlanImport::Retained(
-                            NativeRetainedRequirement::new(
-                                SymbolIdentity {
-                                    unit: unit.clone(),
-                                    module: module.clone(),
-                                    namespace: namespace.clone(),
-                                    occurrence: occurrence.clone(),
-                                    record_parent: record_parent.clone(),
-                                },
-                                requirement.generation,
-                                requirement.type_artifact,
-                            ),
+                        charge_text_copies(
+                            [
+                                unit.as_str(),
+                                module.as_str(),
+                                namespace.as_str(),
+                                occurrence.as_str(),
+                            ]
+                            .into_iter()
+                            .chain(record_parent.as_deref()),
+                            1,
+                            operation,
+                        )?;
+                        NativeCodePlanImport::Retained(NativeRetainedRequirement::new(
+                            SymbolIdentity {
+                                unit: unit.clone(),
+                                module: module.clone(),
+                                namespace: namespace.clone(),
+                                occurrence: occurrence.clone(),
+                                record_parent: record_parent.clone(),
+                            },
+                            requirement.generation,
+                            requirement.type_artifact,
                         ))
                     }
-                })
-                .collect::<Result<Vec<_>, NativeCodeError>>()?;
+                };
+                imports.push(import);
+            }
             plans.push(NativeCodePlan { body, imports });
         }
+        operation.reserve::<usize>(plans.len())?;
         let roots = (0..plans.len()).collect::<Vec<_>>();
         let linked = Self::link(&plans, &roots, operation)?;
         let first = linked
@@ -709,8 +853,16 @@ impl NativeCodeComponent {
         if linked
             .iter()
             .any(|code| !Arc::ptr_eq(code.component(), first.component()))
-            || first.component.facts.as_ref() != facts
         {
+            return Err(NativeCodeError::NoncanonicalComponent);
+        }
+        for (code, record) in linked.iter().zip(&facts.nodes) {
+            operation.charge(1)?;
+            if code.component.facts.nodes[code.member as usize].body != record.body {
+                return Err(NativeCodeError::CommitmentCollision);
+            }
+        }
+        if first.component.facts.as_ref() != facts {
             return Err(NativeCodeError::NoncanonicalComponent);
         }
         Ok(Arc::clone(first.component()))
@@ -768,6 +920,7 @@ mod tests {
         testing, Atom, ExprFrame, GlobalDecl, Group, HeapRhs, PackageCodeOwner, RuntimeRep,
         ScalarLiteral,
     };
+    use proptest::prelude::*;
 
     fn plan(module: &str, children: &[(&str, usize)], result: i64) -> NativeCodePlan {
         let mut wire = testing::wire_program();
@@ -815,6 +968,33 @@ mod tests {
     }
     fn operation() -> InventoryOperation {
         InventoryOperation::new(Default::default())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn unused_inventory_does_not_consume_demand_budget(unused in 4096_usize..8193, demand_first: bool) {
+            let demanded = plan("Demanded", &[], 42);
+            let small_operation = operation();
+            let small = NativeCodeComponent::link(std::slice::from_ref(&demanded), &[0, 0], &small_operation).unwrap();
+            let spent = small_operation.work_usage().unwrap().0;
+            // These rows would refuse if traversal inspected their contracts.
+            let unused_plan = NativeCodePlan {
+                body: demanded.body.clone(),
+                imports: vec![NativeCodePlanImport::Local { occurrence: usize::MAX, value: ValueId(0) }],
+            };
+            let mut inventory = vec![unused_plan; unused];
+            let root = if demand_first { inventory.insert(0, demanded); 0 } else { inventory.push(demanded); unused };
+            let large_operation = InventoryOperation::new(crate::execution_schema::InventoryDecodeLimits {
+                max_work: spent, ..Default::default()
+            });
+            let large = NativeCodeComponent::link(&inventory, &[root, root], &large_operation).unwrap();
+            prop_assert_eq!(large.len(), 2);
+            prop_assert_eq!(large[0].id(), small[0].id());
+            prop_assert_eq!(large[1].id(), small[1].id());
+            prop_assert!(Arc::ptr_eq(large[0].component(), large[1].component()));
+            prop_assert_eq!(large_operation.work_usage().unwrap(), (spent, 0));
+        }
     }
 
     #[test]
