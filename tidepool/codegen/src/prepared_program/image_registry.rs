@@ -1001,6 +1001,20 @@ mod tests {
             Err(BindingPromotionError::ConflictingSourceOrigin)
         ));
         assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
+        let stale_publication = table
+            .prepare_exact_publication_in(&tree, private, public, &[], &owned)
+            .unwrap();
+        assert!(matches!(
+            table.prepare_world_execution_selection(
+                &tree,
+                private,
+                public,
+                &stale_delta,
+                stale_publication,
+            ),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        ));
+        assert_eq!(table.scope_snapshot(&tree, public).unwrap(), before);
         let private_selection = table
             .prepare_world_execution_selection_delta(&tree, private, &completed)
             .unwrap();

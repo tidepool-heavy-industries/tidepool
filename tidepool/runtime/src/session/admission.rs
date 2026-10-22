@@ -7,8 +7,6 @@ use std::sync::{Arc, OnceLock};
 
 use tidepool_codegen::binding_table::{BindingTipId, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
-#[cfg(test)]
-use tidepool_repr::execution_schema::ImportOwner;
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::Generation;
 use tidepool_toolchain::compiler_world::{

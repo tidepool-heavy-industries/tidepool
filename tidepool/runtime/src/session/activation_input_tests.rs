@@ -6685,8 +6685,10 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
 
     original_value_probe(&mut resident, &recipe, "held + 1", 1_000_000);
     assert_eq!(
-        resident.current_binding_in(resident.public_scope(), "held"),
-        Some(original)
+        resident
+            .current_binding_in(resident.public_scope(), "held")
+            .as_ref(),
+        Some(&original)
     );
     assert!(Arc::ptr_eq(
         resident

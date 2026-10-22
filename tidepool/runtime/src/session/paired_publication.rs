@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{PreparedWorldExecutionSelection, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
-use tidepool_toolchain::compiler_world::{CompilerWorld, PrivateCompilerProgress};
+use tidepool_toolchain::compiler_world::PrivateCompilerProgress;
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactLexicalNode, ExactModuleIdentity,

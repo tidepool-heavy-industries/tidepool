@@ -344,7 +344,7 @@ mod tests {
     use crate::prepared_program::{
         BatchImport, BatchLeaseRequest, BatchProgram, DemandedHomeImage, DemandedPackageImage,
         ImageRegistry, NativeArtifactBinding, NativeExportRequest, NativeHomeBinding,
-        PreparedCallOptions, PreparedResult,
+        PreparedCallOptions, PreparedResult, SourceInstanceDomain,
     };
     use crate::scope::{ScopeId, ScopeTree};
     use crate::suspension::RealmId;
