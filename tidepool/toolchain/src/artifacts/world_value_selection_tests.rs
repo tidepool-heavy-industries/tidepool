@@ -183,22 +183,49 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         "Data.List.sort retains its three ordered package roots: {package_roots:?}"
     );
     assert!(
-        selection
-            .target_imports()
-            .iter()
-            .any(|import| match import {
-                crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding,
-                    ..
-                } => binding.product().code().globals().iter().any(|global| {
-                    global.identity.module == "Data.List"
-                        && global.identity.occurrence == "sort"
-                }),
-                _ => false,
-            }),
-        "the item keeps its exact Data.List.sort implementation: {package_roots:?}"
+        package_roots.iter().all(|owner| owner.ends_with("Resume")),
+        "the ordered roots retain their issued package owner: {package_roots:?}"
     );
-
+    let home_rows = selection
+        .completion()
+        .rows()
+        .filter(|row| {
+            row.binding().original_ordinal == 0
+                && row.imports()
+                .iter()
+                .filter(|import| {
+                    matches!(
+                        import,
+                        crate::artifact_inventory::CompletedNativeImport::Package { .. }
+                    )
+                })
+                .count()
+                == 2
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(home_rows.len(), 1, "one package-using HOME declaration");
+    let home = home_rows[0];
+    assert_eq!(home.binding().original_ordinal, 0);
+    let home_packages = home
+        .imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
+                Some(binding)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(home_packages.len(), 2);
+    assert_eq!(
+        home_packages[0].product().code().owner().module,
+        "GHC.Classes"
+    );
+    assert_eq!(
+        home_packages[1].product().code().owner().module,
+        "GHC.Internal.Data.OldList"
+    );
+    assert_eq!(home_packages[1].imports().len(), 2);
     let execution = first.items()[0]
         .native()
         .expect("package input item is executable")
