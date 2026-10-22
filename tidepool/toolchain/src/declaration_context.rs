@@ -19041,7 +19041,7 @@ mod tests {
             .admit_fixture_support(
                 empty.clone(),
                 &source_offer,
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -19279,7 +19279,14 @@ mod tests {
     fn support_admission(root: &Path) -> ExactSourceAdmission {
         let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let request = program_request(root, context);
-        let receipt = support_receipt(root, &request);
+        support_admission_for_request(root, &request)
+    }
+
+    fn support_admission_for_request(
+        root: &Path,
+        request: &ExactCompilationRequest,
+    ) -> ExactSourceAdmission {
+        let receipt = support_receipt(root, request);
         request
             .validate_receipt(&receipt, None, request.context())
             .unwrap()
@@ -29537,7 +29544,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_fixture_support(
                 baseline.clone(),
                 &offer,
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -29665,7 +29672,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
-        let admission = support_admission(directory.path());
+        let admission = support_admission_for_request(directory.path(), &request);
         let context = request
             .admit_fixture_support(
                 baseline.clone(),
@@ -29886,7 +29893,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), empty.clone());
-        let original = support_admission(directory.path());
+        let original = support_admission_for_request(directory.path(), &request);
         let receipt = support_receipt(directory.path(), &request);
         let mut wire = read_receipt(&receipt);
         let fields = wire.as_array_mut().unwrap();
@@ -30214,7 +30221,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -30472,7 +30479,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             request.admit_program_support_with_selection(
                 baseline,
                 fixture.artifacts(),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
                 &selection,
             )
@@ -30963,7 +30970,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
