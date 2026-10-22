@@ -1,75 +1,84 @@
 # Current G2 campaign state
 
-Read [REVIEW-29231ed3](REVIEW-29231ed3.md) and [NEXT-WAVE](NEXT-WAVE.md).
-They supersede the 5c759554 assignments. **G2 remains unqualified.**
+**Implementation is active; G2 remains unqualified.** The Sol tranche follows
+[NEXT-WAVE](NEXT-WAVE.md), with the additional exact Original package handoff
+repair below. The peer review is [REVIEW-29231ed3](REVIEW-29231ed3.md).
 
-| Item | Observed state |
-|---|---|
-| Checkout | /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020 |
-| Review branch | root/g2-final-20261021 |
-| Code candidate | 29231ed3236bb4dd6d13b6e459315533cd171a3e |
-| Incoming documentation tip | 5b3e15d7dc093fc7ea7f28f1592abfe65f150f36 |
-| Current peer changes | Review/plans only; no runtime edits or new test execution |
-| Push remote | github — https://github.com/tidepool-heavy-industries/tidepool.git |
-| Local replication | origin — /srv/swarm/checkouts/tidepool-shared-warm-plan-20261019 |
-| Broader consolidation | integration/compiler-query-warm-final; reconcile refs before promotion |
-| Interactive checkout | /srv/swarm/checkouts/tidepool is unrelated; do not switch/edit it |
-| Bundle / fresh Persona | Not built, qualified or deployed by this review |
+- Integration checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
+- Branch: `root/g2-final-20261021`; code checkpoint `ff889e254e`.
+- Push remote: `github`; `origin` is local replication. Reconcile release/main
+  separately; the isolated checkout's strict status reports `local_main_missing`.
+- The interactive `/srv/swarm/checkouts/tidepool` is unrelated; preserve its work.
+- No bundle or fresh Persona has been qualified or deployed by this tranche.
 
-## Evidence and disposition
+## Integrated work and remaining evidence
 
-Incoming REVIEW-ROOT records joined production compilation; H focused passes;
-old P nine-case passing cohort; expanded P eight/eleven; actor five/nine.
-The actor run lacks exact final source identity, and the T five-case notebook run
-used a branch without P3. Neither is frozen-candidate qualification.
+| Owner | Integrated result | Remaining work |
+|---|---|---|
+| H | Native custody narrowing preserves required payload without restoring unrelated parent custody | Joined acceptance beyond the two passing focused controls |
+| N | Cumulative settled frontier, exact snapshot/operand issuance, active freeze refusal, private query lease, private carrier token, exact retirement | Execute real multi-program, parked, cancellation and publication histories |
+| A | Issuer-returned affine host lease; original-epoch confirmed cleanup; Final activation intent; exact inherited activation replacement | Compile and execute joined activation/reuse/refusal controls |
+| C | World-issued host TYPE origins; typed producer diagnostics; ordinary types avoid origin scanning | Warm World and parked Job; exact mixed Text outcome remains unresolved |
+| P | Physical issued rows and operation ownership; target-local source association; closed ordinary target; real parsed test inputs | Compile repairs, actual repeat-target installation, then remove remaining `same_exact_rows` escape |
+| D / Rust leaf | Target-specific Original-use package occurrences; join to exact retained group/slot obligations; format v4/item v2 | Close emitted-stage ownership API gap; execute producer/decoder mutations and real notebook |
+| T | Real World histories, package premises, generated ownership, canonical cached-HOME producer identity | Execute repaired controls; same-source-slot transfer and durable reopen remain explicitly limited |
+| V | One warm joined validation lane, exact source/artifact/command receipts | Next joined compiler/runtime/actor compilation, then discriminating cohorts |
 
-Four Sol audits and root tracing are retained at
-`/srv/swarm/evidence/inanna/g2-peer-review-29231ed3-20261022/`.
-They distinguish confirmed source defects, observed historical failures,
-bad test premises and unresolved predicates. Copied CBOR/launch inputs and hashes
-preserve the package, Job and old-notebook discriminators independently of /tmp.
+The Original package defect is not the ordinary producer omitting Core5526:
+that ordinary receipt already contains it. A newly acquired stage Original has
+exact package obligations in Rust, while the compiler's chosen occurrence was
+lost before completion. The repair carries the actual per-target/use occurrence
+choice and joins it to the retained demand owner. It does not reconstruct a
+closure from module inventory, broaden HOME roots, or repeat the judgment.
+ArtifactBinding and NativeGroupBinding identifiers belong to different domains;
+their differing selection IDs alone are not an identity defect.
 
-| Area | Disposition |
-|---|---|
-| Current snapshot, exact retirement, one-close stage support | Retain; fix cumulative progress/readiness/refusal custody |
-| Fresh transitive HOME | Producer output proves the intended fresh path; repair the test oracle |
-| Job host authority | Null is emitted by Haskell; World callback omits canonical evidence; precise failed predicate still needs tracing |
-| Checked Text | Mixed-stage producer certification; split ambiguous predicates before repair |
-| Physical row/source installation | Reissuance and source rematching/Unknown remain; finish paired owner route |
-| Activation | Current-snapshot mount partly migrated; duplicate pending registration and binding-only publication remain |
-| Tests | Correct premises, compile affected Haskell consumer, rerun actual joined notebook early |
-| H custody narrowing | Required payload preserved, but unrelated parent custody restored; bounded repair |
-| G3 | Remains open; no implication of release/main acceptance |
+The Rust leaf identified one remaining API closure question: the item package
+selection and its retained demand must derive from the same emitted stage,
+not merely belong to the same operation. Close that in the existing issuer.
 
-## Preserved follow-ups
+## Executed evidence
 
-P/T/N patches and status are retained under
-`/srv/swarm/evidence/inanna/g2-next-wave-90a54565/{p,t,n}/`.
-N has useful first-entry/activation directions but incomplete phase/cleanup
-handling and an invalid borrowed-field edit. P source-association work is useful
-but unqualified and retains row reissuance. T cached lexical fixture is useful;
-source-race WIP bypasses World publication. Review/reuse hunks, not blind patch application.
+Evidence root: `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/`.
+Independent review reports are in `reviews/`; exact commands, hashes and counts
+are in `validation/`. T records are also in the peer-review evidence directory.
 
-T commit `7fac7d7603` is outside the checkpoint and contains literal `Eff {}`
-in an unformatted Haskell fixture. It is not an already-qualified repair.
+- `7e0b1610e1`: worker and affected toolchain/runtime/actor/host consumers compiled;
+  two focused custody controls executed and passed.
+- `600e3f9772`: first N cut compiled production and unit targets for runtime and
+  toolchain. This is compilation, not lifecycle execution acceptance.
+- `2c34f01f7a`: production Haskell worker/test binary compiled; focused host
+  authority case passed 1/1, including cold Job and changed-source refusal.
+- Package cohort at `2c34f01f7a`: nine cases passed; one executed case failed
+  because its fixture passed raw producer bytes where the canonical digest was
+  required (repair integrated). One case failed before libtest during Nix root
+  enumeration. It is not eleven executed cases. Malformed `dnix/store` text was
+  absent from selected argv; startup investigation is retained separately.
+- `dc556799e4`: compilation stopped in P production/cfg(test) API migrations;
+  no actor/runtime execution established. Bounded repairs are now integrated.
+- Baseline notebook at `3ad3aafc`: four executed failures shared the missing
+  Original package completion boundary; no passing notebook claim yet.
 
-Earlier H instrumentation and D diagnostic patch remain preserved at their old
-handoff paths. No source/WIP was deleted. Preserve Persona authored files/memory.
+## Next sequence
 
-## Worker/resource state
+1. Compile the paired Haskell/Rust package format and all changed production,
+   unit, actor and host consumers through the admitted pinned commands.
+2. Execute exact P repeated-target and real source installer controls, cached
+   HOME receipt mutations, native producer tests, then the registered notebook
+   and private-publication/custody histories. Diagnose first shared failure.
+3. Delete the P equality escape only after its proper issuer is demonstrated;
+   keep genuine crossed/stale refusals. Close D's stage owner at construction.
+4. Once ordinary G2 histories pass on one source, freeze one matched bundle,
+   verify Persona spec/tools/initial memory and run bounded DeepSeek smoke.
+5. G3 force/fork/worker-loss/full qualification and main/release convergence
+   remain separate gates. No stale-binary launch or authored-file overwrite.
 
-Peer investigation used four Sol reviewers; root reviewed critical dataflow.
-No implementation workers were launched by this review. External DeepSeek
-liveness is unobserved; require actual resume acknowledgements.
+## Resource and handoff rules
 
-Preflight observed ~114 GiB scratch free, ~108 GiB available RAM and ~23.2 GiB
-build.slice memory. No heavy build admitted. Preserve 100 GiB scratch including
-prospective growth; recheck installed reservation tooling and running jobs before
-new tests. No daemon/service restarted, no outputs deleted.
-
-The strict integration-status check at this documentation checkpoint returned
-local_main_missing (exit 1); its report is in the peer evidence directory. This
-checkout therefore does not establish main containment. Do not manufacture a
-local main ref to conceal that gap. Push only the reviewed branch; main/release
-promotion requires its own reviewed gates. Relative document links and whitespace
-checks pass; no new behavioral tests were run.
+Use the warm integration outputs; available scratch was about 111 GiB at the
+last validation observation, with a 100 GiB floor. Recheck actual headroom before
+admission. V pins source while compiling/running; release the pin before edits.
+Independent workers own isolated sources and send exact commits for review.
+No broad output cleanup, shared service restart or source deletion occurred.
+Preserved older P/T/N patches are historical evidence, not unreviewed work to
+apply automatically. The current implementation replaces the reviewed gaps.
