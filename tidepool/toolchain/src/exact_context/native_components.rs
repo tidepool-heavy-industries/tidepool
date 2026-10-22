@@ -468,45 +468,51 @@ pub(super) mod tests {
         assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
             if detail.contains("recorded package occurrence lacks acquired product custody")));
 
-        let omitted_interface = entries
+        let (original, canonical) = references
             .iter()
-            .find(|entry| matches!(entry.payload, ArtifactPayload::Canonical(_)))
-            .expect("actual HOME dependency retains its canonical companion")
-            .descriptor
-            .id;
-        let incomplete = references
-            .iter()
-            .filter(|reference| match reference {
-                crate::declaration_context::RecoveryPayloadReference::Canonical(reference) => {
-                    crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
-                        reference,
-                    )
-                    .id != omitted_interface
+            .find_map(|reference| match reference {
+                crate::declaration_context::RecoveryPayloadReference::Original(original) => {
+                    original
+                        .module_interface
+                        .as_ref()
+                        .map(|canonical| (original, canonical))
                 }
-                _ => true,
+                _ => None,
             })
-            .cloned()
-            .collect::<Vec<_>>();
-        let incomplete_descriptors = descriptors
-            .iter()
-            .filter(|descriptor| descriptor.id != omitted_interface)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut stage = acquisition.stage_payloads(&incomplete).unwrap();
-        let refusal = stage
-            .capture_payloads_bound(
-                &incomplete,
-                &incomplete_descriptors,
-                &graph.bindings,
-                &edges,
+            .expect("actual HOME dependency retains its canonical companion");
+        let omitted_interface =
+            crate::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface(
+                canonical,
             )
+            .id;
+        assert!(entries
+            .iter()
+            .any(|entry| entry.descriptor.id == omitted_interface
+                && matches!(entry.payload, ArtifactPayload::Canonical(_))));
+        assert!(directory.path().join(&original.product_path).is_file());
+        // Originals name their exact canonical companion implicitly. Remove its
+        // actual payload, rather than only an explicit duplicate reference, and
+        // acquire afresh so held immutable custody cannot satisfy the read.
+        let missing_path = directory.path().join(&canonical.certificate_path);
+        let certificate_bytes = std::fs::read(&missing_path).unwrap();
+        std::fs::remove_file(&missing_path).unwrap();
+        let mut fresh = RecoveredArtifactAcquisition::new(directory.path());
+        let refused =
+            fresh.capture_payloads_bound(&references, &descriptors, &graph.bindings, &edges);
+        std::fs::write(&missing_path, &certificate_bytes).unwrap();
+        let refusal = refused
             .err()
             .expect("missing required interface must refuse");
         assert!(
-            matches!(&refusal, crate::declaration_context::RecoveryInventoryError::Certification(crate::CompileError::ExtractFailed(detail))
-            if detail.contains("bound recovery has duplicate or missing exact endpoints")),
+            matches!(&refusal, crate::declaration_context::RecoveryInventoryError::Artifacts(losses)
+                if losses.iter().any(|(id, error)| *id == omitted_interface
+                    && matches!(error, crate::recovery_artifacts::RecoveryArtifactError::Unavailable(path)
+                        if path == &missing_path))),
             "the native payload cannot replace required canonical interface {omitted_interface:?}: {refusal:?}"
         );
+        fresh
+            .capture_payloads_bound(&references, &descriptors, &graph.bindings, &edges)
+            .unwrap();
     }
 
     // Serializer DATA only; no body, acquired grant or usable CodeRef is issued.
