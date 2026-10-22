@@ -503,9 +503,9 @@ pub(super) mod tests {
             .err()
             .expect("missing required interface must refuse");
         assert!(
-            matches!(refusal, crate::declaration_context::RecoveryInventoryError::Certification(crate::CompileError::ExtractFailed(detail))
+            matches!(&refusal, crate::declaration_context::RecoveryInventoryError::Certification(crate::CompileError::ExtractFailed(detail))
             if detail.contains("bound recovery has duplicate or missing exact endpoints")),
-            "the native payload cannot replace its required canonical interface"
+            "the native payload cannot replace required canonical interface {omitted_interface:?}: {refusal:?}"
         );
     }
 
