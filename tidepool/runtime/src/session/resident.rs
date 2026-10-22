@@ -1073,7 +1073,25 @@ impl HostBindingReservation<'_> {
 struct HostBindingInstall<'a> {
     reservation: HostBindingReservation<'a>,
     interface: super::persistent::StagedCheckedValueInterface,
-    private_input: Option<&'a Arc<super::PrivateExecutionAdmission>>,
+    private_input: Option<PrivateHostBinding<'a>>,
+}
+
+#[derive(Clone, Copy)]
+enum PrivateHostBinding<'a> {
+    Hidden(&'a Arc<super::PrivateExecutionAdmission>),
+    Visible(&'a Arc<super::PrivateExecutionAdmission>),
+}
+
+impl<'a> PrivateHostBinding<'a> {
+    fn admission(self) -> &'a Arc<super::PrivateExecutionAdmission> {
+        match self {
+            Self::Hidden(admission) | Self::Visible(admission) => admission,
+        }
+    }
+
+    fn is_hidden(self) -> bool {
+        matches!(self, Self::Hidden(_))
+    }
 }
 
 enum PreparedBindingInstall<'a> {
@@ -6434,7 +6452,7 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+        private_input: Option<PrivateHostBinding<'_>>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         let HostCarrierOrigin::Interface {
             admission,
@@ -6551,25 +6569,49 @@ where
             .ok_or(SessionError::WorldCellPublicationBaseStale)?;
         // Fresh ID AND fresh name: this operation cannot retract a logical
         // head, nor retroactively classify a previously visible host binding.
-        if !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
-            || execution.owner_epoch != self.state.admission_owner().epoch()
-            || execution.session() != self.state.lib().session_id()
-            || execution.library != self.state.lib().compile_view_identity
-            || execution.final_intent.get().is_some()
-            || self.run_context.lexical_scope != scope
-            || self.state.bindings().get(id).is_some()
-            || self.state.resolve_in(scope, &binder.name).is_some()
-            || self.hidden_host_bindings.contains_key(&id)
-            || !execution.host_retirements.lock().is_empty()
-            || !Arc::ptr_eq(&before.base.source, &facts.source)
-            || !before.base.original_source.matches(&facts.original_source)
-            || !before.base.target.matches(&target)
-            || !self.state.inspection_world_base_is_current(
-                &before.base,
-                &facts.source,
-                &facts.original_source,
-            )
-        {
+        let stale_reason = if !Arc::ptr_eq(&execution.owner, self.state.admission_owner()) {
+            Some("admission owner")
+        } else if execution.owner_epoch != self.state.admission_owner().epoch() {
+            Some("admission epoch")
+        } else if execution.session() != self.state.lib().session_id() {
+            Some("session")
+        } else if execution.library != self.state.lib().compile_view_identity {
+            Some("compile view")
+        } else if execution.final_intent.get().is_some() {
+            Some("final intent")
+        } else if self.run_context.lexical_scope != scope {
+            Some("lexical scope")
+        } else if self.state.bindings().get(id).is_some() {
+            Some("binding id")
+        } else if self.state.resolve_in(scope, &binder.name).is_some() {
+            Some("binding name")
+        } else if self.hidden_host_bindings.contains_key(&id) {
+            Some("hidden binding")
+        } else if !execution.host_retirements.lock().is_empty() {
+            Some("host retirement")
+        } else if !Arc::ptr_eq(&before.base.source, &facts.source) {
+            Some("source")
+        } else if !before.base.original_source.matches(&facts.original_source) {
+            Some("original source")
+        } else if !before.base.target.matches(&target) {
+            Some("target")
+        } else if !self.state.inspection_world_base_is_current(
+            &before.base,
+            &facts.source,
+            &facts.original_source,
+        ) {
+            Some("inspection world")
+        } else {
+            None
+        };
+        if let Some(reason) = stale_reason {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %reason,
+                hidden,
+                binding = %binder.name,
+                "private host mount base refused"
+            );
             return Err(SessionError::WorldCellPublicationBaseStale.into());
         }
         execution.register_pending_visible_host(id)?;
@@ -6577,10 +6619,21 @@ where
             carrier,
             payload,
             settlement,
-            Some(execution),
+            Some(if hidden {
+                PrivateHostBinding::Hidden(execution)
+            } else {
+                PrivateHostBinding::Visible(execution)
+            }),
         ) {
             Ok(write) => write,
             Err(error) => {
+                tracing::debug!(
+                    target: "tidepool::session::private_host_mount",
+                    hidden,
+                    binding = %binder.name,
+                    %error,
+                    "private host mount carrier refused"
+                );
                 execution.settle_pending_visible_host(id)?;
                 return Err(error);
             }
@@ -6588,22 +6641,41 @@ where
         let result = facts
             .original_source
             .with_open_target(&target, || {
-                if (hidden
-                    && self.hidden_host_bindings.get(&id) != Some(&HiddenHostBinding::PrivateInput))
-                    || (!hidden && self.hidden_host_bindings.contains_key(&id))
-                    || !write.matches_private_mount(&self.state, execution)
-                    || !self
-                        .state
-                        .source_lease_in(scope)
-                        .is_ok_and(|live| Arc::ptr_eq(&live, &target))
-                    || self
-                        .state
-                        .lib()
-                        .tips
-                        .get(&scope)
-                        .and_then(|tip| tip.inspection_world.as_ref())
-                        .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                let hidden_classification = self.hidden_host_bindings.get(&id);
+                let stale_reason = if hidden
+                    && hidden_classification != Some(&HiddenHostBinding::PrivateInput)
                 {
+                    Some("hidden classification")
+                } else if !hidden && hidden_classification.is_some() {
+                    Some("visible classification")
+                } else if !write.matches_private_mount(&self.state, execution) {
+                    Some("private mount identity")
+                } else if !self
+                    .state
+                    .source_lease_in(scope)
+                    .is_ok_and(|live| Arc::ptr_eq(&live, &target))
+                {
+                    Some("source lease")
+                } else if self
+                    .state
+                    .lib()
+                    .tips
+                    .get(&scope)
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                    .is_none_or(|live| !Arc::ptr_eq(live, &before))
+                {
+                    Some("inspection world")
+                } else {
+                    None
+                };
+                if let Some(reason) = stale_reason {
+                    tracing::debug!(
+                        target: "tidepool::session::private_host_mount",
+                        %reason,
+                        hidden,
+                        binding = %binder.name,
+                        "private host mount transition refused"
+                    );
                     return Err(SessionError::StaleStagedDeclaration);
                 }
                 let key = self
@@ -6624,7 +6696,7 @@ where
                     .get_mut(&scope)
                     .expect("validated private association")
                     .inspection_world = Some(after.clone());
-                if hidden {
+                let retained = if hidden {
                     write.retain_private_hidden_mount(&self.state, execution.clone(), before, after)
                 } else {
                     write.retain_private_visible_mount(
@@ -6633,7 +6705,17 @@ where
                         before,
                         after,
                     )
+                };
+                if let Err(error) = &retained {
+                    tracing::debug!(
+                        target: "tidepool::session::private_host_mount",
+                        hidden,
+                        binding = %binder.name,
+                        %error,
+                        "private host mount retention refused"
+                    );
                 }
+                retained
             })
             .map_err(SessionError::from)
             .and_then(|result| result);
@@ -6653,7 +6735,7 @@ where
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-        private_input: Option<&Arc<super::PrivateExecutionAdmission>>,
+        private_input: Option<PrivateHostBinding<'_>>,
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         if matches!(&carrier.origin, HostCarrierOrigin::Interface { .. }) {
             return self.mount_host_interface_input(carrier, payload, settlement, private_input);
@@ -8802,10 +8884,11 @@ where
             entries.push(entry);
         }
         if let PreparedBindingInstall::Host(HostBindingInstall {
-            private_input: Some(execution),
+            private_input: Some(private_input),
             ..
         }) = &install
         {
+            let execution = private_input.admission();
             if execution.private_scope() != scope
                 || !Arc::ptr_eq(&execution.owner, self.state.admission_owner())
                 || execution.owner_epoch != self.state.admission_owner().epoch()
@@ -8829,8 +8912,10 @@ where
                 }
                 return Err(error.into());
             }
-            self.hidden_host_bindings
-                .insert(id, HiddenHostBinding::PrivateInput);
+            if private_input.is_hidden() {
+                self.hidden_host_bindings
+                    .insert(id, HiddenHostBinding::PrivateInput);
+            }
         } else if let Some(completion) = private_overlay {
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;

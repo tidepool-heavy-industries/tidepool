@@ -158,6 +158,13 @@ impl CompilerCloseOwner {
 pub(crate) fn with_test_compiler_owner<T, F: std::future::Future<Output = T>>(
     operation: impl FnOnce(crate::CompilerPreparationClient) -> F,
 ) -> impl std::future::Future<Output = T> {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
     // Keep caller payload and operation state behind heap boundaries before
     // composing owner, unwind, and cleanup adapters.
     let operation = Box::new(operation);
@@ -22545,7 +22552,13 @@ pub(crate) mod request_tests {
             context: crate::ActorSessionContext,
             source: &str,
         ) -> Result<(), ResidentActorWorkbenchError> {
-            let (checked, prepared) = self.prepare_cell(context.clone(), source.into()).await?;
+            let (checked, prepared) = self
+                .prepare_cell(context.clone(), source.into())
+                .await
+                .map_err(|error| {
+                    tracing::debug!(stage = "prepare", %error, "test cell execution failed");
+                    error
+                })?;
             let PreparedCell {
                 items,
                 dependencies,
@@ -22564,11 +22577,23 @@ pub(crate) mod request_tests {
                         },
                         item,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(stage = "begin", %error, "test cell execution failed");
+                        error
+                    })?;
                 let settled = match step {
                     ResidentWorkbenchStep::Running { fragment, outcome } => {
                         self.settle_item(context.clone(), *fragment, (*outcome).into())
-                            .await?
+                            .await
+                            .map_err(|error| {
+                                tracing::debug!(
+                                    stage = "settle",
+                                    %error,
+                                    "test cell execution failed"
+                                );
+                                error
+                            })?
                     }
                     other => other,
                 };

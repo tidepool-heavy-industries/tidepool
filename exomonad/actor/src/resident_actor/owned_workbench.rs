@@ -27,7 +27,11 @@ pub(crate) struct WorkbenchCompilationAuthority {
 impl WorkbenchCompilationAuthority {
     #[cfg(test)]
     pub(crate) fn for_test(context: ActorSessionContext) -> Arc<Self> {
-        Self::admit(context, crate::CheckpointSourceLayer::default(), None, None)
+        let source = match &context.source_layer {
+            crate::ActorSourceRoots::Complete(source) => source.clone(),
+            crate::ActorSourceRoots::Deployment(_) => crate::CheckpointSourceLayer::default(),
+        };
+        Self::issue(context, source, None, None)
             .expect("test actor has an unowned source baseline")
             .1
     }
@@ -54,6 +58,22 @@ impl WorkbenchCompilationAuthority {
                 "no configured owner validates issued source authority".into(),
             ));
         }
+        Self::issue(context, source, installed_tools, source_layers)
+    }
+
+    fn issue(
+        context: ActorSessionContext,
+        source: crate::CheckpointSourceLayer,
+        installed_tools: Option<crate::InstalledToolLease>,
+        source_layers: Option<&crate::ActorSourceLayerResolver>,
+    ) -> Result<(ActorSessionContext, Arc<Self>), KernelInvocationFailure> {
+        let actor = context.actor;
+        let reject = |detail| KernelInvocationFailure::Rejected {
+            receipts: Vec::new(),
+            actor,
+            detail,
+            diagnostic: None,
+        };
         let context = context
             .with_issued_source(&source)
             .map_err(|error| reject(format!("cannot select retained source authority: {error}")))?;

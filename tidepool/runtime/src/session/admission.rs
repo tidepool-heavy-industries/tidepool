@@ -910,7 +910,13 @@ impl PrivateExecutionAdmission {
     }
 
     pub(super) fn ensure_open(&self) -> Result<(), SessionError> {
-        if self.state.lock().frozen {
+        let state = self.state.lock();
+        if state.frozen {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                progress = ?state.checked,
+                "private execution open check refused after freeze"
+            );
             Err(SessionError::StaleStagedDeclaration)
         } else {
             Ok(())
@@ -927,7 +933,10 @@ impl PrivateExecutionAdmission {
                 state.checked = PrivateCheckedItemProgress::Started;
                 Ok(())
             }
-            PrivateCheckedItemProgress::Completed => Err(SessionError::StaleStagedDeclaration),
+            PrivateCheckedItemProgress::Completed => {
+                state.checked = PrivateCheckedItemProgress::Started;
+                Ok(())
+            }
         }
     }
 
@@ -959,6 +968,11 @@ impl PrivateExecutionAdmission {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if state.checked != PrivateCheckedItemProgress::Started {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                progress = ?state.checked,
+                "checked item completion has no matching start"
+            );
             return Err(SessionError::StaleStagedDeclaration);
         }
         state.checked = if final_item {
@@ -2217,33 +2231,76 @@ impl RuntimeCheckedPrefix {
         }
         let store = session.held_admission_store()?;
         let mut state = self.state.lock();
-        if self.admission.host_carrier().is_some()
-            || !self.admission.belongs_to(session)
-            || self.admission.scope != scope
-            || state.in_flight.is_some()
-            || state.reservation.as_ref().is_none_or(|reservation| {
+        let stale_reason = if self.admission.host_carrier().is_some() {
+            Some("host carrier")
+        } else if !self.admission.belongs_to(session) {
+            Some("admission owner")
+        } else if self.admission.scope != scope {
+            Some("scope")
+        } else if state.in_flight.is_some() {
+            Some("in flight")
+        } else if state.reservation.as_ref().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
-            })
-            || {
+            }) {
+            Some("reservation")
+        } else if {
                 self.program
                     .items()
                     .get(execution.item().index())
                     .and_then(|item| item.native())
                     .is_none_or(|native| !Arc::ptr_eq(native, &execution))
-            }
-            || execution.item().admission_digest() != self.admission.digest()
-            || !state.snapshot.is_current(session, scope)
-        {
+            } {
+            Some("execution")
+        } else if execution.item().admission_digest() != self.admission.digest() {
+            Some("admission digest")
+        } else if !state.snapshot.is_current(session, scope) {
+            Some("snapshot")
+        } else {
+            None
+        };
+        if let Some(reason) = stale_reason {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %reason,
+                "checked prefix start refused"
+            );
             return Err(SessionError::StaleStagedDeclaration);
         }
         let reservation = state
             .reservation
             .as_ref()
             .expect("checked reservation preflighted");
-        execution.validate_runtime_admission(reservation.digest, self.admission.digest())?;
-        execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
-        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        execution
+            .validate_runtime_admission(reservation.digest, self.admission.digest())
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "tidepool::session::private_host_mount",
+                    %error,
+                    "checked execution runtime admission refused"
+                );
+                error
+            })?;
+        execution
+            .validate_required_native_imports(state.snapshot.actual_retained_imports())
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "tidepool::session::private_host_mount",
+                    %error,
+                    "checked execution native imports refused"
+                );
+                error
+            })?;
+        execution
+            .validate_settled_native_bindings(state.snapshot.settled_native_bindings())
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "tidepool::session::private_host_mount",
+                    %error,
+                    "checked execution native bindings refused"
+                );
+                error
+            })?;
         if let Some(private) = self.admission.private_execution() {
             private.record_checked_item_started()?;
         }
@@ -2253,7 +2310,15 @@ impl RuntimeCheckedPrefix {
             session,
             &state.snapshot,
             execution.private_value_overlay_binders(),
-        )?;
+        )
+        .map_err(|error| {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %error,
+                "checked private value overlay refused"
+            );
+            error
+        })?;
         state.snapshot.compiler_prefix.append(execution.clone())?;
         let prepared = Arc::new(CheckedTurnCompletion {
             prefix: self.clone(),
@@ -5492,30 +5557,62 @@ impl PersistentSession {
             (Some(operand), Some(input), Some(compiler))
                 if operand.matches(&execution, input, compiler) => {}
             (None, None, None) => {}
-            _ => return Err(SessionError::StaleStagedDeclaration),
+            _ => {
+                tracing::debug!(
+                    target: "tidepool::session::private_host_mount",
+                    "private cell operand differs from its mount"
+                );
+                return Err(SessionError::StaleStagedDeclaration);
+            }
         }
         let scope = execution.private_scope();
         self.reap_admission_leases();
-        if !Arc::ptr_eq(&execution.owner, self.admission_owner())
-            || execution.owner_epoch != self.admission_owner().epoch()
-            || !self.has_lib()
-            || execution.session() != self.lib().session_id()
-            || execution.library != self.lib().compile_view_identity
-            || (input.is_none() && self.binding_tip_id(scope) != Some(execution.binding_tip()))
-        {
+        let stale_reason = if !Arc::ptr_eq(&execution.owner, self.admission_owner()) {
+            Some("owner")
+        } else if execution.owner_epoch != self.admission_owner().epoch() {
+            Some("epoch")
+        } else if !self.has_lib() {
+            Some("library absent")
+        } else if execution.session() != self.lib().session_id() {
+            Some("session")
+        } else if execution.library != self.lib().compile_view_identity {
+            Some("compile view")
+        } else {
+            None
+        };
+        if let Some(reason) = stale_reason {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %reason,
+                "private cell admission identity refused"
+            );
             return Err(SessionError::StaleStagedDeclaration);
         }
         let original_source = execution.compiler_basis.original_source.clone();
         let source = execution.compiler_basis.source.clone();
-        let (world, original_key) = execution.world_basis()?;
+        let (world, _) = execution.world_basis()?;
+        let current_private_key = self
+            .compile_view_key_in(scope)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
         let private_key = match input {
             Some(input) => input.private_hidden_mount_key(self, &execution)?,
-            None => original_key.clone(),
+            None => current_private_key.clone(),
         };
-        if self.compile_view_key_in(scope).as_ref() != Some(&private_key)
-            || !Arc::ptr_eq(plan.world().restoration(), world.restoration())
-            || plan.world().logical_id() != world.logical_id()
-        {
+        let stale_reason = if current_private_key != private_key {
+            Some("private key")
+        } else if !Arc::ptr_eq(plan.world().restoration(), world.restoration()) {
+            Some("world restoration")
+        } else if plan.world().logical_id() != world.logical_id() {
+            Some("world identity")
+        } else {
+            None
+        };
+        if let Some(reason) = stale_reason {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %reason,
+                "private cell admission world refused"
+            );
             return Err(SessionError::StaleStagedDeclaration);
         }
         self.reserve_world_cell(
@@ -5847,7 +5944,6 @@ impl PersistentSession {
             || !self.has_lib()
             || execution.session() != self.lib().session_id()
             || execution.library != self.lib().compile_view_identity
-            || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);
         }

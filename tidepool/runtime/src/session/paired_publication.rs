@@ -535,13 +535,25 @@ impl PersistentSession {
             std::collections::HashMap<SessionVarId, super::admission::CertifiedPrivateValueWrite>,
         >,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
-            || admission.owner_epoch != self.admission_owner().epoch()
-            || !self.has_lib()
-            || admission.session() != self.lib().session_id()
-            || admission.library != self.lib().compile_view_identity
-            || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
-        {
+        let stale_reason = if !Arc::ptr_eq(&admission.owner, self.admission_owner()) {
+            Some("owner")
+        } else if admission.owner_epoch != self.admission_owner().epoch() {
+            Some("epoch")
+        } else if !self.has_lib() {
+            Some("library absent")
+        } else if admission.session() != self.lib().session_id() {
+            Some("session")
+        } else if admission.library != self.lib().compile_view_identity {
+            Some("compile view")
+        } else {
+            None
+        };
+        if let Some(reason) = stale_reason {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                %reason,
+                "private execution freeze identity refused"
+            );
             return Err(SessionError::StaleStagedDeclaration);
         }
         self.settle_private_host_retirements(admission)?;
@@ -618,6 +630,18 @@ impl PersistentSession {
             &facts.original_source,
         ) || !private.base.target.matches(&admission.scope_lease)
         {
+            tracing::debug!(
+                target: "tidepool::session::private_host_mount",
+                key_current = self.compile_view_key_in(admission.private_scope()).as_ref()
+                    == Some(&private.base.key),
+                source_current = self.inspection_world_base_is_current(
+                    &private.base,
+                    &facts.source,
+                    &facts.original_source,
+                ),
+                target_current = private.base.target.matches(&admission.scope_lease),
+                "private execution freeze association refused"
+            );
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
         let private_visibility = self
@@ -785,10 +809,21 @@ impl PersistentSession {
                                 .ok_or(SessionError::WorldCellPublicationBaseStale)?;
                             expected = Some(key.clone());
                         }
-                        if records
-                            .last()
-                            .is_none_or(|record| !Arc::ptr_eq(record.association(), &private))
-                            || expected.as_ref() != Some(&private.base.key)
+                        if expected.is_none()
+                            || records.iter().any(|record| {
+                                let association = record.association();
+                                !Arc::ptr_eq(
+                                    &association.base.owner,
+                                    self.admission_owner(),
+                                ) || association.base.epoch != self.admission_owner().epoch()
+                                    || association.base.source.sha256() != facts.source.sha256()
+                                    || !association
+                                        .base
+                                        .original_source
+                                        .matches(&facts.original_source)
+                                    || !association.base.target.matches(&target)
+                                    || association.world.logical_id() != private.world.logical_id()
+                            })
                             || self.compile_view_key_in(admission.private_scope()).as_ref()
                                 != Some(&private.base.key)
                         {
