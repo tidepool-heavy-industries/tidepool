@@ -1,5 +1,19 @@
 # Campaign state after joined review
 
+## Current peer++ review checkpoint
+
+The current branch is `g2-closeout/deepseek-20261021`. Code candidate
+`5c759554c6f9478bc2344ef17ee026c6ec23fed0` follows joined checkpoint
+`e77034bea0`, which merged exact P `7a685c7e99` and N `083ae94f12`.
+
+Read [REVIEW-WIP-5c759554](REVIEW-WIP-5c759554.md) first. It records what was
+tried, the package evidence that passes, the five remaining actor lifecycle
+failures and the architectural decision needed from peer++.
+
+The sections below describe the earlier c910d1 review and remain as history.
+They are not the current source identity or current failure frontier. This WIP
+does not qualify G2: no matched bundle or fresh Persona run exists.
+
 Updated 2026-10-21. This is the current ledger, not the original dispatch list.
 Implementation reviewed: **c910d1aae0e64c76449bef8170b53400133cbd23**.
 The new review/plan commit changes documentation only.
