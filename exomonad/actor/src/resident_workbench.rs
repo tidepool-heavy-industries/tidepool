@@ -19763,7 +19763,7 @@ pub(crate) mod request_tests {
             .workbench_imports
             .extend_text("qualified SourcePublicationRace");
         let (captured, source_owner) = world_query_test_source_files_with_support(
-                &[("SourcePublicationRace.hs", "module SourcePublicationRace where\n{-# NOINLINE raceValue #-}\nraceValue :: Int -> Int\nraceValue value = value + 1\n")],
+                &[vec![("SourcePublicationRace.hs", "module SourcePublicationRace where\n{-# NOINLINE raceValue #-}\nraceValue :: Int -> Int\nraceValue value = value + 1\n")]],
                 &source.base_include,
             );
         public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
