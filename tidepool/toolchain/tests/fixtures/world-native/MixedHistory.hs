@@ -7,6 +7,9 @@ instance MixedStageReader MixedStage where
 {-# NOINLINE dormantStage #-}
 dormantStage :: Int
 dormantStage = StageInputG.g
-let answerStage = MixedStage baseStage
+{-# NOINLINE retainedStage #-}
+retainedStage :: Int
+retainedStage = baseStage
+let answerStage = MixedStage retainedStage
 let () = ()
 let resultStage = readMixedStage answerStage + dormantStage

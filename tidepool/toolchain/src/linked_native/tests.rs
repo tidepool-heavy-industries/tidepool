@@ -4,7 +4,26 @@ use super::*;
 use crate::recovery_artifacts::PackageInterfaceValidation;
 use tidepool_repr::native_code::NativeCodeComponentFacts;
 
-pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
+#[derive(Debug, Default)]
+pub(crate) struct AuthenticationCoverage {
+    pub home_scope: bool,
+    pub source_selector: bool,
+    pub retained_selector: bool,
+    pub package_leaf: bool,
+}
+impl AuthenticationCoverage {
+    pub fn merge(&mut self, other: Self) {
+        self.home_scope |= other.home_scope;
+        self.source_selector |= other.source_selector;
+        self.retained_selector |= other.retained_selector;
+        self.package_leaf |= other.package_leaf;
+    }
+}
+
+pub(crate) fn assert_actual_target_authentication(
+    target: &LinkedNativeTarget,
+) -> AuthenticationCoverage {
+    let mut coverage = AuthenticationCoverage::default();
     let operation = InventoryOperation::new(Default::default());
     let actual = target.closure();
     let exhausted =
@@ -131,6 +150,7 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
         .iter()
         .find(|node| matches!(node.acquisition, NativeAcquisition::Home { .. }))
     {
+        coverage.home_scope = true;
         // Corrupt DATA while preserving the original acquired product and body.
         // An equal executable body cannot authorize another issuing scope.
         let mut forged = nodes.clone();
@@ -178,6 +198,11 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
         let Some((node_index, slot)) = slot else {
             continue;
         };
+        if selector_kind {
+            coverage.retained_selector = true;
+        } else {
+            coverage.source_selector = true;
+        }
         let mut forged = nodes.clone();
         let mut selectors = forged[node_index].imports.to_vec();
         match &mut selectors[slot] {
@@ -202,6 +227,7 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
         matches!(&node.acquisition,
         NativeAcquisition::Package{product,..} if product.code().globals().is_empty())
     }) {
+        coverage.package_leaf = true;
         let mut forged = nodes.clone();
         let node = &mut forged[index];
         let NativeAcquisition::Package {
@@ -231,6 +257,7 @@ pub(crate) fn assert_actual_target_authentication(target: &LinkedNativeTarget) {
             "a leaf's forged receipt child must refuse even though no import loop executes"
         );
     }
+    coverage
 }
 
 /// Count actual newly prepared targets that borrowed a package-bearing HOME

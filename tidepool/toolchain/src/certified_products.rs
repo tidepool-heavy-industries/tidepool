@@ -11614,6 +11614,9 @@ impl AcquiredHomeCodeGrant {
         bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
     ) -> Result<BTreeMap<crate::artifact_inventory::NativeGroupBinding, Self>, crate::CompileError>
     {
+        if bindings.is_empty() {
+            return Ok(BTreeMap::new());
+        }
         if !groups.matches_view(artifacts) {
             return Err(crate::CompileError::ExtractFailed(
                 "HOME acquisition belongs to another selected view".into(),
@@ -11821,6 +11824,9 @@ pub(crate) fn acquire_linked_home_grants(
     bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<crate::artifact_inventory::NativeGroupBinding, AcquiredHomeCodeGrant>, crate::CompileError> {
+    if bindings.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let rows = certify_acquired_original_group_rows(view, bindings, validation)?.rows;
     let custody=view.retain_linked_home_custody(bindings)?;
     Ok(rows.into_iter().map(|(binding,row)| (binding,AcquiredHomeCodeGrant {binding,row,artifacts:custody.clone()})).collect())

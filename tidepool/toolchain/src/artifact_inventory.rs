@@ -6774,11 +6774,14 @@ impl std::fmt::Debug for ArtifactView {
 }
 impl ArtifactView {
     /// Narrow byte/proof lifetime to exact acquired HOME rows. This creates no
-    /// compiler namespace, lexical role or executable root selection.
+    /// compiler role or executable root selection.
     pub(crate) fn retain_linked_home_custody(
         &self,
         groups: &BTreeSet<NativeGroupBinding>,
     ) -> Result<Self, CompileError> {
+        if groups.is_empty() {
+            return Ok(self.inventory().empty_view());
+        }
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         if groups

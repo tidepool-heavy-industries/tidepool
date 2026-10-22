@@ -9450,11 +9450,19 @@ mod module_product_tests {
             assert!(matches!(program.basis(), CellProgramBasis::World(_)));
             assert_eq!(program.items().len(), if mixed { 5 } else { 1 });
             if !declaration_only {
-                let linked = program.items().iter().rev()
+                let mut coverage = crate::linked_native::tests::AuthenticationCoverage::default();
+                let mut targets = 0;
+                for linked in program.items().iter()
                     .filter_map(|item| item.native_products())
-                    .find_map(|products| products.linked_native_target())
-                    .expect("actual native history has a linked target");
-                crate::linked_native::tests::assert_actual_target_authentication(linked);
+                    .filter_map(|products| products.linked_native_target()) {
+                    coverage.merge(crate::linked_native::tests::assert_actual_target_authentication(linked));
+                    targets += 1;
+                }
+                assert!(targets > 0, "actual native history has linked targets");
+                if mixed {
+                    assert!(coverage.home_scope && coverage.source_selector && coverage.retained_selector && coverage.package_leaf,
+                        "mixed history must exercise every acquisition refusal: {coverage:?}");
+                }
             }
             let mut completed = Vec::new();
             for item in program.items() {
