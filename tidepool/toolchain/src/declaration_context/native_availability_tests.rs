@@ -7841,7 +7841,110 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
     assert!(restored.artifact_view().selected_native_groups().is_empty());
 }
 
+struct CompiledPublicationFixture {
+    _directory: tempfile::TempDir,
+    _entry: crate::artifacts::ProductionEntryOutput,
+    producer: Vec<u8>,
+    source: Arc<ExactDeclarationContext>,
+    original: Arc<ArtifactEntry>,
+    own_ordinals: Vec<u32>,
+    first: u32,
+    second: u32,
+}
+
+fn compiled_publication_fixture() -> CompiledPublicationFixture {
+    let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
+    let sources = directory.path().join("sources");
+    std::fs::create_dir(&sources).unwrap();
+    let target = sources.join("PublicationTarget.hs");
+    std::fs::write(
+        &target,
+        include_str!("../../tests/fixtures/native-publication/PublicationTarget.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        sources.join("SourceOriginalSupport.hs"),
+        include_str!("../../tests/fixtures/native-publication/SourceOriginalSupport.hs"),
+    )
+    .unwrap();
+    let endpoint = tidepool_extract_cmd::ExtractCmd::new()
+        .unwrap()
+        .bind()
+        .unwrap();
+    let producer = endpoint.identity().producer_bytes().to_vec();
+    let frozen = crate::artifacts::FrozenEntrySources::capture(&[sources], &target).unwrap();
+    let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+        &frozen,
+        directory.path(),
+        &directory.path().join("entry"),
+    )
+    .expect("the real completed entry retains source and native admission");
+    let source = entry.products().original_execution_context().unwrap();
+    assert_eq!(
+        source.toolchain_identity_sha256(),
+        CanonicalProducerIdentity::from_producer_bytes(&producer).sha256()
+    );
+    let original = source
+        .artifact_view()
+        .entries()
+        .into_iter()
+        .find(|entry| {
+            entry.descriptor.owner.module == "SourceOriginalSupport"
+                && matches!(entry.payload, ArtifactPayload::Original(_))
+        })
+        .expect("the compiler captured the actual imported source Original");
+    assert!(source.source_scope().admits(&original.descriptor.owner));
+    assert!(source.lexical_graph().iter().any(|node| {
+        &node.owner == source.original_instance_target().unwrap()
+            && node.imports.contains(&original.descriptor.owner)
+    }));
+    let ArtifactPayload::Original(product) = &original.payload else {
+        unreachable!()
+    };
+    let own_ordinals = original
+        .native_group_ordinals
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let ordinal = |name: &str| {
+        let selected = own_ordinals
+            .iter()
+            .copied()
+            .filter(|ordinal| {
+                crate::certified_products::original_native_group_definitions(product, *ordinal)
+                    .unwrap()
+                    .export_contracts()
+                    .any(|contract| {
+                        let contract = contract.unwrap();
+                        contract.identity.unit == original.descriptor.owner.unit
+                            && contract.identity.module == original.descriptor.owner.module
+                            && contract.identity.occurrence == name
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 1, "one authenticated group defines {name}");
+        selected[0]
+    };
+    let first = ordinal("first");
+    let second = ordinal("second");
+    assert_ne!(
+        first, second,
+        "the source exports occupy distinct actual groups"
+    );
+    CompiledPublicationFixture {
+        _directory: directory,
+        _entry: entry,
+        producer,
+        source,
+        original,
+        own_ordinals,
+        first,
+        second,
+    }
+}
+
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
     use crate::artifact_inventory::{ArtifactSelectionId, NativeArtifactDemand, ScopeProofV3};
     use crate::exact_context::{hydrate_context, ImmutableScopeProofRef, Materializer};
@@ -7856,29 +7959,24 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
         }
         hydrate_context(&store, receipt.root()).unwrap()
     };
-    for (ordinals, published) in [vec![7, 9001], vec![9001], vec![]]
+    let fixture = compiled_publication_fixture();
+    let mut histories = 0;
+    for (ordinals, published) in [fixture.own_ordinals.clone(), vec![fixture.second], vec![]]
         .into_iter()
         .flat_map(|ordinals| [false, true].map(move |published| (ordinals.clone(), published)))
     {
-        // Only durable facts and newly acquired certified bytes leave this
-        // scope; no original offer/view/payload owner backs the restored context.
-        let (snapshot, mut acquired_inventory, id, recorded_full, carriers) = {
-            let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-            let entry = Arc::new(
-                ArtifactEntry::original(producer.sha256(), product("ProofOnlyOffer", 119)).unwrap(),
-            );
+        // The compiled fixture shares immutable bytes; no live context owner
+        // from this case's independent issuance backs the cold restoration.
+        let (snapshot, mut acquired_inventory, id, recorded_full, carriers, retired_issuer) = {
+            let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer);
+            let entry = fixture.original.clone();
             let id = entry.descriptor.id;
-            let target = Arc::new(ArtifactEntry::canonical(
-                product("ProofOnlyOfferTarget", 120)
-                    .module_interface()
-                    .unwrap()
-                    .clone(),
-            ));
+            let entries = fixture.source.artifact_view().entries();
             let inventory = ArtifactInventory::default();
             let initial = inventory
                 .admit_shared_with_demand(
                     &inventory.empty_view(),
-                    vec![entry.clone(), target.clone()],
+                    entries.clone(),
                     NativeArtifactDemand::ScopeInterfaces,
                 )
                 .unwrap();
@@ -7888,26 +7986,22 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 .admit_recovery_selection(
                     &initial,
                     vec![],
-                    &BTreeSet::from([
-                        NativeGroupKey {
+                    &fixture
+                        .own_ordinals
+                        .iter()
+                        .map(|ordinal| NativeGroupKey {
                             artifact: id,
-                            original_ordinal: 7,
-                        },
-                        NativeGroupKey {
-                            artifact: id,
-                            original_ordinal: 9001,
-                        },
-                    ]),
+                            original_ordinal: *ordinal,
+                        })
+                        .collect(),
                 )
                 .unwrap();
-            let projection =
-                CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()])
-                    .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
             let full_support = fixture_compiler_support(projection.clone(), full.clone());
             let full_offer = full_support
                 .native_offers()
                 .iter()
-                .find(|offer| offer.is_full())
+                .find(|offer| offer.original() == id && offer.is_full())
                 .unwrap();
             let carriers = full_offer.issued_group_carriers().unwrap();
             assert!(
@@ -7957,14 +8051,18 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 support.recorded_input_decisions(),
                 baseline.recorded_input_decisions()
             );
-            let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
-                producer: producer.sha256(),
-                compiler_support: support,
-                lexical: Default::default(),
-                source_scope: Default::default(),
-                template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
-            });
+            fixture
+                .source
+                .source_scope()
+                .preserve_support(fixture.source.compiler_source_support(), &support)
+                .unwrap();
+            let context = fixture
+                .source
+                .as_ref()
+                .clone()
+                .rebuild(|facts| facts.compiler_support = support)
+                .finish()
+                .unwrap();
             let selection =
                 crate::artifact_inventory::ExactArtifactSelection::capture(context.artifact_view());
             let reopened = context
@@ -7980,10 +8078,12 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 context.artifact_view().capture_graph_selection()
             );
             let unrelated = Arc::new(ArtifactEntry::canonical(
-                product("UnrequestedOfferScope", 121)
-                    .module_interface()
-                    .unwrap()
-                    .clone(),
+                crate::certified_products::fixture_module_interface(
+                    producer.sha256(),
+                    "fixture",
+                    "UnrequestedOfferScope",
+                    BTreeMap::new(),
+                ),
             ));
             let broader = context
                 .artifact_view()
@@ -8058,27 +8158,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 "scope identity alone cannot authenticate different immutable proof facts"
             );
             let context = if published {
-                let source = ExactDeclarationContext::from_authenticated_execution_support(
-                    producer.sha256(),
-                    context.compiler_source_support().clone(),
-                    vec![
-                        ExactLexicalNode {
-                            owner: target.descriptor.owner.clone(),
-                            imports: vec![entry.descriptor.owner.clone()],
-                        },
-                        ExactLexicalNode {
-                            owner: entry.descriptor.owner.clone(),
-                            imports: vec![],
-                        },
-                    ],
-                    target.descriptor.owner.clone(),
-                    &[
-                        target.descriptor.owner.clone(),
-                        entry.descriptor.owner.clone(),
-                    ],
-                )
-                .unwrap();
-                let publication = source
+                let publication = context
                     .issue_published_source_original("revision", "input", &entry.descriptor.owner)
                     .unwrap();
                 assert!(publication
@@ -8097,9 +8177,19 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 .rows()
                 .find(|row| row.original.descriptor.id == id)
                 .unwrap();
-            assert_eq!(row.mode == NativeTransportMode::Full, ordinals.len() == 2);
-            assert_eq!(row.permits(7), ordinals.contains(&7));
-            assert_eq!(row.permits(9001), ordinals.contains(&9001));
+            assert_eq!(
+                row.mode == NativeTransportMode::Full,
+                ordinals == fixture.own_ordinals
+            );
+            assert_eq!(
+                row.permits(fixture.first),
+                ordinals.contains(&fixture.first)
+            );
+            assert_eq!(
+                row.permits(fixture.second),
+                ordinals.contains(&fixture.second)
+            );
+            let retired_issuer = Arc::downgrade(&context.owner);
             let snapshot = context.snapshot();
             let graph = snapshot.graph_selection().unwrap();
             let selected_scopes = graph
@@ -8116,33 +8206,30 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 "carrier-only acquisition must omit an offer's distinct group scope"
             );
             let scratch = tempfile::tempdir().unwrap();
-            let (products, interfaces) = partition_native_recovery_references(
-                context
-                    .materialize_recovery_artifacts(
-                        scratch.path(),
-                        &context.artifact_view().artifact_ids().into_iter().collect(),
-                    )
-                    .unwrap(),
-            );
-            let recovered = RecoveredArtifactInventory::capture_bound(
-                scratch.path(),
-                &products,
-                &interfaces,
-                &[],
-                &[],
-                &context.artifact_view().descriptors(),
-                &graph.bindings,
-                &context.artifact_view().binding_dependencies(),
-            )
-            .unwrap();
+            let references = context
+                .materialize_recovery_artifacts(
+                    scratch.path(),
+                    &context.artifact_view().artifact_ids().into_iter().collect(),
+                )
+                .unwrap();
+            let recovered = RecoveredArtifactAcquisition::new(scratch.path())
+                .capture_payloads_bound(
+                    &references,
+                    &context.artifact_view().descriptors(),
+                    &graph.bindings,
+                    &context.artifact_view().binding_dependencies(),
+                )
+                .unwrap();
             (
                 snapshot,
                 recovered,
                 id,
                 full_offer.snapshot_facts(),
                 carriers,
+                retired_issuer,
             )
         };
+        assert!(retired_issuer.upgrade().is_none());
         let receipt = persist(&snapshot);
         let restored = acquired_inventory
             .context_for_expected_snapshot(receipt.root(), &receipt)
@@ -8172,7 +8259,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .compiler_source_support()
             .native_offers()
             .iter()
-            .find(|offer| offer.is_full())
+            .find(|offer| offer.original() == id && offer.is_full())
             .unwrap();
         assert_eq!(full.snapshot_facts(), recorded_full);
         assert_eq!(full.issued_group_carriers().unwrap(), carriers);
@@ -8192,11 +8279,17 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
         }
         let scratch = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(restored))
-            .prepare_compilation(scratch.path(), PRODUCER)
+            .prepare_compilation(scratch.path(), &fixture.producer)
             .unwrap();
         let row = request.compiler_inputs().native_availability(id).unwrap();
-        assert_eq!(row.permits(7), ordinals.contains(&7));
-        assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        assert_eq!(
+            row.permits(fixture.first),
+            ordinals.contains(&fixture.first)
+        );
+        assert_eq!(
+            row.permits(fixture.second),
+            ordinals.contains(&fixture.second)
+        );
         drop(request);
 
         // The writer and hydrator must accept these encoded bytes, so rejection
@@ -8226,7 +8319,9 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             matches!(acquired_inventory.context_for_expected_snapshot(receipt.root(), &receipt),
             Err(CompileError::ExtractFailed(detail)) if detail.contains("missing bound recovery payload"))
         );
+        histories += 1;
     }
+    assert_eq!(histories, 6);
 }
 
 #[test]
@@ -9378,44 +9473,16 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
     use crate::artifact_inventory::ArtifactBindingNode;
-    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let native = product("PublishedCandidateDemand", 136);
-    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
-    let target = Arc::new(ArtifactEntry::canonical(
-        product("PublishedCandidateTarget", 137)
-            .module_interface()
-            .unwrap()
-            .clone(),
-    ));
-    let inventory = ArtifactInventory::default();
-    let view = inventory
-        .admit_shared(&inventory.empty_view(), vec![entry.clone(), target.clone()])
-        .unwrap();
-    let projection =
-        CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()]).unwrap();
-    let source = ExactDeclarationContext::from_authenticated_execution(
-        producer.sha256(),
-        &view,
-        projection,
-        vec![
-            ExactLexicalNode {
-                owner: target.descriptor.owner.clone(),
-                imports: vec![entry.descriptor.owner.clone()],
-            },
-            ExactLexicalNode {
-                owner: entry.descriptor.owner.clone(),
-                imports: vec![],
-            },
-        ],
-        target.descriptor.owner.clone(),
-        &[
-            target.descriptor.owner.clone(),
-            entry.descriptor.owner.clone(),
-        ],
-    )
-    .unwrap();
+    let fixture = compiled_publication_fixture();
+    let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer);
+    let entry = fixture.original.clone();
+    let ArtifactPayload::Original(native) = &entry.payload else {
+        unreachable!()
+    };
+    let source = &fixture.source;
     let publication = source
         .issue_published_source_original("revision", "input", &entry.descriptor.owner)
         .unwrap();
@@ -9462,7 +9529,18 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
         role
     );
-    let fresh = product("FreshBesidePublishedZeroDemand", 138);
+    let fresh = recovered_witness_fixtures(&[fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "FreshBesidePublishedZeroDemand",
+            vec![(7, vec![]), (9001, vec![])],
+            138,
+            &BTreeMap::new(),
+            b"fresh unrelated native interface".to_vec(),
+        ),
+        producer.sha256(),
+    )])
+    .remove(0)
+    .product;
     for mixed_fresh in [false, true] {
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("candidate-native-issuance-only"),
@@ -9542,7 +9620,12 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         }
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context.clone()))
-            .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(reused))
+            .prepare_compilation_with_private_input(
+                directory.path(),
+                &fixture.producer,
+                None,
+                Some(reused),
+            )
             .unwrap();
         assert!(
             request
