@@ -16814,25 +16814,20 @@ enum CompiledBlock {
     Rejected(tidepool_runtime::session::CompileRejection),
 }
 
-/// The admitted source view and next declaration owner for one planned cell.
+/// The admitted source view and next declaration owner for protected setup.
+#[cfg(test)]
 struct CellProgramSnapshot {
     view: crate::ActorCompileView,
     candidate_module: tidepool_repr::SessionModule,
 }
 
-#[derive(Clone, Copy)]
-enum CellSnapshotAdmission<'a> {
-    ProtectedSetup,
-    PrivateExecution(&'a tidepool_runtime::session::PrivateExecutionAdmission),
-}
-
+#[cfg(test)]
 fn snapshot_cell_program<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     mut source: ActorWorkbenchSource,
     request_scope: Option<&RequestWorkbenchScope>,
     mounted_input: Option<&MountedHostInput>,
-    admission: CellSnapshotAdmission<'_>,
 ) -> Result<(ActorWorkbenchSource, CellProgramSnapshot), ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
@@ -16860,35 +16855,17 @@ where
     })?;
     let source = source.for_workbench(context, request_scope);
     let inputs = source.compile_inputs(context)?;
-    let view = if let CellSnapshotAdmission::PrivateExecution(execution) = admission {
-        if execution.private_scope() != context.placement.lexical_scope {
-            return Err(ResidentActorWorkbenchError::Resident(
-                ResidentError::Session(
-                    tidepool_runtime::session::SessionError::StaleStagedDeclaration,
-                ),
-            ));
-        }
-        let session_view = session
-            .compile_view_for_execution(execution)
-            .map_err(|error| {
-                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-            })?;
-        context
-            .compile_view_with_inputs(session_view, inputs)?
-            .with_workbench_imports(&source.workbench_imports)
-    } else {
-        let session_view = session
-            .compile_view_in(context.placement.lexical_scope)
-            .ok_or(ResidentActorWorkbenchError::Resident(
-                ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(
-                    context.placement.lexical_scope,
-                )),
-            ))?
-            .with_scoped_injection();
-        context
-            .compile_view_with_inputs(session_view, inputs)?
-            .with_workbench_imports(&source.workbench_imports)
-    };
+    let session_view = session
+        .compile_view_in(context.placement.lexical_scope)
+        .ok_or(ResidentActorWorkbenchError::Resident(
+            ResidentError::Session(tidepool_runtime::session::SessionError::DeadScope(
+                context.placement.lexical_scope,
+            )),
+        ))?
+        .with_scoped_injection();
+    let view = context
+        .compile_view_with_inputs(session_view, inputs)?
+        .with_workbench_imports(&source.workbench_imports);
     Ok((
         source,
         CellProgramSnapshot {
@@ -37080,7 +37057,6 @@ pub(crate) mod request_tests {
             source.clone(),
             None,
             None,
-            CellSnapshotAdmission::ProtectedSetup,
         )
         .unwrap();
         let prepared = scoped_source.prepare(&snapshot.view);
