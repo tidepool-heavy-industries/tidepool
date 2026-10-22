@@ -268,12 +268,11 @@ impl PackageLinks {
         }
     }
 
-    #[cfg(test)]
-    fn occurrences(&self) -> &[PackageOccurrenceRow] {
+    pub(crate) fn occurrences(&self) -> &[PackageOccurrenceRow] {
         &self.occurrences
     }
 
-    fn stage_id(&self) -> &[u8; 32] {
+    pub(crate) fn stage_id(&self) -> &[u8; 32] {
         &self.stage_id
     }
 
@@ -548,6 +547,9 @@ impl ValidatedHomeContracts {
 }
 
 impl BoundPackageSelection {
+    pub(crate) fn native_manifest(&self) -> &Arc<PackageLinks> {
+        &self.contracts().manifest
+    }
     pub(crate) fn ordinary(
         target: crate::artifacts::invocation_output::CapturedOrdinaryTarget,
     ) -> CertResult<Self> {

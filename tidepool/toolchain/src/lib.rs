@@ -24,6 +24,7 @@ pub mod checked_cell;
 mod compile_input;
 pub mod compiler_world;
 mod host_work;
+pub mod linked_native;
 pub use compile_input::CompileInputError;
 mod declaration_context;
 pub use declaration_context::{
