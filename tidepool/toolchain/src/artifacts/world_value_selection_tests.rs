@@ -554,7 +554,17 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
         let prepared = prepare_world_cell_program_observing_home_contracts(
             Arc::clone(&checked),
             &mut |stage, originals| {
-                ingress.push((stage, originals.assert_home_contract_ingress_controls()));
+                let [ordinal] = checked.stages()[stage].ordinals() else {
+                    panic!("one real checked item per first-demand fixture stage")
+                };
+                if checked
+                    .item(*ordinal)
+                    .expect("actual checked stage item")
+                    .executable()
+                    .is_some()
+                {
+                    ingress.push((*ordinal, originals.assert_home_contract_ingress_controls()));
+                }
             },
         )?;
         Ok((prepared, checked))
@@ -567,11 +577,11 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     let mut unused_prior = 0;
     let mut ordered_refusals = 0;
     let mut count_refusals = 0;
-    for (stage, controls) in ingress {
+    for (ordinal, controls) in ingress {
         ordered_refusals += controls.ordered_refusals;
         count_refusals += controls.count_refusals;
         for (artifact, ordinal, prior) in controls.unused {
-            let completion = program.items()[stage]
+            let completion = program.items()[ordinal]
                 .native_products()
                 .expect("unused annotation control belongs to an executable stage")
                 .completed_native_selection()

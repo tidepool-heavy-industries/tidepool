@@ -8,4 +8,4 @@ textNumber :: String -> Int
 textNumber value = Text.length (Text.pack value)
 {-# NOINLINE unusedNumber #-}
 unusedNumber :: Int -> Int
-unusedNumber value = value
+unusedNumber _ = 271

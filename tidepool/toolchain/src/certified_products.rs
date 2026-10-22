@@ -1424,27 +1424,26 @@ impl CertifiedSegmentOriginals {
             );
         }
         for (key, links) in self.receipt.package_links.home_roots.iter() {
-            let pair = links.iter().enumerate().find_map(|(left, link)| {
-                let a = &self.receipt.package_links.occurrences[link.occurrence() as usize];
-                links
+            let replacement = links.iter().enumerate().find_map(|(slot, link)| {
+                let actual = &self.receipt.package_links.occurrences[link.occurrence() as usize];
+                self.receipt
+                    .package_links
+                    .occurrences
                     .iter()
-                    .enumerate()
-                    .skip(left + 1)
-                    .find_map(|(right, other)| {
-                        let b =
-                            &self.receipt.package_links.occurrences[other.occurrence() as usize];
-                        (a.unit != b.unit
-                            || a.module != b.module
-                            || a.defining_interface_sha256 != b.defining_interface_sha256)
-                            .then_some((left, right))
+                    .find_map(|other| {
+                        (actual.unit != other.unit
+                            || actual.module != other.module
+                            || actual.defining_interface_sha256 != other.defining_interface_sha256)
+                            .then_some((slot, other.id))
                     })
             });
-            if let Some((left, right)) = pair {
+            if let Some((slot, occurrence)) = replacement {
                 let mut changed = self.receipt.clone();
+                // Keep the slot count and occurrence range valid. The substitute
+                // is another authenticated occurrence from this same manifest.
                 Arc::make_mut(&mut changed.package_links.home_roots)
                     .get_mut(key)
-                    .unwrap()
-                    .swap(left, right);
+                    .unwrap()[slot] = PackageLink::Local { occurrence };
                 refuses(&changed, "HOME ordered package import");
                 observed.ordered_refusals += 1;
                 break;
