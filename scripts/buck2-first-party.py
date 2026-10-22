@@ -1883,6 +1883,7 @@ tidepool_buildscript_run(
                     "session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start",
                     "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
                     "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication",
+                    "session::resident::activation_input_tests::abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement",
                     "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
                 ]
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
