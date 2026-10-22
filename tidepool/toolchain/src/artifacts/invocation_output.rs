@@ -1601,15 +1601,14 @@ mod tests {
                         "reverse must exercise nonempty Original package references"
                     );
                 }
-                let target = output.targets["first"].native_inputs.as_ref().unwrap();
+                let target = output.targets["first"]
+                    .linked_native_target()
+                    .expect("actual independent output retains its issued target owner");
                 assert_eq!(
-                    target
-                        .completed_selection()
-                        .unwrap()
-                        .completion()
-                        .package_bindings()
-                        .len()
-                        != 0,
+                    target.acquired().any(|acquired| matches!(
+                        acquired.grant(),
+                        crate::linked_native::NativeCodeGrant::Package { .. }
+                    )),
                     package_code
                 );
                 if !package_code {

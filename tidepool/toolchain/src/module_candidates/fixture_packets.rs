@@ -657,7 +657,7 @@ fn source_boot_candidate_packet_producer() {
                     "published target must be the authenticated completed source owner"
                 );
                 let output =
-                    crate::declaration_join::IssuedOriginalOutput::from_segment_item(&certified)
+                    crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)
                         .expect(
                             "published fixture products retain their completed compiler output",
                         );
