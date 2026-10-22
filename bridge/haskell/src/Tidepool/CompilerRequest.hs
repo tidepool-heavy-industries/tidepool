@@ -1193,8 +1193,8 @@ prepareWorldCellQuestion bound question = do
               stageDirectory = directory </> "stage-" ++ show offset
           output <- case cellPlanItems initial of
             [item] | sbKind (cellAnalysisVerdict item) == KDecl ->
-              prepareDeclaration preparation prior stageDirectory stage
-            _ -> prepareSegment preparation prior stageDirectory initial
+              prepareDeclaration preparation prior earlierSelected stageDirectory stage
+            _ -> prepareSegment preparation prior earlierSelected stageDirectory initial
           let needed = preparedWorldStageExecutionInputs output
               current = preparedWorldStageCompilerInputs output
               currentKeys = Set.fromList (map worldCellInputReferenceBinding current)
@@ -1211,6 +1211,19 @@ prepareWorldCellQuestion bound question = do
           let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected}
           prepareStages preparation (Just (preparedWorldStageProducts output))
             (Set.union earlierSelected selected) (finalizedOutput:reversed)
+    -- Parsed demand sees the current source, but a retained Original's
+    -- unfolding may reference an input selected by an earlier stage. Loan only
+    -- those issued references to projection; the actual reached globals below
+    -- still select the stage's runtime inputs and preserve their original facts.
+    projectionInputGenerations completion earlierSelected = do
+      inputs <- maybe (throwIO WorldCellCorrupt) pure (preparedCompilationWorldInputs completion)
+      let references = worldCellCompilerInputReferences inputs ++ Set.toAscList earlierSelected
+          bindings = Set.fromList (map worldCellInputReferenceBinding references)
+      _ <- either throwIO pure (selectWorldCellExecutionInputReferences bindings references)
+      foldM (\generations (symbol,generation) -> case Map.lookup symbol generations of
+        Nothing -> pure (Map.insert symbol generation generations)
+        Just existing | existing == generation -> pure generations
+        Just _ -> throwIO WorldCellCorrupt) (worldCellRetainedGenerations inputs) (Set.toAscList bindings)
     nextStage preparation = case bound of
       BoundCompilerRequest scope _ _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
     requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
@@ -1239,7 +1252,7 @@ prepareWorldCellQuestion bound question = do
         <> foldMap (\(path,sha) -> encodeListLen 2 <> text path <> encodeBytes sha) common
         <> encodeListLen (fromIntegral (length plans)) <> foldMap encodeTypedSegmentPlan plans
         <> encodeListLen (fromIntegral (length stages)) <> mconcat stages)
-    prepareSegment preparation prior stageDirectory initial = do
+    prepareSegment preparation prior earlierSelected stageDirectory initial = do
       createDirectoryIfMissing True stageDirectory
       preparedBatch <- newIORef Nothing
       attempt <- newIORef (0 :: Int)
@@ -1280,9 +1293,9 @@ prepareWorldCellQuestion bound question = do
           pure (plannedItemOrdinal (typedItemPlan item),signatures)
         inputs <- bindPreparedWorldInputs completion prior
         originalInterfaces <- newPreparedWorldInterfaceArtifacts inputs stageDirectory
+        retainedGenerations <- projectionInputGenerations completion earlierSelected
         let producedGenerations = Map.fromList [(preparedRootIdentity global,generation)
               | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
-            retainedGenerations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
         unless (Map.null (Map.intersection producedGenerations retainedGenerations))
           (throwIO WorldCellCorrupt)
         let generations = Map.union producedGenerations retainedGenerations
@@ -1354,7 +1367,7 @@ prepareWorldCellQuestion bound question = do
           rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared completedProducts
           (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
             Set.fromList (Map.toList producedGenerations))
-    prepareDeclaration preparation prior stageDirectory stage = do
+    prepareDeclaration preparation prior earlierSelected stageDirectory stage = do
       let initial = heldWorldCellStagePlan stage
       (ordinal,generation,kind,sourceItem) <- case heldWorldCellStageItems stage of
         [item] -> case heldWorldCellItemSlot item of
@@ -1378,7 +1391,7 @@ prepareWorldCellQuestion bound question = do
           (throwIO WorldCellCorrupt)
         inputs <- bindPreparedWorldInputs completion prior
         interfaces <- newPreparedWorldInterfaceArtifacts inputs stageDirectory
-        let generations = maybe Map.empty worldCellRetainedGenerations (preparedCompilationWorldInputs completion)
+        generations <- projectionInputGenerations completion earlierSelected
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.
         (_,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
