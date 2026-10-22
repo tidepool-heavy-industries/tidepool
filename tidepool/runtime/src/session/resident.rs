@@ -1047,6 +1047,24 @@ enum PrivateHostBinding<'a> {
     Visible(&'a Arc<super::PrivateExecutionAdmission>),
 }
 
+/// Registration owns only the pre-mount reservation. The committed receipt
+/// takes over before this guard can release a physically mounted binding.
+struct PendingActivationMount {
+    execution: Arc<super::PrivateExecutionAdmission>,
+    binding: SessionVarId,
+    mounted: bool,
+}
+
+impl Drop for PendingActivationMount {
+    fn drop(&mut self) {
+        if !self.mounted {
+            let _ = self
+                .execution
+                .settle_pending_host(self.binding, super::admission::PendingHostKind::Visible);
+        }
+    }
+}
+
 impl<'a> PrivateHostBinding<'a> {
     fn admission(self) -> &'a Arc<super::PrivateExecutionAdmission> {
         match self {
@@ -6258,12 +6276,7 @@ where
         execution: &Arc<super::PrivateExecutionAdmission>,
         snapshot: &Arc<super::PrivatePreparationSnapshot>,
     ) -> Result<MountedActivationInput, ResidentError> {
-        self.mount_activation_input_impl(
-            owner,
-            interface,
-            settlement,
-            Some((execution, snapshot)),
-        )
+        self.mount_activation_input_impl(owner, interface, settlement, Some((execution, snapshot)))
     }
 
     fn mount_activation_input_impl(
@@ -6330,10 +6343,6 @@ where
                     .filter(|association| Arc::ptr_eq(association, snapshot.association()))
                     .cloned()
                     .ok_or(SessionError::StaleStagedDeclaration)?;
-                execution.register_pending_host(
-                    binding,
-                    super::admission::PendingHostKind::Visible,
-                )?;
                 Ok(association)
             })
             .transpose()?;
@@ -6368,33 +6377,38 @@ where
             .state
             .source_lease_in(scope)
             .map_err(SessionError::SourceAdmission)?;
-        if private.is_some() {
-            private
-                .expect("checked private activation")
-                .0
-                .register_pending_host(
+        let prepared_write = match private {
+            Some((execution, _)) => Some(super::PendingHostValueWrite::prepare_activation_mount(
+                &self.state,
+                execution.clone(),
+                &binder,
+                interface.clone(),
+                private_before
+                    .as_ref()
+                    .expect("validated private activation")
+                    .clone(),
+            )?),
+            None => None,
+        };
+        let mut pending = private
+            .map(|(execution, _)| {
+                execution
+                    .register_pending_host(binding, super::admission::PendingHostKind::Visible)?;
+                Ok::<_, SessionError>(PendingActivationMount {
+                    execution: execution.clone(),
                     binding,
-                    super::admission::PendingHostKind::Visible,
-                )?;
-        }
-        let consumed = owner
+                    mounted: false,
+                })
+            })
+            .transpose()?;
+        owner
             .input
             .original_source
             .with_open_target(&target, || {
                 self.state
                     .consume_binding_interface(reservation, &interface)
             })
-            .map_err(SessionError::SourceAdmission)
-            .and_then(|result| result);
-        if let Err(error) = consumed {
-            if let Some((execution, _)) = private {
-                execution.settle_pending_host(
-                    binding,
-                    super::admission::PendingHostKind::Visible,
-                )?;
-            }
-            return Err(error.into());
-        }
+            .map_err(SessionError::SourceAdmission)??;
         self.mount_activation_binding_prepared(
             scope,
             &binder,
@@ -6403,58 +6417,45 @@ where
             owner.input.custody,
             staged,
             settlement,
+            private.map(|(execution, _)| PrivateHostBinding::Visible(execution)),
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
             binding,
             source: Box::new(source),
         })?;
-        if let Some((execution, _)) = private {
-            let committed = (|| -> Result<(), SessionError> {
-                let before = private_before.ok_or(SessionError::StaleStagedDeclaration)?;
-                let key = self
-                    .state
-                    .compile_view_key_in(scope)
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                let after = Arc::new(super::inspection::InspectionWorldAssociation {
-                    base: super::inspection::InspectionWorldBase {
-                        key,
-                        ..before.base.clone()
-                    },
-                    world: before.world.clone(),
-                });
-                self.state
-                    .lib_mut()
-                    .tips
-                    .get_mut(&scope)
-                    .ok_or(SessionError::DeadScope(scope))?
-                    .inspection_world = Some(after.clone());
-                let mut write = super::PendingHostValueWrite::mounted_host_interface(
-                    &self.state,
-                    scope,
-                    &binder,
-                    interface.clone(),
-                )?;
-                write =
-                    write.retain_private_visible_mount(
-                        &self.state,
-                        execution.clone(),
-                        before,
-                        after,
-                    )?;
-                write.accept(execution)
-            })();
-            if let Err(source) = committed {
-                execution
-                    .settle_pending_host(
-                        binding,
-                        super::admission::PendingHostKind::Visible,
-                    )
-                    .ok();
-                return Err(ResidentError::ActivationMountCommitted {
+        if let Some(pending) = pending.as_mut() {
+            pending.mounted = true;
+        }
+        if let (Some((execution, _)), Some(prepared_write)) = (private, prepared_write) {
+            let before = private_before.expect("validated private activation");
+            let key = self
+                .state
+                .compile_view_key_in(scope)
+                .expect("committed activation retains its live private scope");
+            let after = Arc::new(super::inspection::InspectionWorldAssociation {
+                base: super::inspection::InspectionWorldBase {
+                    key,
+                    ..before.base.clone()
+                },
+                world: before.world.clone(),
+            });
+            self.state
+                .lib_mut()
+                .tips
+                .get_mut(&scope)
+                .expect("committed activation retains its private association")
+                .inspection_world = Some(after.clone());
+            let write = prepared_write.committed(handle.raw().0, after);
+            // This exact owner exists before acceptance or any later refusal.
+            // Drop transfers unresolved cleanup to the resident queue.
+            let mut lease =
+                self.retain_private_host_binding(execution.clone(), binder.clone(), write);
+            lease
+                .accept()
+                .map_err(|source| ResidentError::ActivationMountCommitted {
                     binding,
                     source: Box::new(source.into()),
-                });
-            }
+                })?;
         }
         let visibility = self
             .state
@@ -7500,6 +7501,7 @@ where
         custody: RootCustody,
         staged_interface: super::persistent::StagedCheckedValueInterface,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+        private_input: Option<PrivateHostBinding<'_>>,
     ) -> Result<(), ResidentError> {
         custody.checked_handle(&self.custody_cleanup)?;
         let transfer = custody.into_transfer();
@@ -7524,7 +7526,7 @@ where
             PreparedBindingInstall::Host(HostBindingInstall {
                 reservation: HostBindingReservation::Interface(reservation),
                 interface: staged_interface,
-                private_input: None,
+                private_input,
             }),
             settlement,
         )?;
@@ -9805,6 +9807,25 @@ where
     /// Release affine roots whose handles were dropped while the machine was
     /// checked into a registry or otherwise unavailable to the token itself.
     fn settle_dropped_custody(&mut self) -> usize {
+        // Take the complete batch before entering exact retirement, which may
+        // itself settle other dropped custody. Refusal preserves each receipt.
+        let private_hosts = std::mem::take(&mut *self.custody_cleanup.private_host_bindings.lock());
+        let mut private_host_count = 0;
+        let mut unresolved = Vec::new();
+        for retained in private_hosts {
+            match self.retire_private_host_binding_owner(
+                &retained.execution,
+                &retained.binder,
+                &retained.write,
+            ) {
+                Ok(()) => private_host_count += 1,
+                Err(_) => unresolved.push(retained),
+            }
+        }
+        self.custody_cleanup
+            .private_host_bindings
+            .lock()
+            .extend(unresolved);
         let bindings_before = self.state.bindings().mutation_revision();
         self.state.reap_admission_leases();
         let startup_entries = std::mem::take(&mut *self.custody_cleanup.startup_entries.lock());
@@ -9846,7 +9867,7 @@ where
                 engine.discard_handle(handle);
             }
         }
-        count + binding_count + startup_count
+        count + binding_count + startup_count + private_host_count
     }
 
     /// Install the signal an owning lifecycle manager uses to resume cleanup
@@ -9864,6 +9885,7 @@ where
     pub fn outstanding_custody(&mut self) -> usize {
         self.settle_dropped_custody();
         self.custody_cleanup.external_leases.load(Ordering::Acquire)
+            + self.custody_cleanup.private_host_bindings.lock().len()
     }
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:

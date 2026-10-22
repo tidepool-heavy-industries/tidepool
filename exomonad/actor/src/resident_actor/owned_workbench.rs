@@ -1598,7 +1598,7 @@ where
             },
             |behavior, _kernel, mut owned, (answer, binding)| {
                 let binding = binding.and_then(|binding| {
-                    if let Some(binding) = binding {
+                    if let Some(mut binding) = binding {
                         if owned
                             .state
                             .effects
@@ -2201,7 +2201,7 @@ where
             },
             move |behavior, _kernel, mut owned, mut result| {
                 let retained_binding = match result.retained_job_binding.take() {
-                    Some(binding)
+                    Some(mut binding)
                         if !owned
                             .state
                             .effects

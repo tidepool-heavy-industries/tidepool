@@ -5347,26 +5347,21 @@ pub type ChildSessionFactory<H, O> = Arc<
 >;
 
 /// Keeps an original host binding leased until its consumer accepts or abandons it.
-/// Drop schedules retirement through the owning machine checkout.
+/// Private abandonment transfers the original receipt to resident cleanup.
 struct HostInputRetirement {
     input: MountedHostInput,
     _lease: tidepool_runtime::session::resident::BindingLease,
     background_retire: Box<dyn FnOnce() + Send>,
     retire_private: Option<
         Box<
-            dyn FnOnce(
-                    tidepool_runtime::session::PendingHostValueWrite,
-                ) -> futures_util::future::BoxFuture<
+            dyn Fn() -> futures_util::future::BoxFuture<
                     'static,
-                    Result<
-                        tidepool_runtime::session::PendingHostValueWrite,
-                        ResidentActorWorkbenchError,
-                    >,
+                    Result<(), ResidentActorWorkbenchError>,
                 > + Send,
         >,
     >,
+    private_lease: Option<Arc<Mutex<tidepool_runtime::session::resident::PrivateHostBindingLease>>>,
     write: Option<tidepool_runtime::session::PendingHostValueWrite>,
-    private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
 }
 
 impl HostInputRetirement {
@@ -5377,12 +5372,26 @@ impl HostInputRetirement {
         lease: tidepool_runtime::session::resident::BindingLease,
         write: tidepool_runtime::session::PendingHostValueWrite,
         private: Option<Arc<tidepool_runtime::session::PrivateExecutionAdmission>>,
+        session: &ResidentSession<H, O>,
     ) -> Self
     where
         H: DispatchEffect<O> + Send + 'static,
         O: OutputSink + Sync + 'static,
     {
-        let background_retire: Box<dyn FnOnce() + Send> = {
+        let (private_lease, write) = match private {
+            Some(private) => (
+                Some(Arc::new(Mutex::new(session.retain_private_host_binding(
+                    private,
+                    input.binder.clone(),
+                    write,
+                )))),
+                None,
+            ),
+            None => (None, Some(write)),
+        };
+        let background_retire: Box<dyn FnOnce() + Send> = if private_lease.is_some() {
+            Box::new(|| {})
+        } else {
             let machines = Arc::clone(&access.machines);
             let source = access.source.clone();
             let context = context.clone();
@@ -5399,85 +5408,70 @@ impl HostInputRetirement {
                         })
                         .await
                     {
-                        tracing::warn!(
-                            %error,
-                            "failed to retire an abandoned host binding"
-                        );
+                        tracing::warn!(%error, "failed to retire an abandoned host binding");
                     }
                 });
             })
         };
-        let retire_private = private.as_ref().map(|private| {
+        let retire_private = private_lease.as_ref().map(|lease| {
             let access = access.sharing();
             let context = context.clone();
-            let binder = input.binder.clone();
-            let private = private.clone();
-            Box::new(
-                move |write| -> futures_util::future::BoxFuture<
-                    'static,
-                    Result<
-                        tidepool_runtime::session::PendingHostValueWrite,
-                        ResidentActorWorkbenchError,
-                    >,
-                > {
-                    Box::pin(async move {
-                        access
-                            .with_machine(context, move |session, _, _| {
-                                session
-                                    .retire_private_host_binding_owner(&private, &binder, &write)
-                                    .map_err(ResidentActorWorkbenchError::Resident)?;
-                                Ok(write)
-                            })
-                            .await
-                    })
-                },
-            )
-                as Box<
-                    dyn FnOnce(
-                            tidepool_runtime::session::PendingHostValueWrite,
-                        ) -> futures_util::future::BoxFuture<
-                            'static,
-                            Result<
-                                tidepool_runtime::session::PendingHostValueWrite,
-                                ResidentActorWorkbenchError,
-                            >,
-                        > + Send,
-                >
+            let lease = lease.clone();
+            Box::new(move || -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> {
+                let access = access.sharing();
+                let context = context.clone();
+                let lease = lease.clone();
+                Box::pin(async move {
+                    access.with_machine(context, move |session, _, _| {
+                        session.retire_private_host_binding_lease(&mut lease.lock())
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    }).await
+                })
+            }) as Box<dyn Fn() -> futures_util::future::BoxFuture<'static, Result<(), ResidentActorWorkbenchError>> + Send>
         });
         Self {
             input,
             _lease: lease,
             background_retire,
             retire_private,
-            write: Some(write),
-            private,
+            private_lease,
+            write,
         }
     }
 
-    fn keep_binding(mut self) -> Result<(), ResidentActorWorkbenchError> {
-        if let Some(private) = &self.private {
-            self.write
-                .as_mut()
-                .expect("original host mount write")
-                .accept(private)
-                .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
-            self.write.take();
+    fn with_write<R>(
+        &self,
+        body: impl FnOnce(Option<&tidepool_runtime::session::PendingHostValueWrite>) -> R,
+    ) -> R {
+        match &self.private_lease {
+            Some(lease) => body(lease.lock().write()),
+            None => body(self.write.as_ref()),
         }
+    }
+
+    fn keep_binding(&mut self) -> Result<(), ResidentActorWorkbenchError> {
+        if let Some(lease) = &self.private_lease {
+            lease
+                .lock()
+                .accept()
+                .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+        }
+        self.write.take();
         self.retire_private = None;
         self.background_retire = Box::new(|| {});
         Ok(())
     }
 
     async fn retire_for_publication(&mut self) -> Result<(), ResidentActorWorkbenchError> {
-        let retire = self.retire_private.take().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "host input lacks its original private retirement owner".into(),
-            )
-        })?;
-        let write = self.write.take().expect("original private input write");
-        self.write = Some(retire(write).await?);
-        // The exact owner has completed retirement under its source gates.
-        // Abandonment continues to use generic cleanup through Drop.
+        let retirement = {
+            let retire = self.retire_private.as_ref().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "host input lacks its original private retirement owner".into(),
+                )
+            })?;
+            retire()
+        };
+        retirement.await?;
         self.background_retire = Box::new(|| {});
         Ok(())
     }
@@ -5499,24 +5493,18 @@ impl RetainedHostBinding {
         &self.name
     }
 
-    pub(crate) fn accept(self) -> Result<String, ResidentActorWorkbenchError> {
-        if let Some(mounted) = self.mounted {
+    pub(crate) fn accept(&mut self) -> Result<String, ResidentActorWorkbenchError> {
+        if let Some(mounted) = self.mounted.as_mut() {
             mounted.keep_binding()?;
         }
-        Ok(self.name)
+        self.mounted.take();
+        Ok(self.name.clone())
     }
 }
 
 impl Drop for HostInputRetirement {
     fn drop(&mut self) {
-        if let (Some(retire), Some(write)) = (self.retire_private.take(), self.write.take()) {
-            tokio::spawn(async move {
-                if let Err(error) = retire(write).await {
-                    tracing::warn!(%error, "failed to retire an abandoned private host binding");
-                }
-            });
-            return;
-        }
+        // The private lease queues exact custody synchronously on its final drop.
         let background = std::mem::replace(&mut self.background_retire, Box::new(|| {}));
         background();
     }
@@ -10510,9 +10498,7 @@ where
                 move |session, context, _, settlement| {
                     let _private_owner = private_owner;
                     let snapshot = session
-                        .prepare_private_execution_snapshot(
-                            _private_owner.admission.clone(),
-                        )
+                        .prepare_private_execution_snapshot(_private_owner.admission.clone())
                         .map_err(ResidentError::Session)?;
                     reject_activation_declaration(session, context.placement.lexical_scope)?;
                     let owner = session
@@ -11062,6 +11048,7 @@ where
                     lease,
                     write,
                     private,
+                    session,
                 ))
             })
             .await
@@ -11326,29 +11313,28 @@ where
                 "checked cell preparation requires its admitted context and source revision".into(),
             ));
         }
-        let preparation: Option<
-            Arc<tidepool_runtime::session::PrivatePreparationSnapshot>,
-        > = match purpose.execution() {
-            Some(execution) => Some(
-                self.access
-                    .with_compiler_machine(context.clone(), {
-                        let execution = execution.admission.clone();
-                        move |session, _, _, _| {
-                            session
-                                .prepare_private_execution_snapshot(execution)
-                                .map_err(|error| {
-                                    ResidentActorWorkbenchError::Resident(
-                                        ResidentError::Session(error),
-                                    )
-                                })
-                        }
-                    })
-                    .await?,
-            ),
-            // Internal HostCarrier preparation deliberately uses its narrow
-            // current-or-pinned precursor path and never owns authored progress.
-            None => None,
-        };
+        let preparation: Option<Arc<tidepool_runtime::session::PrivatePreparationSnapshot>> =
+            match purpose.execution() {
+                Some(execution) => Some(
+                    self.access
+                        .with_compiler_machine(context.clone(), {
+                            let execution = execution.admission.clone();
+                            move |session, _, _, _| {
+                                session
+                                    .prepare_private_execution_snapshot(execution)
+                                    .map_err(|error| {
+                                        ResidentActorWorkbenchError::Resident(
+                                            ResidentError::Session(error),
+                                        )
+                                    })
+                            }
+                        })
+                        .await?,
+                ),
+                // Internal HostCarrier preparation deliberately uses its narrow
+                // current-or-pinned precursor path and never owns authored progress.
+                None => None,
+            };
         let world = match &preparation {
             Some(preparation) => preparation.world().clone(),
             None => {
@@ -11379,20 +11365,18 @@ where
                 .clone();
             self.access
                 .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                    let write = input.write.as_ref().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "the mounted cell input lost its pending write".into(),
-                        )
-                    })?;
-                    let operand = session
-                        .world_cell_operand_for_input(
-                            execution,
-                            &operand_preparation,
-                            write,
-                        )
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    let operand = input.with_write(|write| {
+                        let write = write.ok_or_else(|| {
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "the mounted cell input lost its pending write".into(),
+                            )
                         })?;
+                        session
+                            .world_cell_operand_for_input(execution, &operand_preparation, write)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    })?;
                     Ok((Some(operand), Some(input)))
                 })
                 .await?
@@ -11442,15 +11426,22 @@ where
                             expected,
                             authority_digest,
                         ),
-                    CellPreparationPurpose::PrivateExecution(execution) => session
-                        .admit_world_planned_cell_with_snapshot(
-                            execution.admission.clone(),
-                            preparation
-                                .clone()
-                                .expect("authored preparation has a snapshot"),
-                            plan,
-                            leased_input.as_ref().and_then(|input| input.write.as_ref()),
-                        ),
+                    CellPreparationPurpose::PrivateExecution(execution) => {
+                        let admit = |write| {
+                            session.admit_world_planned_cell_with_snapshot(
+                                execution.admission.clone(),
+                                preparation
+                                    .clone()
+                                    .expect("authored preparation has a snapshot"),
+                                plan,
+                                write,
+                            )
+                        };
+                        match leased_input.as_ref() {
+                            Some(input) => input.with_write(admit),
+                            None => admit(None),
+                        }
+                    }
                 };
                 let admission = admitted.map_err(|error| {
                     ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
@@ -19092,7 +19083,7 @@ pub(crate) mod request_tests {
             .accept()
             .unwrap();
         assert_eq!(accepted, repeated, "same accepted write is reused");
-        let unaccepted = workbench
+        let mut unaccepted = workbench
             .bind_command_job(private.clone(), "unaccepted job".into())
             .await
             .unwrap();
@@ -19402,9 +19393,7 @@ pub(crate) mod request_tests {
                     move |session, _, _| {
                         session
                             .private_publication_diagnostic(&admission)
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(error.into())
-                            })
+                            .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))
                     }
                 })
                 .await
@@ -20021,8 +20010,11 @@ pub(crate) mod request_tests {
                 .mounted
                 .as_mut()
                 .unwrap()
-                .write
-                .as_mut()
+                .private_lease
+                .as_ref()
+                .unwrap()
+                .lock()
+                .write_mut()
                 .unwrap()
                 .accept(&wrong)
                 .is_err(),
@@ -21051,15 +21043,17 @@ pub(crate) mod request_tests {
             .access
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
                 let operand_preparation = preparation.clone();
-                let operand = session
-                    .world_cell_operand_for_input(
-                        execution.admission.clone(),
-                        &operand_preparation,
-                        input.write.as_ref().unwrap(),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
+                let operand = input.with_write(|write| {
+                    session
+                        .world_cell_operand_for_input(
+                            execution.admission.clone(),
+                            &operand_preparation,
+                            write.unwrap(),
+                        )
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                })?;
                 Ok((operand, input))
             })
             .await
@@ -21319,7 +21313,7 @@ pub(crate) mod request_tests {
                 let scope = context.placement.lexical_scope;
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, input.write.as_ref()),
+                assert!(matches!(input.with_write(|write| session.admit_world_planned_cell_with_input(execution, plan, write)),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
                     "a parser plan cannot move to another actual execution");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
@@ -21333,7 +21327,7 @@ pub(crate) mod request_tests {
                 let scope = context.placement.lexical_scope;
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, other_input.write.as_ref()),
+                assert!(matches!(other_input.with_write(|write| session.admit_world_planned_cell_with_input(execution, plan, write)),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
                     "a legitimate mount from another input cannot replace the exact parser operand");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
@@ -21364,7 +21358,7 @@ pub(crate) mod request_tests {
                     "retained parser plans keep physical custody without reviving the logical mount");
                 let before = (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),
                     session.declaration_generation_high_water().unwrap(), session.scope_binding_count(scope));
-                assert!(matches!(session.admit_world_planned_cell_with_input(execution, plan, input.write.as_ref()),
+                assert!(matches!(input.with_write(|write| session.admit_world_planned_cell_with_input(execution, plan, write)),
                     Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)),
                     "the same authentic input write must refuse after its actual mount retires");
                 assert_eq!(before, (session.binding_tip_id(scope), session.compile_view_in(scope).unwrap().next_value_generation(),

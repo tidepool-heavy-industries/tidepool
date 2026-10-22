@@ -27,7 +27,7 @@ impl PreparedCommandPresentation {
         output: &mut Vec<WorkbenchEffectOutput>,
         recovered_bindings: &mut Vec<String>,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        if let Some(binding) = self.binding {
+        if let Some(mut binding) = self.binding {
             let binding = binding.accept()?;
             recovered_bindings.push(binding.clone());
             fragment.retain_job_binding(binding);

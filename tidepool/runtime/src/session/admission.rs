@@ -666,6 +666,52 @@ pub struct PendingHostValueWrite {
     private_mount: Option<PrivateHostMount>,
 }
 
+/// Prevalidated activation receipt recipe retained across the native mount.
+/// Only a committed mount supplies its actual root and successor association.
+pub(super) struct PreparedActivationMountWrite {
+    owner: Arc<RuntimeAdmissionOwner>,
+    owner_epoch: u64,
+    execution: Arc<PrivateExecutionAdmission>,
+    binder: super::BoundBinder,
+    interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+    before: Arc<super::inspection::InspectionWorldAssociation>,
+}
+
+impl PreparedActivationMountWrite {
+    pub(super) fn committed(
+        self,
+        root_id: u64,
+        after: Arc<super::inspection::InspectionWorldAssociation>,
+    ) -> PendingHostValueWrite {
+        PendingHostValueWrite {
+            owner: self.owner,
+            owner_epoch: self.owner_epoch,
+            scope: self.execution.private_scope(),
+            id: tidepool_repr::SessionVarId::from_extract(self.binder.var_id),
+            write: CertifiedPrivateValueWrite {
+                name: self.binder.name.clone(),
+                identity: SymbolIdentity {
+                    unit: "main".into(),
+                    module: self.binder.module,
+                    namespace: "value".into(),
+                    occurrence: self.binder.name,
+                    record_parent: None,
+                },
+                generation: self.interface.value_interface_certificate().owner().gen,
+                root_id,
+                proof: CertifiedPrivateValueProof::HostInterface(self.interface),
+                visible_host: None,
+            },
+            private_mount: Some(PrivateHostMount {
+                execution: self.execution,
+                before: self.before,
+                after,
+                kind: PendingHostKind::Visible,
+            }),
+        }
+    }
+}
+
 /// The actual runtime owner's transition across one fresh private input.
 struct PrivateHostMount {
     execution: Arc<PrivateExecutionAdmission>,
@@ -729,6 +775,39 @@ impl std::fmt::Debug for PendingHostValueWrite {
 }
 
 impl PendingHostValueWrite {
+    pub(super) fn prepare_activation_mount(
+        session: &PersistentSession,
+        execution: Arc<PrivateExecutionAdmission>,
+        binder: &super::BoundBinder,
+        interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+        before: Arc<super::inspection::InspectionWorldAssociation>,
+    ) -> Result<PreparedActivationMountWrite, SessionError> {
+        let certified =
+            super::turn::decode_bound_binder(interface.binder()).map_err(SessionError::Compile)?;
+        if !Arc::ptr_eq(&execution.owner, session.admission_owner())
+            || execution.owner_epoch != session.admission_owner().epoch()
+            || session
+                .lib()
+                .tips
+                .get(&execution.private_scope())
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_none_or(|live| !Arc::ptr_eq(live, &before))
+            || certified.name != binder.name
+            || certified.var_id != binder.var_id
+            || certified.module != binder.module
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(PreparedActivationMountWrite {
+            owner: session.admission_owner().clone(),
+            owner_epoch: session.admission_owner().epoch(),
+            execution,
+            binder: binder.clone(),
+            interface,
+            before,
+        })
+    }
+
     pub(super) fn id(&self) -> tidepool_repr::SessionVarId {
         self.id
     }

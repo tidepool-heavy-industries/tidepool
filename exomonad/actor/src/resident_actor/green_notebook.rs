@@ -122,7 +122,7 @@ where
         current.inflight_effect = None;
         if let Some(mut attachment) = completion.attachment {
             let receipt = attachment.receipt;
-            if let Some(binding) = attachment.retained_job_binding.take() {
+            if let Some(mut binding) = attachment.retained_job_binding.take() {
                 if !state
                     .effects
                     .control
