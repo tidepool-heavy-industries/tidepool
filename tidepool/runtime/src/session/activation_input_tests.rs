@@ -6400,8 +6400,8 @@ fn crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish(
         .owner()
         .clone();
     assert_ne!(
-        owner_a, owner_b,
-        "independent World cells issue distinct authored owners even for the same visible binder"
+        owner_a.module, owner_b.module,
+        "independent World cells reserve distinct Lib module identities even for the same visible binder"
     );
     let public_before = resident
         .public_visibility_snapshot_in(resident.public_scope())
