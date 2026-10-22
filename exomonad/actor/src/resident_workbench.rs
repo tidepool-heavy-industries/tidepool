@@ -19607,7 +19607,7 @@ pub(crate) mod request_tests {
             let failure = workbench
                 .execute_cell_for_test(
                     private.clone(),
-                    "keptPrivate <- pure (41 :: Int)\nerror \"later item failed\"",
+                    "keptPrivate <- pure (41 :: Int)\n(sleep (minutes 0) >> error \"later item failed\") :: Eff {} ()",
                 )
                 .await
                 .expect_err("the later item fails after genuine private progress");
