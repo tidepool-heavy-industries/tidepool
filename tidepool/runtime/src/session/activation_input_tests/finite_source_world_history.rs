@@ -1,12 +1,12 @@
 //! Finite source publication and later cells use the actual B source owner.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
-use tidepool_codegen::prepared_program::{
-    NativeBindingKey, NativeInstanceLease, SourceInstanceDomain,
-};
+use tidepool_codegen::prepared_program::{NativeInstanceLease, SourceInstanceDomain};
 use tidepool_repr::execution_schema::{Group, HeapRhs, UpdatePolicy, ValueId};
+use tidepool_repr::native_code::{NativeCodeBody, NativeCodeId, NativeCodeImport};
+use tidepool_toolchain::linked_native::{LinkedNativeTarget, LinkedNativeTargetImport};
 
-type CafKey = (NativeBindingKey, ValueId);
+type CafKey = (NativeCodeId, ValueId);
 
 #[derive(Debug)]
 struct HeldPackageCaf {
@@ -21,7 +21,7 @@ fn selected_package_roots(
     scope: ScopeId,
 ) -> (
     SourceInstanceDomain,
-    BTreeMap<NativeBindingKey, NativeInstanceLease>,
+    BTreeMap<NativeCodeId, NativeInstanceLease>,
 ) {
     let selection = resident
         .state
@@ -29,7 +29,7 @@ fn selected_package_roots(
         .native_domain_selection_in(resident.state.scope_tree(), scope)
         .expect("the actual source owner issues its selected native domain");
     let domain = selection.current();
-    let mut roots = BTreeMap::<NativeBindingKey, NativeInstanceLease>::new();
+    let mut roots = BTreeMap::<NativeCodeId, NativeInstanceLease>::new();
     for (key, lease) in selection
         .roots()
         .iter()
@@ -408,16 +408,19 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
                 Arc::ptr_eq(package.image().image(), expected.image().image()),
                 package.image().group().owner(), package.image().group().binders()))
         }).collect::<Vec<_>>();
-        let edges = |selection: &tidepool_toolchain::artifact_inventory::CompletedNativeSelection| {
-            selection.completion().package_bindings().filter_map(|binding| {
-                (binding.product().code() == expected.image().group()).then(|| (
-                    binding.binding(), binding.import_links().map(|(child, value)|
-                        (child.binding(), value)).collect::<Vec<_>>(),
+        let edges = |selection: &LinkedNativeTarget| {
+            selection.acquired().filter_map(|acquired| {
+                let NativeCodeBody::Package(body) = acquired.code().body() else { return None; };
+                (body == expected.image().group()).then(|| (
+                    acquired.code().id(), acquired.code().imports().filter_map(|import| match import {
+                        NativeCodeImport::Code { code, value } => Some((code.id(), value)),
+                        NativeCodeImport::Retained(_) => None,
+                    }).collect::<Vec<_>>(),
                 ))
             }).collect::<Vec<_>>()
         };
         let original = prepared.compiled().certification.as_ref().unwrap()
-            .native_selection.as_ref().unwrap();
+            .linked_target.as_ref().unwrap();
         panic!("the first B cell demands the SAME issued package CAF binding; expected={forced_key:?} expected_owner={:?} expected_binders={:?} current_domain={:?} original_edges={:?} first_edges={:?} all_observed=(key,instance,same_code,same_image,owner,binders){observed:?}",
             expected.image().group().owner(), expected.image().group().binders(), domains.current(),
             edges(original), edges(&first_selection));
@@ -460,10 +463,15 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "packageFunction 2",
         45,
     );
-    assert!(callable_selection.target_imports().iter().any(|import| matches!(import,
-        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
-            if identity == &callable)),
-        "the common installer must consume an actual retained callable, not recompile its body");
+    assert!(
+        callable_selection
+            .imports()
+            .iter()
+            .any(|import| matches!(import,
+        LinkedNativeTargetImport::RetainedCapture(requirement)
+            if requirement.identity() == &callable)),
+        "the common installer must consume an actual retained callable, not recompile its body"
+    );
     let public_second = observed_package_cafs(&mut resident, public_b, "public_second");
     assert!(assert_unchanged_public_caf(&public_second, forced_key, first_caf).evaluated);
     let (_, before_expression) = selected_package_roots(&resident, public_b);
@@ -618,10 +626,15 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
         "P.sum (P.map packageFunction [0,1])",
         87,
     );
-    assert!(callback_selection.target_imports().iter().any(|import| matches!(import,
-        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
-            if identity == &callable)),
-        "a package callback keeps the SAME actual retained callable after independent A retires");
+    assert!(
+        callback_selection
+            .imports()
+            .iter()
+            .any(|import| matches!(import,
+        LinkedNativeTargetImport::RetainedCapture(requirement)
+            if requirement.identity() == &callable)),
+        "a package callback keeps the SAME actual retained callable after independent A retires"
+    );
     let (restored_domain, restored_roots) = selected_package_roots(&resident, public_b);
     assert_eq!(restored_domain, late_domain);
     for key in &newly_selected {
@@ -657,7 +670,7 @@ fn public_package_cell(
     name: &str,
     expression: &str,
     expected: i64,
-) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
+) -> Arc<LinkedNativeTarget> {
     let source = format!("{name} <- pure (({expression}), T.pack (P.show ({expression})))");
     public_package_binding(resident, recipe, name, &source, Some(expected))
 }
@@ -668,7 +681,7 @@ fn public_package_binding(
     name: &str,
     source: &str,
     expected: Option<i64>,
-) -> Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection> {
+) -> Arc<LinkedNativeTarget> {
     let public = resident.public_context();
     let execution = begin_fixture_execution(resident);
     let private = execution.private_scope();
@@ -684,7 +697,7 @@ fn public_package_binding(
         .certification
         .as_ref()
         .unwrap()
-        .native_selection
+        .linked_target
         .as_ref()
         .unwrap()
         .clone();
@@ -812,10 +825,12 @@ fn public_package_expression_pair(resident: &mut TestSession, recipe: &InputReci
             &format!("{name} ()"),
             expected,
         );
-        assert!(selection.target_imports().iter().any(|import| matches!(import,
-            tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity: selected, .. }
-                if selected == &identity)),
-            "each result must apply its actual retained expression capture");
+        assert!(
+            selection.imports().iter().any(|import| matches!(import,
+            LinkedNativeTargetImport::RetainedCapture(requirement)
+                if requirement.identity() == &identity)),
+            "each result must apply its actual retained expression capture"
+        );
         let after = resident.public_visibility_snapshot_in(public).unwrap();
         assert!(
             before_forcing
