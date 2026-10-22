@@ -4604,6 +4604,26 @@ where
             .prepare_private_execution_snapshot(execution)
     }
 
+    /// Capture readiness and its optional exact hidden input in one checkout.
+    pub fn prepare_private_execution(
+        &mut self,
+        execution: Arc<super::PrivateExecutionAdmission>,
+        input: Option<&super::PendingHostValueWrite>,
+    ) -> Result<super::PrivateCellPreparation, SessionError> {
+        self.settle_dropped_custody();
+        let snapshot = self
+            .state
+            .prepare_private_execution_snapshot_with_input(execution.clone(), input)?;
+        let operand = input
+            .map(|input| {
+                let binding = self.lease_bindings(&[tidepool_repr::VarId(input.id().raw())]);
+                input.world_cell_operand(&self.state, execution.clone(), &snapshot, binding)
+            })
+            .transpose()?;
+        execution.ensure_snapshot_current(&snapshot)?;
+        Ok(super::PrivateCellPreparation { snapshot, operand })
+    }
+
     pub fn private_publication_diagnostic(
         &self,
         execution: &super::PrivateExecutionAdmission,

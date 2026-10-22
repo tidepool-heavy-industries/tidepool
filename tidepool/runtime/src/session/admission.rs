@@ -221,6 +221,12 @@ pub(super) enum PendingHostKind {
     Visible,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PrivateHostDeltaDisposition {
+    Applied,
+    Superseded,
+}
+
 pub(super) struct PrivateFreezeTransition<'a> {
     admission: &'a PrivateExecutionAdmission,
     committed: bool,
@@ -252,6 +258,29 @@ pub struct PrivatePreparationSnapshot {
     accepted_revision: u64,
     applied_revision: u64,
     frontier: Arc<PrivateSettledFrontier>,
+    selected_input: Option<tidepool_repr::SessionVarId>,
+}
+
+/// One readiness issuance, including the exact optional hidden operand.
+/// Neither part is minted against a different compiler predecessor.
+pub struct PrivateCellPreparation {
+    pub(super) snapshot: Arc<PrivatePreparationSnapshot>,
+    pub(super) operand: Option<Arc<RuntimeWorldCellOperand>>,
+}
+
+impl PrivateCellPreparation {
+    pub fn snapshot(&self) -> &Arc<PrivatePreparationSnapshot> {
+        &self.snapshot
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Arc<PrivatePreparationSnapshot>,
+        Option<Arc<RuntimeWorldCellOperand>>,
+    ) {
+        (self.snapshot, self.operand)
+    }
 }
 
 impl PrivatePreparationSnapshot {
@@ -274,6 +303,19 @@ struct PrivateExecutionCompilerBasis {
     admitted_context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
+fn private_pending_is_ready(
+    state: &PrivateExecutionState,
+    selected: Option<tidepool_repr::SessionVarId>,
+) -> bool {
+    match selected {
+        Some(id) => {
+            state.pending_hosts.len() == 1
+                && state.pending_hosts.get(&id) == Some(&PendingHostKind::Hidden)
+        }
+        None => state.pending_hosts.is_empty(),
+    }
+}
+
 fn execution_snapshot_is_ready(
     state: &PrivateExecutionState,
     snapshot: &PrivatePreparationSnapshot,
@@ -282,6 +324,7 @@ fn execution_snapshot_is_ready(
         || state.accepted_visible_revision != snapshot.accepted_revision
         || state.applied_visible_revision != snapshot.applied_revision
         || snapshot.accepted_revision != snapshot.applied_revision
+        || !private_pending_is_ready(state, snapshot.selected_input)
         || !matches!(&state.authored, PrivateAuthoredProgram::Ready(frontier)
             if Arc::ptr_eq(frontier, &snapshot.frontier))
     {
@@ -635,7 +678,10 @@ impl PendingHostValueWrite {
         binding: super::resident::BindingLease,
     ) -> Result<Arc<RuntimeWorldCellOperand>, SessionError> {
         self.private_hidden_mount_key(session, &execution)?;
-        if !binding.retained_bindings().contains(&self.id) {
+        if !Arc::ptr_eq(&snapshot.execution, &execution)
+            || snapshot.selected_input != Some(self.id)
+            || !binding.retained_bindings().contains(&self.id)
+        {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let world = snapshot.world();
@@ -1034,11 +1080,10 @@ impl PrivateExecutionAdmission {
         kind: PendingHostKind,
     ) -> Result<(), SessionError> {
         let mut state = self.state.lock();
-        if state.phase != PrivateExecutionPhase::Open
-            || state.pending_hosts.insert(id, kind).is_some()
-        {
+        if state.phase != PrivateExecutionPhase::Open || state.pending_hosts.contains_key(&id) {
             return Err(SessionError::StaleStagedDeclaration);
         }
+        state.pending_hosts.insert(id, kind);
         Ok(())
     }
 
@@ -1084,18 +1129,12 @@ impl PrivateExecutionAdmission {
         if state.phase != PrivateExecutionPhase::Open {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        match &state.authored {
-            PrivateAuthoredProgram::Active {
-                admission_digest: active,
-                ..
-            } if *active == admission_digest => return Ok(()),
-            PrivateAuthoredProgram::Ready(frontier)
-                if Arc::ptr_eq(frontier, &snapshot.frontier)
-                    && state.accepted_visible_revision == snapshot.accepted_revision
-                    && state.applied_visible_revision == snapshot.applied_revision
-                    && snapshot.accepted_revision == snapshot.applied_revision => {}
-            _ => return Err(SessionError::StaleStagedDeclaration),
+        if matches!(&state.authored, PrivateAuthoredProgram::Active { admission_digest: active, .. }
+            if *active == admission_digest)
+        {
+            return Ok(());
         }
+        execution_snapshot_is_ready(&state, snapshot)?;
         state.authored = PrivateAuthoredProgram::Active {
             admission_digest,
             settled: snapshot.frontier.clone(),
@@ -1132,17 +1171,7 @@ impl PrivateExecutionAdmission {
         &self,
         snapshot: &PrivatePreparationSnapshot,
     ) -> Result<(), SessionError> {
-        let state = self.state.lock();
-        if state.phase != PrivateExecutionPhase::Open
-            || state.accepted_visible_revision != snapshot.accepted_revision
-            || state.applied_visible_revision != snapshot.applied_revision
-            || snapshot.accepted_revision != snapshot.applied_revision
-            || !matches!(&state.authored, PrivateAuthoredProgram::Ready(frontier)
-                if Arc::ptr_eq(frontier, &snapshot.frontier))
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        Ok(())
+        execution_snapshot_is_ready(&self.state.lock(), snapshot)
     }
 
     pub(super) fn accepted_host_progress(&self) -> Option<Arc<PrivateHostBindingProgress>> {
@@ -2348,6 +2377,46 @@ impl RuntimeCheckedPrefixSnapshot {
                 }
             }
     }
+    fn is_current_predecessor(
+        &self,
+        admission: &RuntimeCellAdmission,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> bool {
+        let continuing = admission.private_execution().is_some_and(|private| {
+            let state = private.state.lock();
+            state.phase == PrivateExecutionPhase::Open
+                && matches!(&state.authored, PrivateAuthoredProgram::Active { admission_digest, .. }
+                    if *admission_digest == admission.digest())
+        });
+        if !continuing {
+            return self.is_current(session, scope);
+        }
+        let RuntimeCheckedPrefixBasis::World { world, .. } = &self.basis else {
+            return self.is_current(session, scope);
+        };
+        let (Ok(original), Ok(source)) = (
+            admission.original_source(),
+            admission.world_source_reference(),
+        ) else {
+            return false;
+        };
+        session
+            .lib()
+            .tips
+            .get(&scope)
+            .and_then(|tip| tip.inspection_world.as_ref())
+            .is_some_and(|association| {
+                Arc::ptr_eq(&association.world, world)
+                    && session.inspection_world_base_is_current(
+                        &association.base,
+                        source,
+                        &original,
+                    )
+                    && association.base.target.matches(&admission._retained_scope)
+            })
+    }
+
     pub fn interfaces(&self) -> impl Iterator<Item = &AdmittedValueInterface> {
         self.interfaces.iter()
     }
@@ -2442,7 +2511,10 @@ impl RuntimeCheckedPrefix {
             Some("execution")
         } else if execution.item().admission_digest() != self.admission.digest() {
             Some("admission digest")
-        } else if !state.snapshot.is_current(session, scope) {
+        } else if !state
+            .snapshot
+            .is_current_predecessor(&self.admission, session, scope)
+        {
             Some("snapshot")
         } else {
             None
@@ -2516,7 +2588,10 @@ impl RuntimeCheckedPrefix {
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         self.admission.with_open_sources(|| {
-            if !state.snapshot.is_current(session, scope) {
+            if !state
+                .snapshot
+                .is_current_predecessor(&self.admission, session, scope)
+            {
                 return Err(SessionError::StaleStagedDeclaration);
             }
             state.in_flight = Some(execution);
@@ -2616,7 +2691,9 @@ impl CheckedTurnCompletion {
                     .in_flight
                     .as_ref()
                     .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
-                || !state.snapshot.is_current(session, scope)
+                || !state
+                    .snapshot
+                    .is_current_predecessor(&self.prefix.admission, session, scope)
             {
                 return Err(SessionError::StaleStagedDeclaration.into());
             }
@@ -3543,7 +3620,9 @@ impl PersistentSession {
             || prefix.program.items()[0]
                 .native()
                 .is_none_or(|original| !Arc::ptr_eq(original, execution))
-            || !state.snapshot.is_current(self, scope)
+            || !state
+                .snapshot
+                .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -3609,7 +3688,9 @@ impl PersistentSession {
             || item.index() != state.snapshot.compiler_prefix.next_item()
             || state.in_flight.is_some()
             || state.reservation.is_some()
-            || !state.snapshot.is_current(self, scope)
+            || !state
+                .snapshot
+                .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -3699,7 +3780,10 @@ impl PersistentSession {
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         prefix.admission.with_open_sources(|| {
-            if !state.snapshot.is_current(self, scope) {
+            if !state
+                .snapshot
+                .is_current_predecessor(&prefix.admission, self, scope)
+            {
                 return Err(SessionError::StaleStagedDeclaration);
             }
             if let Some(execution) = prefix.admission.private_execution() {
@@ -3739,7 +3823,9 @@ impl PersistentSession {
             || state.reservation.as_ref().is_none_or(|reserved| {
                 reserved.item != *item || reserved.generation != admission.generation
             })
-            || !state.snapshot.is_current(self, scope)
+            || !state
+                .snapshot
+                .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -4758,13 +4844,13 @@ impl PersistentSession {
         rows.sort_by_key(|(id, _)| id.raw());
 
         let mut bindings = Vec::with_capacity(rows.len());
+        let mut processed = Vec::with_capacity(rows.len());
         for (id, write) in &rows {
             if self
                 .resolve_in(execution.private_scope(), write.name())
                 .is_none_or(|entry| entry.id != *id)
             {
-                // Acceptance remains retained evidence. Its compiler delta was
-                // superseded before application by an actual later winner.
+                processed.push((*id, PrivateHostDeltaDisposition::Superseded));
                 continue;
             }
             let entry = self
@@ -4781,6 +4867,7 @@ impl PersistentSession {
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
+            processed.push((*id, PrivateHostDeltaDisposition::Applied));
             bindings.push(match &write.proof {
                 CertifiedPrivateValueProof::Execution(proof) => {
                     tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_checked_execution(
@@ -4835,7 +4922,12 @@ impl PersistentSession {
                 .get_mut(&execution.private_scope())
                 .expect("validated private World association")
                 .inspection_world = Some(successor_association.clone());
-            state.unapplied_visible_hosts.clear();
+            for (id, disposition) in &processed {
+                state.unapplied_visible_hosts.remove(id);
+                tracing::debug!(target: "tidepool::session::private_host_mount",
+                    binding = id.raw(), ?disposition, accepted_revision,
+                    "private accepted host delta processed");
+            }
             state.applied_visible_revision = accepted_revision;
             state.accepted_host_progress = Some(successor.progress().clone());
             state.authored = PrivateAuthoredProgram::Ready(successor_frontier);
@@ -4850,44 +4942,57 @@ impl PersistentSession {
         Ok(successor_association)
     }
 
-    /// Issue the exact current prep state for one new authored program.
+    /// Issue the exact current prep state for a program with no hidden operand.
     pub fn prepare_private_execution_snapshot(
         &mut self,
         execution: Arc<PrivateExecutionAdmission>,
     ) -> Result<Arc<PrivatePreparationSnapshot>, SessionError> {
-        execution.ensure_open()?;
-        if matches!(
-            execution.state.lock().authored,
-            PrivateAuthoredProgram::Active { .. } | PrivateAuthoredProgram::Failed
-        ) {
-            return Err(SessionError::StaleStagedDeclaration);
+        self.prepare_private_execution_snapshot_with_input(execution, None)
+    }
+
+    pub(super) fn prepare_private_execution_snapshot_with_input(
+        &mut self,
+        execution: Arc<PrivateExecutionAdmission>,
+        input: Option<&PendingHostValueWrite>,
+    ) -> Result<Arc<PrivatePreparationSnapshot>, SessionError> {
+        let selected_input = input
+            .map(|input| {
+                input
+                    .private_hidden_mount_key(self, &execution)
+                    .map(|_| input.id)
+            })
+            .transpose()?;
+        {
+            let state = execution.state.lock();
+            if state.phase != PrivateExecutionPhase::Open
+                || !matches!(state.authored, PrivateAuthoredProgram::Ready(_))
+                || !private_pending_is_ready(&state, selected_input)
+            {
+                return Err(SessionError::WorldCellPublicationIncomplete);
+            }
         }
         let association = self.reconcile_private_visible_hosts(&execution, false)?;
         let state = execution.state.lock();
-        if state.phase != PrivateExecutionPhase::Open
-            || matches!(state.authored, PrivateAuthoredProgram::Active { .. })
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let accepted_revision = state.accepted_visible_revision;
-        let applied_revision = state.applied_visible_revision;
         let frontier = match &state.authored {
             PrivateAuthoredProgram::Ready(frontier)
-                if accepted_revision == applied_revision
-                    && frontier.matches_world(&association.world) =>
+                if state.phase == PrivateExecutionPhase::Open
+                    && state.accepted_visible_revision == state.applied_visible_revision
+                    && frontier.matches_world(&association.world)
+                    && private_pending_is_ready(&state, selected_input) =>
             {
                 frontier.clone()
             }
             _ => return Err(SessionError::StaleStagedDeclaration),
         };
-        drop(state);
-        Ok(Arc::new(PrivatePreparationSnapshot {
-            execution,
+        let snapshot = Arc::new(PrivatePreparationSnapshot {
+            execution: execution.clone(),
             association,
-            accepted_revision,
-            applied_revision,
+            accepted_revision: state.accepted_visible_revision,
+            applied_revision: state.applied_visible_revision,
             frontier,
-        }))
+            selected_input,
+        });
+        Ok(snapshot)
     }
 
     pub fn private_publication_diagnostic(
@@ -6040,7 +6145,8 @@ impl PersistentSession {
         plan: super::turn::RuntimeWorldCellPlan,
         input: Option<&PendingHostValueWrite>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        let snapshot = self.prepare_private_execution_snapshot(execution.clone())?;
+        let snapshot =
+            self.prepare_private_execution_snapshot_with_input(execution.clone(), input)?;
         self.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, input)
     }
 

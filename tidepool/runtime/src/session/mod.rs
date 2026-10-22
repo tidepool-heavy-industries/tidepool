@@ -105,7 +105,7 @@ pub use admission::{
     RuntimeBindingInterfaceReservation,
     RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
     RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
-    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
+    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand, PrivateCellPreparation,
     UnpublishedNotebookScope,
 };
 pub use paired_publication::FinalExecutionIntent;
