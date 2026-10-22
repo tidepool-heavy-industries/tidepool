@@ -11954,14 +11954,16 @@ mod tests {
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
             );
             let before_source_context = inventory.metrics().issued_scope_nodes;
-            let context = crate::declaration_context::ExactDeclarationContext::from_issued_output(
+            let context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
                 producer_sha256,
-                fixed.captured_stage().output(),
+                CompilerSourceSupport::close_complete_output(fixed.captured_stage().compiler_inputs())
+                    .unwrap(),
                 lexical.clone(),
                 native.descriptor.owner.clone(),
                 &[],
             )
             .unwrap();
+            assert!(context.source_scope().rows().is_empty());
             assert_eq!(
                 inventory.metrics().issued_scope_nodes,
                 before_source_context

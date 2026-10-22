@@ -909,9 +909,12 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     .unwrap();
     let target = fixture.original.descriptor.owner.clone();
     let context = Arc::new(
-        ExactDeclarationContext::from_issued_output(
+        ExactDeclarationContext::from_authenticated_execution_support(
             producer,
-            candidate.output(),
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                candidate.compiler_inputs(),
+            )
+            .unwrap(),
             vec![ExactLexicalNode {
                 owner: target.clone(),
                 imports: vec![],
@@ -921,6 +924,7 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
         )
         .unwrap(),
     );
+    assert!(context.source_scope().rows().is_empty());
     let before = context.as_ref().clone();
     let private = original_native_declaration_inputs(&context, PRODUCER)
         .unwrap()

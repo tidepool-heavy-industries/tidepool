@@ -121,6 +121,7 @@ fn type_context(products: &[CertifiedRecoveryProduct]) -> Arc<ExactDeclarationCo
             producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
             compiler_support: fixture_compiler_support(projection, view),
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -259,6 +260,7 @@ fn partial_context(
             producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
             compiler_support: fixture_compiler_support(projection, view),
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -797,6 +799,7 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
         compiler_support: recover_fixture_compiler_support(projection.clone(), source.clone(), [])
             .unwrap(),
         lexical: Default::default(),
+        source_scope: Default::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
@@ -1334,6 +1337,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             producer: producer.sha256(),
             compiler_support: support,
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
@@ -1581,6 +1585,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             )
             .unwrap(),
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
@@ -1902,6 +1907,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             producer: producer.sha256(),
             compiler_support: fixture_compiler_support(projection, view),
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
@@ -2118,6 +2124,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 producer: producer.sha256(),
                 compiler_support: fixture_compiler_support(projection.clone(), ambiguous),
                 lexical: Default::default(),
+                source_scope: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
@@ -2298,6 +2305,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             producer: producer.sha256(),
             compiler_support: fixture_compiler_support(projection, view),
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
@@ -2883,6 +2891,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             producer: producer.sha256(),
             compiler_support: interfaces,
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -3187,6 +3196,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             producer: producer.sha256(),
             compiler_support: reusable_support,
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -3327,6 +3337,7 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
             producer: producer.sha256(),
             compiler_support: support,
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -4508,6 +4519,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     producer: producer.sha256(),
                     compiler_support: support,
                     lexical: Default::default(),
+                    source_scope: Default::default(),
                     template_imports: None,
                     original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 },
@@ -4738,6 +4750,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             producer: producer.sha256(),
             compiler_support: baseline.clone(),
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
@@ -5188,6 +5201,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             producer: producer.sha256(),
             compiler_support: narrowed,
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -7009,6 +7023,7 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
                 artifacts,
             ),
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -7160,6 +7175,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 producer: producer.sha256(),
                 compiler_support: interfaces,
                 lexical: Default::default(),
+                source_scope: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
@@ -7474,6 +7490,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 )
                 .unwrap(),
                 lexical: Default::default(),
+                source_scope: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
@@ -7746,6 +7763,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         producer: producer.sha256(),
         compiler_support: support,
         lexical: Default::default(),
+        source_scope: Default::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
@@ -7943,6 +7961,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 producer: producer.sha256(),
                 compiler_support: support,
                 lexical: Default::default(),
+                source_scope: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
@@ -8232,6 +8251,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
         )
         .unwrap(),
         lexical: Default::default(),
+        source_scope: Default::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
@@ -8302,6 +8322,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
             producer: producer.sha256(),
             compiler_support: support,
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
@@ -8634,6 +8655,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                                 producer: producer.sha256(),
                                 compiler_support: support,
                                 lexical: Default::default(),
+                                source_scope: Default::default(),
                                 template_imports: None,
                                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
                             });
@@ -8919,6 +8941,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
                 )
                 .unwrap(),
                 lexical: Default::default(),
+                source_scope: Default::default(),
                 template_imports: None,
                 original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
@@ -8959,6 +8982,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
             )
             .unwrap(),
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -9793,6 +9817,7 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
         producer: producer.sha256(),
         compiler_support: support,
         lexical: Default::default(),
+        source_scope: Default::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
@@ -10247,6 +10272,7 @@ fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationCon
             producer: CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
             compiler_support: fixture_compiler_support(projection, view),
             lexical: Default::default(),
+            source_scope: Default::default(),
             template_imports: None,
             original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
@@ -10473,6 +10499,7 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         producer,
         compiler_support: narrowed,
         lexical: Default::default(),
+        source_scope: Default::default(),
         template_imports: None,
         original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
