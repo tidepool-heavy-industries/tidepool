@@ -82,6 +82,8 @@ pub enum SnapshotError {
     UnsupportedCid(Cid),
     #[error("immutable block storage: {0}")]
     Storage(#[source] anyhow::Error),
+    #[error("compiler context encoding version {found} is unsupported; expected {expected}")]
+    UnsupportedContextVersion { found: u32, expected: u32 },
     #[error("malformed immutable snapshot: {0}")]
     Malformed(String),
 }
@@ -250,16 +252,20 @@ pub fn verify_block(cid: &Cid, bytes: &[u8]) -> Result<(), SnapshotError> {
     Ok(())
 }
 
-pub fn read_value<T: DeserializeOwned, BS: Blockstore>(
-    store: &BS,
-    cid: &Cid,
-) -> Result<T, SnapshotError> {
+fn read_checked_bytes<BS: Blockstore>(store: &BS, cid: &Cid) -> Result<Vec<u8>, SnapshotError> {
     let bytes = store
         .get(cid)
         .map_err(storage_error)?
         .ok_or(SnapshotError::MissingBlock(*cid))?;
     verify_block(cid, &bytes)?;
-    fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)
+    Ok(bytes)
+}
+
+pub fn read_value<T: DeserializeOwned, BS: Blockstore>(
+    store: &BS,
+    cid: &Cid,
+) -> Result<T, SnapshotError> {
+    fvm_ipld_encoding::from_slice(&read_checked_bytes(store, cid)?).map_err(malformed)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -384,7 +390,12 @@ impl ReachableBlocks {
     ) -> Result<(SemanticRoots, Self), SnapshotError> {
         let frontier = self.replace_roots(
             staged,
-            vec![roots.primary, roots.associations, roots.bindings, roots.lexical],
+            vec![
+                roots.primary,
+                roots.associations,
+                roots.bindings,
+                roots.lexical,
+            ],
         )?;
         Ok((roots, frontier))
     }
@@ -2740,6 +2751,8 @@ fn hydrate_publication_native<BS: Blockstore>(
     Ok(facts)
 }
 
+const CONTEXT_ENCODING_VERSION: u32 = 7;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextDescriptor {
@@ -2820,7 +2833,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             &next.native_completions,
         )?;
         let descriptor = ContextDescriptor {
-            version: 7,
+            version: CONTEXT_ENCODING_VERSION,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
@@ -2863,12 +2876,20 @@ pub fn hydrate_context<BS: Blockstore>(
 ) -> Result<MaterializedContext, SnapshotError> {
     let hydrator = SnapshotHydrator::new(store);
     let store = &hydrator;
-    let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 7 {
-        return Err(malformed(
-            "context encoding requires version 7 with native completion facts",
-        ));
+    let bytes = read_checked_bytes(store, root.cid())?;
+    // Refuse an old schema before decoding its layout or following any links.
+    #[derive(Deserialize)]
+    struct ContextVersion {
+        version: u32,
     }
+    let version: ContextVersion = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
+    if version.version != CONTEXT_ENCODING_VERSION {
+        return Err(SnapshotError::UnsupportedContextVersion {
+            found: version.version,
+            expected: CONTEXT_ENCODING_VERSION,
+        });
+    }
+    let descriptor: ContextDescriptor = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
     let selection = store.selection(&descriptor.selection)?;
     let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
     let lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec> =

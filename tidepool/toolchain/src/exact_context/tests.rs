@@ -823,10 +823,90 @@ fn old_selection_and_context_versions_are_rejected() {
         };
         let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
         install(&store, materializer.finish().unwrap());
-        assert!(
-            matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding requires version 7 with native completion facts")
-        );
+        assert!(matches!(hydrate_context(&store, &old_root),
+                Err(SnapshotError::UnsupportedContextVersion { found, expected })
+                    if found == version && expected == CONTEXT_ENCODING_VERSION));
     }
+}
+
+#[test]
+fn context_version_gate_precedes_layout_and_child_hydration() {
+    #[derive(Serialize)]
+    struct ForeignContext {
+        version: u32,
+        foreign_native_rows: Cid,
+    }
+    let store = MemoryBlockstore::new();
+    let missing = Cid::new_v1(
+        DAG_CBOR,
+        Code::Blake2b256.digest(b"unavailable context child"),
+    );
+    for version in [
+        0,
+        CONTEXT_ENCODING_VERSION - 1,
+        CONTEXT_ENCODING_VERSION + 1,
+    ] {
+        let mut writer = Materializer::new(&store);
+        let root = ContextRoot(
+            writer
+                .materialize_value(&ForeignContext {
+                    version,
+                    foreign_native_rows: missing,
+                })
+                .unwrap(),
+        );
+        install(&store, writer.finish().unwrap());
+        let observed = CountingStore {
+            inner: &store,
+            reads: RefCell::new(BTreeMap::new()),
+        };
+        assert!(matches!(hydrate_context(&observed, &root),
+            Err(SnapshotError::UnsupportedContextVersion { found, expected })
+                if found == version && expected == CONTEXT_ENCODING_VERSION));
+        let reads = observed.reads.borrow();
+        assert_eq!(
+            reads.len(),
+            1,
+            "unsupported contexts must not acquire child blocks"
+        );
+        assert_eq!(reads.get(root.cid()).unwrap().0, 1);
+        assert!(!reads.contains_key(&missing));
+    }
+    let mut writer = Materializer::new(&store);
+    let root = ContextRoot(
+        writer
+            .materialize_value(&ForeignContext {
+                version: CONTEXT_ENCODING_VERSION,
+                foreign_native_rows: missing,
+            })
+            .unwrap(),
+    );
+    install(&store, writer.finish().unwrap());
+    assert!(
+        matches!(
+            hydrate_context(&store, &root),
+            Err(SnapshotError::Malformed(_))
+        ),
+        "the current version still requires the complete current layout"
+    );
+    assert!(matches!(hydrate_context(&MemoryBlockstore::new(), &root),
+        Err(SnapshotError::MissingBlock(cid)) if cid == *root.cid()));
+    struct InaccessibleStore;
+    impl Blockstore for InaccessibleStore {
+        fn get(&self, _: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+        }
+        fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+            unreachable!("context hydration does not publish blocks")
+        }
+    }
+    assert!(matches!(
+        hydrate_context(&InaccessibleStore, &root),
+        Err(SnapshotError::Storage(_))
+    ));
+    store.put_keyed(root.cid(), &[0]).unwrap();
+    assert!(matches!(hydrate_context(&store, &root),
+        Err(SnapshotError::Integrity(cid)) if cid == *root.cid()));
 }
 
 #[test]
