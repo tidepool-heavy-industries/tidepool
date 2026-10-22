@@ -1272,6 +1272,10 @@ def actor_private_publication_test_cases(binary):
         "declaration_only_history_publishes_real_progress_for_a_fresh_cell",
         "empty_import_only_history_has_an_explicit_terminal_transition",
         "failed_later_item_keeps_its_private_progress_unpublished",
+        "distinct_private_programs_compose_before_publication_and_real_readmission",
+        "private_freeze_between_items_refuses_without_sealing_the_running_program",
+        "unchanged_private_world_preserves_later_public_source_selection",
+        "disjoint_private_world_edit_preserves_later_public_source_selection",
     )]
     env, resources, worker = compiler_service_test_inputs(
         "exomonad-actor", "actor_n2_publication_tests", mixed=True
@@ -1876,7 +1880,9 @@ tidepool_buildscript_run(
                 '    visibility = ["PUBLIC"],', ")", ""]))
             if package_name == "tidepool-runtime":
                 world_tests = [
+                    "session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start",
                     "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
+                    "session::resident::activation_input_tests::started_world_item_freezes_incomplete_and_refuses_publication",
                     "session::turn::tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
                 ]
                 world_env, world_resources, world_worker = compiler_service_test_inputs(

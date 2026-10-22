@@ -19650,6 +19650,208 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
+    async fn distinct_private_programs_compose_before_publication_and_real_readmission() {
+        with_test_compiler_owner(|preparation_client| async move {
+                let (machines, mut public, source, _root) = actor_registry_fixture();
+                let (captured, source_owner) =
+                    world_query_test_source_files_with_support(&[], &source.base_include);
+                public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+                let (workbench, private) = ResidentActorWorkbench::new(
+                    machines, source.bind_preparation(preparation_client), None,
+                )
+                .admit_private_cell_with_source_for_test(public.clone(), captured.clone(), source_owner.clone())
+                .await;
+                workbench.execute_cell_for_test(private.clone(), "first <- pure (41 :: Int)")
+                    .await.expect("the first authored program commits privately");
+                workbench.execute_cell_for_test(private.clone(), "second <- pure (first + 1 :: Int)")
+                    .await.expect("a distinct program reads the current private World");
+                workbench.publish_completed_cell_for_test(private).await
+                    .expect("both completed programs publish and release their private scope");
+                let (workbench, fresh) = workbench
+                    .admit_private_cell_with_source_for_test(public, captured, source_owner).await;
+                workbench.execute_cell_for_test(fresh,
+                    "if first == (41 :: Int) && second == (42 :: Int) then (42 :: Int) else error \"private program values changed\"")
+                    .await.expect("real source readmission retains both published values");
+            }).await;
+    }
+
+    #[tokio::test]
+    async fn private_freeze_between_items_refuses_without_sealing_the_running_program() {
+        with_test_compiler_owner(|preparation_client| async move {
+                let (machines, mut public, source, _root) = actor_registry_fixture();
+                let (captured, source_owner) =
+                    world_query_test_source_files_with_support(&[], &source.base_include);
+                public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+                let (workbench, private) = ResidentActorWorkbench::new(
+                    machines, source.bind_preparation(preparation_client), None,
+                ).admit_private_cell_with_source_for_test(public.clone(), captured, source_owner).await;
+                let (checked, prepared) = workbench.prepare_cell(private.clone(),
+                    "first <- pure (41 :: Int)\nsecond <- pure (first + 1 :: Int)".into())
+                    .await.expect("the complete two-item program is checked once");
+                let PreparedCell { items, dependencies } = prepared;
+                assert_eq!(checked.items.len(), 2);
+                assert_eq!(items.len(), 2);
+                let execution = workbench.private_execution.as_ref().unwrap().clone();
+                let mut items = checked.items.iter().zip(items).enumerate();
+                for ordinal in 0..2 {
+                    let (index, (observed, item)) = items.next().unwrap();
+                    assert_eq!(index, ordinal);
+                    let step = workbench.begin_prepared_cell_item(private.clone(), ParsedBlock {
+                        ordinal: index + 1,
+                        total: checked.items.len(),
+                        source: observed.source.clone(),
+                    }, item).await.expect("the next exact item retains its program owner");
+                    let step = match step {
+                        ResidentWorkbenchStep::Running { fragment, outcome } => workbench
+                            .settle_item(private.clone(), *fragment, (*outcome).into())
+                            .await.expect("the exact pure item settles"),
+                        step => step,
+                    };
+                    assert!(matches!(step, ResidentWorkbenchStep::Committed { .. }));
+                    if ordinal == 0 {
+                        assert_eq!(execution.admission.checked_progress(),
+                            tidepool_toolchain::compiler_world::PrivateCheckedItemProgress::Started);
+                        let before = workbench.access.with_machine(public.clone(), |session, context, _| {
+                            Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope).unwrap())
+                        }).await.unwrap();
+                        let refused = workbench_runner_for_test(&workbench)
+                            .publish_private_execution(private.clone(), execution.clone()).await;
+                        assert!(matches!(refused,
+                            Err(ResidentActorWorkbenchError::PrivatePublication { source, .. })
+                            if matches!(source.as_ref(), ResidentActorWorkbenchError::Resident(
+                                ResidentError::Session(tidepool_runtime::session::SessionError::WorldCellPublicationIncomplete)
+                            ))
+                        ), "an active program cannot issue a final intent");
+                        let after = workbench.access.with_machine(public.clone(), |session, context, _| {
+                            Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope).unwrap())
+                        }).await.unwrap();
+                        assert_eq!(after, before, "refused freeze leaves the public state intact");
+                    }
+                }
+                drop(dependencies);
+                workbench.publish_completed_cell_for_test(private).await
+                    .expect("the freeze refusal did not seal the program before its final item");
+            }).await;
+    }
+
+    #[tokio::test]
+    async fn unchanged_private_world_preserves_later_public_source_selection() {
+        with_test_compiler_owner(|client| async move {
+            private_world_source_publication_race(client, false).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn disjoint_private_world_edit_preserves_later_public_source_selection() {
+        with_test_compiler_owner(|client| async move {
+            private_world_source_publication_race(client, true).await;
+        })
+        .await;
+    }
+
+    async fn private_world_source_publication_race(
+        preparation_client: crate::CompilerPreparationClient,
+        private_edit: bool,
+    ) {
+        let (machines, mut public, mut source, _root) = actor_registry_fixture();
+        source
+            .workbench_imports
+            .extend_text("qualified SourcePublicationRace");
+        let (captured, source_owner) = world_query_test_source_files_with_support(
+                &[("SourcePublicationRace.hs", "module SourcePublicationRace where\n{-# NOINLINE raceValue #-}\nraceValue :: Int -> Int\nraceValue value = value + 1\n")],
+                &source.base_include,
+            );
+        public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+        let (a, private_a) =
+            ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None)
+                .admit_private_cell_with_source_for_test(
+                    public.clone(),
+                    captured.clone(),
+                    source_owner.clone(),
+                )
+                .await;
+        if private_edit {
+            a.execute_cell_for_test(private_a.clone(), "privateValue <- pure (7 :: Int)")
+                .await
+                .expect("A makes one genuine private edit before B advances");
+        }
+        let (b, private_b) = workbench_runner_for_test(&a)
+            .application_workbench()
+            .admit_private_cell_with_source_for_test(
+                public.clone(),
+                captured.clone(),
+                source_owner.clone(),
+            )
+            .await;
+        b.execute_cell_for_test(
+            private_b.clone(),
+            "publicValue <- pure (SourcePublicationRace.raceValue 41)",
+        )
+        .await
+        .expect("B installs the captured HOME function's actual native source");
+        b.publish_completed_cell_for_test(private_b)
+            .await
+            .expect("B publishes its checked World and retires its private scope");
+        let latest_b = a
+            .access
+            .with_machine(public.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        assert!(
+            !latest_b.source_instances.is_empty(),
+            "B must issue real selected native source instances before the race"
+        );
+        a.publish_completed_cell_for_test(private_a)
+            .await
+            .expect("A publishes through its original Final World intent over latest B");
+        let after_a = a
+            .access
+            .with_machine(public.clone(), |session, context, _| {
+                Ok(session
+                    .public_visibility_snapshot_in(context.placement.lexical_scope)
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        if private_edit {
+            assert!(
+                latest_b
+                    .source_instances
+                    .iter()
+                    .all(|key| after_a.source_instances.contains(key)),
+                "A's disjoint private change retains B's exact source custody"
+            );
+        } else {
+            assert_eq!(
+                after_a.source_instances, latest_b.source_instances,
+                "unchanged A retains the exact latest B source instances"
+            );
+            assert_eq!(
+                after_a.source_selection, latest_b.source_selection,
+                "unchanged A cannot replace or union B's selected source state"
+            );
+        }
+        let (fresh, context) = workbench_runner_for_test(&a)
+            .application_workbench()
+            .admit_private_cell_with_source_for_test(public, captured, source_owner)
+            .await;
+        let source = if private_edit {
+            "if publicValue == (42 :: Int) && privateValue == (7 :: Int) then (42 :: Int) else error \"source publication lost a value\""
+        } else {
+            "if publicValue == (42 :: Int) then (42 :: Int) else error \"source publication lost B\""
+        };
+        fresh
+            .execute_cell_for_test(context, source)
+            .await
+            .expect("fresh real source admission consumes the merged public World");
+    }
+
+    #[tokio::test]
     async fn failed_later_item_keeps_its_private_progress_unpublished() {
         with_test_compiler_owner(|preparation_client| async move {
                 let (machines, mut public, source, _root) = actor_registry_fixture();
