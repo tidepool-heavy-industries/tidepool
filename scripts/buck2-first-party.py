@@ -1946,6 +1946,23 @@ tidepool_buildscript_run(
                     runtime_arguments(end_env, end_resources, end_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
+                disposal_history = "session::resident::activation_input_tests::world_disposal_history::released_compiler_world_restores_while_retained_native_custody_executes"
+                disposal_env, disposal_resources, disposal_worker = compiler_service_test_inputs(
+                    package_name, "runtime_world_disposal_history_test"
+                )
+                disposal_env["TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES"] = "0"
+                disposal_env["TIDEPOOL_TEST_TRACE_PROFILE"] = "full"
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    '    name = "runtime_world_disposal_history_test",',
+                    f"    binary = {json.dumps(':' + unit_target['name'])},",
+                    "    exact_tests = [", render_strings([disposal_history], 8), "    ],",
+                    "    expected_count = 1,", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                    '    case_compiler_modes = {' + json.dumps(disposal_history) + ': "owned-resident"},',
+                    runtime_arguments(disposal_env, disposal_resources, disposal_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
                 package_history = "session::resident::activation_input_tests::finite_source_world_history::finite_source_original_feeds_public_world_cells_after_prior_cutoff"
                 package_env, package_resources, package_worker = compiler_service_test_inputs(
                     package_name, "runtime_package_source_history_test"

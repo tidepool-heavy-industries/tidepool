@@ -6,6 +6,9 @@ mod finite_source_world_history;
 #[path = "activation_input_tests/compiler_end_history.rs"]
 mod compiler_end_history;
 
+#[path = "activation_input_tests/world_disposal_history.rs"]
+mod world_disposal_history;
+
 #[path = "activation_input_tests/historical_original_recovery.rs"]
 mod historical_original_recovery;
 
