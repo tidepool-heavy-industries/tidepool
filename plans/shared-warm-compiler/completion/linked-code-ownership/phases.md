@@ -49,12 +49,19 @@ and declaration consumers carry the issued output owner.
 
 Source-level test migration uses actual stages for outputs, closed support for
 input transfer and authenticated recovery for malformed input refusals. No direct
-`OriginalCompilerInputs` fixture literals remain. Empty/Partial outputs remain
-completed facts; native demand still checks their exact own offers. One remaining
-module-candidate fixture migration is owned by T.
+`OriginalCompilerInputs` fixture literals or deleted-constructor callers remain.
+Empty/Partial outputs remain completed facts; native demand still checks their
+exact own offers.
 
-The first joined production compile found stale native-fact observations and a
-source-extension argument; their bounded fixes are queued. Production recompile,
-joined cfg(test) compile and executed qualification remain pending. Target
-admission still needs its bounded owner-accessor cut to eliminate the independent
-cohort/selection parameter pair. None of these source changes is G2 acceptance.
+The first repaired production checkpoint compiled successfully. The final owner
+cut now carries stage, prefix and authoritative selection in one private bundle;
+target admission obtains its selection only from that owner. Decoded metadata
+cannot replace the issued selection. The item issuer alone refines the selection
+for actual produced types. Joined production/cfg(test) compilation and execution
+of this final cut remain pending.
+
+The synthetic executable future-item control was retired with the raw pair it
+constructed. Representation/offer-transfer checks and full-stage target positives
+remain. T owns a replacement refusal through an actual issued item; the current
+staged first-demand history does not establish that specific boundary. G2 remains
+unqualified until this gap and the integrated execution gates close.
