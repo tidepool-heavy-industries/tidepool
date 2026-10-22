@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+pub mod encoding;
 mod shared_content;
 pub(crate) mod symbol;
 use shared_content::SharedContent;
@@ -1222,6 +1223,48 @@ pub struct ProjectedGroup {
 }
 
 impl ProjectedGroup {
+    /// Reserve temporary canonical-encoding storage before allocating it. Hash
+    /// traversal is used only to visit fields for accounting, never as identity.
+    pub(crate) fn charge_canonical_encoding(
+        &self,
+        operation: &InventoryOperation,
+    ) -> Result<(), ParseError> {
+        use std::hash::{Hash, Hasher};
+        struct Account<'a> {
+            operation: &'a InventoryOperation,
+            refused: Option<ParseError>,
+        }
+        impl Hasher for Account<'_> {
+            fn finish(&self) -> u64 {
+                0
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                if self.refused.is_none() {
+                    // Covers temporary Value nodes, Vec storage, encoded bytes
+                    // and string/byte copies for each visited scalar/container.
+                    self.refused = bytes
+                        .len()
+                        .checked_mul(8)
+                        .and_then(|n| n.checked_add(64))
+                        .ok_or(ParseError::LimitExceeded("native code encoding"))
+                        .and_then(|amount| self.operation.charge(amount))
+                        .err();
+                }
+            }
+        }
+        let mut account = Account {
+            operation,
+            refused: None,
+        };
+        self.original_ordinal.hash(&mut account);
+        self.binders.as_ref().hash(&mut account);
+        self.definitions.as_ref().hash(&mut account);
+        match account.refused {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     pub fn definitions(&self) -> DefinitionsView<'_> {
         DefinitionsView::from(self.definitions.as_ref())
     }
@@ -1358,6 +1401,9 @@ pub struct PackageGroupCode {
 }
 
 impl PackageGroupCode {
+    pub(crate) fn projected_group(&self) -> &ProjectedGroup {
+        &self.group
+    }
     /// Validate the structural owner and export inventory. Product
     /// authentication and dependency selection belong to the package issuer.
     pub fn admit(owner: PackageCodeOwner, mut group: ProjectedGroup) -> Result<Self, ParseError> {
@@ -1397,6 +1443,9 @@ impl PackageGroupCode {
 }
 
 impl CertifiedGroupCode {
+    pub(crate) fn projected_group(&self) -> &ProjectedGroup {
+        &self.group
+    }
     /// Validate immutable source identity without resolving installation imports.
     pub fn admit(owner: CachedHomeOwner, group: ProjectedGroup) -> Result<Self, ParseError> {
         group.validate_code_owner(&owner.unit, &owner.module)?;

@@ -7,6 +7,7 @@ pub mod execution_schema;
 pub mod freer_names;
 pub mod id_issuer;
 pub mod jsonl;
+pub mod native_code;
 pub mod serial;
 pub mod session_ids;
 pub mod tree;

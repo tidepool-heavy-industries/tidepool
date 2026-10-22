@@ -79,3 +79,14 @@ changes, cycles, exact retained requirements and distinct nominal definitions.
 Keep foreign-grant refusals even when code identities are equal. Restore validates
 canonical/maximal SCCs and rejects cycles between stored components. Do not use
 the old differing-scoped-bindings test as proof of different semantic children.
+
+## Implementation checkpoint
+
+B isolated source: `refactor/g2-linked-code-core-20261022`, based on contract
+`1e1e42072a`. The first pure repr component/ref/body/edge owner and same-linker
+restore constructor are implemented, with iterative SCC discovery and exact
+prepared-data encoding moved from test-data into repr. Toolchain demanded
+producer and replacement of executable completion/package consumers remain next.
+This intermediate slice is not release-ready; no old route is accepted as a
+permanent parallel path. Compilation and the three pure graph controls are
+pending the bounded warm joined lane.
