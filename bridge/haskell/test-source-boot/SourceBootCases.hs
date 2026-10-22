@@ -242,7 +242,8 @@ import Tidepool.ExactScope
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
-  , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners )
+  , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners
+  , writeCheckedExactCompilation )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
@@ -1754,8 +1755,36 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
           [(dependencySourcePath source,dependencySourceSha256 source)
           | source <- dependencySources (preparedFreshDependencies prepared)
           , takeFileName (dependencySourcePath source) == "GeneratedRoleFresh.hs"]
+        publishRole expected source prepared = do
+          receipt <- maybe (fail "finite role publication lacks its actual source receipt") pure
+            (preparedExactCompilation prepared)
+          let parent = work </> ".exact-compilations"
+              directories = doesDirectoryExist parent >>= \exists ->
+                if exists then Set.fromList <$> listDirectory parent else pure Set.empty
+          before <- directories
+          writeFile target source
+          writeCheckedExactCompilation (prHscEnv (pprPipelineResult prepared)) receipt
+            (preparedFreshDependencies prepared)
+          after <- directories
+          issued <- case Set.toList (after `Set.difference` before) of
+            [name] -> BS.readFile (parent </> name </> "receipt.cbor")
+            _ -> fail "finite role publication did not issue one actual receipt"
+          case deserialiseFromBytes decodeTerm (BSL.fromStrict issued) of
+            Right (rest,TList [TString "TPEXACTCOMPILE",TString "4",_,_,_,_,_,_,_,_,TList rows])
+              | BSL.null rest
+              , [mask | TList [TString "none",TString "GeneratedRoleFresh",TBool False,TString "main",TInt mask] <- rows]
+                  == [expected] -> pure ()
+            _ -> fail "finite v4 wire lost its actual protected/authored role projection"
     requireRole 4 protectedRole
     requireRole 5 overlapRole
+    protectedReceipt <- maybe (fail "protected finite producer lost its actual receipt") pure
+      (preparedExactCompilation protectedRole)
+    requireUserError "finite receipt cannot replay origins over another actual capture"
+      "exact compile source differs from its issued import origins" $
+      writeCheckedExactCompilation (prHscEnv (pprPipelineResult protectedRole))
+        protectedReceipt (preparedFreshDependencies overlapRole)
+    publishRole 4 roleTemplate protectedRole
+    publishRole 5 (importRenderingSource overlapRendering) overlapRole
     unless (length (consumedRole protectedRole) == 1
         && consumedRole protectedRole == consumedRole overlapRole) $
       fail "paired finite roles did not consume the same actual HOME source bytes"
