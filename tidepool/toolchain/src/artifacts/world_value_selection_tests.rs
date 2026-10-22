@@ -6,12 +6,14 @@ use crate::compiler_world::{
     CompilerWorldBindings, CompilerWorldCellOperand, CompilerWorldLexicalSurface,
     WorldCellOperandExposure, WorldSourceSelection,
 };
+use crate::linked_native::{AcquiredNativeImport, NativeCodeGrant};
 use crate::recovery_artifacts::PackageInterfaceValidation;
 use crate::toolchain::AdmittedCompilerEndpoint;
 use tidepool_extract_cmd::{
     settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
     CompilerTransactionClose, CompilerTransactionOrigin, HostAdmissionCancellation,
 };
+use tidepool_repr::native_code::NativeCodeBody;
 
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
@@ -482,6 +484,7 @@ fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() 
 #[ignore = "requires the declared rooted compiler service"]
 fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     let mut ingress = Vec::new();
+    let mut manifest_stages = BTreeMap::new();
     let ((prepared, checked), admission) = settle(|| {
         // Typed declaration stages import Display in their generated scaffold.
         let (endpoint, world, source) = open_world_with_primary_and_module(
@@ -558,6 +561,7 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
                 let [ordinal] = checked.stages()[stage].ordinals() else {
                     panic!("one real checked item per first-demand fixture stage")
                 };
+                manifest_stages.insert(*ordinal, *originals.package_links().stage_id());
                 if checked
                     .item(*ordinal)
                     .expect("actual checked stage item")
@@ -582,18 +586,15 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
         ordered_refusals += controls.ordered_refusals;
         count_refusals += controls.count_refusals;
         for (group, prior) in controls.unused {
-            let completion = program.items()[item_ordinal]
+            let target = program.items()[item_ordinal]
                 .native_products()
                 .expect("unused annotation control belongs to an executable stage")
-                .completed_native_selection()
+                .linked_native_target()
                 .unwrap();
             assert!(
-                !completion
-                    .completion()
-                    .rows()
-                    .any(|row| row.binding().binding.artifact() == group.artifact
-                        && row.binding().original_ordinal == group.original_ordinal),
-                "the actual selected closure contains no binding for the unused physical group"
+                !target.acquired().any(|acquired| matches!(acquired.grant(), NativeCodeGrant::Home { binding, .. }
+                    if binding.binding.artifact() == group.artifact && binding.original_ordinal == group.original_ordinal)),
+                "the actual acquired closure contains no binding for the unused physical group"
             );
             if prior {
                 unused_prior += 1;
@@ -617,8 +618,7 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     // transport mutation or an injected-prior end-to-end metamorphic control.
     for (index, packageful) in [(2, false), (4, true)] {
         let products = program.items()[index].native_products().unwrap();
-        let selection = products.completed_native_selection().unwrap();
-        let completed = selection.completion();
+        let target = products.linked_native_target().unwrap();
         let actual_binder = products
             .pending_imports()
             .iter()
@@ -632,56 +632,72 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
             })
             .expect("target carries its actual prior Source binder");
         assert!(
-            completed
-                .rows()
-                .any(|row| row.product().owner().module == "Module"
-                    && row.product().group().binders().contains(actual_binder)),
+            target
+                .acquired()
+                .any(|acquired| match acquired.code().body() {
+                    NativeCodeBody::Home(body) =>
+                        body.owner().module == "Module"
+                            && body
+                                .exported_values()
+                                .any(|(binder, _)| binder == actual_binder),
+                    _ => false,
+                }),
             "actual non-inline prior Source export must be selected"
         );
-        for row in completed
-            .rows()
-            .filter(|row| row.product().owner().module == "Module")
-        {
+        let mut packages = 0;
+        for acquired in target.acquired() {
+            let NativeCodeBody::Home(body) = acquired.code().body() else {
+                continue;
+            };
+            if body.owner().module != "Module" {
+                continue;
+            }
+            let NativeCodeGrant::Home {
+                binding, product, ..
+            } = acquired.grant()
+            else {
+                panic!("HOME body retains actual HOME grant")
+            };
             let exact = products
                 .target_native_inputs()
                 .certified_groups()
-                .get(row.binding())
-                .expect("the selected prior Source group has its actual exact physical binding");
+                .get(binding)
+                .expect("selected prior Source group has its actual physical binding");
             assert!(
-                row.product().same_issuance(exact),
-                "completion must preserve the exact prior Source physical product and issuer"
+                product.same_issuance(exact),
+                "acquisition preserves exact prior physical product and issuer"
             );
-            assert_eq!(row.product().owner(), exact.owner());
-            assert_eq!(
-                row.product().group().original_ordinal(),
-                exact.group().original_ordinal()
-            );
+            assert_eq!(body.owner(), exact.owner());
+            assert_eq!(body.original_ordinal(), exact.group().original_ordinal());
+            packages += acquired.imports().filter(|import| matches!(import, AcquiredNativeImport::Code { acquired, .. } if matches!(acquired.code().body(), NativeCodeBody::Package(_)))).count();
         }
-        let packages = completed
-            .rows()
-            .filter(|row| row.product().owner().module == "Module")
-            .flat_map(|row| row.product().imports())
-            .filter(|owner| {
-                matches!(
-                    owner,
-                    certified_products::PendingImportOwner::Package { .. }
-                )
-            })
-            .count();
         assert_eq!(packages > 0, packageful, "optimized package slot premise");
     }
     let first = program.items()[0]
         .native_products()
         .unwrap()
-        .completed_native_selection()
+        .linked_native_target()
         .unwrap();
-    assert!(
-        !first
-            .completion()
-            .rows()
-            .any(|row| row.product().owner().module == "Module"),
-        "initial target does not demand the later bodies"
-    );
+    assert!(!first.acquired().any(|acquired| matches!(acquired.code().body(), NativeCodeBody::Home(body) if body.owner().module == "Module")), "initial target does not demand later bodies");
+    let mut previous = Vec::<Arc<crate::linked_native::LinkedNativeTarget>>::new();
+    let mut borrowed_cohorts = 0;
+    for (item_ordinal, manifest_stage) in manifest_stages {
+        let Some(products) = program.items()[item_ordinal].native_products() else {
+            continue;
+        };
+        let target = products
+            .linked_native_target()
+            .expect("actual executable stage target");
+        for prior in &previous {
+            borrowed_cohorts += crate::linked_native::tests::assert_borrowed_cohort_witnesses(
+                prior,
+                target,
+                manifest_stage,
+            );
+        }
+        previous.push(Arc::clone(target));
+    }
+    assert!(borrowed_cohorts > 0, "actual stages must share a package-bearing HOME head while the incoming package manifest changes");
     let request = checked.native_demand_completion();
     let stage = &checked.stages()[0];
     let unknown = Arc::new(stage.as_ref().clone());
