@@ -7205,8 +7205,9 @@ where
                     || (visible && execution.completed_values.lock().contains_key(&id))
                     || self
                         .state
-                        .resolve_in(scope, &binder.name)
-                        .is_none_or(|entry| entry.id != id || entry.scope != scope)
+                        .bindings()
+                        .get(id)
+                        .is_none_or(|entry| entry.scope != scope || entry.name.0 != binder.name)
                 {
                     return Err(SessionError::StaleStagedDeclaration);
                 }

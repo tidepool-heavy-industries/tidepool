@@ -1838,59 +1838,40 @@ impl PersistentSession {
         original_source: &Arc<super::RuntimeOriginalSource>,
         admission: super::admission::CompilerWorldAdmission,
     ) -> bool {
-        super::RuntimeOriginalSource::with_sources_and_targets(
-            [custody.original_source.clone()],
-            [custody.target.clone()],
-            |sources, _| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    sources.iter().map(|source| source.source_admission()),
-                    || {
-                        if !association
-                            .base
-                            .original_source
-                            .matches(&custody.original_source)
-                            || !association.base.target.matches(&custody.target)
-                            || !Arc::ptr_eq(original_source, &custody.original_source)
-                            || cancellation.checkpoint().is_err()
-                            || !self.inspection_world_base_is_current(
-                                &association.base,
-                                source,
-                                original_source,
-                            )
-                        {
-                            return false;
-                        }
-                        custody
-                            .target
-                            .with_compiler_world_admission(
-                                &association.world,
-                                admission,
-                                |install| {
-                                    if !install {
-                                        return true;
-                                    }
-                                    tracing::debug!(
-                                        target: "exomonad_harness::timing",
-                                        logical_world = ?association.world.logical_id(),
-                                        source_sha256 = ?source.sha256(),
-                                        scope = ?association.base.scope,
-                                        "compiler world association installed"
-                                    );
-                                    let state = self
-                                        .lib_mut()
-                                        .tips
-                                        .entry(association.base.scope)
-                                        .or_default();
-                                    state.inspection_world = Some(association.clone());
-                                    true
-                                },
-                            )
-                            .unwrap_or(false)
-                    },
-                )
-            },
-        )
-        .unwrap_or(false)
+        // Terminal adoption takes lifecycle exclusion before source claims.
+        // Keep this installation path in the same lock order.
+        custody.target.with_compiler_world_admission(&association.world, admission, |install| {
+            super::RuntimeOriginalSource::with_sources_and_targets(
+                [custody.original_source.clone()],
+                [custody.target.clone()],
+                |sources, _| {
+                    super::RuntimeSourceAdmission::with_open_admissions(
+                        sources.iter().map(|source| source.source_admission()),
+                        || {
+                            if !association.base.original_source.matches(&custody.original_source)
+                                || !association.base.target.matches(&custody.target)
+                                || !Arc::ptr_eq(original_source, &custody.original_source)
+                                || cancellation.checkpoint().is_err()
+                                || !self.inspection_world_base_is_current(
+                                    &association.base, source, original_source,
+                                )
+                            {
+                                return false;
+                            }
+                            if install {
+                                tracing::debug!(target: "exomonad_harness::timing",
+                                    logical_world = ?association.world.logical_id(),
+                                    source_sha256 = ?source.sha256(), scope = ?association.base.scope,
+                                    "compiler world association installed");
+                                self.lib_mut().tips.entry(association.base.scope).or_default()
+                                    .inspection_world = Some(association.clone());
+                            }
+                            true
+                        },
+                    )
+                },
+            ).unwrap_or(false)
+        }).unwrap_or(false)
     }
 
     pub(super) fn with_current_compiler_world<T>(
@@ -1900,35 +1881,37 @@ impl PersistentSession {
         action: impl FnOnce() -> T,
     ) -> Result<T, SessionError> {
         let association = &completed.association;
-        publication.with_current(&completed.custody.target, || {
-            completed
-                .cancellation
-                .checkpoint()
-                .map_err(tidepool_toolchain::CompileError::from)?;
-            if !self.inspection_world_base_is_current(
-                &association.base,
-                &association.base.source,
-                &completed.custody.original_source,
-            ) || !association
-                .base
-                .original_source
-                .matches(&completed.custody.original_source)
-                || !association.base.target.matches(&completed.custody.target)
-                || !self
-                    .lib()
-                    .tips
-                    .get(&association.base.scope)
-                    .and_then(|state| state.inspection_world.as_ref())
-                    .is_some_and(|installed| Arc::ptr_eq(installed, association))
-            {
-                return Err(SessionError::WrongPublicManifestTicket);
-            }
-            completed.custody.target.with_compiler_world_admission(
-                &association.world,
-                super::admission::CompilerWorldAdmission::Install,
-                |_| action(),
-            )
-        })?
+        completed.custody.target.with_compiler_world_admission(
+            &association.world,
+            super::admission::CompilerWorldAdmission::Install,
+            |_| {
+                publication.with_current(&completed.custody.target, || {
+                    completed
+                        .cancellation
+                        .checkpoint()
+                        .map_err(tidepool_toolchain::CompileError::from)?;
+                    if !self.inspection_world_base_is_current(
+                        &association.base,
+                        &association.base.source,
+                        &completed.custody.original_source,
+                    ) || !association
+                        .base
+                        .original_source
+                        .matches(&completed.custody.original_source)
+                        || !association.base.target.matches(&completed.custody.target)
+                        || !self
+                            .lib()
+                            .tips
+                            .get(&association.base.scope)
+                            .and_then(|state| state.inspection_world.as_ref())
+                            .is_some_and(|installed| Arc::ptr_eq(installed, association))
+                    {
+                        return Err(SessionError::WrongPublicManifestTicket);
+                    }
+                    Ok(action())
+                })?
+            },
+        )?
     }
 
     /// Read mutation-owner facts without constructing a view or its digest.
