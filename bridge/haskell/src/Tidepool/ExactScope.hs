@@ -921,7 +921,10 @@ admittedInterfaceSourceSha256 :: CanonicalInterfaceAdmission -> String
 admittedInterfaceSourceSha256 (ModuleInterfaceAdmission proof) = canonicalSourceSha256 proof
 admittedInterfaceSourceSha256 (LocalInterfaceAdmission proof) = localFinalizedSourceSha256 proof
 
-data CanonicalAdmissionKind = CanonicalModuleOrigin | LocalNativeDeclarationOrigin
+data CanonicalAdmissionKind
+  = CanonicalSourceOrigin
+  | CanonicalAuthoredDeclarationOrigin Generation
+  | LocalNativeDeclarationOrigin
   deriving (Eq, Show)
 
 data ShippedHomeModuleOrigin
@@ -975,7 +978,9 @@ resolveShippedHomeModuleWithEvidence env admitted name expected = do
                     LocalInterfaceAdmission original -> localFinalizedInterface original
                   actualOwner = (exactUnit artifact,exactModule artifact)
                   kind = case proof of
-                    ModuleInterfaceAdmission _ -> CanonicalModuleOrigin
+                    ModuleInterfaceAdmission original -> case canonicalOrigin original of
+                      SourceOriginal _ -> CanonicalSourceOrigin
+                      NativeAuthoredDeclaration generation -> CanonicalAuthoredDeclarationOrigin generation
                     LocalInterfaceAdmission _ -> LocalNativeDeclarationOrigin
                   actual = admittedInterfaceSourceSha256 proof
               unless (actualOwner == owner exactHome)
