@@ -2,7 +2,9 @@
 -- target no longer references. Their executable closure is part of admission.
 module Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
-  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalGlobalsWithPrior
+  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalDemandWithPrior
+  , requiredOriginalExternalDemandForSeeds
+  , requiredOriginalExternalGlobalsWithPrior, OriginalExternalDemand(..)
   , ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand ) where
 
@@ -83,10 +85,10 @@ requiredOriginalPackageGlobalsWithRetained
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
   -> Set.Set SymbolIdentity -> [GlobalDecl] -> Either String [SymbolIdentity]
 requiredOriginalPackageGlobalsWithRetained fresh cached exact retained =
-  requiredOriginalExternalGlobalsWithPrior fresh cached exact retained (const (Right Nothing))
+  fmap originalExternalPackageGlobals
+    . requiredOriginalExternalDemandWithPrior fresh cached exact retained
+      (const (Right Nothing))
 
--- The read-only prior query stays with its certified owner. It is evaluated
--- only for reached symbols, never flattened into this current-group index.
 requiredOriginalExternalGlobalsWithPrior
   :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
   -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
@@ -94,17 +96,50 @@ requiredOriginalExternalGlobalsWithPrior
   -> (SymbolIdentity -> Either String (Maybe (Set.Set SymbolIdentity)))
   -> [GlobalDecl] -> Either String [SymbolIdentity]
 requiredOriginalExternalGlobalsWithPrior fresh cached exact retained prior =
+  fmap originalExternalPackageGlobals
+    . requiredOriginalExternalDemandWithPrior fresh cached exact retained prior
+
+-- The demand owner reports both package leaves and the HOME groups reached to
+-- obtain them. Consumers project only these groups; direct target membership
+-- is not a complete HOME closure.
+data OriginalExternalDemand = OriginalExternalDemand
+  { originalExternalHomeGroups :: Set.Set (String, String, Word)
+  , originalExternalPackageGlobals :: [SymbolIdentity]
+  } deriving (Eq, Show)
+
+-- The read-only prior query stays with its certified owner. It is evaluated
+-- only for reached symbols, never flattened into this current-group index.
+requiredOriginalExternalDemandWithPrior
+  :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
+  -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
+  -> Set.Set SymbolIdentity
+  -> (SymbolIdentity -> Either String (Maybe (Set.Set SymbolIdentity)))
+  -> [GlobalDecl] -> Either String OriginalExternalDemand
+requiredOriginalExternalDemandWithPrior fresh cached exact retained prior =
+  requiredOriginalExternalDemandForSeeds fresh cached exact retained prior
+    . map globalIdentity
+    . filter ((== Nothing) . globalRequiredGeneration)
+
+requiredOriginalExternalDemandForSeeds
+  :: [(String, String, Either String [ProjectedGroup])] -> [ModuleCandidate]
+  -> [(String, String, [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])])]
+  -> Set.Set SymbolIdentity
+  -> (SymbolIdentity -> Either String (Maybe (Set.Set SymbolIdentity)))
+  -> [SymbolIdentity] -> Either String OriginalExternalDemand
+requiredOriginalExternalDemandForSeeds fresh cached exact retained prior =
   -- The original inventory is immutable across target and recovery passes.
   -- Partially applying this function retains its validated binder index;
   -- each target still starts a fresh traversal of that inventory.
   case foldM insert Map.empty groups of
     Left reason -> const (Left reason)
-    Right indexed -> \target -> do
+    Right indexed -> \seeds -> do
       (roots,packages) <- foldM seed ([],Set.empty)
-        [globalIdentity global | global <- target
-          , globalRequiredGeneration global == Nothing
-          , globalIdentity global `Set.notMember` retained]
-      Set.toAscList <$> walk indexed Set.empty packages roots
+        [symbol | symbol <- seeds, symbol `Set.notMember` retained]
+      (reached, globals) <- walk indexed Set.empty packages roots
+      Right OriginalExternalDemand
+        { originalExternalHomeGroups = reached
+        , originalExternalPackageGlobals = Set.toAscList globals
+        }
   where
     groups =
       [ ((unit, name, fromIntegral (projectedOriginalOrdinal group)),
@@ -133,7 +168,7 @@ requiredOriginalExternalGlobalsWithPrior fresh cached exact retained prior =
       | otherwise = do
           selected <- prior symbol
           Right (roots,maybe packages (Set.union packages) selected)
-    walk _ _ packages [] = Right packages
+    walk _ reached packages [] = Right (reached, packages)
     walk indexed seen packages (symbol : pending)
       | symbol `Set.member` retained = walk indexed seen packages pending
       | otherwise = case Map.lookup symbol indexed of

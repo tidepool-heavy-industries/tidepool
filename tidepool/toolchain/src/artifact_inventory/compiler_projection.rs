@@ -366,6 +366,7 @@ pub enum CompletedNativeImport {
 pub struct CompletedNativeSourceRow {
     binding: NativeGroupBinding,
     product: Arc<crate::certified_products::PendingCertifiedGroup>,
+    current_source: Option<Arc<crate::certified_products::PendingCertifiedGroup>>,
     imports: Arc<[CompletedNativeImport]>,
 }
 impl CompletedNativeSourceRow {
@@ -374,6 +375,11 @@ impl CompletedNativeSourceRow {
     }
     pub fn product(&self) -> &Arc<crate::certified_products::PendingCertifiedGroup> {
         &self.product
+    }
+    pub(crate) fn current_source(
+        &self,
+    ) -> Option<&Arc<crate::certified_products::PendingCertifiedGroup>> {
+        self.current_source.as_ref()
     }
     pub fn imports(&self) -> &[CompletedNativeImport] {
         &self.imports
@@ -837,6 +843,7 @@ fn restore_native_completion(
             Arc::new(CompletedNativeSourceRow {
                 binding: *binding,
                 product: Arc::clone(product),
+                current_source: None,
                 imports: imports.into(),
             }),
         );
@@ -1153,17 +1160,12 @@ pub(crate) fn complete_native_selection(
     for row in sources.groups() {
         let mut prior = None;
         for completed in inherited.iter() {
-            let same_binding = completed.rows.get(&row.binding());
-            let same_physical_row = completed.rows.values().filter(|old| {
-                old.product.owner() == row.group().owner()
-                    && old.product.group().original_ordinal()
-                        == row.group().group().original_ordinal()
-            });
-            for old in same_binding.into_iter().chain(same_physical_row) {
+            if let Some(old) = completed.rows.get(&row.binding()) {
                 let same_exact_rows = old.product.owner() == row.group().owner()
                     && old.product.origin() == row.group().origin()
                     && old.product.group() == row.group().group()
-                    && old.product.imports() == row.group().imports();
+                    && old.product.imports() == row.group().imports()
+                    && row.physical_current().is_some();
                 if !old.product.same_issuance(row.group()) && !same_exact_rows {
                     tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         binding = ?row.binding(), owner = ?row.group().owner(),
@@ -1190,7 +1192,11 @@ pub(crate) fn complete_native_selection(
             || Arc::new(row.group().clone()),
             |old| Arc::clone(&old.product),
         );
-        row_inputs.push((row, prior, product));
+        let current_source = row
+            .physical_current()
+            .is_some()
+            .then(|| Arc::new(row.group().clone()));
+        row_inputs.push((row, prior, product, current_source));
     }
     // Package-bearing rows consume their target-qualified HOME links. A prior
     // completion is authoritative, but the current occurrence must match its
@@ -1201,7 +1207,7 @@ pub(crate) fn complete_native_selection(
         .collect::<BTreeSet<_>>();
     let source_home_rows = row_inputs
         .iter()
-        .map(|(row, _, _)| {
+        .map(|(row, _, _, _)| {
             let owner = row.group().owner();
             let package_slots = row
                 .imports()
@@ -1239,7 +1245,7 @@ pub(crate) fn complete_native_selection(
         .map(|(key, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let mut consumed_home_keys = BTreeSet::new();
-    for (row, prior, _) in &row_inputs {
+    for (row, prior, _, _) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
         if imports.len() != definitions.globals().len()
@@ -1509,7 +1515,7 @@ pub(crate) fn complete_native_selection(
             .map(Into::into)
     };
     let mut rows = imbl::OrdMap::new();
-    for (row, prior, product) in row_inputs {
+    for (row, prior, product, current_source) in row_inputs {
         let imports = close(row.imports(), row.group().group().definitions())?;
         if prior.is_some_and(|prior| prior.imports != imports) {
             return Err(failure(
@@ -1521,6 +1527,7 @@ pub(crate) fn complete_native_selection(
             Arc::new(CompletedNativeSourceRow {
                 binding: row.binding(),
                 product,
+                current_source,
                 imports,
             }),
         );

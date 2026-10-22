@@ -624,21 +624,25 @@ impl CertifiedTargetNativeInputs {
     /// roots or compiler roles. Missing package code remains a refusal.
     pub(crate) fn complete_native_selection(
         mut self,
-        prepared: &tidepool_repr::execution_schema::PreparedProgram,
         output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
         packages: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
         selection: crate::certified_products::BoundPackageSelection,
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
-        if !std::ptr::eq(self.target.slots.observed.target().as_ref(), prepared) {
+        let prepared = Arc::clone(
+            selection
+                .prepared_program()
+                .ok_or_else(|| failure("native completion lacks its bound prepared program"))?,
+        );
+        if !Arc::ptr_eq(self.target.slots.observed.target(), &prepared) {
             return Err(failure(
                 "native completion belongs to another prepared target owner",
             ));
         }
         let sources = crate::artifacts::ResolvedNativeSourceProducts::issue(
             self.resolve_sources()?,
-            prepared,
+            &prepared,
         )?;
         let completed = compiler_projection::complete_native_selection(
             &sources,

@@ -939,10 +939,6 @@ pub fn prepare_world_cell_program(
                 let relative = PathBuf::from(format!("item-{index}"));
                 let bytes =
                     checked_cell::world_output_bytes(&program, &relative.join(prepared_path))?;
-                let program_sha256: [u8; 32] = {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest(bytes.as_ref()).into()
-                };
                 validation
                     .inventory
                     .charge(bytes.len().checked_mul(64).ok_or_else(|| {
@@ -951,11 +947,13 @@ pub fn prepare_world_cell_program(
                         )
                     })?)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-                let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-                    bytes,
+                let program_artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+                    Arc::new(bytes.as_ref().to_vec()),
                     &crate::prepared_artifact::production_requirements()?,
                     DecodeLimits::default(),
-                )?);
+                )?;
+                let target = Arc::clone(program_artifact.prepared_shared());
+                let package_program = program_artifact.bind_package_program();
                 let item_receipt = certified_products::decode_segment_item_with_operation(
                     checked_cell::world_output_bytes(
                         &program,
@@ -969,8 +967,7 @@ pub fn prepare_world_cell_program(
                     .select_item(
                         &mut artifacts,
                         item_receipt,
-                        &target,
-                        &program_sha256,
+                        &package_program,
                         Some(&produced),
                         &mut validation,
                     )
@@ -990,14 +987,13 @@ pub fn prepare_world_cell_program(
                     groups: segment.group_baseline(),
                 };
                 let admitted = admit_native_target_products(
-                    &target,
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
                     crate::certified_products::BoundPackageSelection::item(
                         segment.originals.package_links(),
                         &item_selection,
-                        program_sha256,
+                        package_program.clone(),
                     )
                     .map_err(compiler_evidence_failure)?,
                     segment
@@ -1034,6 +1030,7 @@ pub fn prepare_world_cell_program(
                 let output = ProgramNativeOutput {
                     directory,
                     target,
+                    program: package_program,
                     turn: checked_cell::world_output_bytes(&program, &relative.join("turn.cbor"))?
                         .clone(),
                     metadata: checked_cell::world_output_bytes(
@@ -2471,13 +2468,22 @@ impl SelectedModuleCandidateOffer {
         };
         let sites = decode_turn_yield_sites(site_observations)?;
         let native = acquisition.complete()?;
+        let requirements = crate::prepared_artifact::production_requirements()?;
+        let target = Arc::new(tidepool_repr::execution_schema::parse_program(
+            native.bundle.prepared(),
+            &requirements,
+            DecodeLimits::default(),
+        )?);
+        let program = crate::prepared_artifact::PreparedArtifact::bind_package_program_from_bytes(
+            Arc::new(native.bundle.prepared().to_vec()),
+            Arc::clone(&target),
+            &requirements,
+            DecodeLimits::default(),
+        )?;
         let mut output = ProgramNativeOutput {
             directory: directory.to_path_buf(),
-            target: Arc::new(tidepool_repr::execution_schema::parse_program(
-                native.bundle.prepared(),
-                &crate::prepared_artifact::production_requirements()?,
-                DecodeLimits::default(),
-            )?),
+            target,
+            program,
             turn: turn.clone(),
             metadata: native.bundle.metadata().into(),
             source: source.to_owned(),
@@ -2504,7 +2510,7 @@ impl SelectedModuleCandidateOffer {
             directory,
             &directory.join(format!("{module}.hs")),
             source,
-            &output.target,
+            &output.program,
             "__prepared",
             issue_identity.then_some((&table, sites.as_slice())),
             None,
@@ -3084,7 +3090,7 @@ impl SelectedModuleCandidateOffer {
                 // receipt binds the consumed source path, not the item copy.
                 &source_directory.join(format!("{module}.hs")),
                 &output.source,
-                &output.target,
+                &output.program,
                 "__prepared",
                 None,
                 None,
@@ -3229,18 +3235,17 @@ impl SelectedModuleCandidateOffer {
             &dependency_evidence,
             &source_inventory,
         )?;
-        let requirements = crate::prepared_artifact::production_requirements()?;
-        let target = Arc::new(
-            tidepool_repr::execution_schema::parse_program(
-                &crate::checked_cell::read(
-                    directory.join("__result.prepared.cbor"),
-                    128 * 1024 * 1024,
-                )?,
-                &requirements,
-                DecodeLimits::default(),
-            )
-            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?,
+        let program_artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+            Arc::new(crate::checked_cell::read(
+                directory.join("__result.prepared.cbor"),
+                128 * 1024 * 1024,
+            )?),
+            &crate::prepared_artifact::production_requirements()?,
+            DecodeLimits::default(),
         );
+        let program_artifact = program_artifact
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        let program = program_artifact.bind_package_program();
         let authored = crate::declaration_join::NativeAuthoredDeclarationAdmission::from_planned(
             &module, &admission,
         )?;
@@ -3250,7 +3255,7 @@ impl SelectedModuleCandidateOffer {
             &directory,
             &source_path,
             source,
-            &target,
+            &program,
             "__result",
             None,
             Some(&authored),
@@ -3315,6 +3320,7 @@ impl SelectedModuleCandidateOffer {
 pub(crate) struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
+    program: crate::prepared_artifact::BoundPackageProgram,
     turn: Arc<[u8]>,
     metadata: Arc<[u8]>,
     products: Option<Arc<SealedTurnProducts>>,
@@ -3362,25 +3368,28 @@ fn read_native_turn_artifacts(
     let prepared_read_start = Instant::now();
     let prepared_bytes =
         crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?;
+    let prepared_len = prepared_bytes.len() as u64;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
         timing::STAGE_PREPARED_READ,
         prepared_read_start.elapsed(),
-        prepared_bytes.len() as u64,
+        prepared_len,
     );
     let prepared_decode_start = Instant::now();
-    let target = Arc::new(tidepool_repr::execution_schema::parse_program(
-        &prepared_bytes,
+    let artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+        Arc::new(prepared_bytes),
         &crate::prepared_artifact::production_requirements()?,
         DecodeLimits::default(),
-    )?);
+    )?;
+    let target = Arc::clone(artifact.prepared_shared());
+    let program = artifact.bind_package_program();
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
         "native.prepared_decode",
         prepared_decode_start.elapsed(),
-        prepared_bytes.len() as u64,
+        prepared_len,
     );
     let metadata_read_start = Instant::now();
     let metadata: Arc<[u8]> =
@@ -3402,6 +3411,7 @@ fn read_native_turn_artifacts(
     Ok(ProgramNativeOutput {
         directory: directory.to_owned(),
         target,
+        program,
         turn,
         metadata,
         products: None,
@@ -3603,8 +3613,9 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         &self,
         selected: &crate::artifact_inventory::CompletedNativeSourceRow,
     ) -> Option<PhysicalCurrentNativeGroup<'a>> {
+        let current_source = selected.current_source()?;
         let mut matching = self.rows.iter().filter(|row| {
-            row.binding() == selected.binding() && row.matches_group(selected.product())
+            row.binding() == selected.binding() && row.matches_group(current_source)
         });
         let row = matching.next()?;
         if matching.next().is_some() {
@@ -3950,7 +3961,7 @@ fn seal_turn_outputs_with_validation(
     output_dir: &Path,
     source_path: &Path,
     source: &str,
-    prepared: &Arc<PreparedProgram>,
+    program: &crate::prepared_artifact::BoundPackageProgram,
     target: &str,
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
     authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
@@ -3969,6 +3980,7 @@ fn seal_turn_outputs_with_validation(
     )>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
+    let prepared = program.prepared();
     if std::fs::read_to_string(source_path)? != source {
         return Err(CompileError::ExtractFailed(
             "turn source changed after worker compile".into(),
@@ -4130,8 +4142,7 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
-    let (certified, item_globals, item_packages, item_selection, item_program_sha256) =
-        match segment_originals {
+    let (certified, item_globals, item_packages, item_selection) = match segment_originals {
             Some(originals) => {
                 let item = certified_products::decode_segment_item_with_operation(
                     &receipt_bytes,
@@ -4147,20 +4158,10 @@ fn seal_turn_outputs_with_validation(
                             .is_some_and(|value| value.ends_with(".prepared.cbor"))
                     })
                     .collect::<Vec<_>>();
-                let [prepared_path] = prepared_paths.as_slice() else {
+                let [_prepared_path] = prepared_paths.as_slice() else {
                     return Err(CompileError::ExtractFailed(
                         "segment item lacks one prepared program".into(),
                     ));
-                };
-                let prepared_bytes = certified_products::read_bounded_with_operation(
-                    prepared_path,
-                    validation.inventory.limits().max_bytes as u64,
-                    &validation.inventory,
-                )
-                .map_err(compiler_evidence_failure)?;
-                let program_sha256: [u8; 32] = {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest(&prepared_bytes).into()
                 };
                 let (products, globals, packages, selection) = originals
                     .select_item(
@@ -4173,8 +4174,7 @@ fn seal_turn_outputs_with_validation(
                             })?
                             .selection,
                         item,
-                        prepared,
-                        &program_sha256,
+                        program,
                         Some(produced_types.ok_or_else(|| {
                             CompileError::ExtractFailed(
                                 "segment item lacks its checked type selection".into(),
@@ -4188,7 +4188,6 @@ fn seal_turn_outputs_with_validation(
                     Some(globals),
                     Some(packages),
                     Some(selection),
-                    Some(program_sha256),
                 )
             }
             None => {
@@ -4241,9 +4240,9 @@ fn seal_turn_outputs_with_validation(
                     output_dir,
                     &validation.inventory,
                 );
-                (products, None, None, None, None)
+                (products, None, None, None)
             }
-        };
+    };
     let accepted = if let Some(globals) = &item_globals {
         globals.as_slice()
     } else {
@@ -4308,7 +4307,7 @@ fn seal_turn_outputs_with_validation(
             crate::certified_products::BoundPackageSelection::item(
                 originals.package_links(),
                 selection,
-                item_program_sha256.expect("item program digest"),
+                program.clone(),
             )
             .map_err(compiler_evidence_failure)?
         }
@@ -4318,7 +4317,7 @@ fn seal_turn_outputs_with_validation(
                 .expect("ordinary receipt")
                 .package_links,
             target,
-            [0; 32],
+            program.clone(),
         )
         .map_err(compiler_evidence_failure)?,
         _ => {
@@ -4328,7 +4327,6 @@ fn seal_turn_outputs_with_validation(
         }
     };
     let admitted = admit_native_target_products(
-        prepared,
         physical_native_output,
         &certified,
         &package_products,
@@ -4545,7 +4543,6 @@ struct AdmittedNativeTargetProducts {
 /// Its inputs have already passed their owning source and product admission.
 #[allow(clippy::too_many_arguments)]
 fn admit_native_target_products(
-    prepared: &Arc<PreparedProgram>,
     output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
@@ -4559,6 +4556,9 @@ fn admit_native_target_products(
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
+    let prepared = package_selection
+        .prepared_program()
+        .ok_or_else(|| CompileError::ExtractFailed("native target lacks its prepared program".into()))?;
     let target_admission_start = Instant::now();
     let observed = certified_products::AuthenticatedTargetImports::issue(
         prepared,
@@ -4650,7 +4650,6 @@ fn admit_native_target_products(
         target: selected_target
             .with_certified_groups(Arc::clone(&selected_groups))?
             .complete_native_selection(
-                prepared,
                 output,
                 packages,
                 package_selection,
@@ -6482,17 +6481,15 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                let program_sha256: [u8; 32] = {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest(target.prepared.bytes()).into()
-                };
                 let package_selection = receipt
-                    .ordinary_package_selection(name, program_sha256)
+                    .ordinary_package_selection(
+                        name,
+                        target.prepared.bind_package_program(),
+                    )
                     .map_err(compiler_evidence_failure)?;
                 let native_inputs = selected_target
                     .with_certified_groups(Arc::clone(&selected_groups))?
                     .complete_native_selection(
-                        target.prepared.prepared(),
                         &native_output,
                         &package_products,
                         package_selection,

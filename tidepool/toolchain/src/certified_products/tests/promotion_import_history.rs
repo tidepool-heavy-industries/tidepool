@@ -21,6 +21,10 @@ fn binder(module: &str, ordinal: u32) -> SymbolIdentity {
     }
 }
 
+fn empty_item_selection(stage_id: [u8; 32]) -> PackageSelection {
+    empty_package_selection(stage_id, "item")
+}
+
 fn package_bundle() -> Vec<u8> {
     let roots = |module: &str| {
         let value = value_array([
@@ -940,20 +944,23 @@ fn check_retained_core_promotion_history(item_count: usize) {
         ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
         HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
     );
+    let prepared = testing::prepare(testing::wire_program()).unwrap();
+    let prepared_binding = crate::prepared_artifact::BoundPackageProgram::fixture(
+        Arc::new(prepared.clone()),
+        [0; 32],
+    );
     let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
         globals: vec![],
         packages: BTreeMap::new(),
-        selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
+        selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
     }));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
-    let prepared = testing::prepare(testing::wire_program()).unwrap();
     for item in 0..item_count {
         let (selected, globals, additions, _) = shared
             .select_item(
                 &mut cursor,
                 decode_segment_item_with_operation(&empty_delta, &validation.inventory).unwrap(),
-                &prepared,
-                &[0; 32],
+                &prepared_binding,
                 None,
                 &mut validation,
             )
@@ -1033,6 +1040,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
             required_generation: None,
         });
         let target = Arc::new(testing::prepare(wire).unwrap());
+        let target_binding = crate::prepared_artifact::BoundPackageProgram::fixture(
+            Arc::clone(&target),
+            [0; 32],
+        );
         let owner = (identity.unit.clone(), identity.module.clone());
         let witness = PackageInterfaceWitness {
             selected_path: path.clone(),
@@ -1041,14 +1052,13 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let addition = || SegmentItemReceipt {
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
-            selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
+            selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
         };
         let (selected, globals, packages, _) = shared
             .select_item(
                 &mut cursor,
                 addition(),
-                &target,
-                &[0; 32],
+                &target_binding,
                 None,
                 &mut validation,
             )
@@ -1085,13 +1095,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 SegmentItemReceipt {
                     globals: vec![],
                     packages: BTreeMap::new(),
-                    selection: empty_package_selection(
-                        *shared.receipt.package_links.stage_id(),
-                        "item",
-                    ),
+                    selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
                 },
-                &prepared,
-                &[0; 32],
+                &prepared_binding,
                 None,
                 &mut validation,
             )
@@ -1103,8 +1109,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             shared.select_item(
                 &mut cursor,
                 unused,
-                &prepared,
-                &[0; 32],
+                &prepared_binding,
                 None,
                 &mut validation
             ),
@@ -1118,8 +1123,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             shared.select_item(
                 &mut cursor,
                 addition(),
-                &target,
-                &[0; 32],
+                &target_binding,
                 None,
                 &mut recapture,
             ),
@@ -1135,13 +1139,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
             SegmentItemReceipt {
                 globals: vec![],
                 packages: BTreeMap::new(),
-                selection: empty_package_selection(
-                    *shared.receipt.package_links.stage_id(),
-                    "item",
-                ),
+                selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
             },
-            &prepared,
-            &[0; 32],
+            &prepared_binding,
             None,
             &mut other_validation,
         ),

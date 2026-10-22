@@ -417,6 +417,19 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
     let result2_roots = home_package_roots(&result2);
     assert_eq!(result_roots.len(), 2);
     assert_eq!(result2_roots, result_roots);
+    for (target, selection) in [("result", &result), ("result2", &result2)] {
+        let sources = forward.targets[target]
+            .native_source_products()
+            .expect("issued target resolves its source products")
+            .expect("issued target has native source products");
+        for row in selection.completion().rows() {
+            assert!(
+                sources.physical_current_for(row).is_some(),
+                "{target} preserves current-source custody for ordinal {}",
+                row.binding().original_ordinal
+            );
+        }
+    }
 
     let package_bindings =
         |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>, ordinal: u32| {
