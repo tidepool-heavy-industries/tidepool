@@ -86,8 +86,10 @@ missing-census fallback. Existing source/receipt/stage digests bind the new byte
 No unrelated package, native or context format changes with this protocol.
 
 Rust parses and budgets raw rows, then the owning source admission checks exact
-root HOME-edge coverage and issues one private role owner. Current-source
-reachability and lexical claim issuance borrow that owner. Authored overlap keeps
+root HOME-edge coverage and issues one private role owner. Canonical source
+qualification follows actual consumed edges, including protected and inherited
+paths; its proof table alone never supplies lexical roots. Lexical claim issuance
+borrows the same role owner. Authored overlap keeps
 current reproof requirements; inherited roles require actual earlier lexical
 admission; protected-only edges remain compiler dependencies and never create
 lexical roots. Nonroot source imports keep their authenticated ordinary/canonical
@@ -98,3 +100,14 @@ captured inventory, protected-only versus authored overlap; automatic Display,
 inherited continuation, current reproof, malformed roles and honest retry. The
 protocol scaffold is not compilation or executed evidence. V owns the joined
 warm lane; no cold output graph is being created.
+
+The producer followup uses the same complete parsed-occurrence check before
+World demand renaming and before receipt issuance. Physical offsets count decoded
+characters, as GHC 9.12 `BufPos` does; Unicode, multiline imports/comments and
+`LINE` perturbations exercise that shared check in the existing cell-splitter
+case. The existing generated-scaffold source-boot case now also compares actual
+finite producer captures with protected-only and protected-plus-authored HOME
+imports, keeping the fresh helper bytes and original native dependency fixed.
+Its hidden authored/helper refusals retain parsed authored occurrence evidence.
+These controls and the worker/test targets still require joined warm compilation
+and execution; no test pass is claimed by this source checkpoint.

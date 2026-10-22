@@ -54,7 +54,8 @@ import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
-  ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath )
+  ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedSourceImportOrigins )
 import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
 import Tidepool.CheckedPrefixImports (parsedDeclarationOccurrences)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
@@ -163,7 +164,9 @@ prepareModuleDemand flags captured = case unP Parser.parseModule parser of
   PFailed state -> parseRejected state
   POk state parsed
     | not (isEmptyMessages (getPsErrorMessages state)) -> parseRejected state
-    | null quotes -> Right (ParsedModuleDemand captured flags parsed)
+    | null quotes -> case capturedSourceImportOrigins captured parsed of
+        Left reason -> Left (ModuleDemandParseRejected path reason)
+        Right _ -> Right (ParsedModuleDemand captured flags parsed)
     | otherwise -> Left (ModuleDemandQuasiQuoteRejected path (map (showPpr flags) quotes))
     where quotes = quasiQuoteOccurrences flags parsed
   where

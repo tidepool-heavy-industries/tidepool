@@ -67,7 +67,8 @@ import GHC.Types.SourceError (SourceError)
 import Tidepool.Binders
 import Tidepool.TurnSource
   ( extractModuleName, spliceTemplate, generatedScaffoldModuleName, renameScaffoldModuleHeader
-  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker )
+  , captureCompilerDefaultRecipe, qualifyCompilerDefault, preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker
+  , ImportOrigin(..), importRenderingSource, literalImportRendering )
 import Test.QuickCheck qualified as QC
 import Tidepool.SessionArtifacts (mkBoundBinders)
 import Tidepool.DiagJson (Diag (..), DiagSeverity(..), DependencyLoadFailure(..), diagsFromSourceError)
@@ -78,7 +79,10 @@ import Tidepool.ExactScope (readExactScope)
 import Tidepool.CompilerProducts (newPreparedOriginalInterfaceArtifacts)
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
-  , originalInterfaceBytes, originalInterfaceSha256 )
+  , originalInterfaceBytes, originalInterfaceSha256, CheckedTemplateImports(..)
+  , captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
+  , capturedSourceImportOrigins )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -3222,6 +3226,7 @@ automaticGenericPlans flags = do
         assertContains "check source carries generated declaration"
           "deriving instance TidepoolCompilerGeneric.Generic (Packet a)" checked
       [] -> fail "automatic Generic cell omitted declaration item"
+  parsedImportOriginChecks flags
   where
     source = unlines
       [ "{-# LANGUAGE GADTs, StandaloneDeriving, ExistentialQuantification #-}"
@@ -3234,6 +3239,64 @@ automaticGenericPlans flags = do
       , "  Witness :: Int -> Witness Int"
       , "data Hidden a = forall b. Hidden b"
       ]
+
+-- These are parser/renderer observations, not executable source grants. Each
+-- variation uses the same actual recipe/captured-byte census as World demand.
+parsedImportOriginChecks :: DynFlags -> IO ()
+parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \directory -> do
+  let source = "import qualified Data.List\n  as AuthoredList\ndata RoleMarker = RoleMarker\n"
+      templates = [checkTemplate
+        , "-- π λ before the header\n" ++ checkTemplate
+        , replaceHeader "{-# LINE 900 \"virtual-role-source.hs\" #-}\n"
+        , replaceHeader "{- multi-line\n import qualified Fake -- not an import\n λ comment -}\n"]
+      replaceHeader addition = Text.unpack (Text.replace "module CellCheck where\n"
+        (Text.pack ("module CellCheck where\n" ++ addition)) (Text.pack checkTemplate))
+      parse selected path bytes = case unP Parser.parseModule
+          (initParserState (initParserOpts selected) (stringToStringBuffer bytes)
+            (mkRealSrcLoc (mkFastString path) 1 1)) of
+        PFailed _ -> fail "role regression rendered invalid Haskell"
+        POk _ parsed -> pure parsed
+  forM_ templates $ \template -> do
+    selected <- templateParserFlags flags template >>= either (fail . renderCellSplitError) pure
+    original <- analyzeOrderedCellWithFlags selected template source >>= either (fail . renderCellSplitError) pure
+    let prologue = cellPlanPrologue original
+        plan = original { cellPlanPrologue = prologue { prologueImports =
+          LocatedImport (CellSourceSpan 1 1 1 1) "import qualified Data.Maybe as Carried" InheritedLexicalImport
+            [mkModuleName "Data.Maybe",mkModuleName "Carried"] : prologueImports prologue } }
+        path = directory </> "CellCheck.hs"
+    (rendering,offset) <- either fail pure (renderCellCheckSourceWithImports template plan)
+    mapped <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" selected template
+      >>= renderProtectedTemplateImports offset)
+    let rendered = importRenderingSource rendering
+    writeFile path rendered
+    recipe <- generatedCheckingTemplateRecipeWithImportRendering selected (CheckedTemplateImports [] [])
+      mapped template rendering path "CellCheck" >>= either fail pure
+    captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+    parsed <- parse selected path rendered
+    origins <- either fail pure (capturedSourceImportOrigins captured parsed)
+    let observations = zip [moduleNameString (unLoc (ideclName (unLoc imported)))
+          | imported <- hsmodImports (unLoc parsed)] origins
+    assertEqual "authored multiline import origin" [AuthoredCurrent]
+      [origin | ("Data.List",origin) <- observations]
+    assertEqual "inherited import origin" [InheritedLexical]
+      [origin | ("Data.Maybe",origin) <- observations]
+    assertEqual "automatic Display import stays compiler-only" [ProtectedCompiler]
+      [origin | ("Tidepool.Inspection.Display",origin) <- observations]
+    unless (not (null [() | ("GHC.Generics",ProtectedCompiler) <- observations]))
+      (fail "role census did not observe the actual generated Generic import")
+    incomplete <- generatedCheckingTemplateRecipeWithImportRendering selected (CheckedTemplateImports [] [])
+      mapped template (literalImportRendering rendered) path "CellCheck" >>= either fail pure
+    missing <- captureGeneratedScaffoldSource incomplete path >>= either fail pure
+    unless (case capturedSourceImportOrigins missing parsed of Left _ -> True; Right _ -> False)
+      (fail "missing occurrence roles were reconstructed from rendered imports")
+  where
+    temporary = do
+      parent <- getTemporaryDirectory
+      (path,handle) <- openTempFile parent "tidepool-import-origins"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 noStandaloneDerivingLeavesCellUntouched :: DynFlags -> IO ()
 noStandaloneDerivingLeavesCellUntouched flags = do

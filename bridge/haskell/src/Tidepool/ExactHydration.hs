@@ -40,6 +40,7 @@ module Tidepool.ExactHydration
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedSourceImportOrigins
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsRoot
   , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
@@ -112,7 +113,7 @@ import Tidepool.ExecutionSource (ExecutionSourceIdentity(..))
 import Tidepool.DependencyEvidence (sourceEvidenceWithFingerprint, dependencySourceSha256)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import GHC (Ghc, ParsedModule(..), getSession, setSession, depanal)
+import GHC (Ghc, GhcPs, ParsedModule(..), getSession, setSession, depanal)
 import GHC.LanguageExtensions.Type qualified as LangExt
 import GHC.Driver.Monad (reifyGhc, reflectGhc)
 import GHC.Unit.Module.ModDetails (ModDetails(..))
@@ -338,7 +339,7 @@ data RenderedProtectedTemplateImports = RenderedProtectedTemplateImports
 
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
   [(CheckedTemplateInterface,Int,TemplateImportShape)] [CheckedTemplateInterface]
-  GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose [(Int,Int,ImportOrigin,TemplateImportShape)]
+  GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose [(Int,Int,ImportOrigin)]
   deriving (Eq)
 
 newtype TemplateImportShape = TemplateImportShape String
@@ -509,16 +510,14 @@ generatedScaffoldRecipeWithOriginsFor purpose flags
       (Left "protected template occurrence map belongs to another source")
     mapM_ mappedOccurrence mappedOccurrences
     let lineStart line = sum (map ((+1) . length) (take (line-1) (lines rendered)))
-        protectedOrigins = [(lineStart line,lineStart line+length source,ProtectedCompiler,shape)
-          | (_,line,source,shape) <- mappedOccurrences]
+        protectedOrigins = [(lineStart line,lineStart line+length source,ProtectedCompiler)
+          | (_,line,source,_) <- mappedOccurrences]
     insertedOrigins <- forM origins $ \(start,end,origin) -> do
       unless (start >= 0 && end > start && end <= length rendered)
         (Left "rendered import occurrence leaves its captured source")
-      (_,shape) <- maybe (Left "rendered import occurrence is not one parsed import") Right
-        (parseTemplateImport flags (take (end-start) (drop start rendered)))
-      pure (start,end,origin,shape)
-    let census = sortOn (\(start,_,_,_) -> start) (protectedOrigins ++ insertedOrigins)
-    unless (and [end <= next | ((_,end,_,_),(next,_,_,_)) <- zip census (drop 1 census)])
+      pure (start,end,origin)
+    let census = sortOn (\(start,_,_) -> start) (protectedOrigins ++ insertedOrigins)
+    unless (and [end <= next | ((_,end,_),(next,_,_)) <- zip census (drop 1 census)])
       (Left "rendered import occurrences overlap")
     let rootSet = Set.fromList roots
         graphOwners = [(templateInterfaceUnit interface,templateInterfaceModule interface) | interface <- interfaces]
@@ -566,13 +565,28 @@ generatedActivationPreviewRecipe flags interfaces originalOwner protectedTemplat
     pure (GeneratedScaffoldRecipe canonical target bytes line selected interfaces (OriginalPreviewInstances originalTarget) role census)
 
 data CapturedGeneratedScaffoldSource = CapturedGeneratedScaffoldSource FilePath BS.ByteString
-  [(Int,Int,ImportOrigin,TemplateImportShape)]
+  [(Int,Int,ImportOrigin)]
 
 capturedGeneratedScaffoldBytes :: CapturedGeneratedScaffoldSource -> BS.ByteString
 capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes _) = bytes
 
 capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
 capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
+
+capturedSourceImportOrigins :: CapturedGeneratedScaffoldSource -> Located (HsModule GhcPs)
+  -> Either String [ImportOrigin]
+capturedSourceImportOrigins (CapturedGeneratedScaffoldSource _ _ census) parsed = do
+  checked <- forM (hsmodImports (unLoc parsed)) $ \located -> do
+    (start,end) <- case getBufSpan (getLocA located) of
+      Strict.Just span' -> Right (bufPos (bufSpanStart span'),bufPos (bufSpanEnd span'))
+      Strict.Nothing -> Left "parsed source import lacks a physical range"
+    case [(origin,index) | (index,(first,last',origin)) <- zip [0::Int ..] census
+        , first <= start, end <= last'] of
+      [(origin,index)] -> Right (origin,index)
+      _ -> Left "parsed source import differs from its rendered origin census"
+  unless (sortOn id (map snd checked) == [0..length census-1])
+    (Left "rendered source import census has an unused or repeated occurrence")
+  pure (map fst checked)
 
 captureGeneratedScaffoldSource :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String CapturedGeneratedScaffoldSource)
 captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ _ census) requested = do
@@ -630,39 +644,27 @@ issueSourceImports recipe parsed homeEdges = do
     unless (fingerprint == ms_hs_hash summary && dependencySourceSha256 observed == hexBytes digest)
       (Left "source import census differs from its parsed snapshot")
     let declarations = hsmodImports (unLoc (pm_parsed_source parsed))
-        physical located = case getBufSpan (getLocA located) of
-          Strict.Just span' -> Right (bufPos (bufSpanStart span'),bufPos (bufSpanEnd span'))
-          Strict.Nothing -> Left "parsed source import lacks a physical range"
         roleBit AuthoredCurrent = 1
         roleBit InheritedLexical = 2
         roleBit ProtectedCompiler = 4
         qualifier NoPkgQual = "none"
         qualifier (ThisPkg unit) = "this:" ++ unitString unit
         qualifier (OtherPkg unit) = "other:" ++ unitString unit
-    checked <- forM declarations $ \located -> do
+    origins <- case recipe of
+      Nothing -> Right (replicate (length declarations) AuthoredCurrent)
+      Just _ -> capturedSourceImportOrigins (CapturedGeneratedScaffoldSource path bytes census) (pm_parsed_source parsed)
+    checked <- forM (zip declarations origins) $ \(located,origin) -> do
       let declaration = unLoc located
           name = ideclName declaration
           boot = ideclSource declaration == IsBoot
-          shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
-      (start,end) <- physical located
-      (origin,used) <- case recipe of
-        Nothing -> Right (AuthoredCurrent,Nothing)
-        Just _ -> case [(origin,index) | (index,(first,last',origin,expected)) <- zip [0::Int ..] census
-            , first <= start, end <= last', expected == shape] of
-          [(origin,index)] -> Right (origin,Just index)
-          _ -> Left "parsed source import differs from its rendered origin census"
       selected <- case [qualifier raw | (isBoot,imports) <- [(False,ms_textual_imps summary),(True,ms_srcimps summary)]
           , isBoot == boot, (raw,imported) <- imports, getLoc imported == getLocA name] of
         [raw] -> Right raw
         _ -> Left "parsed source import has another consumed import occurrence"
-      pure (((selected,moduleNameString (unLoc name),boot),roleBit origin),used)
-    unless (case recipe of
-        Nothing -> True
-        Just _ -> sortOn id [index | (_,Just index) <- checked] == [0..length census-1])
-      (Left "rendered source import census has an unused or repeated occurrence")
+      pure ((selected,moduleNameString (unLoc name),boot),roleBit origin)
     let root = ms_mod summary
     bindSourceHomeImports homeEdges (IssuedSourceImports path bytes digest
-      (unitString (moduleUnit root),moduleNameString (moduleName root)) (map fst checked) [])
+      (unitString (moduleUnit root),moduleNameString (moduleName root)) checked [])
 
 -- HOME resolution comes from the already-consumed graph, never another Finder
 -- lookup. Package occurrences stay in the private complete syntactic census.

@@ -119,7 +119,7 @@ import System.Directory
   , getModificationTime, setModificationTime, withCurrentDirectory, getCurrentDirectory, canonicalizePath )
 import System.Environment (setEnv, lookupEnv, unsetEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), (<.>), takeBaseName, takeDirectory, normalise, replaceExtension, addTrailingPathSeparator)
+import System.FilePath ((</>), (<.>), takeBaseName, takeDirectory, takeFileName, normalise, replaceExtension, addTrailingPathSeparator)
 import System.IO (hPutStrLn, hSetFileSize, withBinaryFile, IOMode(WriteMode), stderr, openBinaryTempFile, hClose)
 import System.IO.Error (isUserError, ioeGetErrorString)
 import System.Process (readProcessWithExitCode)
@@ -191,6 +191,7 @@ import Tidepool.ExactHydration
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
+  , generatedScaffoldRecipeWithImportRendering, sourceImportsHomeRoles
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.TypedSegment.Source
   ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope )
@@ -245,8 +246,10 @@ import Tidepool.ExactScope
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
-import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker)
-import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
+import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker
+  , literalImportRendering, appendImportRendering, replaceImportRendering, importRenderingSource)
+import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..)
+  , SourcePrologue(..), locatedImportsRendering)
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..)
   , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceNode(..)
@@ -1677,6 +1680,16 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
       hiddenSession = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
       protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
+      authoredRendering template imported = do
+        plan <- analyzeCellWithFlags parserFlags template imported >>= either (fail . show) pure
+        either fail pure $ replaceImportRendering preambleImportMarker
+          (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue plan)))
+            (literalImportRendering preambleImportMarker)) (literalImportRendering template)
+      renderingRecipe template rendering = do
+        mapped <- either fail pure
+          (captureProtectedTemplateImports parserFlags template >>= renderProtectedTemplateImports 0)
+        generatedScaffoldRecipeWithImportRendering parserFlags templateImports mapped
+          template rendering target "Expr" >>= either fail pure
       shadowDirectory = work </> "Tidepool" </> "Internal"
       shadowPath = shadowDirectory </> "Resume.hs"
   createDirectoryIfMissing True shadowDirectory
@@ -1713,13 +1726,48 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     resumeTops <- either (fail . show) pure (preparedTopIdentities [resumeModule])
     unless (all (\entry -> any ((== entry) . symbolOccurrence) resumeTops) ["__prepared","__resume"]) $
       fail "generated scaffold did not retain its settle and resume preparation entries"
+    -- Both captures consume the same fresh HOME bytes. A second, genuinely
+    -- parsed authored occurrence changes source-role evidence, independently
+    -- of the protected interface/native qualification above.
+    let rolePath = work </> "GeneratedRoleFresh.hs"
+    writeFile rolePath "module GeneratedRoleFresh where\nroleValue :: Int\nroleValue = 17\n"
+    roleTemplate <- either fail pure $ replaceTemplateMarker preambleImportMarker
+      ("import qualified GeneratedRoleFresh as CompilerRole\n" ++ preambleImportMarker) protectedSource
+    protectedRoleRecipe <- renderingRecipe roleTemplate (literalImportRendering roleTemplate)
+    writeFile target roleTemplate
+    protectedRole <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile protectedRoleRecipe (CheckedItemCompile [] Nothing []))
+      (Just hiddenSession) target [] Nothing
+    overlapRendering <- authoredRendering roleTemplate "import qualified GeneratedRoleFresh as AuthoredRole\n"
+    overlapRecipe <- renderingRecipe roleTemplate overlapRendering
+    writeFile target (importRenderingSource overlapRendering)
+    overlapRole <- compile (PreparedProducts Nothing) Set.empty
+      (GeneratedScaffoldCompile overlapRecipe (CheckedItemCompile [] Nothing []))
+      (Just hiddenSession) target [] Nothing
+    let requireRole expected prepared = do
+          receipt <- maybe (fail "finite role capture lacks its actual source receipt") pure
+            (preparedExactCompilation prepared)
+          unless ([mask | ("none","GeneratedRoleFresh",False,"main",mask) <-
+              sourceImportsHomeRoles (compilationSourceImports receipt)] == [expected]) $
+            fail "finite source receipt lost the protected/authored overlap"
+        consumedRole prepared =
+          [(dependencySourcePath source,dependencySourceSha256 source)
+          | source <- dependencySources (preparedFreshDependencies prepared)
+          , takeFileName (dependencySourcePath source) == "GeneratedRoleFresh.hs"]
+    requireRole 4 protectedRole
+    requireRole 5 overlapRole
+    unless (length (consumedRole protectedRole) == 1
+        && consumedRole protectedRole == consumedRole overlapRole) $
+      fail "paired finite roles did not consume the same actual HOME source bytes"
+    requireRetainedAnswer "protected role dependency preserves the captured native body" protectedRole
+    requireRetainedAnswer "authored overlap preserves the captured native body" overlapRole
+    writeFile target protectedSource
     requireHiddenSource "ordinary source import has no generated-template authority" $
       compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just hiddenSession) target [] Nothing
-    duplicateSource <- either fail pure $ replaceTemplateMarker preambleImportMarker
-      (protectedImport ++ "\n" ++ preambleImportMarker) protectedSource
+    duplicateRendering <- authoredRendering protectedSource (protectedImport ++ "\n")
+    let duplicateSource = importRenderingSource duplicateRendering
     writeFile target duplicateSource
-    duplicateRecipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource duplicateSource target "Expr"
-      >>= either fail pure
+    duplicateRecipe <- renderingRecipe protectedSource duplicateRendering
     requireHiddenSource "additional authored home import has no protected occurrence slot" $
       compile (PreparedProducts Nothing) Set.empty
         (GeneratedScaffoldCompile duplicateRecipe (CheckedItemCompile [] Nothing []))
@@ -1730,11 +1778,10 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       compile (PreparedProducts Nothing) Set.empty purpose (Just hiddenSession) target [] Nothing
     writeFile target protectedSource
     copyFile "test-source-boot/fixtures/GeneratedScaffoldHelper.hs" (work </> "GeneratedScaffoldHelper.hs")
-    helperTarget <- either fail pure $ replaceTemplateMarker preambleImportMarker
-      ("import GeneratedScaffoldHelper\n" ++ preambleImportMarker) protectedSource
+    helperRendering <- authoredRendering protectedSource "import GeneratedScaffoldHelper\n"
+    let helperTarget = importRenderingSource helperRendering
     writeFile target helperTarget
-    helperRecipe <- generatedScaffoldRecipe parserFlags templateImports protectedSource helperTarget target "Expr"
-      >>= either fail pure
+    helperRecipe <- renderingRecipe protectedSource helperRendering
     requireHiddenSource "fresh helper importing hidden home support" $
       compile (PreparedProducts Nothing) Set.empty
         (GeneratedScaffoldCompile helperRecipe GeneralCompile) (Just hiddenSession) target [] Nothing
