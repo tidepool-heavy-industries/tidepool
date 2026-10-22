@@ -1099,6 +1099,7 @@ impl PreparedMachine<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prepared_program::{DemandedHomeImage, DemandedImage};
     use crate::prepared_program::{GroupInventory, ImageRegistry};
     use tidepool_repr::execution_schema::{
         testing, Atom, CachedHomeOwner, CertifiedGroup, CheckedLayout, ConstructorDecl,
