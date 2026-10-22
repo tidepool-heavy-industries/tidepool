@@ -109,6 +109,11 @@ producer product origin and refuses a non-fresh package slot without prior
 completion. Its focused source-boot control passed 1/1 with build
 `7f286f4c-4f85-4a26-b0b9-ba51b5940773`.
 
+Q1 is merged at `f900654416`. The merged campaign preserves Q1's duplicate-field
+truncation behavior and passes `structuredLogging` 1/1 with build
+`800ea223-b196-4565-b952-d225e6d01a23`. Every other DeepSeek branch except the
+unverified H WIP was already an ancestor of the campaign before this merge.
+
 The historical reader remains a review blocker, not a qualification pass. On
 the bounded candidate it advances past the former HOME-key mismatch and fails
 at the manifest-less segment-item target root (`target package slot lacks
@@ -141,7 +146,7 @@ assignments are made; do not prefill fictitious agent IDs or active status.
 | P3 | app-server thread `01a1604b-a892-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p3-20261021`; `g2-deepseek/p3-20261021`; tip `527e53cd04` | review-ready | Integrate into P and run the full occurrence/refusal/recovery cohort | Historical fixtures tracked and mapped; exact same-seal control 1/1 |
 | W | app-server thread `01a1603f-7dc4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-w-20261021`; `g2-deepseek/w-20261021`; tip `d2b6899f71` | integrated | Join notebook histories | R approved; 5 focused executed checks pass |
 | N | `/root/deepseek_n` | `/srv/swarm/checkouts/tidepool-deepseek-g2-n-20261021`; `g2-deepseek/n-20261021`; tip `9f77dd17ab` | blocked-on-specific-contract | Typed unchanged/checked/incomplete progress is implemented; joined P HOME-slot publication remains | N publication evidence plus W integration |
-| Q1 | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021` | `g2-deepseek/q1-20261021`; tip `00beb4c093` | review-ready | Duplicate-field truncation fix and regression are pushed; no further work | `structuredLogging` passed 1/1, build `b8761203-7fb8-4feb-9f65-95f7edc9defa`; exact ceiling 814604 bytes |
+| Q1 | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021` | `g2-deepseek/q1-20261021`; tip `00beb4c093` | integrated | Merge `f900654416`; no further work | Merged campaign `structuredLogging` passed 1/1, build `800ea223-b196-4565-b952-d225e6d01a23`; exact ceiling 814604 bytes |
 | Q2 | `/root/deepseek_q2` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q2-20261021`; `g2-deepseek/q2-20261021`; tip `769ef0ed40` | integrated | Joined qualification remains | Owner/kind census property controls pass |
 | Q3 | app-server thread `01a1603f-8d20-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q3-20261021`; `g2-deepseek/q3-20261021`; tip `393d6e5d8c` | integrated | Joined qualification remains | Independent enumeration plus disabled-trace control |
 | Q4 | app-server thread `01a1603f-90b4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q4-20261021`; `g2-deepseek/q4-20261021`; tip `9809de64c4` | integrated | Joined defining-Name replay remains | 1 focused executed check |
