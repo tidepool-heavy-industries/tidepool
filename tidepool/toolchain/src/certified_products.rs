@@ -361,6 +361,72 @@ pub struct PackageInterfaceWitness {
     pub sha256: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PackageInterfaceSelectionKind {
+    Reuse,
+    NewSelection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PackageInterfaceDecisionAction {
+    Reuse {
+        selected: PackageInterfaceWitness,
+        observed: PackageInterfaceWitness,
+        token: Option<Arc<CertifiedPackageInterface>>,
+    },
+    New {
+        token: Option<Arc<CertifiedPackageInterface>>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PackageInterfaceDecision {
+    owner: (String, String),
+    observed: PackageInterfaceWitness,
+    action: PackageInterfaceDecisionAction,
+}
+
+impl PackageInterfaceDecision {
+    pub(crate) fn owner(&self) -> &(String, String) {
+        &self.owner
+    }
+
+    pub(crate) fn selected(&self) -> &PackageInterfaceWitness {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse { selected, .. } => selected,
+            PackageInterfaceDecisionAction::New { .. } => &self.observed,
+        }
+    }
+
+    pub(crate) fn observed(&self) -> &PackageInterfaceWitness {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse { observed, .. } => observed,
+            PackageInterfaceDecisionAction::New { .. } => &self.observed,
+        }
+    }
+
+    pub(crate) fn token(&self) -> Option<&Arc<CertifiedPackageInterface>> {
+        match &self.action {
+            PackageInterfaceDecisionAction::Reuse { token, .. }
+            | PackageInterfaceDecisionAction::New { token } => token.as_ref(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kind(&self) -> PackageInterfaceSelectionKind {
+        match self.action {
+            PackageInterfaceDecisionAction::Reuse { .. } => PackageInterfaceSelectionKind::Reuse,
+            PackageInterfaceDecisionAction::New { .. } => {
+                PackageInterfaceSelectionKind::NewSelection
+            }
+        }
+    }
+
+    pub(crate) fn is_new(&self) -> bool {
+        matches!(self.action, PackageInterfaceDecisionAction::New { .. })
+    }
+}
+
 /// Borrowed package lookup lets item additions coexist with immutable originals
 /// without copying their availability map or selecting unused packages.
 pub(crate) trait PackageInterfaceLookup {
@@ -486,6 +552,76 @@ pub(crate) fn inherited_package_witnesses_with_validation(
         }
     }
     Ok(selected)
+}
+
+/// Ordinary package observations reconciled against interfaces already issued
+/// by retained originals. Only genuine new selections remain in `current`;
+/// authenticated overlaps retain the inherited witness and its custody.
+pub(crate) struct OrdinaryPackageInterfaces {
+    inherited: BTreeMap<(String, String), PackageInterfaceWitness>,
+    decisions: Vec<PackageInterfaceDecision>,
+}
+
+impl OrdinaryPackageInterfaces {
+    #[cfg(test)]
+    pub(crate) fn decisions(&self) -> &[PackageInterfaceDecision] {
+        &self.decisions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inherited(
+        &self,
+    ) -> &BTreeMap<(String, String), PackageInterfaceWitness> {
+        &self.inherited
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<(String, String), PackageInterfaceWitness>,
+        Vec<PackageInterfaceDecision>,
+    ) {
+        (self.inherited, self.decisions)
+    }
+}
+
+pub(crate) fn reconcile_ordinary_package_interfaces(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<OrdinaryPackageInterfaces> {
+    let inherited = inherited_package_witnesses_with_validation(products, validation)?;
+    let mut decisions = Vec::new();
+    for (owner, witness) in receipt_packages {
+        verify_package_interface(validation, witness)?;
+        match inherited.get(owner) {
+            Some(inherited) if inherited.sha256 != witness.sha256 => {
+                return Err(CertificationError::Mismatch(
+                    "exact inherited package selection differs from current target",
+                ));
+            }
+            Some(inherited) => {
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::Reuse {
+                        selected: inherited.clone(),
+                        observed: witness.clone(),
+                        token: issued_package_token(products, owner, &inherited.sha256),
+                    },
+                });
+            }
+            None => decisions.push(PackageInterfaceDecision {
+                owner: owner.clone(),
+                observed: witness.clone(),
+                action: PackageInterfaceDecisionAction::New { token: None },
+            }),
+        }
+    }
+    Ok(OrdinaryPackageInterfaces {
+        inherited,
+        decisions,
+    })
 }
 
 /// A group whose retained globals still need an exact live binding or native
@@ -917,7 +1053,6 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
-        let mut additions = BTreeMap::new();
         for (owner, witness) in &item.packages {
             let imported = item.globals.iter().any(|global| match &global.owner {
                 ReceiptImportOwner::Package {
@@ -948,37 +1083,15 @@ impl CertifiedSegmentOriginals {
                     "item package has no target demand",
                 ));
             }
-            match classify_segment_package_addition(
-                owner,
-                witness,
-                &self.receipt.packages,
-                &self.package_availability,
-            )? {
-                SegmentPackageAddition::NewSelection => {
-                    verify_package_interface(validation, witness)?;
-                    additions.insert(owner.clone(), witness.clone());
-                }
-                SegmentPackageAddition::Reuse => {
-                    // The incoming observation re-reads the same authenticated
-                    // bytes at a new path. It is evidence of a retained copy,
-                    // not a new selection: keep the inherited issuance witness
-                    // and re-register its retained bytes under its issued
-                    // logical path so later consumers do not reopen a removed
-                    // transaction location.
-                    verify_package_interface(validation, witness)?;
-                    let inherited = self
-                        .package_availability
-                        .get(owner)
-                        .expect("reused owner retains its inherited witness");
-                    carry_inherited_package_witness(
-                        &self.products.recovery_products,
-                        owner,
-                        inherited,
-                        validation,
-                    )?;
-                }
-            }
         }
+        let reconciled = reconcile_segment_package_additions(
+            &item.packages,
+            &self.receipt.packages,
+            &self.package_availability,
+            &self.products.recovery_products,
+            validation,
+        )?;
+        let additions = reconciled.into_additions();
         // This segment already authenticated every captured input interface.
         // An item can need an input's type without retaining its runtime value.
         // Only this request's produced interfaces need ordinal narrowing here;
@@ -1067,27 +1180,36 @@ fn carry_inherited_package_witness(
     owner: &(String, String),
     inherited: &PackageInterfaceWitness,
     validation: &mut PackageInterfaceValidation,
-) -> CertResult<()> {
+) -> CertResult<Option<Arc<CertifiedPackageInterface>>> {
     // Prefer the exact issued token: its retained bytes survive removal of the
     // original transaction copy without reopening storage.
-    for product in products {
-        let Some(native) = product.original_native() else {
-            continue;
-        };
-        if let Some(token) = native.package_interfaces().get(owner) {
-            if token.sha256() == &inherited.sha256 {
-                return validation
-                    .register_package_interface(&inherited.selected_path, token)
-                    .map_err(package_validation_error);
-            }
-        }
+    if let Some(token) = issued_package_token(products, owner, &inherited.sha256) {
+        validation
+            .register_package_interface(&inherited.selected_path, &token)
+            .map_err(package_validation_error)?;
+        return Ok(Some(token));
     }
     // A legacy decoded home witness has no retained token. Authenticate its
     // inherited bytes through the existing capture path and register them
     // under the issued logical path. Missing, inaccessible or corrupt storage
     // keeps its typed refusal; the incoming new path is never consumed as
     // authority.
-    verify_package_interface(validation, inherited)
+    verify_package_interface(validation, inherited)?;
+    Ok(None)
+}
+
+fn issued_package_token(
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    owner: &(String, String),
+    seal: &[u8; 32],
+) -> Option<Arc<CertifiedPackageInterface>> {
+    products.iter().find_map(|product| {
+        product
+            .original_native()
+            .and_then(|native| native.package_interfaces().get(owner))
+            .filter(|token| token.sha256() == seal)
+            .cloned()
+    })
 }
 
 /// An incoming segment-item package observation, classified against the
@@ -1120,6 +1242,72 @@ fn classify_segment_package_addition(
         )),
         Some(_) => Ok(SegmentPackageAddition::Reuse),
         None => Ok(SegmentPackageAddition::NewSelection),
+    }
+}
+
+fn reconcile_segment_package_additions(
+    item_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    receipt_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    available_packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
+    products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<SegmentPackageAdditions> {
+    let mut decisions = Vec::new();
+    for (owner, witness) in item_packages {
+        match classify_segment_package_addition(
+            owner,
+            witness,
+            receipt_packages,
+            available_packages,
+        )? {
+            SegmentPackageAddition::NewSelection => {
+                verify_package_interface(validation, witness)?;
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::New { token: None },
+                });
+            }
+            SegmentPackageAddition::Reuse => {
+                verify_package_interface(validation, witness)?;
+                let inherited = available_packages
+                    .get(owner)
+                    .expect("reused owner retains its inherited witness");
+                let token = carry_inherited_package_witness(products, owner, inherited, validation)?;
+                decisions.push(PackageInterfaceDecision {
+                    owner: owner.clone(),
+                    observed: witness.clone(),
+                    action: PackageInterfaceDecisionAction::Reuse {
+                        selected: inherited.clone(),
+                        observed: witness.clone(),
+                        token,
+                    },
+                });
+            }
+        }
+    }
+    Ok(SegmentPackageAdditions { decisions })
+}
+
+struct SegmentPackageAdditions {
+    decisions: Vec<PackageInterfaceDecision>,
+}
+
+impl SegmentPackageAdditions {
+    fn into_additions(self) -> BTreeMap<(String, String), PackageInterfaceWitness> {
+        self.decisions
+            .into_iter()
+            .filter(|decision| decision.is_new())
+            .map(|decision| {
+                let selected = decision.selected().clone();
+                (decision.owner, selected)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn decisions(&self) -> &[PackageInterfaceDecision] {
+        &self.decisions
     }
 }
 
@@ -26043,6 +26231,307 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ordinary_package_interfaces_reuse_authenticated_relocated_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("External.hi");
+        let relocated = root.path().join("retained").join("External.hi");
+        let new_selection = root.path().join("New.hi");
+        std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+        std::fs::write(&selected, [0x43]).unwrap();
+        std::fs::write(&relocated, [0x43]).unwrap();
+        std::fs::write(&new_selection, [0x45]).unwrap();
+
+        let selected_witness = PackageInterfaceWitness {
+            selected_path: selected.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let packages = BTreeMap::from([(owner.clone(), selected_witness.clone())]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: owner.0.clone(),
+                    module: owner.1.clone(),
+                    binder: SymbolIdentity {
+                        unit: owner.0.clone(),
+                        ..testing::identity(&owner.1, "entry")
+                    },
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        assert!(issued.original_native().is_some());
+
+        // The issued token survives removal of its producer transaction path.
+        std::fs::remove_file(&selected).unwrap();
+        let relocated_witness = PackageInterfaceWitness {
+            selected_path: relocated.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let new_owner = ("new-package".to_owned(), "New".to_owned());
+        let receipt = BTreeMap::from([
+            (owner.clone(), relocated_witness.clone()),
+            (
+                new_owner.clone(),
+                PackageInterfaceWitness {
+                    selected_path: new_selection,
+                    sha256: sha(&[0x45]),
+                },
+            ),
+        ]);
+        let mut validation = PackageInterfaceValidation::default();
+        let before = crate::recovery_artifacts::package_interface_io();
+        let reconciled = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &receipt,
+            &mut validation,
+        )
+        .unwrap();
+        let after = crate::recovery_artifacts::package_interface_io();
+        assert_eq!((after.0 - before.0, after.1 - before.1), (2, 2));
+        let reuse = reconciled
+            .decisions()
+            .iter()
+            .find(|observation| observation.kind() == PackageInterfaceSelectionKind::Reuse)
+            .unwrap();
+        assert_eq!(reuse.selected(), &selected_witness);
+        assert_eq!(reuse.observed(), &relocated_witness);
+        assert_eq!(reuse.token().map(|token| token.sha256()), Some(&sha(&[0x43])));
+        assert!(reconciled.decisions().iter().any(|observation| {
+            observation.kind() == PackageInterfaceSelectionKind::NewSelection
+                && observation.owner() == &new_owner
+                && observation.selected().selected_path == root.path().join("New.hi")
+        }));
+        assert_eq!(reconciled.inherited()[&owner], selected_witness);
+        verify_package_interface(&mut validation, &selected_witness).unwrap();
+
+        // A fresh admission, after the producer path was removed, reaches the
+        // same selected token and reads only the relocated observation.
+        let mut cold = PackageInterfaceValidation::default();
+        let cold_before = crate::recovery_artifacts::package_interface_io();
+        let cold_reconciled = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+            &mut cold,
+        )
+        .unwrap();
+        let cold_after = crate::recovery_artifacts::package_interface_io();
+        assert_eq!(
+            (cold_after.0 - cold_before.0, cold_after.1 - cold_before.1),
+            (1, 1)
+        );
+        assert!(cold_reconciled
+            .decisions()
+            .iter()
+            .all(|decision| !decision.is_new()));
+        assert_eq!(cold_reconciled.inherited()[&owner], selected_witness);
+        verify_package_interface(&mut cold, &selected_witness).unwrap();
+
+        // Same bytes at another owner classify as that owner's new selection,
+        // never as reuse of the already selected external-package owner.
+        let wrong_owner = ("other-package".to_owned(), "External".to_owned());
+        let separated = reconcile_ordinary_package_interfaces(
+            std::slice::from_ref(&issued),
+            &BTreeMap::from([(wrong_owner.clone(), relocated_witness.clone())]),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(separated
+            .decisions()
+            .iter()
+            .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
+        assert_eq!(separated.inherited()[&owner], selected_witness);
+
+        // A genuine different seal refuses rather than replacing the inherited
+        // selection, even when the incoming observation is readable.
+        std::fs::write(&relocated, [0x44]).unwrap();
+        let changed = PackageInterfaceWitness {
+            selected_path: relocated.clone(),
+            sha256: sha(&[0x44]),
+        };
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner.clone(), changed)]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "exact inherited package selection differs from current target"
+            ))
+        ));
+
+        // Authentication failures remain the existing typed storage failures.
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&relocated, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(
+                reconcile_ordinary_package_interfaces(
+                    std::slice::from_ref(&issued),
+                    &BTreeMap::from([(owner.clone(), relocated_witness.clone())]),
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::Unreadable { .. }
+                ))
+            ));
+            std::fs::set_permissions(&relocated, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::remove_file(&relocated).unwrap();
+        assert!(matches!(
+            reconcile_ordinary_package_interfaces(
+                std::slice::from_ref(&issued),
+                &BTreeMap::from([(owner, relocated_witness)]),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::Unavailable(_)
+            ))
+        ));
+    }
+
+    #[test]
+    fn segment_package_additions_reuse_only_a_genuine_relocation() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = root.path().join("External.hi");
+        let relocated = root.path().join("retained").join("External.hi");
+        std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+        std::fs::write(&selected, [0x43]).unwrap();
+        std::fs::write(&relocated, [0x43]).unwrap();
+
+        let owner = ("external-package".to_owned(), "External".to_owned());
+        let selected_witness = PackageInterfaceWitness {
+            selected_path: selected.clone(),
+            sha256: sha(&[0x43]),
+        };
+        let packages = BTreeMap::from([(owner.clone(), selected_witness.clone())]);
+        let fixture = fixture_finalized_product(
+            original_witness_fixture(
+                "Consumer",
+                Some(PendingImportOwner::Package {
+                    unit: owner.0.clone(),
+                    module: owner.1.clone(),
+                    binder: SymbolIdentity {
+                        unit: owner.0.clone(),
+                        ..testing::identity(&owner.1, "entry")
+                    },
+                    interface_digest: sha(&[0x43]),
+                }),
+                7,
+                &packages,
+            ),
+            [1; 32],
+        );
+        let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
+        let item = BTreeMap::from([(
+            owner.clone(),
+            PackageInterfaceWitness {
+                selected_path: relocated.clone(),
+                sha256: sha(&[0x43]),
+            },
+        )]);
+        let available = inherited_package_witnesses_with_validation(
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(&selected).unwrap();
+
+        let mut validation = PackageInterfaceValidation::default();
+        let reconciled = reconcile_segment_package_additions(
+            &item,
+            &BTreeMap::new(),
+            &available,
+            std::slice::from_ref(&issued),
+            &mut validation,
+        )
+        .unwrap();
+        let [observation] = reconciled.decisions() else {
+            panic!("one segment package observation expected");
+        };
+        assert_eq!(observation.kind(), PackageInterfaceSelectionKind::Reuse);
+        assert_eq!(observation.selected(), &selected_witness);
+        assert_eq!(observation.observed(), &item[&owner]);
+        assert_eq!(
+            observation.token().map(|token| token.sha256()),
+            Some(&sha(&[0x43]))
+        );
+        verify_package_interface(&mut validation, &selected_witness).unwrap();
+
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &item,
+                &item,
+                &available,
+                std::slice::from_ref(&issued),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "item repeats an original package selection"
+            ))
+        ));
+        let mut conflict = item.clone();
+        conflict.get_mut(&owner).unwrap().sha256[0] ^= 1;
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &conflict,
+                &BTreeMap::new(),
+                &available,
+                std::slice::from_ref(&issued),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch(
+                "item replaces an inherited package selection"
+            ))
+        ));
+
+        let wrong_owner = ("other-package".to_owned(), "External".to_owned());
+        let separated = reconcile_segment_package_additions(
+            &BTreeMap::from([(wrong_owner.clone(), item[&owner].clone())]),
+            &BTreeMap::new(),
+            &available,
+            std::slice::from_ref(&issued),
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
+        assert!(separated
+            .decisions()
+            .iter()
+            .any(|decision| decision.owner() == &wrong_owner && decision.is_new()));
+        assert_eq!(available[&owner], selected_witness);
+
+        std::fs::write(&relocated, [0x44]).unwrap();
+        assert!(matches!(
+            reconcile_segment_package_additions(
+                &item,
+                &BTreeMap::new(),
+                &available,
+                std::slice::from_ref(&issued),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::CapturedModulePayload(
+                crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
+            ))
+        ));
+    }
+
+    #[test]
     fn inherited_package_witness_reuse_preserves_current_files_and_conflicts() {
         let root = tempfile::tempdir().unwrap();
         let first = root.path().join("External.hi");
@@ -26277,6 +26766,25 @@ pub(crate) mod tests {
             &mut legacy_validation,
         )
         .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(
+                carry_inherited_package_witness(
+                    std::slice::from_ref(&legacy),
+                    &owner,
+                    &inherited,
+                    &mut PackageInterfaceValidation::default(),
+                ),
+                Err(CertificationError::CapturedModulePayload(
+                    crate::recovery_artifacts::RecoveryArtifactError::Unreadable { .. }
+                ))
+            ));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         // A removed legacy copy is a typed refusal.
         std::fs::remove_file(&path).unwrap();
