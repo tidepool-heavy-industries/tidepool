@@ -6854,16 +6854,19 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
         , programTypes = TypeGraph IntMap.empty IntMap.empty, programSites = [], programConstructorReplies = [], programJsonLayout = Nothing }
   let interfacePath = component </> "structural-package-references.hi"
   iface <- maybe (fail "structural package references lost their completed HOME interface") pure
-    (Map.lookup (mkModuleName "InstanceConsumer") (pprProductInterfaces prepared))
+    (Map.lookup (mkModuleName "InstanceOwner") (pprProductInterfaces prepared))
+  requirements <- either fail pure (preparedHomeRequirements prepared "main" "InstanceOwner")
+  unless (null requirements && null (homeInterfaceUsageOwners producer iface)) $
+    fail "structural package reference fixture requires an actual HOME leaf interface"
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression interfacePath iface
   interfaceBytes <- BS.readFile interfacePath
   source <- case [dependencyModuleSource row | row <- dependencyModules evidence
-      , dependencyModuleName row == "InstanceConsumer", not (dependencyModuleBoot row)] of
+      , dependencyModuleName row == "InstanceOwner", not (dependencyModuleBoot row)] of
     [path] -> pure path
     _ -> fail "structural package references require the actual compiled HOME source"
   sourceBytes <- BS.readFile source
   let sidecar = encodePackageImports
-        (ExactIfaceArtifact "main" "InstanceConsumer" interfacePath (digest interfaceBytes) [])
+        (ExactIfaceArtifact "main" "InstanceOwner" interfacePath (digest interfaceBytes) [])
         emptyPackageImports
   BS.writeFile (interfacePath ++ ".packages") sidecar
   base <- structuralCandidate component
@@ -6880,7 +6883,7 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
           pure (CandidateGlobal (globalIdentity global) (globalRep global) signature
             (globalRequiredEvaluated global) (fromIntegral <$> globalRequiredGeneration global))
         pure base
-          { candidateUnit = "main", candidateModule = "InstanceConsumer"
+          { candidateUnit = "main", candidateModule = "InstanceOwner"
           , candidateSource = source, candidateSourceSha256 = digest sourceBytes
           , candidateInterface = interfacePath, candidateInterfaceSha256 = digest interfaceBytes
           , candidateModuleVersion = replicate 64 '1'
@@ -6895,7 +6898,7 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
       encodeIn environment globals = do
         projected <- candidate globals
         encodeCertifiedProducts environment OrdinaryExecutionSource
-          (Map.singleton (mkModuleName "InstanceConsumer") iface)
+          (Map.singleton (mkModuleName "InstanceOwner") iface)
           (emptyFinalizedModuleArtifacts environment) [projected] Nothing [] [] evidence "" ""
       encode = encodeIn producer
   withTiming $ do
@@ -6919,7 +6922,7 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
     retainByteOracle "repeated-package" first
     repeatedFacts <- certificateFacts first
     case codecCertificateModuleReferences repeatedFacts of
-      [("main","InstanceConsumer",[(0,references)])]
+      [("main","InstanceOwner",[(0,references)])]
         | length references == 1001
         , length (codecCertificateOwners repeatedFacts) == 2
         , length (codecCertificateGlobalSeals repeatedFacts) == 2
