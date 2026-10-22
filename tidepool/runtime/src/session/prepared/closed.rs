@@ -622,7 +622,6 @@ enum ScopedNativeSlot {
 /// not retain this observation or its existing physical instance leases.
 pub(in crate::session) struct NativeInstantiation {
     plan: Arc<NativeInstantiationPlan>,
-    selection: NativeDomainSelection,
     anchors: BTreeMap<NativeOccurrence, NativeInstanceLease>,
     package_anchors: BTreeMap<NativeOccurrence, WorldPackageInstanceWitness>,
     package_permits: BTreeMap<(NativeOccurrence, ValueId), WorldPackageSlotPermit>,
@@ -826,7 +825,6 @@ impl NativeInstantiationPlan {
         }
         Ok(NativeInstantiation {
             plan: Arc::clone(self),
-            selection,
             anchors,
             package_anchors,
             package_permits,
