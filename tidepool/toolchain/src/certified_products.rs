@@ -26203,7 +26203,95 @@ pub(crate) mod tests {
             assert!(
                 matches!(current_ref.own_group_candidates().unwrap(), NativeGroupCandidates::NewProduct(groups) if groups.is_empty())
             );
-            if full {
+            assert!(
+                selection
+                    .current_product(
+                        crate::artifact_inventory::NativeGroupKey {
+                            artifact: entry.descriptor.id,
+                            original_ordinal: 9001,
+                        },
+                        &entry,
+                    )
+                    .unwrap()
+                    .is_none(),
+                "dependency is an input, never another current output"
+            );
+            let inventory = output.inventory();
+            let issued = inventory
+                .bind_segment(&output, vec![], &selection, &mut validation)
+                .unwrap();
+            assert!(!issued
+                .source_selection()
+                .has_unissued_current_native_products());
+            if !full {
+                let current_issued = issued
+                    .source_selection()
+                    .current_product(
+                        crate::artifact_inventory::NativeGroupKey {
+                            artifact: current_entry.descriptor.id,
+                            original_ordinal: 5,
+                        },
+                        &current_entry,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    matches!(
+                        current_issued.own_group_candidates().unwrap(),
+                        NativeGroupCandidates::IssuedAvailability(groups) if groups.is_empty()
+                    ),
+                    "completed Empty output cannot offer its blocked body"
+                );
+                for (product, ordinal, artifact) in [
+                    (dependency, 9001, entry.descriptor.id),
+                    (current, 5, current_entry.descriptor.id),
+                ] {
+                    let observations = source_target_observations(&[(product, ordinal)]);
+                    let prepared = prepared_target_fixture(&observations);
+                    let observed = AuthenticatedTargetImports::issue(
+                        &prepared,
+                        &observations,
+                        &validation.inventory,
+                    )
+                    .unwrap();
+                    let denied = inventory.select_native_target(
+                        issued.physical_inputs().physical_cohort().unwrap(),
+                        issued.source_selection(),
+                        observed,
+                        None,
+                        Some(&output),
+                        &[],
+                        &BTreeMap::new(),
+                        &mut validation,
+                    );
+                    if artifact == entry.descriptor.id {
+                        assert!(
+                            matches!(
+                                &denied,
+                                Err(crate::CompileError::ArtifactInventory(error))
+                                    if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
+                                        artifact,
+                                        original_ordinal: ordinal,
+                                    }
+                            ),
+                            "Empty input availability must refuse the exact dependency: {denied:?}"
+                        );
+                    } else {
+                        assert_eq!(artifact, current_entry.descriptor.id);
+                        assert_eq!(ordinal, 5);
+                        assert!(
+                            matches!(
+                                &denied,
+                                Err(crate::CompileError::ExtractFailed(message))
+                                    if message == "artifact inventory: target produced group was not issued"
+                            ),
+                            "completed Empty output must refuse its own body: {denied:?}"
+                        );
+                    }
+                }
+                continue;
+            }
+            {
                 use crate::artifact_inventory::{ArtifactBindingNode, ArtifactDependency};
                 // Read the expected dependency directly from the original
                 // issuer's recorded rows, before either receiving planner runs.
@@ -26222,15 +26310,6 @@ pub(crate) mod tests {
                     .collect::<BTreeSet<_>>();
                 assert_eq!(expected.len(), 1);
                 let expected = *expected.first().unwrap();
-                let inventory = output.inventory();
-                let bound = inventory
-                    .bind_segment(
-                        &output,
-                        vec![],
-                        &selection,
-                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                    )
-                    .unwrap();
                 let observations = source_target_observations(&[(current, 5)]);
                 let prepared = prepared_target_fixture(&observations);
                 let observed = AuthenticatedTargetImports::issue(
@@ -26241,8 +26320,8 @@ pub(crate) mod tests {
                 .unwrap();
                 let bound = inventory
                     .select_native_target(
-                        bound.physical_inputs().physical_cohort().unwrap(),
-                        bound.source_selection(),
+                        issued.physical_inputs().physical_cohort().unwrap(),
+                        issued.source_selection(),
                         observed,
                         None,
                         Some(&output),
@@ -26305,20 +26384,7 @@ pub(crate) mod tests {
                     );
                 }
             }
-            let result = OriginalCompilerInputs::from_selection(&selection, &output);
-            if !full {
-                let observed = format!("{result:?}");
-                assert!(
-                    matches!(result, Err(crate::CompileError::ArtifactInventory(error))
-                    if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact: entry.descriptor.id,
-                        original_ordinal: 9001,
-                    }),
-                    "missing or bounded-empty availability must refuse the actual dependency: {observed}"
-                );
-                continue;
-            }
-            let private = result.expect("current product must borrow its issued full dependency");
+            let private = issued.physical_inputs().as_ref().clone();
             // Program support predates the new private proof issuance. Continue
             // through that actual handoff rather than preparing from private directly.
             let (admission, source) =
@@ -26329,7 +26395,11 @@ pub(crate) mod tests {
                     &request,
                 );
             let private = private
-                .for_program_continuation(&output, &[admission], &source)
+                .for_program_continuation(
+                    issued.physical_inputs().issued_artifacts(),
+                    &[admission],
+                    &source,
+                )
                 .unwrap();
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
