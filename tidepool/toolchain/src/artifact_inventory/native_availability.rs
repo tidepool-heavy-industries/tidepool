@@ -3709,9 +3709,7 @@ mod normalized_dependency_tests {
         original_groups_fixture_with_interface, recovered_witness_fixtures,
     };
     use crate::certified_products::{fixture_finalized_product, PendingImportOwner};
-    use crate::declaration_context::{
-        ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
-    };
+    use crate::declaration_context::{ExactCompileContext, ExactDeclarationContext};
 
     #[test]
     fn complete_availability_preserves_only_its_own_solver_source_receipt() {
@@ -3741,23 +3739,22 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let completed = crate::declaration_context::CapturedCompilerStage::issue(
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             entries,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            &mut validation,
         )
-        .unwrap()
-        .issued_artifacts()
-        .clone();
-        let inputs = OriginalCompilerInputs::from_selection(&selection, &completed).unwrap();
+        .unwrap();
+        let inputs = stage.compiler_inputs();
         assert_eq!(inputs.issued_offers().len(), 2);
         for offer in inputs.issued_offers() {
             let NativeOfferSourceReceipt::Solved(sources) = &offer.0.custody.source_receipt else {
@@ -3847,23 +3844,22 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &physical.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let completed = crate::declaration_context::CapturedCompilerStage::issue(
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &physical,
             entries,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            &mut validation,
         )
-        .unwrap()
-        .issued_artifacts()
-        .clone();
-        let inputs = OriginalCompilerInputs::from_selection(&selection, &completed).unwrap();
+        .unwrap();
+        let inputs = stage.compiler_inputs();
         let offer = inputs
             .issued_offers()
             .iter()
@@ -3993,14 +3989,22 @@ mod normalized_dependency_tests {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let selection =
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut selection =
             crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                 &projection,
                 &artifacts.metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                &validation.inventory,
             )
             .unwrap();
-        let inputs = OriginalCompilerInputs::from_selection(&selection, &artifacts).unwrap();
+        let stage = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &artifacts,
+            Vec::new(),
+            &mut validation,
+        )
+        .unwrap();
+        let inputs = stage.compiler_inputs();
         let original = ArtifactEntry::original(producer.sha256(), products[0].clone())
             .unwrap()
             .descriptor

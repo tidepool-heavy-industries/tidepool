@@ -659,14 +659,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             }
         });
         let exact = (&current.request).product_admission(&current.source);
-        assert!(crate::declaration_context::IssuedOriginalOutput::issue(
-            current.certified.source_selection.clone(), view.inventory().empty_view(),
-        ).is_err(), "an issued output cannot pair this source selection with missing canonical/native custody");
-        let output = crate::declaration_context::IssuedOriginalOutput::issue(
-            current.certified.source_selection.clone(),
-            view.clone(),
-        )
-        .unwrap();
+        let output = current.completed_output();
         let certified = crate::declaration_join::certify_same_offer_planned_declaration(
             module,
             &format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n"),
@@ -835,11 +828,7 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
             });
             let exact = (&selected_issue.request).product_admission(&selected_issue.source);
             let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
-            let output = crate::declaration_context::IssuedOriginalOutput::issue(
-                selected_issue.certified.source_selection.clone(),
-                view.clone(),
-            )
-            .unwrap();
+            let output = selected_issue.completed_output();
             let joined = crate::declaration_join::certify_same_offer_planned_declaration(
                 module,
                 &source,

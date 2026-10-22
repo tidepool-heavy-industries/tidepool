@@ -6539,18 +6539,23 @@ mod tests {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selection =
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .unwrap();
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, &artifacts,
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &artifacts,
+                Vec::new(),
+                &mut validation,
             )
             .unwrap();
-            let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+            let output = stage.compiler_inputs();
+            let support = CompilerSourceSupport::close_complete_output(output).unwrap();
             Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()

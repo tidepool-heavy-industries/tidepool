@@ -136,13 +136,13 @@ fn sparse_issued_interfaces_do_not_expand_to_unselected_custody() {
             entries[chosen].clone(),
         ])
         .unwrap();
-        let selection = CertifiedSourceSelection::from_compiler_projection(
-            &projection,
-            &view.metadata_snapshot(),
-            &InventoryOperation::new(Default::default()),
+        let issued = crate::declaration_context::recover_fixture_compiler_support(
+            projection,
+            view.clone(),
+            [],
         )
         .unwrap();
-        let private = OriginalCompilerInputs::from_selection(&selection, &view).unwrap();
+        let private = OriginalCompilerInputs::from_issued_support(&issued);
         let producer =
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&[3; 32])
                 .sha256();
@@ -207,12 +207,6 @@ fn omission_of_an_issued_interface_only_role_is_refused() {
     let projection =
         CompilerInputProjection::from_issued_entries(&[entries[0].clone(), entries[1].clone()])
             .unwrap();
-    let selection = CertifiedSourceSelection::from_compiler_projection(
-        &projection,
-        &view.metadata_snapshot(),
-        &InventoryOperation::new(Default::default()),
-    )
-    .unwrap();
     let without_side = view
         .select_roots(vec![entries[0].descriptor.id, entries[2].descriptor.id])
         .unwrap();
@@ -221,7 +215,8 @@ fn omission_of_an_issued_interface_only_role_is_refused() {
         .artifacts
         .contains_key(&entries[1].descriptor.id));
     assert!(
-        OriginalCompilerInputs::from_selection(&selection, &without_side).is_err(),
+        crate::declaration_context::recover_fixture_compiler_support(projection, without_side, [])
+            .is_err(),
         "omitted issued Side interface must not be reconstructed from other custody"
     );
 }

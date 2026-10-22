@@ -532,21 +532,10 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Public inheritance retains availability without selecting a body or
     // granting lexical imports for this original.
-    let public_view = crate::declaration_context::certified_product_artifact_view_with_validation(
-        producer,
-        &issued.recovery_products,
-        &issued.module_interfaces,
-        &issued.value_interfaces,
-        None,
-        NativeArtifactDemand::ScopeInterfaces,
-        &mut PackageInterfaceValidation::default(),
+    let public_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        physical.compiler_inputs(),
     )
     .unwrap();
-    let public_output =
-        OriginalCompilerInputs::from_selection(&issued.source_selection, &public_view).unwrap();
-    let public_support =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&public_output)
-            .unwrap();
     let public_original = Arc::new(
         ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
@@ -715,17 +704,11 @@ fn private_original_package_witness_survives_sparse_literal_target() {
 
     // Empty demand retains package custody without granting Source execution.
     // The earlier permitted request can also consume a direct package global.
-    let empty_view = view
-        .inventory()
-        .admit_recovery_selection(
-            &view.inventory().empty_view(),
-            view.entries(),
-            &BTreeSet::new(),
-        )
-        .unwrap();
-    assert!(empty_view.selected_native_groups().is_empty());
-    let empty_private =
-        OriginalCompilerInputs::from_selection(&issued.source_selection, &empty_view).unwrap();
+    let empty_private = OriginalCompilerInputs::from_issued_support(&public_support);
+    assert!(empty_private
+        .issued_artifacts()
+        .selected_native_groups()
+        .is_empty());
     let late_request = public
         .prepare_compilation_with_private_input(
             &directory.path().join("late-private-inputs"),

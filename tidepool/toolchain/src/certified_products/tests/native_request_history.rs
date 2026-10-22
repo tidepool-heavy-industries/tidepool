@@ -809,7 +809,7 @@ fn replay_native_transport_history(
         assert_eq!(groups, BTreeSet::from([child(0).0]));
         coverage.successful_demands += 1;
     }
-    let handoff = OriginalCompilerInputs::from_selection(&selected, inputs.artifacts()).unwrap();
+    let handoff = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     let next = ExactCompileContext::new(base_context.clone())
         .prepare_compilation_with_private_input(
             &root.path().join("handoff"),
