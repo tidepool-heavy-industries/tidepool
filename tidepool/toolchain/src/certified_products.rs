@@ -214,8 +214,8 @@ pub struct PackageProductOutput {
 
 /// One producer-local occurrence/linkage manifest. It is receipt-scoped: an
 /// `OccurrenceId` is valid only under the authenticated output that issued it,
-/// and never becomes durable authority by itself. Runtime binding authority
-/// stays with `IssuedPackageCodeGraph` / `ScopeProofV3`.
+/// and never becomes durable authority by itself. Executable authority remains
+/// with the checked native acquisition.
 ///
 /// Wire (one paired value, version 4):
 /// ```text
@@ -29707,8 +29707,7 @@ pub(crate) mod tests {
     #[test]
     fn scoped_home_owner_query_separates_package_custody_from_home_downgrade() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, ArtifactPayload, IssuedPackageCodeGraph,
-            PackageCodePlan, PackageCodeTarget,
+            ArtifactEntry, ArtifactInventory, ArtifactPayload, NativeArtifactDemand,
         };
         let root = tempfile::tempdir().unwrap();
         let external_unit = "external-package";
@@ -29798,21 +29797,17 @@ pub(crate) mod tests {
         // not manufacture a HOME observation or fire the downgrade guard.
         let package =
             CertifiedPackageCodeProduct::package_code_fixture(external_unit, "External", 13);
-        let operation = InventoryOperation::new(Default::default());
-        let graph = IssuedPackageCodeGraph::issue(
-            &consumer_view,
-            vec![PackageCodePlan {
-                product: Arc::clone(&package),
-                imports: Vec::new(),
-            }],
-            vec![PackageCodeTarget::Planned(package.artifact_id())],
-            &[],
-            &operation,
-        )
-        .unwrap();
-        assert!(graph.artifacts().has_observed_owner(&external_owner));
-        assert!(!graph.artifacts().has_home_owner(&external_owner));
-        let with_package = consumer_view.retain_package_code_graph(&graph).unwrap();
+        let package_view = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(ArtifactEntry::package_code(package))],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        assert!(package_view.has_observed_owner(&external_owner));
+        assert!(!package_view.has_home_owner(&external_owner));
+        assert!(package_view.selected_native_groups().is_empty());
+        let with_package = consumer_view.retain_custody(&package_view).unwrap();
         assert!(with_package.has_observed_owner(&external_owner));
         assert!(!with_package.has_home_owner(&external_owner));
         let mut validation = PackageInterfaceValidation::default();
