@@ -57,10 +57,10 @@ import Control.Monad (forM, forM_, unless)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVarMasked)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (mapAccumL, stripPrefix)
+import Data.List (mapAccumL)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
-import Data.Char (isHexDigit, isSpace, toLower)
+import Data.Char (isHexDigit, toLower)
 import Data.Maybe (isJust, isNothing)
 import Data.Bits ((.|.))
 import Data.List (sortOn)
@@ -87,7 +87,7 @@ import GHC.Unit.Home.ModInfo
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
-import qualified GHC.Parser as Parser (parseImport)
+import qualified GHC.Parser as Parser (parseImport, parseHeader)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, fsLit)
@@ -326,6 +326,7 @@ data CheckedTemplateImports = CheckedTemplateImports
 data ProtectedTemplateImport = ProtectedTemplateImport
   { protectedImportModule :: String
   , protectedImportLine :: Int
+  , protectedImportOffset :: Int
   , protectedImportSource :: String
   , protectedImportShape :: TemplateImportShape
   }
@@ -334,7 +335,7 @@ data ProtectedTemplateImports = ProtectedTemplateImports String Bool [ProtectedT
 
 data RenderedProtectedTemplateImports = RenderedProtectedTemplateImports
   { renderedProtectedSource :: String
-  , renderedProtectedOccurrences :: [(String,Int,String,TemplateImportShape)]
+  , renderedProtectedOccurrences :: [(String,Int,Int,String,TemplateImportShape)]
   }
 
 data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteString Int
@@ -390,18 +391,34 @@ captureProtectedTemplateImportsAt marker flags source = do
     _ -> Left "protected template insertion marker must occupy one physical line"
   let sourceLines = zip [1..] (lines source)
       insertionBoundaries = [line | (line,textLine) <- sourceLines, textLine == markerLine]
-      occurrences =
-        [ ProtectedTemplateImport owner line textLine shape
-        | (line,textLine) <- sourceLines
-        , let trimmed = dropWhile isSpace textLine
-        , Just rest <- [stripPrefix "import" trimmed]
-        , not (null rest) && isSpace (head rest)
-        , Just (owner,shape) <- [parseTemplateImport flags textLine]
-        ]
+      -- Only the reserved pragma slot precedes the header. Blanking it leaves
+      -- every physical character/newline in place; parseHeader stops before
+      -- declaration/body slots and does not inspect generated body syntax.
+      headerSource = Text.unpack (Text.replace "{{CELL_PRAGMAS}}"
+        (Text.replicate (length ("{{CELL_PRAGMAS}}" :: String)) " ") (Text.pack source))
+  parsed <- case unP Parser.parseHeader (initParserState (initParserOpts flags)
+      (stringToStringBuffer headerSource) (mkRealSrcLoc (mkFastString "<protected-template>") 1 1)) of
+    PFailed _ -> Left "GHC could not parse the protected template header"
+    POk _ header -> Right header
+  occurrences <- forM (hsmodImports (unLoc parsed)) $ \located -> do
+    (start,end) <- case getBufSpan (getLocA located) of
+      Strict.Just span' -> Right (bufPos (bufSpanStart span'),bufPos (bufSpanEnd span'))
+      Strict.Nothing -> Left "protected template import lacks its physical range"
+    unless (0 <= start && start < end && end <= length source)
+      (Left "protected template import leaves its captured source")
+    let before = take start source
+        first = start - length (takeWhile (/= '\n') (reverse before))
+        declaration = unLoc located
+        owner = moduleNameString (unLoc (ideclName declaration))
+        line = 1 + length (filter (== '\n') before)
+        imported = take (end-start) (drop start source)
+        shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+    pure (ProtectedTemplateImport owner line (start-first) imported shape)
   case insertionBoundaries of
     [] -> pure (ProtectedTemplateImports source False occurrences)
     [boundary]
-      | all ((< boundary) . protectedImportLine) occurrences ->
+      | all (\occurrence -> protectedImportLine occurrence
+          + length (filter (== '\n') (protectedImportSource occurrence)) < boundary) occurrences ->
           pure (ProtectedTemplateImports source True occurrences)
       | otherwise -> Left "protected template import follows its mutable insertion marker"
     _ -> Left "protected template repeats its mutable insertion marker"
@@ -412,7 +429,7 @@ renderProtectedTemplateImports linePrefix (ProtectedTemplateImports source hasBo
   | linePrefix > 0 && not hasBoundary =
       Left "protected template line mapping requires its mutable insertion marker"
   | otherwise = Right (RenderedProtectedTemplateImports source
-      [(protectedImportModule occurrence, protectedImportLine occurrence + linePrefix,
+      [(protectedImportModule occurrence, protectedImportLine occurrence + linePrefix, protectedImportOffset occurrence,
         protectedImportSource occurrence, protectedImportShape occurrence)
       | occurrence <- occurrences])
 
@@ -487,16 +504,15 @@ generatedScaffoldRecipeWithOriginsFor purpose flags
   let compilerImport = "import qualified \"tidepool-resume\" Tidepool.Internal.Resume as "
         ++ moduleNameString (generatedScaffoldQualifier purpose)
       bytes = TextEncoding.encodeUtf8 (Text.pack rendered)
-      renderedLines = zip [1..] (lines rendered)
       mappedSource = renderedProtectedSource mapped
       mappedOccurrences = renderedProtectedOccurrences mapped
       mappedFor interface =
-        [occurrence | occurrence@(owner,_,source,_) <- mappedOccurrences
+        [occurrence | occurrence@(owner,_,_,source,_) <- mappedOccurrences
         , owner == templateInterfaceModule interface, source /= compilerImport]
-      compilerImportLines = [line | (_,line,source,_) <- mappedOccurrences, source == compilerImport]
-      mappedOccurrence (owner,line,source,shape) = do
-        renderedSource <- maybe (Left "checked template interface import is missing, duplicated, or changed") Right
-          (lookup line renderedLines)
+      compilerImportLines = [line | (_,line,_,source,_) <- mappedOccurrences, source == compilerImport]
+      mappedOccurrence (owner,line,offset,source,shape) = do
+        let first = sum (map ((+1) . length) (take (line-1) (lines rendered))) + offset
+            renderedSource = take (length source) (drop first rendered)
         unless (renderedSource == source) (Left "checked template interface import is missing, duplicated, or changed")
         case parseTemplateImport flags renderedSource of
           Just (renderedOwner,renderedShape) | renderedOwner == owner && renderedShape == shape -> Right ()
@@ -504,14 +520,14 @@ generatedScaffoldRecipeWithOriginsFor purpose flags
       templateOccurrences interface = do
         let selected = mappedFor interface
         mapM_ mappedOccurrence selected
-        pure [(interface,line,shape) | (_,line,_,shape) <- selected]
+        pure [(interface,line,shape) | (_,line,_,_,shape) <- selected]
   pure $ do
     unless (mappedSource == protectedTemplate)
       (Left "protected template occurrence map belongs to another source")
     mapM_ mappedOccurrence mappedOccurrences
     let lineStart line = sum (map ((+1) . length) (take (line-1) (lines rendered)))
-        protectedOrigins = [(lineStart line,lineStart line+length source,ProtectedCompiler)
-          | (_,line,source,_) <- mappedOccurrences]
+        protectedOrigins = [(lineStart line+offset,lineStart line+offset+length source,ProtectedCompiler)
+          | (_,line,offset,source,_) <- mappedOccurrences]
     insertedOrigins <- forM origins $ \(start,end,origin) -> do
       unless (start >= 0 && end > start && end <= length rendered)
         (Left "rendered import occurrence leaves its captured source")

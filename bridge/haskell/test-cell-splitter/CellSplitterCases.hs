@@ -3247,6 +3247,8 @@ parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \d
   let source = "import qualified Data.List\n  as AuthoredList\ndata RoleMarker = RoleMarker\n"
       templates = [checkTemplate
         , "-- π λ before the header\n" ++ checkTemplate
+        , Text.unpack (Text.replace "import GHC.Generics (Generic)"
+            "import GHC.Generics\n  (Generic)" (Text.pack checkTemplate))
         , replaceHeader "{-# LINE 900 \"virtual-role-source.hs\" #-}\n"
         , replaceHeader "{- multi-line\n import qualified Fake -- not an import\n λ comment -}\n"]
       replaceHeader addition = Text.unpack (Text.replace "module CellCheck where\n"

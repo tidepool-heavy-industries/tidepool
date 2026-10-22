@@ -314,12 +314,12 @@ import Tidepool.ExactHydration
   , noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes
-  , CheckedTemplateImports(..), captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedCheckingTemplateRecipe
   , generatedTypedSegmentRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
-import Tidepool.TurnSource (ImportOrigin(..), literalImportRendering, locatedImportRendering
-  , appendImportRendering, replaceImportRendering, importRenderingSource)
+import Tidepool.TurnSource (importRenderingSource)
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -2744,18 +2744,11 @@ prepareWorldObservationStage universe baseEnv timing
       declarationImports = case worldLexicalDeclaration lexical of
         Nothing -> []
         Just declaration -> ["import " ++ exactModule (worldDeclarationInterface declaration)]
-      protectedImports = map ("import " ++) (worldObservationImports scaffold)
-      inheritedImports = worldLexicalImportLines lexical ++ declarationImports
-      header = "module " ++ owner ++ " where\n"
+      imports = map ("import " ++) (worldObservationImports scaffold)
+        ++ worldLexicalImportLines lexical ++ declarationImports
   createDirectoryIfMissing True directory
-  protectedTemplate <- either fail pure (replaceTemplateModuleHeader
-    (header ++ unlines protectedImports) (worldObservationFragment scaffold))
-  let inherited = foldl appendImportRendering (literalImportRendering "")
-        [locatedImportRendering InheritedLexical (line ++ "\n") | line <- inheritedImports]
-  renderedPrefix <- either fail pure $ replaceImportRendering header
-    (appendImportRendering (literalImportRendering header) inherited)
-    (literalImportRendering protectedTemplate)
-  let protected = importRenderingSource renderedPrefix
+  protected <- either fail pure (replaceTemplateModuleHeader
+    ("module " ++ owner ++ " where\n" ++ unlines imports) (worldObservationFragment scaffold))
   let inert = "(let observation = observation in observation)"
       indent = unlines . map ("  " ++) . lines
       typeProbeHeader = "\n__tidepool_type_search_query :: " :: String
@@ -2787,18 +2780,15 @@ prepareWorldObservationStage universe baseEnv timing
           , Map.notMember name (worldInputsBindings facts)]
       demandProbes = unlines [name ++ " () = " ++ expression alias
         | (name,alias) <- zip probeNames candidates]
-      rendering = appendImportRendering renderedPrefix (literalImportRendering (probes ++ "\n" ++ demandProbes))
-      source = importRenderingSource rendering
+      source = protected ++ probes ++ "\n" ++ demandProbes
       operand = case query of
         WorldObservationExpression {} -> ObservationExpressionOperand
         WorldObservationTypeSearch _ expression _ -> ObservationTypeOperand
           (length protected + length typeProbeHeader + length expression + 1)
         _ -> ObservationNoOperand
   writeFile path source
-  mapped <- either fail pure (captureProtectedTemplateImports flags protectedTemplate
-    >>= renderProtectedTemplateImports (length (filter (== '\n') (importRenderingSource inherited))))
-  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
-    mapped protectedTemplate rendering path owner >>= either fail pure
+  recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
+    protected source path owner >>= either fail pure
   scope <- heldWorldDemandScope universe timing world
   pure (WorldObservationStage scaffold query (GeneratedScaffoldCompile recipe WorldObservationCompile)
     path directory (length protected) operand probeNames scope)
