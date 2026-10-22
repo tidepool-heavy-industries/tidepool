@@ -4397,42 +4397,7 @@ impl CompilerSourceSupport {
             available =
                 available.project_roles(|owner, role| (owner != &generated).then(|| role.clone()));
         }
-        // The compiler's narrowed namespace can keep an inherited SOURCE body
-        // as RetainedCore (body custody without a selected Original). A source
-        // import, or an owner in its exact Original dependency closure, that
-        // still carries an authenticated Original body keeps that body so the
-        // native dependency closure stays acquirable. Unrelated dependencies
-        // and interface-only roles without bodies stay interface-only.
-        let metadata = artifacts.metadata_snapshot();
-        let issued_rows = inputs.native_availability();
-        let mut original_by_owner = BTreeMap::new();
-        for entry in metadata.artifacts.values() {
-            if matches!(&entry.payload, ArtifactPayload::Original(_))
-                && issued_rows.issued_row(entry.descriptor.id).is_some()
-            {
-                original_by_owner.insert(entry.descriptor.owner.clone(), entry.descriptor.id);
-            }
-        }
-        let mut source_originals = owners.clone();
-        let mut promote_pending = owners.iter().cloned().collect::<Vec<_>>();
-        let mut promote_seen = BTreeSet::new();
-        while let Some(owner) = promote_pending.pop() {
-            if !promote_seen.insert(owner.clone()) {
-                continue;
-            }
-            source_originals.insert(owner.clone());
-            let Some(original_id) = original_by_owner.get(&owner).copied() else {
-                continue;
-            };
-            let Some(entry) = metadata.artifacts.get(&original_id) else {
-                continue;
-            };
-            for required in &entry.requirements {
-                if original_by_owner.contains_key(required) {
-                    promote_pending.push(required.clone());
-                }
-            }
-        }
+        let available = available.world_stage_roles(&owners);
         let operation = program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
@@ -4477,20 +4442,7 @@ impl CompilerSourceSupport {
                 .roles
                 .get(&owner)
                 .ok_or_else(|| failure("World source fragment lacks a required compiler role"))?;
-            let role = if source_originals.contains(&owner) {
-                match (role.original(), original_by_owner.get(&owner)) {
-                    (Some(_), _) => role.clone(),
-                    (None, Some(original)) => CompilerInputRole::ReusableOriginal {
-                        interface: role.interface(),
-                        original: *original,
-                    },
-                    (None, None) => role.clone(),
-                }
-            } else {
-                CompilerInputRole::InterfaceOnly {
-                    interface: role.interface(),
-                }
-            };
+            let role = role.clone();
             for id in std::iter::once(role.interface()).chain(role.original()) {
                 let entry =
                     artifacts.lease.payloads.get(&id).ok_or_else(|| {
@@ -5578,6 +5530,21 @@ impl CompilerInputProjection {
             }
         }
         projected
+    }
+
+    /// A World stage selects compiler implementations only for its direct
+    /// source imports. Dependencies remain part of that issuer's native
+    /// availability without being promoted into compiler namespace roles.
+    pub(crate) fn world_stage_roles(&self, source_owners: &BTreeSet<ExactModuleIdentity>) -> Self {
+        self.project_roles(|owner, role| {
+            Some(if source_owners.contains(owner) {
+                role.clone()
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: role.interface(),
+                }
+            })
+        })
     }
 
     pub(crate) fn from_issued_entries(
