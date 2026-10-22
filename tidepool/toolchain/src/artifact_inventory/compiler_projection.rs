@@ -1169,7 +1169,9 @@ pub(crate) fn complete_native_selection(
     // Resolve HOME package slots in row order. Fresh rows consume their exact
     // `home_roots` links keyed by (unit, module, original ordinal); retained
     // rows reuse their prior held binding and never consult a digest-to-many
-    // inventory.
+    // inventory. Product origin, not the absence of a recomputed prior, owns
+    // that distinction: an unchanged historical Original can be non-fresh
+    // without appearing in this request's inherited completion map.
     for (row, prior) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
@@ -1181,7 +1183,9 @@ pub(crate) fn complete_native_selection(
             ));
         }
         let owner = row.group().owner();
-        let fresh_links = if prior.is_none() {
+        let fresh_links = if row.group().origin()
+            == crate::certified_products::ProductOrigin::Fresh
+        {
             Some(
                 links
                     .home_links(&owner.unit, &owner.module, row.binding().original_ordinal)
@@ -1210,7 +1214,9 @@ pub(crate) fn complete_native_selection(
                     Some(_) => return Err(failure("completed HOME slot changed its import kind")),
                     None => {
                         let slot = fresh_links
-                            .expect("fresh HOME links")
+                            .ok_or_else(|| {
+                                failure("non-fresh HOME package slot lacks its prior completion")
+                            })?
                             .get(fresh_slot)
                             .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
                         fresh_slot += 1;
