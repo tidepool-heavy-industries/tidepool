@@ -1150,6 +1150,79 @@ mod promotion_tests {
         assert!(table.drain_scope(captured).is_empty());
         assert_eq!(table.collect_observations().len(), 1);
     }
+
+    #[test]
+    fn private_selection_delta_preserves_public_domain_absence_and_relabel() {
+        use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
+
+        let admitted_domain =
+            crate::prepared_program::SourceInstanceDomain::in_view(BindingTipId(11), 0);
+        let latest_domain =
+            crate::prepared_program::SourceInstanceDomain::in_view(BindingTipId(12), 0);
+        let owner = CachedHomeOwner {
+            unit: "unit".into(),
+            module: "Source".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        };
+        let mut admitted_record = SourceDomainRecord::empty();
+        admitted_record.authored.insert_mut(
+            owner.clone(),
+            AuthoredSourceOrigin {
+                domain: admitted_domain,
+                support: None,
+            },
+        );
+        let admitted = SourceSelectionView {
+            current: admitted_domain,
+            domains: [(admitted_domain, admitted_record)].into_iter().collect(),
+        };
+        let latest = SourceSelectionView {
+            current: latest_domain,
+            domains: [(latest_domain, SourceDomainRecord::empty())]
+                .into_iter()
+                .collect(),
+        };
+
+        let unchanged =
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &admitted).unwrap();
+        assert_eq!(unchanged, latest, "unchanged A preserves B exactly");
+        assert!(!unchanged.domains.contains_key(&admitted_domain));
+
+        let mut completed = admitted.clone();
+        completed
+            .domains
+            .get_mut(&admitted_domain)
+            .unwrap()
+            .authored
+            .remove(&owner);
+        let removal =
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &completed).unwrap();
+        assert_eq!(removal, latest, "private removal cannot recreate absent A");
+
+        let mut divergent = admitted.clone();
+        divergent
+            .domains
+            .get_mut(&admitted_domain)
+            .unwrap()
+            .authored
+            .insert_mut(
+                CachedHomeOwner {
+                    module: "Other".into(),
+                    ..owner
+                },
+                AuthoredSourceOrigin {
+                    domain: admitted_domain,
+                    support: None,
+                },
+            );
+        assert_eq!(
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &divergent),
+            Err(BindingPromotionError::ConflictingSourceOrigin),
+            "a private authored addition cannot revive a public-removed domain"
+        );
+    }
 }
 
 struct ObservationBinding {

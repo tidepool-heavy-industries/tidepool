@@ -6,8 +6,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tidepool_codegen::binding_table::PreparedWorldExecutionSelection;
-use tidepool_codegen::binding_table::SourceLeaseKey;
+use tidepool_codegen::binding_table::{PreparedWorldExecutionSelection, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::compiler_world::{
