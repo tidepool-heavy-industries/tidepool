@@ -241,7 +241,11 @@ fn assert_current_handles_are_target_bound(
     .unwrap()
     .with_linked_native_target(linked)
     .unwrap();
-    let narrowed = support.selected_interfaces().unwrap();
+    let narrowed = support
+        .for_source_owners(&BTreeSet::new())
+        .unwrap()
+        .finalize_namespace()
+        .unwrap();
     assert!(narrowed
         .projection()
         .roles()
