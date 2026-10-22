@@ -12307,26 +12307,27 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 .program_support
                 .as_ref()
                 .unwrap();
+            // This executable stage computes only Int7. Its non-generated
+            // dependencies contribute canonical interfaces, not produced bodies
+            // or authored lexical permission. The generated executable is not a
+            // retained source row.
             assert!(
-                support
-                    .imports
-                    .values()
-                    .any(|row| row.physical_product.is_some()),
-                "canonical SOURCE support retains the actual completed producer"
+                !support.imports.is_empty(),
+                "actual canonical support is nonempty"
             );
             for (owner, row) in support.imports.iter() {
-                let Some(_) = &row.physical_product else {
-                    continue;
-                };
+                assert!(
+                    row.physical_product.is_none(),
+                    "interface-only stage support has no completed native producer"
+                );
                 let entry = support
                     .compiler_support
                     .implementation_entry(owner)
                     .unwrap();
                 assert!(
                     matches!(entry.payload, ArtifactPayload::Canonical(_)),
-                    "retaining the physical proof does not select an Original compiler role"
+                    "interface-only support retains its canonical compiler role"
                 );
-                assert!(row.matches_domain_entry(entry));
             }
         }
         let (continuation, first_source) = segment.finish();
@@ -12411,6 +12412,8 @@ pub(crate) fn assert_world_repeated_source_refusals(
         match (observation, result) {
             (Observation::Unchanged, Ok(mut next)) => {
                 let authored_ordinal = *next.stage.ordinals().first().unwrap();
+                let authored_owner = next.stage.identity().original_owner()
+                    .expect("the actual declaration stage has its Original owner").clone();
                 let authored_produced = produced
                     .for_segment(authored_ordinal..authored_ordinal)
                     .unwrap();
@@ -12444,6 +12447,9 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 };
                 assert!(!produced_rows.is_empty(),
                     "actual authored stage owns produced Source proofs");
+                assert!(produced_rows.iter().any(|(_, entry)|
+                    entry.descriptor.owner == authored_owner),
+                    "the actual authored Original retains its physical issuer, independently of protected dependency production or lexical permission");
                 let (continuation, _) = next.finish();
                 let following = &program.stages()[2];
                 let first = *following.ordinals().first().unwrap();

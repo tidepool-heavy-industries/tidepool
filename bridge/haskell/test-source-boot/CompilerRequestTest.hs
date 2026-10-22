@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -80,9 +80,28 @@ packageTargetRootDriftRefusal = do
       | "target package roots changed" `isInfixOf` reason -> pure ()
     other -> fail ("target root mutation was not refused: " ++ show other)
 
+worldRequestSlotBoundaries :: IO ()
+worldRequestSlotBoundaries = do
+  let recipe = WorldCellRecipe "(this must not parse" "module CellCheck where" []
+      cellPrepare = WorldCellPrepareRequest (replicate 64 'a') (replicate 64 '1' ++ ".7")
+        recipe Nothing "untrusted-receipt" (BS.replicate 32 1) 17
+        [] "/unavailable/cell-operation" "/unavailable/cell-prepared.cbor"
+  let decodeSlots slots = workerRequestFromArgv (workerArgv
+        [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
+  forM_ [[(0,PlannedDeclaration 1),(1,PlannedBind 1)]
+    ,[(0,PlannedBind 1),(1,PlannedDeclaration 1)]
+    ,[(0,PlannedExpression 1 "observation"),(1,PlannedPrologue 1)]] $ \slots ->
+      case decodeSlots slots of
+        Right (Just _) -> pure ()
+        other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
+  forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
+    ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
+      case decodeSlots slots of
+        Left _ -> pure ()
+        other -> fail ("held request admitted duplicate module reservations: " ++ show other)
+
 worldRequestBoundaries :: IO ()
 worldRequestBoundaries = do
-  worldAcquisitionDiagnostics
   requireObservationPackageEnvironment
   let root = replicate 64 'a'
       foreignReference = replicate 64 '1' ++ ".7"
@@ -121,19 +140,6 @@ worldRequestBoundaries = do
       decode fields = case workerRequestFromArgv (workerArgv fields) of
         Right (Just request) -> pure request
         other -> fail ("invalid held cell fixture: " ++ show other)
-  let decodeSlots slots = workerRequestFromArgv (workerArgv
-        [WorldCellPrepare cellPrepare {worldCellPrepareSlots=slots}])
-  forM_ [[(0,PlannedDeclaration 1),(1,PlannedBind 1)]
-    ,[(0,PlannedBind 1),(1,PlannedDeclaration 1)]
-    ,[(0,PlannedExpression 1 "observation"),(1,PlannedPrologue 1)]] $ \slots ->
-      case decodeSlots slots of
-        Right (Just _) -> pure ()
-        other -> fail ("held request conflated Lib1 and Val1 reservations: " ++ show other)
-  forM_ [[(0,PlannedBind 1),(1,PlannedExpression 1 "observation")]
-    ,[(0,PlannedPrologue 1),(1,PlannedDeclaration 1)]] $ \slots ->
-      case decodeSlots slots of
-        Left _ -> pure ()
-        other -> fail ("held request admitted duplicate module reservations: " ++ show other)
   planArgs <- decode [WorldCellPlan cellPlan]
   prepareArgs <- decode [WorldCellPrepare cellPrepare]
   (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
@@ -147,9 +153,11 @@ worldRequestBoundaries = do
       unless (either (== WorldCellUnavailable) (const False) absent)
         (fail "unheld prepare parsed source or allocated compiler generation state")
       compiled <- try (compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing "/unavailable/target.hs")
-        :: IO (Either WorldCellRefusal CheckedEnvironmentResult)
-      unless (either (== WorldCellUnavailable) (const False) compiled)
-        (fail "world compiler bypassed its actual hold/admission owner")
+        :: IO (Either InputRejection CheckedEnvironmentResult)
+      case compiled of
+        Left CheckedPurposeMismatch -> pure ()
+        Left failure -> throwIO failure
+        Right _ -> fail "held World request entered the generic compiler path"
       conflict <- try (compileBoundRequest request CheckedEnvironment Set.empty
         (ParsedImportSelection [] (ParsedImportSelection [] GeneralCompile)) Nothing "/unavailable/target.hs")
         :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
