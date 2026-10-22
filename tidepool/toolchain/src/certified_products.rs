@@ -29707,7 +29707,8 @@ pub(crate) mod tests {
     #[test]
     fn scoped_home_owner_query_separates_package_custody_from_home_downgrade() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, ArtifactPayload, NativeArtifactDemand,
+            ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure, ArtifactPayload,
+            NativeArtifactDemand, PackageCodeRefusal,
         };
         let root = tempfile::tempdir().unwrap();
         let external_unit = "external-package";
@@ -29793,29 +29794,30 @@ pub(crate) mod tests {
             module: "External".into(),
         };
 
-        // Positive control: real package custody for the external owner must
-        // not manufacture a HOME observation or fire the downgrade guard.
+        // Package payload acquisition belongs to its native closure. A compiler
+        // inventory cannot turn the envelope into a HOME observation.
         let package =
             CertifiedPackageCodeProduct::package_code_fixture(external_unit, "External", 13);
-        let package_view = inventory
+        let package_id = package.artifact_id();
+        let refusal = inventory
             .admit_shared_with_demand(
                 &inventory.empty_view(),
                 vec![Arc::new(ArtifactEntry::package_code(package))],
                 NativeArtifactDemand::ScopeInterfaces,
             )
-            .unwrap();
-        assert!(package_view.has_observed_owner(&external_owner));
-        assert!(!package_view.has_home_owner(&external_owner));
-        assert!(package_view.selected_native_groups().is_empty());
-        let with_package = consumer_view.retain_custody(&package_view).unwrap();
-        assert!(with_package.has_observed_owner(&external_owner));
-        assert!(!with_package.has_home_owner(&external_owner));
+            .unwrap_err();
+        assert!(matches!(refusal, CompileError::ArtifactInventory(error)
+        if error.failure == ArtifactInventoryFailure::PackageCode {
+            artifact: package_id, reason: PackageCodeRefusal::WrongKind,
+        }));
+        assert!(!consumer_view.has_observed_owner(&external_owner));
+        assert!(!consumer_view.has_home_owner(&external_owner));
         let mut validation = PackageInterfaceValidation::default();
         let mut checked =
             OriginalValidationInventory::selected(&available, &validation.inventory).unwrap();
         let rows = checked
             .certify_selected_scope(
-                SelectedOriginalGroupScope::View(&with_package),
+                SelectedOriginalGroupScope::View(&consumer_view),
                 &BTreeMap::new(),
                 &mut validation,
                 None,
