@@ -420,9 +420,6 @@ fn validate_source_selected_originals_in_domain(
         }
         if let Some(node) = fresh.get(&owner) {
             for (qualifier, child) in exact_edges.get(&owner).into_iter().flatten() {
-                if !context.import_roles.requires_current_source(&owner, child) {
-                    continue;
-                }
                 if selected.contains_key(*child)
                     && (owner.unit != child.unit
                         || !matches!(qualifier, ImportQualifier::Unqualified)
@@ -449,9 +446,6 @@ fn validate_source_selected_originals_in_domain(
                     unit: owner.unit.clone(),
                     module: edge.module.clone(),
                 };
-                if !context.import_roles.requires_current_source(&owner, &child) {
-                    continue;
-                }
                 if fresh.get(&child).is_some_and(|node| &node.source == path) {
                     pending.push(child);
                 }

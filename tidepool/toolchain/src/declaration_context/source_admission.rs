@@ -113,6 +113,7 @@ pub(crate) struct RootSourceImportRoles {
     root: ExactModuleIdentity,
     rows: Vec<RawSourceImportRole>,
     masks: BTreeMap<ExactModuleIdentity, u8>,
+    inherited_lexical: BTreeSet<ExactModuleIdentity>,
 }
 
 impl RootSourceImportRoles {
@@ -191,17 +192,19 @@ impl RootSourceImportRoles {
             charge_owner(operation, &imported, 1)?;
             *masks.entry(imported).or_insert(0) |= row.mask;
         }
-        let owner = Self { root, rows, masks };
-        for row in &owner.rows {
-            let imported = identity(&row.unit, &row.module);
-            if owner.role(&owner.root, &imported) == RootImportRole::InheritedLexical
-                && !prior_lexical(&imported)
-            {
-                return Err(failure(
-                    "inherited source import lacks an already-admitted lexical owner",
-                ));
+        let mut inherited_lexical = BTreeSet::new();
+        for (imported, mask) in &masks {
+            if mask & 1 == 0 && mask & 2 != 0 && prior_lexical(imported) {
+                charge_owner(operation, imported, 1)?;
+                inherited_lexical.insert(imported.clone());
             }
         }
+        let owner = Self {
+            root,
+            rows,
+            masks,
+            inherited_lexical,
+        };
         Ok(Arc::new(owner))
     }
 
@@ -219,16 +222,23 @@ impl RootSourceImportRoles {
         }
     }
 
-    pub(crate) fn compilation_root(&self) -> &ExactModuleIdentity {
-        &self.root
+    #[cfg(test)]
+    pub(super) fn observed_rows(&self) -> impl Iterator<Item = (&str, &str, bool, &str, u8, bool)> {
+        self.rows.iter().map(|row| {
+            let imported = identity(&row.unit, &row.module);
+            (
+                row.qualifier.as_str(),
+                row.module.as_str(),
+                row.boot,
+                row.unit.as_str(),
+                row.mask,
+                self.admits_lexical_edge(&self.root, &imported),
+            )
+        })
     }
 
-    pub(crate) fn requires_current_source(
-        &self,
-        source: &ExactModuleIdentity,
-        imported: &ExactModuleIdentity,
-    ) -> bool {
-        self.role(source, imported) == RootImportRole::AuthoredCurrent
+    pub(crate) fn compilation_root(&self) -> &ExactModuleIdentity {
+        &self.root
     }
 
     fn admits_lexical_edge(
@@ -236,7 +246,11 @@ impl RootSourceImportRoles {
         source: &ExactModuleIdentity,
         imported: &ExactModuleIdentity,
     ) -> bool {
-        self.role(source, imported) != RootImportRole::ProtectedCompiler
+        match self.role(source, imported) {
+            RootImportRole::AuthoredCurrent => true,
+            RootImportRole::InheritedLexical => self.inherited_lexical.contains(imported),
+            RootImportRole::ProtectedCompiler => false,
+        }
     }
 }
 
@@ -323,16 +337,7 @@ impl ReceiptSourceClaims {
             let Some(imports) = adjacency.get(&owner) else {
                 continue;
             };
-            let inherited =
-                roles.role(compilation_root, &owner) == RootImportRole::InheritedLexical;
-            let kind = if inherited {
-                if !prior(&owner) {
-                    return Err(failure(
-                        "inherited source traversal lacks prior source admission",
-                    ));
-                }
-                SourceLexicalClaim::PriorProgramSource
-            } else if selected.contains_key(&owner) {
+            let kind = if selected.contains_key(&owner) {
                 SourceLexicalClaim::CurrentSelectedOriginal
             } else if prior(&owner) {
                 SourceLexicalClaim::PriorProgramSource
@@ -343,7 +348,9 @@ impl ReceiptSourceClaims {
             pending.extend(
                 imports
                     .iter()
-                    .filter(|child| roles.admits_lexical_edge(&owner, child))
+                    // Inherited links borrow the earlier Source scope. Its
+                    // compiler adjacency cannot issue new source claims.
+                    .filter(|child| roles.role(&owner, child) == RootImportRole::AuthoredCurrent)
                     .cloned(),
             );
         }
@@ -792,8 +799,8 @@ mod selection_tests {
             )
             .is_ok());
         }
-        // The same consumed inventory and canonical selection cannot promote a
-        // protected template dependency into an authored current-source claim.
+        // Canonical qualification follows actual compiler consumption even when
+        // the same exact edge grants no lexical source visibility.
         let protected_roles = RootSourceImportRoles::issue(
             &role_evidence,
             &role_path,
@@ -806,18 +813,22 @@ mod selection_tests {
             &operation,
         )
         .unwrap();
-        let refused = validate_source_selected_originals(
-            vec![claim()],
+        let protected_context = || SourceSelectionContext {
+            import_roles: &protected_roles,
+            ..context()
+        };
+        assert!(
+            validate_source_selected_originals(vec![claim()], &evidence, protected_context())
+                .is_ok()
+        );
+        let mut malformed = claim();
+        malformed.certificate_sha256[0] ^= 1;
+        assert!(validate_source_selected_originals(
+            vec![malformed],
             &evidence,
-            SourceSelectionContext {
-                import_roles: &protected_roles,
-                ..context()
-            },
+            protected_context()
         )
-        .unwrap_err();
-        assert!(refused
-            .to_string()
-            .contains("selected owners are unreachable from actual imports"));
+        .is_err());
         assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
         // An adjacent consumed module is not another compilation root.
         let mut adjacent = fresh.clone();

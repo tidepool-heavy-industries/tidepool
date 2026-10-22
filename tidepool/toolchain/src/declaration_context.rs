@@ -9462,6 +9462,13 @@ impl ExactSourceAdmission {
     pub(crate) fn evidence_bytes(&self) -> &[u8] {
         &self.evidence_bytes
     }
+    #[cfg(test)]
+    pub(crate) fn source_import_role_rows(
+        &self,
+    ) -> impl Iterator<Item = (&str, &str, bool, &str, u8, bool)> {
+        self.claims.roles.observed_rows()
+    }
+
     pub(crate) fn selected_originals(
         &self,
     ) -> &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal> {
@@ -11684,9 +11691,9 @@ impl WorldProgramSegment {
         let mut facts = context.owner.facts.clone();
         facts.lexical = facts.lexical.append_issued(lexical.iter().cloned())?;
         if !executable {
-            let edges = imports
-                .get(&generated)
-                .ok_or_else(|| failure("authored stage lacks original import evidence"))?;
+            let edges = admission
+                .lexical_imports(&generated)
+                .ok_or_else(|| failure("authored stage lacks admitted lexical imports"))?;
             facts.lexical = facts.lexical.append_issued([ExactLexicalNode {
                 owner: generated,
                 imports: edges
@@ -27867,13 +27874,56 @@ mod tests {
         let request = program_request(directory.path(), empty.clone());
         let receipt = support_receipt(directory.path(), &request);
         let original = read_receipt(&receipt);
-        for mask in [1, 4, 5] {
+        for mask in [1, 2, 4, 5, 6] {
             let mut value = original.clone();
             value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
                 .as_array_mut()
                 .unwrap()[4] = Value::Integer(mask.into());
             write_receipt(&receipt, &value);
             let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
+            assert_eq!(
+                admission.source_import_role_rows().next().unwrap().5,
+                mask & 1 != 0
+            );
+            let supplied_fixture = support_offer(&[
+                support_product("Target"),
+                support_product("InstanceOwner"),
+                support_product("InstanceRelay"),
+            ]);
+            let supplied = supplied_fixture
+                .artifacts()
+                .root_entries()
+                .into_iter()
+                .map(|entry| (entry.descriptor.owner.clone(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let bundle = SourceAdmissionBundle::issue(
+                SourceAdmissionBoundary::FiniteRequest,
+                Arc::new(match &supplied_fixture {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        panic!("complete product fixture")
+                    }
+                }),
+                admission.compiler_dependencies().clone(),
+                std::iter::once(&admission),
+                supplied.iter(),
+                |_| None,
+                |_| None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                bundle
+                    .lexical_imports(&identity("fixture", "Target"))
+                    .unwrap(),
+                if mask & 1 != 0 {
+                    vec![identity("fixture", "InstanceRelay")]
+                } else {
+                    vec![]
+                }
+            );
             let mut receiving = request.clone();
             receiving
                 .admit_fixture_support(
@@ -27888,21 +27938,8 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 receiving.program_source_lexical().len(),
-                if mask == 4 { 0 } else { 2 }
+                if mask & 1 == 0 { 0 } else { 2 }
             );
-        }
-        for mask in [2, 6] {
-            let mut value = original.clone();
-            value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
-                .as_array_mut()
-                .unwrap()[4] = Value::Integer(mask.into());
-            write_receipt(&receipt, &value);
-            assert!(request
-                .validate_receipt(&receipt, None, &empty)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("already-admitted lexical owner"));
         }
         let mut missing = original.clone();
         missing.as_array_mut().unwrap()[10] = Value::Array(vec![]);
@@ -27933,6 +27970,50 @@ mod tests {
             request.validate_receipt(&unpermitted, None, &empty),
             Err(CompileError::ExactImportWitness(_))
         ));
+    }
+
+    #[test]
+    fn selected_source_proofs_qualify_consumption_without_granting_lexical_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let (request, context, receipt) = source_selected_receipt(directory.path(), false, None);
+        let original = read_receipt(&receipt);
+        let supplied = context.compiler_metadata_snapshot().unwrap().entries;
+        for mask in [1, 2, 4, 5, 6, 7] {
+            let mut value = original.clone();
+            value.as_array_mut().unwrap()[10].as_array_mut().unwrap()[0]
+                .as_array_mut()
+                .unwrap()[4] = Value::Integer(mask.into());
+            write_receipt(&receipt, &value);
+            let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+            assert_eq!(admission.selected_originals().len(), 1);
+            let bundle = SourceAdmissionBundle::issue(
+                SourceAdmissionBoundary::FiniteRequest,
+                Arc::new(context.compiler_source_support().clone()),
+                admission.compiler_dependencies().clone(),
+                std::iter::once(&admission),
+                supplied.iter(),
+                |owner| supplied.get(owner),
+                |owner| supplied.get(owner),
+                None,
+            )
+            .unwrap();
+            assert_eq!(bundle.admits_lexical(&identity("main", "A")), mask & 1 != 0);
+        }
+        let mut malformed = original.clone();
+        malformed.as_array_mut().unwrap()[10]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[4] = Value::Integer(4.into());
+        malformed.as_array_mut().unwrap()[9].as_array_mut().unwrap()[0]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[2] = text(hex(&[99; 32]));
+        write_receipt(&receipt, &malformed);
+        assert!(request.validate_receipt(&receipt, None, &context).is_err());
+        write_receipt(&receipt, &original);
+        assert!(request.validate_receipt(&receipt, None, &context).is_ok());
     }
 
     #[test]
