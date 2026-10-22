@@ -1,11 +1,7 @@
--- P3 oracle fixture 2: a transitive package import competes with a direct
--- sibling target supplying the same defining module under a different body.
---
--- `viaText` reaches Data.Text.Internal (and its transitive closure) through
--- Data.Text; `directText` reaches Data.Text.Internal directly. The two
--- projections of the shared defining module must stay distinct, and the
--- transitive choice made inside Data.Text must not collapse onto the direct
--- target's projection.
+-- P3 ordinary shared-symbol fixture. `viaText` reaches Data.Text through
+-- Data.Text.Internal while `directText` reaches the internal module directly.
+-- This fixture establishes order invariance only; it does not establish two
+-- competing transitive candidates.
 module TransitiveCompetitor where
 
 import qualified Data.Text as T

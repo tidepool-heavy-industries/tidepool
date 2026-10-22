@@ -126,6 +126,121 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_package_occurrence_linkage_tests owns it"]
+fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
+    let ((endpoint, world, source, prepared), admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world()?;
+        let checked = prepare_package_checked(
+            &endpoint,
+            &world,
+            &source,
+            include_str!("../../tests/fixtures/world-native/PackageWorldItem.hs"),
+            &[(41, "supplied")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        assert_eq!(checked.stages()[0].ordinals(), &[0]);
+        let prepared = prepare_world_cell_program(checked)?;
+        Ok((endpoint, world, source, prepared))
+    });
+    let first = prepared
+        .seal(&admission)
+        .expect("package-using World item reaches native END");
+    assert_eq!(first.items().len(), 1);
+    let products = first.items()[0]
+        .native_products()
+        .expect("package item owns native products");
+    let selection = products
+        .completed_native_selection()
+        .expect("package item owns its exact completed selection");
+    assert_eq!(
+        products
+            .native_source_products()
+            .expect("item source products resolve through the item issuer")
+            .target()
+            .definitions()
+            .globals()
+            .len(),
+        selection.target_imports().len(),
+        "the item target has exactly one selected link per physical global"
+    );
+    let package_roots = selection
+        .target_imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeTargetImport::Package { binding, .. } => {
+                Some(format!(
+                    "{}:{}",
+                    binding.product().code().owner().unit,
+                    binding.product().code().owner().module
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        package_roots.len(),
+        2,
+        "Data.List.sort retains its body and Ord dictionary roots: {package_roots:?}"
+    );
+    assert!(
+        package_roots.iter().any(|owner| owner.ends_with("OldList")),
+        "the item keeps its sort implementation: {package_roots:?}"
+    );
+    assert!(
+        package_roots
+            .iter()
+            .any(|owner| owner.ends_with("GHC.Classes")),
+        "the item keeps its exact Ord dictionary: {package_roots:?}"
+    );
+
+    let execution = first.items()[0]
+        .native()
+        .expect("package input item is executable")
+        .clone();
+    let operand = CompilerWorldCellOperand::from_checked_host_execution(
+        &world,
+        WorldCellOperandExposure::Input,
+        1,
+        &execution,
+    )
+    .expect("the package result is captured by the later-cell operand owner");
+    let (prepared, admission) = settle(|| {
+        let body = include_str!("../../tests/fixtures/world-native/PackageWorldConsumer.hs")
+            .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence);
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            &body,
+            Some(operand),
+            &[(51, "laterValue")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        assert_eq!(checked.stages()[0].ordinals(), &[0]);
+        prepare_world_cell_program(checked)
+    });
+    let later = prepared
+        .seal(&admission)
+        .expect("later World cell consumes the package-derived value");
+    assert_eq!(later.items().len(), 1);
+    let later_products = later.items()[0]
+        .native_products()
+        .expect("later item owns native products");
+    assert!(
+        later_products
+            .completed_native_selection()
+            .expect("later item owns its exact completion")
+            .target_imports()
+            .iter()
+            .all(|import| !matches!(
+                import,
+                crate::artifact_inventory::CompletedNativeTargetImport::Package { .. }
+            )),
+        "the later cell consumes the issued value, not a package import chosen by name"
+    );
+}
+
+#[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_reference_history_test owns it"]
 fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() {
     use crate::host_work::HostWorkCounter as Counter;
@@ -260,6 +375,36 @@ fn prepare_checked(
             include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
         ),
     };
+    prepare_checked_with_template(endpoint, world, source, body, operand, values, template)
+}
+
+fn prepare_package_checked(
+    endpoint: &AdmittedCompilerEndpoint,
+    world: &Arc<CompilerWorld>,
+    source: &WorldSourceSelection,
+    body: &str,
+    values: &[(u64, &str)],
+) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
+    prepare_checked_with_template(
+        endpoint,
+        world,
+        source,
+        body.into(),
+        None,
+        values,
+        include_str!("../../tests/fixtures/world-native/PackageCellTemplate.hs").into(),
+    )
+}
+
+fn prepare_checked_with_template(
+    endpoint: &AdmittedCompilerEndpoint,
+    world: &Arc<CompilerWorld>,
+    source: &WorldSourceSelection,
+    body: String,
+    operand: Option<Arc<CompilerWorldCellOperand>>,
+    values: &[(u64, &str)],
+    template: String,
+) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
     let plan = crate::compiler_world::plan_cell(
         endpoint,
         world,
