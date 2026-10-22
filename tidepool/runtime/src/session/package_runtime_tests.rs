@@ -1,9 +1,10 @@
-//! Runtime integration histories for machine-local PACKAGE choices.
+//! Runtime integration histories for machine-local native choices.
 
 use super::*;
 
 #[test]
-fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group() {
+fn sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group() {
+    use tidepool_codegen::prepared_program::NativeBindingKey;
     tidepool_testing::eval_harness::require_extract();
     let targets = tidepool_testing::with_settlement(|settlement| {
         crate::compile_runtime_targets(
@@ -17,7 +18,7 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
             settlement,
         )
     })
-    .expect("compile a real paired target with executable PACKAGE imports");
+    .expect("compile a real paired target with executable HOME and PACKAGE imports");
     let compiled =
         super::super::turn::CompiledTurn::from_runtime_target(&targets, "first").unwrap();
     let code = compiled.code();
@@ -41,8 +42,10 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
     let b = session
         .mint_world_execution_scope(ScopeId::ROOT, &admitted)
         .unwrap();
+    let isolated = session.mint_detached_scope(ScopeId::ROOT).unwrap();
     let a_lease = session.prepared_lexical_scope_lease(a).unwrap();
     let b_lease = session.prepared_lexical_scope_lease(b).unwrap();
+    let isolated_lease = session.prepared_lexical_scope_lease(isolated).unwrap();
     let settled = session
         .with_source_compiler_transaction(
             targets.source.clone(),
@@ -53,29 +56,39 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
             |session, _| {
                 session.admit_source_lease(a_lease.clone()).unwrap();
                 session.admit_source_lease(b_lease.clone()).unwrap();
+                session.admit_source_lease(isolated_lease.clone()).unwrap();
                 let stale = session.resolve_closed_turn_in(a, &plan, &origin).unwrap();
                 let before_a = session.bindings.scope_snapshot(&session.scopes, a).unwrap();
                 let (b_program, _, _) = session
                     .install_closed_turn_in(b, compiled.table(), &plan, &origin)
                     .unwrap()
                     .into_parts();
-                let package_groups = |session: &PersistentSession, scope| {
-                    session
+                let native_groups = |session: &PersistentSession, scope| {
+                    let mut groups = BTreeMap::new();
+                    for lease in session
                         .bindings
                         .selected_source_instances_in(&session.scopes, scope)
-                        .into_iter()
-                        .filter_map(|lease| match &lease {
-                            NativeInstanceLease::Package(package) => {
-                                Some((package.binding(), lease.instance()))
-                            }
-                            NativeInstanceLease::Home(_) => None,
-                        })
-                        .collect::<BTreeMap<_, _>>()
+                    {
+                        let old = groups.insert(lease.binding_key(), lease.instance());
+                        assert!(
+                            old.is_none_or(|old| old == lease.instance()),
+                            "one selected native binding has one physical group"
+                        );
+                    }
+                    groups
                 };
-                let b_groups = package_groups(session, b);
+                let b_groups = native_groups(session, b);
                 assert!(
-                    !b_groups.is_empty(),
-                    "the fixture must demand executable PACKAGE custody"
+                    b_groups
+                        .keys()
+                        .any(|key| matches!(key, NativeBindingKey::Home(_))),
+                    "the real fixture must demand HOME custody"
+                );
+                assert!(
+                    b_groups
+                        .keys()
+                        .any(|key| matches!(key, NativeBindingKey::Package(_))),
+                    "the real fixture must demand PACKAGE custody"
                 );
                 let residency = session.residency();
                 let roots = session.persistent_roots_count();
@@ -99,8 +112,13 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
                     .install_closed_turn_in(a, compiled.table(), &plan, &origin)
                     .unwrap()
                     .into_parts();
-                let a_groups = package_groups(session, a);
-                assert!(!a_groups.is_empty());
+                let a_groups = native_groups(session, a);
+                assert!(
+                    a_groups
+                        .keys()
+                        .any(|key| matches!(key, NativeBindingKey::Home(_))),
+                    "fresh sibling resolution must actually request a HOME group"
+                );
                 // Anchored groups already retain their transitive dependencies;
                 // A acquires only its actual requested exports from those groups.
                 for (binding, instance) in a_groups {
@@ -110,8 +128,46 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
                         "fresh resolution must select the exact live sibling group"
                     );
                 }
-                assert!(session.prepared_mut().unwrap().unpin(a_program));
-                assert!(session.prepared_mut().unwrap().unpin(b_program));
+                let captured = session.mint_detached_scope(b).unwrap();
+                let captured_lease = session.prepared_lexical_scope_lease(captured).unwrap();
+                session.admit_source_lease(captured_lease.clone()).unwrap();
+                let current = |session: &PersistentSession, scope| {
+                    session
+                        .bindings
+                        .native_domain_selection_in(&session.scopes, scope)
+                        .unwrap()
+                        .current()
+                };
+                assert_ne!(current(session, isolated), current(session, b));
+                assert_ne!(current(session, captured), current(session, b));
+                let (isolated_program, _, _) = session
+                    .install_closed_turn_in(isolated, compiled.table(), &plan, &origin)
+                    .unwrap()
+                    .into_parts();
+                let isolated_groups = native_groups(session, isolated);
+                assert_eq!(
+                    isolated_groups.keys().collect::<Vec<_>>(),
+                    b_groups.keys().collect::<Vec<_>>()
+                );
+                for (binding, instance) in isolated_groups {
+                    assert_ne!(
+                        b_groups[&binding], instance,
+                        "an empty independent fork instantiates its own native group"
+                    );
+                }
+                let (captured_program, _, _) = session
+                    .install_closed_turn_in(captured, compiled.table(), &plan, &origin)
+                    .unwrap()
+                    .into_parts();
+                assert_eq!(
+                    native_groups(session, captured),
+                    b_groups,
+                    "fork relabeling preserves actual selected physical groups"
+                );
+                for program in [a_program, b_program, isolated_program, captured_program] {
+                    assert!(session.prepared_mut().unwrap().unpin(program));
+                }
+                (captured, captured_lease, b_groups)
             },
         )
         .unwrap()
@@ -120,8 +176,30 @@ fn sibling_package_slot_install_refuses_recorded_vacancy_then_reuses_live_group(
         settled.close,
         crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
     ));
+    let (captured, _captured_lease, groups) = settled.action;
     session.retire_scope(a);
     session.retire_scope(b);
+    session.retire_scope(isolated);
+    session
+        .prepared_mut()
+        .unwrap()
+        .quiesce_and_collect_now()
+        .unwrap();
+    assert!(
+        session.residency().unwrap().programs > 0,
+        "the live captured scope retains its original groups"
+    );
+    let retained = session
+        .bindings
+        .selected_source_instances_in(&session.scopes, captured)
+        .into_iter()
+        .map(|lease| (lease.binding_key(), lease.instance()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        retained, groups,
+        "every captured group survives its original scope retirement"
+    );
+    session.retire_scope(captured);
     session
         .prepared_mut()
         .unwrap()
