@@ -6415,7 +6415,6 @@ fn compile_invocation_inner(
         let physical = physical_inputs.issued_artifacts();
         artifacts.artifact_view = physical.clone();
         let mut selected_products = BTreeMap::new();
-        let mut selected_group_baseline = None;
         let mut inherited_completion_support = compiler_inputs
             .as_ref()
             .map(|inputs| inputs.compiler_source_support().clone())
@@ -6444,11 +6443,9 @@ fn compile_invocation_inner(
                 let selected_groups = Arc::new(
                     crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                         selected_target.artifacts(), &certified.groups,
-                        selected_group_baseline.as_deref().or_else(|| {
-                            exact_request
-                                .as_ref()
-                                .map(|request| request.groups.as_ref())
-                        }),
+                        exact_request
+                            .as_ref()
+                            .map(|request| request.groups.as_ref()),
                         &mut validation,
                     )?,
                 );
@@ -6459,7 +6456,12 @@ fn compile_invocation_inner(
                             slot.insert(group.clone());
                         }
                         std::collections::btree_map::Entry::Occupied(previous) => {
-                            if !previous.get().same_issuance(group) {
+                            let previous = previous.get();
+                            let same_exact_rows = previous.owner() == group.owner()
+                                && previous.origin() == group.origin()
+                                && previous.group() == group.group()
+                                && previous.imports() == group.imports();
+                            if !previous.same_issuance(group) && !same_exact_rows {
                                 return Err(CompileError::ExtractFailed(
                                     "finite targets disagree on a physical native product".into(),
                                 ));
@@ -6506,7 +6508,6 @@ fn compile_invocation_inner(
                 inherited_completion_support =
                     inherited_completion_support.with_native_selection_completion(completed)?;
                 target.native_inputs = Some(native_inputs);
-                selected_group_baseline = Some(Arc::clone(&selected_groups));
             }
         }
         timing::record_stage_with_owners(

@@ -190,17 +190,16 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         .completion()
         .rows()
         .filter(|row| {
-            row.binding().original_ordinal == 0
-                && row.imports()
+            row.imports()
                 .iter()
-                .filter(|import| {
-                    matches!(
-                        import,
-                        crate::artifact_inventory::CompletedNativeImport::Package { .. }
-                    )
+                .filter_map(|import| match import {
+                    crate::artifact_inventory::CompletedNativeImport::Package {
+                        binding,
+                        ..
+                    } => Some(binding.product().code().owner().module.as_str()),
+                    _ => None,
                 })
-                .count()
-                == 2
+                .eq(["GHC.Classes", "GHC.Internal.Data.OldList"])
         })
         .collect::<Vec<_>>();
     assert_eq!(home_rows.len(), 1, "one package-using HOME declaration");
@@ -265,10 +264,16 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
             .expect("later item owns its exact completion")
             .target_imports()
             .iter()
-            .all(|import| !matches!(
-                import,
-                crate::artifact_inventory::CompletedNativeTargetImport::Package { .. }
-            )),
+            .all(|import| match import {
+                crate::artifact_inventory::CompletedNativeTargetImport::Package {
+                    binding,
+                    ..
+                } => {
+                    let module = &binding.product().code().owner().module;
+                    module != "GHC.Classes" && module != "GHC.Internal.Data.OldList"
+                }
+                _ => true,
+            }),
         "the later cell consumes the issued value, not a package import chosen by name"
     );
 }
