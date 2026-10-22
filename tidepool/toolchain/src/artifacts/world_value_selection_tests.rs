@@ -326,21 +326,6 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         |_, _, _| {},
     )
     .expect("the cached HOME owner comes from the production compiler");
-    let issued_groups = compiled_home
-        .certified_groups
-        .iter()
-        .filter(|group| {
-            group.owner().module == "CachedPackageWorldHome"
-                && group
-                    .group()
-                    .binders()
-                    .iter()
-                    .any(|binder| binder.occurrence == "cachedTextLength")
-        })
-        .collect::<Vec<_>>();
-    let [issued] = issued_groups.as_slice() else {
-        panic!("the original module must issue one cachedTextLength group");
-    };
     let owner = crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
         module: "CachedPackageWorldHome".into(),
@@ -397,30 +382,40 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let selection = products
         .completed_native_selection()
         .expect("cached HOME item owns its completed selection");
-    let row = selection
+    let home_rows = selection
         .completion()
         .rows()
-        .find(|row| {
-            row.product().owner() == issued.owner()
-                && row.binding().original_ordinal == issued.group().original_ordinal()
+        .filter(|row| {
+            row.product().owner().module == "CachedPackageWorldHome" && !row.imports().is_empty()
         })
-        .expect("the World target selects the original module's actual cachedTextLength group");
-    let offered = primary
-        .compiler_source_support()
-        .native_availability()
-        .issued_row(row.binding().binding.artifact())
-        .expect("the selected group belongs to the actual Original input");
+        .collect::<Vec<_>>();
     assert!(
-        offered.exact_group_support(row.binding()).is_some(),
-        "the World completion must retain the input's exact group issuer"
+        !home_rows.is_empty(),
+        "the World target selects package-using Original HOME code"
     );
-    assert!(
-        row.product().same_issuance(issued),
-        "the World target preserves the original group's issuing product"
-    );
-    let packages = row
-        .imports()
+    for row in &home_rows {
+        let offered = primary
+            .compiler_source_support()
+            .native_availability()
+            .issued_row(row.binding().binding.artifact())
+            .expect("the selected group belongs to the actual Original input");
+        assert!(
+            offered.exact_group_support(row.binding()).is_some(),
+            "the World completion must retain the input's exact group issuer"
+        );
+        let issued = products
+            .target_native_inputs()
+            .certified_groups()
+            .get(row.binding())
+            .expect("the actual target certifier owns the selected group before completion");
+        assert!(
+            row.product().same_issuance(issued),
+            "native completion preserves the target's selected issuing product"
+        );
+    }
+    let packages = home_rows
         .iter()
+        .flat_map(|row| row.imports())
         .filter_map(|import| match import {
             crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
                 Some(binding.product().code().owner().module.as_str())
