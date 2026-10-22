@@ -419,6 +419,25 @@ impl BoundPackageSelection {
                 "item package selection references another stage or program",
             ));
         }
+        let expected_target_roots = links.target_roots(&selection.target).ok_or_else(|| {
+            CertificationError::Receipt("item package selection lacks its stage target")
+        })?;
+        if selection.target_roots != expected_target_roots {
+            return Err(CertificationError::Receipt(
+                "item package target roots differ from the stage manifest",
+            ));
+        }
+        let expected_home_roots = links
+            .home_roots
+            .iter()
+            .filter(|(key, _)| key.target == selection.target)
+            .map(|(key, roots)| (key.clone(), roots.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if selection.home_roots != expected_home_roots {
+            return Err(CertificationError::Receipt(
+                "item package HOME roots differ from the stage manifest",
+            ));
+        }
         Ok(Self {
             mode: BoundPackageSelectionState::Item {
                 program_sha256,
@@ -3138,7 +3157,7 @@ fn package_stage_identity(
         ])
     };
     let value = value_array([
-        Value::Integer(2.into()),
+        Value::Integer(1.into()),
         value_array(links.occurrences.iter().map(|occurrence| {
             value_array([
                 Value::Bytes(occurrence.envelope_sha256.to_vec()),
@@ -32871,7 +32890,7 @@ None,
         .unwrap();
         let package_coordinate = 1 - source_coordinate;
         for reference in [
-            Value::Integer(2.into()),
+            Value::Integer(1.into()),
             Value::Integer((-1).into()),
             Value::Null,
             Value::Integer(package_coordinate.into()),
@@ -34697,6 +34716,55 @@ None,
         let mut crossed = selection;
         crossed.stage_id = [3; 32];
         assert!(BoundPackageSelection::item(&stage, &crossed, [1; 32]).is_err());
+    }
+
+    #[test]
+    fn package_selection_refuses_crossed_target_and_home_roots() {
+        let mut stage = PackageLinks::empty_for_target("item");
+        Arc::make_mut(&mut stage.target_roots)
+            .insert("item".into(), vec![PackageLink::Local { occurrence: 0 }]);
+        let home = PackageHomeRootKey {
+            target: "item".into(),
+            unit: "main".into(),
+            module: "Home".into(),
+            original_ordinal: 1,
+        };
+        Arc::make_mut(&mut stage.home_roots).insert(
+            home.clone(),
+            vec![PackageLink::Local { occurrence: 0 }],
+        );
+        let selection = PackageSelection {
+            stage_id: [0; 32],
+            program_sha256: [1; 32],
+            target: "item".into(),
+            target_roots: vec![PackageLink::Local { occurrence: 0 }],
+            home_roots: BTreeMap::from([(
+                home.clone(),
+                vec![PackageLink::Local { occurrence: 0 }],
+            )]),
+        };
+        assert!(BoundPackageSelection::item(&stage, &selection, [1; 32]).is_ok());
+
+        let mut crossed_target = selection.clone();
+        crossed_target.target_roots = vec![PackageLink::Local { occurrence: 1 }];
+        assert!(matches!(
+            BoundPackageSelection::item(&stage, &crossed_target, [1; 32]),
+            Err(CertificationError::Receipt(
+                "item package target roots differ from the stage manifest"
+            ))
+        ));
+
+        let mut crossed_home = selection;
+        crossed_home.home_roots.insert(
+            home,
+            vec![PackageLink::Local { occurrence: 1 }],
+        );
+        assert!(matches!(
+            BoundPackageSelection::item(&stage, &crossed_home, [1; 32]),
+            Err(CertificationError::Receipt(
+                "item package HOME roots differ from the stage manifest"
+            ))
+        ));
     }
 
     #[test]
