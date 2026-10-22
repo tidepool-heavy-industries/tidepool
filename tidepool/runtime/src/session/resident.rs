@@ -5709,7 +5709,7 @@ where
 
     #[cfg(test)]
     pub(super) fn assert_checked_native_source_selection(
-        &self,
+        &mut self,
         code: &TurnCode<'_>,
         crossed: &TurnCode<'_>,
     ) {
