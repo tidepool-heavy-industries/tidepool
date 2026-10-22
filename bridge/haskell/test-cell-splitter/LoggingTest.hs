@@ -8,9 +8,10 @@ import Control.Exception
   , try )
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
+import Data.Char (isDigit)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import System.Directory (doesPathExist, getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO
@@ -28,6 +29,7 @@ runLoggingTests :: IO ()
 runLoggingTests = do
   checkLevels
   checkEmission
+  checkProducerShape
   checkEscaping
   checkBoundedValue
   checkFieldCap
@@ -81,6 +83,32 @@ checkEmission = withScratch $ \path -> do
       , "\"missing\":null"
       ] && not ("ignored duplicate" `isInfixOf` rendered))
     (fail "structured logging encoding changed")
+
+-- The Rust transport decoder consumes this same checked-in producer fixture.
+-- This test binds its field order, closed level and value vocabulary to the
+-- actual Haskell emission path instead of letting the consumer invent a shape.
+checkProducerShape :: IO ()
+checkProducerShape = withScratch $ \path -> do
+  expected <- readFile' "test-cell-splitter/fixtures/logging/producer-shape.txt"
+  let logger = newLogger "compiler.world" LogTrace
+  withFile path WriteMode $ \handle ->
+    logEventTo handle logger LogTrace "world.cell.stage"
+      [ ("stage", LogText "declaration-inputs-refused")
+      , ("count", LogInteger 2)
+      , ("ok", LogBool True)
+      , ("missing", LogNull)
+      ]
+  actual <- readFile' path
+  unless (normalizeObserved expected == normalizeObserved actual)
+    (fail "producer logging shape differs from the shared fixture")
+  where
+    normalizeObserved [] = []
+    normalizeObserved text
+      | "\"observed_ns\":" `isPrefixOf` text =
+          "\"observed_ns\":<clock>"
+            ++ dropWhile isDigit
+                 (drop (length ("\"observed_ns\":" :: String)) text)
+      | character:rest <- text = character : normalizeObserved rest
 
 checkEscaping :: IO ()
 checkEscaping = withScratch $ \path -> do
