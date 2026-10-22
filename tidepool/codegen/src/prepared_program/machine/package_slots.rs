@@ -294,3 +294,478 @@ impl PreparedMachine<'_> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::binding_table::BindingTable;
+    use crate::prepared_program::{
+        BatchImport, BatchLeaseRequest, BatchProgram, DemandedPackageImage, ImageRegistry,
+        NativeExportRequest, PreparedCallOptions, PreparedResult,
+    };
+    use crate::scope::{ScopeId, ScopeTree};
+    use crate::suspension::RealmId;
+    use tidepool_repr::execution_schema::{
+        testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs,
+        PackageCodeOwner, PackageGroupCode, ResultContract, RuntimeRep, SignatureId, TopBinding,
+        UpdatePolicy, ValueId, ValueRef,
+    };
+
+    fn fixture() -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
+        let mut package = testing::wire_program();
+        package.signatures.push(package.signatures[0].clone());
+        package.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        package
+            .expressions
+            .nodes
+            .push(package.expressions.nodes[0].clone());
+        package.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(1)))]);
+        let Group::NonRecursive(top) = &mut package.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Thunk {
+            signature: SignatureId(0),
+            update: UpdatePolicy::Memoize,
+            captures: vec![],
+            body: 0,
+        };
+        package.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", "result"),
+            binding: HeapBinding {
+                id: ValueId(1),
+                rhs: HeapRhs::Function {
+                    signature: SignatureId(1),
+                    parameters: vec![],
+                    captures: vec![],
+                    body: 1,
+                },
+            },
+        }));
+        package.bindings.push(Group::NonRecursive(TopBinding {
+            identity: testing::identity("Fixture", "bytes"),
+            binding: HeapBinding {
+                id: ValueId(2),
+                rhs: HeapRhs::Bytes(b"package-slot".to_vec()),
+            },
+        }));
+        let code = PackageGroupCode::admit(
+            PackageCodeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                compiler_sha256: [1; 32],
+                profile_sha256: [2; 32],
+                interface_sha256: [3; 32],
+                defining_version_sha256: [4; 32],
+            },
+            testing::projected_group(package, 3).unwrap(),
+        )
+        .unwrap();
+        let package = Arc::new(
+            DemandedPackageImage::prepare(
+                code,
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &ImageRegistry::new(),
+            )
+            .unwrap(),
+        );
+        let mut consumer = testing::wire_program();
+        consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        consumer.signatures.push(consumer.signatures[0].clone());
+        consumer.globals.push(GlobalDecl {
+            identity: testing::identity("Fixture", "entry"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(1)),
+            required_evaluated: false,
+            required_generation: None,
+        });
+        consumer.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(1),
+        };
+        let consumer = Arc::new(
+            CompiledProgram::compile_prepared_definitions(&testing::prepare(consumer).unwrap())
+                .unwrap(),
+        );
+        (package, consumer)
+    }
+
+    fn key(byte: u8) -> NativeArtifactBinding {
+        NativeArtifactBinding {
+            artifact: [byte; 32],
+            selection: [2; 32],
+        }
+    }
+
+    fn permit(
+        table: &mut BindingTable,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        package: &Arc<DemandedPackageImage>,
+        binding: NativeArtifactBinding,
+        value: u32,
+    ) -> WorldPackageSlotPermit {
+        let domain = table
+            .native_domain_selection_in(tree, scope)
+            .unwrap()
+            .current();
+        let request =
+            NativeExportRequest::for_package(package.clone(), binding, domain, ValueId(value))
+                .unwrap();
+        table.package_slot_permit_in(tree, scope, &request).unwrap()
+    }
+
+    fn release_scope(
+        table: &mut BindingTable,
+        machine: &mut PreparedMachine<'_>,
+        tree: &mut ScopeTree,
+        scope: ScopeId,
+    ) {
+        for scope in tree.retire(scope) {
+            let drained = table.drain_scope_with_sources(scope);
+            machine.retire_world_package_domains(table.take_package_domain_retirements());
+            assert!(drained.bindings.is_empty());
+            for lease in drained.source_instances {
+                assert!(machine.release(lease.handle()));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_world_parent_retains_package_choice_through_child_abort_and_live_closure() {
+        let (package, consumer) = fixture();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut tree = ScopeTree::new();
+        let parent = tree.mint_isolated();
+        let a = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let empty = table.scope_snapshot(&tree, parent).unwrap();
+        table
+            .seed_world_execution_scope(&tree, parent, a, &empty)
+            .unwrap();
+        assert_eq!(
+            table.scope_snapshot(&tree, parent).unwrap(),
+            empty,
+            "materializing the implicit parent's lifetime changes no semantic snapshot"
+        );
+        let first = permit(&mut table, &tree, a, &package, key(1), 0);
+        assert!(machine
+            .lookup_world_package_slot(&first, None)
+            .unwrap()
+            .is_none());
+        let receipt = machine
+            .install_shared_batch_with_leases(
+                vec![
+                    BatchProgram {
+                        image: consumer,
+                        imports: vec![BatchImport::Source {
+                            group: 1,
+                            binding: ValueId(0),
+                        }],
+                    },
+                    BatchProgram {
+                        image: package.image().clone(),
+                        imports: vec![],
+                    },
+                ],
+                vec![BatchLeaseRequest::for_package(
+                    1,
+                    package.clone(),
+                    key(1),
+                    first.domain(),
+                    ValueId(0),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        let group = receipt.leases[0].instance();
+        let staged = machine
+            .prepare_world_package_slot_publication(vec![(first.clone(), group)])
+            .unwrap();
+        let admission = table
+            .register_source_instances_in_domains(&tree, a, receipt.source_attachments, &machine)
+            .ok()
+            .unwrap();
+        machine.commit_world_package_slots(staged);
+        let result = machine
+            .run_entry_retained(
+                receipt.programs[0],
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 0,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(closure)] = result.values.as_slice() else {
+            panic!("real PACKAGE CAF returns its own closure")
+        };
+        let closure = *closure;
+        assert!(machine
+            .handle_is_evaluated(receipt.leases[0].handle())
+            .unwrap());
+        for lease in table.rollback_source_admission(a, &admission).unwrap() {
+            assert!(machine.release(lease.handle()));
+        }
+        release_scope(&mut table, &mut machine, &mut tree, a);
+        assert!(!table.validate_package_slot_permit(&tree, a, &first));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(
+            machine.programs.contains_key(&group.program()),
+            "retained closure keeps actual CAF group live without table source roots"
+        );
+        let b = tree.mint_isolated();
+        table
+            .seed_world_execution_scope(&tree, parent, b, &empty)
+            .unwrap();
+        let sibling = permit(&mut table, &tree, b, &package, key(1), 1);
+        let witness = machine
+            .lookup_world_package_slot(&sibling, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            witness.instance(),
+            group,
+            "implicit live parent preserves domain identity"
+        );
+        let attachment = machine
+            .retain_world_package_export(&witness, &sibling)
+            .unwrap();
+        assert_eq!(
+            machine.handle_current_pointer(closure),
+            machine.handle_current_pointer(attachment.lease().handle())
+        );
+        let staged = machine
+            .prepare_world_package_slot_publication(vec![(sibling.clone(), group)])
+            .unwrap();
+        table
+            .register_source_instances_in_domains(&tree, b, vec![attachment], &machine)
+            .ok()
+            .unwrap();
+        machine.commit_world_package_slots(staged);
+        let caf = permit(&mut table, &tree, b, &package, key(1), 0);
+        let caf_witness = machine
+            .lookup_world_package_slot(&caf, None)
+            .unwrap()
+            .unwrap();
+        let caf_root = machine
+            .retain_world_package_export(&caf_witness, &caf)
+            .unwrap();
+        assert!(
+            machine
+                .handle_is_evaluated(caf_root.lease().handle())
+                .unwrap(),
+            "sibling reuse preserves prior memoizing CAF update"
+        );
+        assert!(machine.release(caf_root.lease().handle()));
+        let fork = tree.mint_isolated();
+        table.seed_scope(&tree, b, fork);
+        let fork_permit = permit(&mut table, &tree, fork, &package, key(1), 0);
+        let selected = table
+            .native_domain_selection_in(&tree, fork)
+            .unwrap()
+            .roots()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let fork_witness = machine
+            .lookup_world_package_slot(&fork_permit, Some(&selected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fork_witness.instance(),
+            group,
+            "forked domain first honors inherited physical anchor"
+        );
+        let fork_publication = machine
+            .prepare_world_package_slot_publication(vec![(fork_permit.clone(), group)])
+            .unwrap();
+        let fork_root = machine
+            .retain_world_package_export(&fork_witness, &fork_permit)
+            .unwrap();
+        table
+            .register_source_instances_in_domains(&tree, fork, vec![fork_root], &machine)
+            .ok()
+            .unwrap();
+        machine.commit_world_package_slots(fork_publication);
+        let independent = tree.mint_isolated();
+        let independent_permit = permit(&mut table, &tree, independent, &package, key(1), 0);
+        assert!(
+            machine
+                .lookup_world_package_slot(&independent_permit, None)
+                .unwrap()
+                .is_none(),
+            "independent vacant domain does not share another CAF"
+        );
+        let different = permit(&mut table, &tree, b, &package, key(3), 0);
+        assert!(
+            machine
+                .lookup_world_package_slot(&different, None)
+                .unwrap()
+                .is_none(),
+            "exact binding selection remains distinct"
+        );
+        release_scope(&mut table, &mut machine, &mut tree, parent);
+        let stale_child = tree.mint_isolated();
+        assert!(
+            table
+                .seed_world_execution_scope(&tree, parent, stale_child, &empty)
+                .is_err(),
+            "an immutable snapshot cannot recreate a retired parent domain"
+        );
+        release_scope(&mut table, &mut machine, &mut tree, b);
+        assert!(
+            machine.lookup_world_package_slot(&first, None).is_err(),
+            "retained snapshot or stale permit cannot revive dead parent domain"
+        );
+        assert_eq!(
+            machine.package_domains.len(),
+            1,
+            "only the actual fork's alias remains"
+        );
+        release_scope(&mut table, &mut machine, &mut tree, fork);
+        release_scope(&mut table, &mut machine, &mut tree, independent);
+        assert!(
+            machine.package_domains.is_empty(),
+            "dead fork metadata disappears despite surviving closure"
+        );
+        assert!(machine.programs.contains_key(&group.program()));
+        assert!(machine.release(closure));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn package_slot_commit_refuses_failed_admission_conflicts_and_detached_group() {
+        let (package, _) = fixture();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut tree = ScopeTree::new();
+        let scope = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let address = permit(&mut table, &tree, scope, &package, key(1), 2);
+        let groups = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: package.image().clone(),
+                imports: vec![],
+            }])
+            .unwrap();
+        let group = GroupInstanceId::from(groups[0]);
+        machine.pin(group.program()).unwrap();
+        let failed = machine
+            .prepare_world_package_slot_publication(vec![(address.clone(), group)])
+            .unwrap();
+        drop(failed);
+        assert!(
+            machine
+                .lookup_world_package_slot(&address, None)
+                .unwrap()
+                .is_none(),
+            "cancelled precommit publishes no occupancy"
+        );
+        let staged = machine
+            .prepare_world_package_slot_publication(vec![(address.clone(), group)])
+            .unwrap();
+        table
+            .register_source_instances_in_domains(&tree, scope, vec![], &machine)
+            .ok()
+            .unwrap();
+        machine.commit_world_package_slots(staged);
+        let value = permit(&mut table, &tree, scope, &package, key(1), 1);
+        let witness = machine
+            .lookup_world_package_slot(&value, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            witness.instance(),
+            group,
+            "address-only first demand still owns one physical PACKAGE choice"
+        );
+        let other = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: package.image().clone(),
+                    imports: vec![],
+                }],
+                vec![BatchLeaseRequest::for_package(
+                    0,
+                    package.clone(),
+                    key(1),
+                    value.domain(),
+                    ValueId(1),
+                )
+                .unwrap()],
+            )
+            .unwrap();
+        assert!(
+            machine
+                .lookup_world_package_slot(&value, Some(&other.leases[0]))
+                .is_err(),
+            "independently selected conflicting group is never overwritten"
+        );
+        assert_eq!(
+            machine
+                .lookup_world_package_slot(&value, None)
+                .unwrap()
+                .unwrap()
+                .instance(),
+            group
+        );
+        let root = machine
+            .retain_world_package_export(&witness, &value)
+            .unwrap();
+        let root_handle = root.lease().handle();
+        let foreign_scope = tree.mint_isolated();
+        let rejected = table
+            .register_source_instances_in_domains(&tree, foreign_scope, vec![root], &machine)
+            .err()
+            .unwrap();
+        assert_eq!(
+            machine
+                .lookup_world_package_slot(&value, None)
+                .unwrap()
+                .unwrap()
+                .instance(),
+            group,
+            "failed source admission leaves existing occupancy unchanged"
+        );
+        for root in rejected {
+            assert!(machine.release(root.lease().handle()));
+        }
+        assert!(machine.handle_is_evaluated(root_handle).is_err());
+        assert!(machine.release(other.leases[0].handle()));
+        let held_marker = witness.marker.upgrade().unwrap();
+        machine.detach_roots(group.program()).unwrap();
+        assert!(
+            witness.marker.upgrade().is_some(),
+            "retained marker alone is not liveness authority"
+        );
+        assert!(
+            machine.programs.contains_key(&group.program()),
+            "metadata may remain while block roots are detached"
+        );
+        assert!(machine
+            .validate_world_package_witness(&witness, &value)
+            .is_err());
+        assert!(machine
+            .retain_world_package_export(&witness, &value)
+            .is_err());
+        assert!(machine.package_domains.is_empty());
+        drop(held_marker);
+        machine.unpin(group.program());
+        release_scope(&mut table, &mut machine, &mut tree, scope);
+        release_scope(&mut table, &mut machine, &mut tree, foreign_scope);
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+}
