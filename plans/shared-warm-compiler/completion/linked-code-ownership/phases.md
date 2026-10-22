@@ -41,11 +41,20 @@ cfg(test) callers before claiming the phase migration complete.
 
 ## Implementation progress
 
-- P first API slice: `CapturedCompilerStage` now owns the actual operation,
-  captured facts, demanded-row issuer and completed whole-stage output. Carried
-  `OriginalCompilerInputs` no longer contains an optional physical capability.
-- `BoundArtifactSelection` retains that stage and borrows its completed source
-  selection; selected item compiler prefixes remain separate carried inputs.
-- Production consumer migration is coordinated with C. Test caller migration,
-  raw-pair constructor deletion, compilation and executed qualification remain
-  pending. This source checkpoint is not integration-ready or test evidence.
+`CapturedCompilerStage` owns the actual operation, captured facts, demanded-row
+issuer and completed whole-stage output. `BoundArtifactSelection` retains that
+stage; selected item prefixes remain separate carried inputs. The optional
+physical capability and both raw pair constructors are deleted. `CompiledArtifacts`
+and declaration consumers carry the issued output owner.
+
+Source-level test migration uses actual stages for outputs, closed support for
+input transfer and authenticated recovery for malformed input refusals. No direct
+`OriginalCompilerInputs` fixture literals remain. Empty/Partial outputs remain
+completed facts; native demand still checks their exact own offers. One remaining
+module-candidate fixture migration is owned by T.
+
+The first joined production compile found stale native-fact observations and a
+source-extension argument; their bounded fixes are queued. Production recompile,
+joined cfg(test) compile and executed qualification remain pending. Target
+admission still needs its bounded owner-accessor cut to eliminate the independent
+cohort/selection parameter pair. None of these source changes is G2 acceptance.
