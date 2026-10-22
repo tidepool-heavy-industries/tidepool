@@ -473,10 +473,7 @@ impl PrivateHostBindingProgress {
             .count()
     }
 
-    fn resumed_from(
-        prior: &Arc<Self>,
-        extension: &Arc<Self>,
-    ) -> Result<Arc<Self>, CompileError> {
+    fn resumed_from(prior: &Arc<Self>, extension: &Arc<Self>) -> Result<Arc<Self>, CompileError> {
         let mut bindings = prior.bindings.clone();
         for binding in &extension.bindings {
             if bindings
@@ -494,6 +491,7 @@ impl PrivateHostBindingProgress {
 }
 
 pub struct CompilerWorldHostSuccessor {
+    predecessor: Arc<CompilerWorld>,
     world: Arc<CompilerWorld>,
     progress: Arc<PrivateHostBindingProgress>,
 }
@@ -1596,11 +1594,11 @@ pub enum PrivateCompilerProgress {
     Unchanged,
     /// A real completed checked-cell successor was issued by the cell owner.
     /// The existing checked promotion path validates its full lineage.
-    Checked(Option<Arc<PrivateHostBindingProgress>>),
+    Checked(Arc<PrivateSettledFrontier>),
     /// Accepted visible host bindings issued a real compiler row and their
     /// named facts were projected into the private World. No checked item
     /// completed for this invocation.
-    HostChanged(Arc<PrivateHostBindingProgress>),
+    HostChanged(Arc<PrivateSettledFrontier>),
     /// Compiler work started, changed its input, was refused, or otherwise
     /// never produced a completed checked successor. None of these may become
     /// either successful publication branch.
@@ -1643,27 +1641,14 @@ impl CompilerWorld {
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.restoration.logical_id
     }
-    /// Classify the private compiler product against the public base it
-    /// borrowed. An unchanged borrow keeps the same logical product; only a
-    /// real completed checked successor is `Checked`. Started, foreign, or
-    /// otherwise incomplete progress is `Incomplete` and cannot publish.
-    pub fn classify_private_publication(
-        private: &Arc<Self>,
-        original_public: &Arc<Self>,
-        checked: PrivateCheckedItemProgress,
-        host: Option<Arc<PrivateHostBindingProgress>>,
-    ) -> PrivateCompilerProgress {
-        let diagnostic = Self::diagnose_private_publication(private, original_public, host.clone());
-        classify_private_world(
-            checked,
-            host,
-            private,
-            diagnostic.same_product,
-            diagnostic.position_present,
-            diagnostic.fences_match,
-            diagnostic.original_base_matches,
-            diagnostic.position_complete,
-        )
+    /// Begin a private lineage at this exact borrowed World. This cannot pair
+    /// a caller-selected successor with a different birth World.
+    pub fn private_frontier(self: &Arc<Self>) -> Arc<PrivateSettledFrontier> {
+        Arc::new(PrivateSettledFrontier {
+            birth: *self.logical_id(),
+            world: self.clone(),
+            kind: PrivateSettledKind::Borrowed,
+        })
     }
 
     pub fn diagnose_private_publication(
@@ -1744,63 +1729,123 @@ impl CompilerWorld {
     }
 }
 
-/// The compiler owner's closed decision table for a private World. It never
-/// consults tool names, runtime booleans, or Arc address identity.
-fn classify_private_world(
-    checked: PrivateCheckedItemProgress,
-    host: Option<Arc<PrivateHostBindingProgress>>,
-    private: &CompilerWorld,
-    same_product: bool,
-    position_present: bool,
-    fences_match: bool,
-    position_original_base_matches: bool,
-    position_complete: bool,
-) -> PrivateCompilerProgress {
-    if !fences_match {
-        return PrivateCompilerProgress::Incomplete;
+/// Immutable certificate of the current settled private lineage. Runtime owns
+/// its replacement and the active lease; this value retains no history graph.
+#[derive(Debug)]
+pub struct PrivateSettledFrontier {
+    birth: [u8; 32],
+    world: Arc<CompilerWorld>,
+    kind: PrivateSettledKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PrivateSettledKind {
+    Borrowed,
+    Host,
+    Checked,
+}
+
+impl PrivateSettledFrontier {
+    pub fn matches_world(&self, world: &Arc<CompilerWorld>) -> bool {
+        Arc::ptr_eq(&self.world, world)
     }
-    if host.as_ref().is_some_and(|host| {
-        host.bindings.iter().any(|binding| {
-            private
-                .restoration
-                .inputs
-                .bindings
-                .entries
-                .get(&binding.occurrence)
-                .is_none_or(|fact| {
-                    fact.symbol != binding.symbol
-                        || fact.session_var != binding.session_var
-                        || fact.defining_scope != binding.defining_scope
-                        || !Arc::ptr_eq(&fact.row, &binding.row)
-                })
-        })
-    }) {
-        return PrivateCompilerProgress::Incomplete;
+
+    pub fn publication(self: &Arc<Self>) -> PrivateCompilerProgress {
+        match self.kind {
+            PrivateSettledKind::Borrowed => PrivateCompilerProgress::Unchanged,
+            PrivateSettledKind::Host => PrivateCompilerProgress::HostChanged(self.clone()),
+            PrivateSettledKind::Checked => PrivateCompilerProgress::Checked(self.clone()),
+        }
     }
-    let host_changed = host.as_ref().is_some_and(|host| !host.is_empty());
-    match checked {
-        PrivateCheckedItemProgress::Started => PrivateCompilerProgress::Incomplete,
-        PrivateCheckedItemProgress::NotStarted => {
-            if position_present {
-                PrivateCompilerProgress::Incomplete
-            } else if host_changed && !same_product {
-                PrivateCompilerProgress::HostChanged(
-                    host.clone()
-                        .expect("host-changed progress carries its issued bindings"),
-                )
-            } else if !host_changed && same_product {
-                PrivateCompilerProgress::Unchanged
-            } else {
-                PrivateCompilerProgress::Incomplete
-            }
+
+    /// Validate this program's terminal independently of its runtime lifecycle.
+    /// Runtime may commit this candidate only with the same active program.
+    pub fn complete_program(
+        &self,
+        program: &crate::checked_cell::CellProgram,
+        successor: &CheckedWorldSuccessor,
+    ) -> Result<Arc<Self>, CompileError> {
+        let crate::checked_cell::CellProgramBasis::World(output) = program.basis() else {
+            return Err(source_failure("private frontier requires a World program"));
+        };
+        let position = successor.world.position.as_ref().ok_or_else(|| {
+            source_failure("private frontier requires its completed program cursor")
+        })?;
+        if self.world.logical_id() != output.logical().logical_id()
+            || position.original_base != *self.world.logical_id()
+            || position.certificate != *output.certificate_sha256()
+            || position.total_items != program.items().len()
+            || position.next_item != position.total_items
+            || successor.world.restoration.producer != self.world.restoration.producer
+            || successor.world.restoration.profile != self.world.restoration.profile
+            || successor.world.restoration.inputs.sources.seal()
+                != self.world.restoration.inputs.sources.seal()
+        {
+            return Err(source_failure(
+                "private terminal belongs to another frontier or program",
+            ));
         }
-        PrivateCheckedItemProgress::Completed => {
-            if position_present && position_original_base_matches && position_complete {
-                PrivateCompilerProgress::Checked(host)
-            } else {
-                PrivateCompilerProgress::Incomplete
-            }
+        Ok(Arc::new(Self {
+            birth: self.birth,
+            world: successor.world.clone(),
+            kind: PrivateSettledKind::Checked,
+        }))
+    }
+
+    pub fn complete_empty_program(
+        &self,
+        program: &crate::checked_cell::CellProgram,
+    ) -> Result<Arc<Self>, CompileError> {
+        let crate::checked_cell::CellProgramBasis::World(output) = program.basis() else {
+            return Err(source_failure("private frontier requires a World program"));
+        };
+        if !program.items().is_empty()
+            || self.world.logical_id() != output.logical().logical_id()
+            || self.world.restoration.producer != *output.producer_sha256()
+            || self.world.restoration.profile != output.logical().profile_sha256
+        {
+            return Err(source_failure(
+                "empty terminal belongs to another private frontier",
+            ));
         }
+        Ok(Arc::new(Self {
+            birth: self.birth,
+            world: self.world.clone(),
+            kind: PrivateSettledKind::Checked,
+        }))
+    }
+
+    pub fn apply_host_successor(
+        &self,
+        successor: &CompilerWorldHostSuccessor,
+    ) -> Result<Arc<Self>, CompileError> {
+        if !self.matches_world(&successor.predecessor) {
+            return Err(source_failure(
+                "host successor belongs to another private frontier",
+            ));
+        }
+        Ok(Arc::new(Self {
+            birth: self.birth,
+            world: successor.world.clone(),
+            kind: match self.kind {
+                PrivateSettledKind::Checked => PrivateSettledKind::Checked,
+                _ if !successor.progress.is_empty() => PrivateSettledKind::Host,
+                _ => self.kind,
+            },
+        }))
+    }
+
+    fn validate_publication(
+        &self,
+        birth: &Arc<CompilerWorld>,
+        current: &Arc<CompilerWorld>,
+    ) -> Result<(), CompileError> {
+        if self.birth != *birth.logical_id() || !self.matches_world(current) {
+            return Err(source_failure(
+                "private publication has another settled frontier",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2137,27 +2182,12 @@ impl CompilerWorld {
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
     ) -> Result<Arc<Self>, CompileError> {
         let checked_prefix = match progress {
-            PrivateCompilerProgress::Checked(_) => {
-                let position = private.position.as_ref().ok_or_else(|| {
-                    source_failure("private publication lacks a checked cell prefix")
-                })?;
-                if position.original_base != *original_public.logical_id()
-                    || position.next_item != position.total_items
-                {
-                    return Err(source_failure(
-                        "private publication has an incomplete checked lineage",
-                    ));
-                }
+            PrivateCompilerProgress::Checked(frontier) => {
+                frontier.validate_publication(original_public, private)?;
                 true
             }
-            PrivateCompilerProgress::HostChanged(_) => {
-                if private.position.is_some()
-                    || private.logical_id() == original_public.logical_id()
-                {
-                    return Err(source_failure(
-                        "host-only publication does not carry its accepted binding progress",
-                    ));
-                }
+            PrivateCompilerProgress::HostChanged(frontier) => {
+                frontier.validate_publication(original_public, private)?;
                 false
             }
             PrivateCompilerProgress::Unchanged | PrivateCompilerProgress::Incomplete => {
@@ -2332,6 +2362,7 @@ impl CompilerWorld {
                 None => extension,
             };
             return Ok(CompilerWorldHostSuccessor {
+                predecessor: self.clone(),
                 world: self.clone(),
                 progress,
             });
@@ -2360,6 +2391,7 @@ impl CompilerWorld {
             .transpose()?
             .unwrap_or(extension);
         Ok(CompilerWorldHostSuccessor {
+            predecessor: self.clone(),
             world,
             progress,
         })

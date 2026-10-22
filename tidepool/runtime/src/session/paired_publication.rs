@@ -519,8 +519,7 @@ impl PersistentSession {
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         let transition = admission.begin_freeze()?;
-        let result =
-            self.freeze_execution_intent_locked(admission, write_ids, source_keys);
+        let result = self.freeze_execution_intent_locked(admission, write_ids, source_keys);
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -651,20 +650,13 @@ impl PersistentSession {
             .public_visibility_snapshot_in(admission.private_scope())
             .ok_or(SessionError::DeadScope(admission.private_scope()))?;
         let host_progress = admission.accepted_host_progress();
-        let private_world = private.world.clone();
         if let Some(progress) = &host_progress {
             tracing::debug!(target: "exomonad_harness::timing",
                 checked_execution_bindings = progress.checked_execution_bindings(),
                 host_interface_bindings = progress.host_interface_bindings(),
                 "private host binding progress issued");
         }
-        let private = private;
-        let progress = CompilerWorld::classify_private_publication(
-            &private.world,
-            &facts.published.world,
-            admission.checked_progress(),
-            host_progress,
-        );
+        let progress = admission.publication_progress(&private.world)?;
         let selection = self
             .bindings()
             .prepare_world_execution_selection_delta(
