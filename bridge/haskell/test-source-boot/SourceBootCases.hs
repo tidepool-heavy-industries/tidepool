@@ -2,7 +2,9 @@ module SourceBootCases where
 
 import Tidepool.RequestCompletion (finishCompletion)
 import Tidepool.CompilerRequest
-  ( withBoundCompilerRequest, boundRequestExactScope, withBoundExactInterfaceTransaction )
+  ( BoundCompilerRequest, withBoundCompilerRequest, boundRequestExactScope, withBoundExactInterfaceTransaction
+  , compilePreparedRequest, preparedCompilationResult, prepareArtifactsWithIntent
+  , PreparedArtifactOutput(..), paProgram )
 import Tidepool.ExtractRequest (RequestField(..), workerArgv, workerRequestFromArgv)
 
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
@@ -3564,7 +3566,18 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
     fail "restored native certificate changed the retained census or selected roots"
 
 originalProjectionProducts :: IO ()
-originalProjectionProducts = withScratch $ \work -> do
+originalProjectionProducts = withScratch $ \work ->
+  withRootedCompilerEnvironment work $ withQuietStdout $
+    withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \compiler -> do
+      args <- case workerRequestFromArgv (workerArgv
+          [Input (work </> "ProjectionConsumer.hs"),Include work,Target "usesGood",OutputDir work]) of
+        Right (Just request) -> pure request
+        other -> fail ("invalid original product projection request: " ++ show other)
+      (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $
+        originalProjectionProductsWithRequest work
+
+originalProjectionProductsWithRequest :: FilePath -> BoundCompilerRequest -> IO ()
+originalProjectionProductsWithRequest work request = do
   originalGraphClosureProperties
   let identity :: String -> String -> String -> SymbolIdentity
       identity unit moduleName' occurrence =
@@ -3620,8 +3633,9 @@ originalProjectionProducts = withScratch $ \work -> do
     , "module ProjectionConsumer (usesGood) where"
     , "import ProjectionOwner", "import ProjectionIndependent"
     , "usesGood :: Int -> Int", "usesGood x = good x + 1" ]
-  paired <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "ProjectionConsumer.hs") [work] Nothing
+  completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "ProjectionConsumer.hs")
+  let paired = preparedCompilationResult completion
   let findPrepared name = case [prepared | prepared <- pprModules paired
         , moduleNameString (moduleName (pmModule prepared)) == name] of
           [prepared] -> pure prepared
@@ -3708,18 +3722,19 @@ originalProjectionProducts = withScratch $ \work -> do
     (retainedOriginalInterfaces paired) captureDirectory
   currentContext <- prepareCompilerProjectionContext paired Map.empty (pmModule consumer)
     "usesGood" [] Nothing
-  (currentModules,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
+  (_,rawContext) <- prepareOriginalProducts pairedEnv Nothing pairedInterfaces
     currentContext Set.empty (pprModules paired)
-  issuedContext <- admitCurrentOriginalProducts currentInterfaces captureDirectory paired rawContext
+  output <- prepareArtifactsWithIntent currentInterfaces captureDirectory completion ["usesGood"] [] Map.empty []
+  (currentProgram,issuedContext) <- case output of
+    NativeOutputs [artifact] products -> pure (paProgram artifact,products)
+    _ -> fail "original product projection did not issue its actual native target"
   issued <- maybe (fail "genuine original issuer did not return its inventory") pure
     (preparedCurrentOriginalInventory issuedContext)
   let importedNames = currentOriginalBindingsExcept issued (Set.singleton entry)
       importedSymbols = Set.fromList (Map.elems importedNames)
-      currentProjection = currentContext {projectionCurrentOriginals = importedNames}
   unless (known `Set.member` importedSymbols && entry `Set.notMember` importedSymbols
       && importedSymbols `Set.isSubsetOf` currentOriginalBinders issued) $
     fail "current original boundary lost supported names or imported its own entry"
-  currentProgram <- either (fail . show) pure (projectPrepared currentProjection currentModules)
   let currentGlobals = [global | global <- programGlobals currentProgram
         , globalIdentity global `Set.member` importedSymbols]
       currentDefinitions = Set.fromList [identity' | group <- programBindings currentProgram
