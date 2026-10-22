@@ -194,8 +194,7 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
                 .iter()
                 .filter_map(|import| match import {
                     crate::artifact_inventory::CompletedNativeImport::Package {
-                        binding,
-                        ..
+                        binding, ..
                     } => Some(binding.product().code().owner().module.as_str()),
                     _ => None,
                 })
@@ -303,8 +302,7 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
             .iter()
             .all(|import| match import {
                 crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding,
-                    ..
+                    binding, ..
                 } => {
                     let module = &binding.product().code().owner().module;
                     module != "GHC.Classes" && module != "GHC.Internal.Data.OldList"
@@ -312,6 +310,92 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
                 _ => true,
             }),
         "the later cell consumes the issued value, not a package import chosen by name"
+    );
+}
+
+#[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_package_occurrence_linkage_tests owns it"]
+fn real_cached_home_world_item_admits_its_package_roots() {
+    let home_source = include_str!("../../tests/fixtures/world-native/CachedPackageWorldHome.hs");
+    let compiled_home = crate::artifacts::test_support::compile_invocation(
+        &crate::artifacts::CompileInvocation {
+            source: home_source,
+            targets: &["cachedTextLength"],
+            include: &[],
+            fallback_module_name: "CachedPackageWorldHome",
+        },
+        |_, _, _| {},
+    )
+    .expect("the cached HOME owner comes from the production compiler");
+    let original = crate::declaration_context::OriginalCompilerInputs::from_selection(
+        compiled_home
+            .source_selection
+            .as_ref()
+            .expect("fresh compiler selection"),
+        &compiled_home.artifact_view,
+    )
+    .unwrap();
+    let support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&original).unwrap();
+    let primary = Arc::new(
+        crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_issued_compiler_support(&support)
+            .unwrap(),
+    );
+    let ((_endpoint, _world, _source, prepared), admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world_with_primary(Some(primary))?;
+        let checked = prepare_package_checked(
+            &endpoint,
+            &world,
+            &source,
+            include_str!("../../tests/fixtures/world-native/CachedPackageWorldItem.hs"),
+            &[(41, "cachedWorldValue")],
+        )?;
+        assert_eq!(checked.stages().len(), 1);
+        let prepared = prepare_world_cell_program(checked)?;
+        Ok((endpoint, world, source, prepared))
+    });
+    let output = prepared
+        .seal(&admission)
+        .expect("the cached HOME World item reaches native END");
+    let products = output.items()[0]
+        .native_products()
+        .expect("cached HOME item owns native products");
+    let selection = products
+        .completed_native_selection()
+        .expect("cached HOME item owns its completed selection");
+    let row = selection
+        .completion()
+        .rows()
+        .find(|row| row.product().owner().module == "CachedPackageWorldHome")
+        .expect("the cached HOME product remains an issued completion row");
+    assert_eq!(
+        row.product().origin(),
+        crate::certified_products::ProductOrigin::Cached
+    );
+    let packages = row
+        .imports()
+        .iter()
+        .filter_map(|import| match import {
+            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
+                Some(binding.product().code().owner().module.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        packages
+            .iter()
+            .any(|module| *module == "Data.Text.Internal"),
+        "the cached HOME row retains its Data.Text package roots: {packages:?}"
+    );
+    let source_products = products
+        .native_source_products()
+        .expect("cached item has current source products");
+    assert!(
+        !source_products.target_requirements().is_empty(),
+        "the final source target retains its ordered cached HOME dependency slots"
     );
 }
 
@@ -393,6 +477,51 @@ fn open_empty_world() -> Result<
     let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
     let inputs = ModuleCandidateOffer::compiler_world_inputs(
         None,
+        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+        sources,
+        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
+    )?;
+    let world = crate::compiler_world::open_world(inputs, &endpoint)?;
+    Ok((endpoint, world, source))
+}
+
+fn open_empty_world_with_primary(
+    primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+) -> Result<
+    (
+        AdmittedCompilerEndpoint,
+        Arc<CompilerWorld>,
+        WorldSourceSelection,
+    ),
+    CompileError,
+> {
+    let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+        .expect("declared compiler deployment");
+    let (endpoint, _, _) = crate::toolchain::bind_admitted_extract_endpoint(&configured)
+        .expect("configured compiler endpoint");
+    let endpoint =
+        AdmittedCompilerEndpoint::from_bound(endpoint).expect("admitted compiler endpoint");
+    let root = Arc::new(tempfile::tempdir()?);
+    let body = b"module Module where\n";
+    std::fs::write(root.path().join("Module.hs"), body)?;
+    let sources = Arc::new(CapturedCompilerSources::from_captured_roots(
+        vec![CapturedCompilerSourceRoot {
+            manifest: crate::cache::SourceRootManifest::from_file_digests([(
+                PathBuf::from("Module.hs"),
+                blake3::hash(body).to_hex().to_string(),
+            )])
+            .expect("actual captured source manifest"),
+            bodies: BTreeMap::from([(
+                PathBuf::from("Module.hs"),
+                Arc::<[u8]>::from(body.as_slice()),
+            )]),
+        }],
+        Arc::from(&b"world-selection-source"[..]),
+        root,
+    )?);
+    let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
+    let inputs = ModuleCandidateOffer::compiler_world_inputs(
+        primary,
         CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
         sources,
         CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,

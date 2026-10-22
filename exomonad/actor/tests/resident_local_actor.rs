@@ -383,6 +383,52 @@ async fn resident_command_retain_binding_returns_reference_without_command_prese
 }
 
 #[tokio::test]
+async fn resident_captured_source_retains_the_parked_job_for_a_later_cell() {
+    let markers = ["captured-job"];
+    let mut fixture = ConcurrentResident::new(193, &markers).await;
+    let mut parked = fixture.spawn_cell(
+        markers[0],
+        include_str!("resident_local_actor/command_retain_binding_cell.hs").into(),
+    );
+    let execution = fixture.wait_started(markers[0], &mut parked).await;
+    fixture.release(markers[0]);
+    let settled = ConcurrentResident::settle(parked)
+        .await
+        .expect("the parked cell retains its Job before publication");
+    assert_eq!(committed_execution(&settled), execution);
+    let installed = settled["items"][0]["installedBindings"]
+        .as_array()
+        .expect("the committed cell installs its result and retained Job");
+    let job = installed
+        .last()
+        .and_then(serde_json::Value::as_str)
+        .expect("the retained Job binding");
+    assert!(
+        installed
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|binding| binding.starts_with("observation")),
+        "the retained Job is distinct from the automatic result observation: {settled:?}"
+    );
+    let later = fixture
+        .read(
+            "captured-job-later",
+            &format!("_ <- Cmd.await {job}\npure (42 :: Int)"),
+        )
+        .await;
+    assert_eq!(later["items"][0]["output"], "42", "{later:?}");
+    assert_eq!(
+        fixture
+            .backend
+            .completion_count
+            .load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "the later captured-source cell observes the retained Job without replay"
+    );
+    fixture.shutdown(&markers).await;
+}
+
+#[tokio::test]
 async fn resident_failed_cell_discards_command_binding_and_retains_job_output() {
     resident_await_watch_case(WatchCase::PrimaryCommandRetainBindingFailure).await;
 }
@@ -790,9 +836,14 @@ impl ConcurrentResident {
         let mut include = effects.include_paths().to_vec();
         include.push(eval_harness::prelude_path());
         let layers = NotebookSourceOwner::capture(&include, observation.unwrap_or_default());
-        assert!(exomonad_actor::ActorSourceLayers::validate_source_authority(
-            layers.as_ref(), &exomonad_actor::CheckpointSourceLayer::default(),
-        ).is_err(), "an empty capsule cannot authorize the captured notebook inputs");
+        assert!(
+            exomonad_actor::ActorSourceLayers::validate_source_authority(
+                layers.as_ref(),
+                &exomonad_actor::CheckpointSourceLayer::default(),
+            )
+            .is_err(),
+            "an empty capsule cannot authorize the captured notebook inputs"
+        );
         let include = layers.snapshot.paths.clone();
         let preamble = insert_preamble_imports(
             &tidepool_mcp::build_preamble(&declarations, false),
@@ -838,7 +889,9 @@ impl ConcurrentResident {
         // Immutable compiler input ownership is available even though this
         // snapshot cannot publish reloads or grant authored Source operations.
         forest.set_source_layers(layers);
-        assert!(forest.installed_intrinsic_effect_support().contains(&source_effect));
+        assert!(forest
+            .installed_intrinsic_effect_support()
+            .contains(&source_effect));
         assert!(!actor_effects.contains(&exomonad_actor::ActorEffectKey::Source));
         let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
         let prepared = preparation
