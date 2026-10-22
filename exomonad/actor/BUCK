@@ -650,6 +650,62 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "actor_n2_publication_tests",
+    binary = ":exomonad_actor_unit_tests",
+    exact_tests = [
+        "resident_workbench::request_tests::abandoned_visible_host_mount_repairs_private_world_and_allows_publication",
+        "resident_workbench::request_tests::hidden_private_input_retires_then_allows_publication",
+        "resident_workbench::request_tests::host_only_private_execution_publishes_its_exact_retained_text",
+        "resident_workbench::request_tests::successful_private_cell_publishes_declarations_and_accepted_host_writes_only",
+        "resident_workbench::request_tests::tool_result_mounts_retain_original_checked_interfaces",
+        "resident_workbench::request_tests::two_abandoned_visible_host_mounts_retire_before_publication",
+    ],
+    expected_count = 6,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 14400000,
+    case_compiler_modes = {
+        "resident_workbench::request_tests::abandoned_visible_host_mount_repairs_private_world_and_allows_publication": "owned-resident",
+        "resident_workbench::request_tests::hidden_private_input_retires_then_allows_publication": "owned-resident",
+        "resident_workbench::request_tests::host_only_private_execution_publishes_its_exact_retained_text": "owned-resident",
+        "resident_workbench::request_tests::successful_private_cell_publishes_declarations_and_accepted_host_writes_only": "owned-resident",
+        "resident_workbench::request_tests::tool_result_mounts_retain_original_checked_interfaces": "owned-resident",
+        "resident_workbench::request_tests::two_abandoned_visible_host_mounts_retire_before_publication": "owned-resident",
+    },
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/testing:haskell_test_fixtures",
+        "//build/package:compiler_deployment",
+        "//build/rust:workspace_git_bundle",
+        "//build/rust:workspace_gitlink",
+        "//exomonad/examples/workspace:facade_test_sources",
+        "toolchains//:exomonad_runtime_tools",
+        "toolchains//:jev_sources",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_JEV_SOURCE_DIR": "$(location toolchains//:jev_sources)",
+        "TIDEPOOL_JEV_WORKSPACE_DIR": "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "actor_compiler_world_queries_test",
     binary = ":exomonad_actor_unit_tests",
     exact_tests = [

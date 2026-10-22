@@ -4151,27 +4151,34 @@ impl PersistentSession {
             .bindings
             .prepare_binding_publication_removals(prepared, &declared_names)
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        {
-            let projection = self
-                .bindings
-                .prepared_promotion_projection(self.scope_tree(), &prepared)
-                .map_err(SessionError::InvalidPublicBindingPromotion)?;
-            for entry in projection.retained_bindings() {
-                let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
-                let handle = entry.value.handle;
-                if self
-                    .prepared()
-                    .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                    != Some(handle)
-                {
-                    return Err(SessionError::InvalidPublicBindingPromotion(
-                        tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
-                    ));
-                }
+        // One projection witnesses both runtime binding retirement and the
+        // compiler World's visible-name delta. It is taken after removals and
+        // from the exact prepared promotion that can commit.
+        let projection = self
+            .bindings
+            .prepared_promotion_projection(self.scope_tree(), &prepared)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        for entry in projection.retained_bindings() {
+            let entry = entry.map_err(SessionError::InvalidPublicBindingPromotion)?;
+            let handle = entry.value.handle;
+            if self
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                != Some(handle)
+            {
+                return Err(SessionError::InvalidPublicBindingPromotion(
+                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
+                ));
             }
         }
-        // The final promotion witness must be taken from the SAME prepared
-        // promotion that would commit. It is only meaningful after removals.
+        let visible_changes = projection
+            .visible_changes()
+            .map(|(name, entry)| (name.0.clone(), entry.map(|entry| (entry.id, entry.scope.0))))
+            .collect::<Vec<_>>();
+        if projection.target_scope() != ticket.public_scope {
+            return Err(SessionError::WorldCellPublicationBaseStale);
+        }
+        drop(projection);
         let promoted_world = if let Some(intent) = &world_execution {
             let world = intent.world().expect("World execution was selected");
             let public = self
@@ -4187,13 +4194,6 @@ impl PersistentSession {
                 &public_custody.original_source,
             ) || !public.base.target.matches(&world.target)
             {
-                return Err(SessionError::WorldCellPublicationBaseStale);
-            }
-            let projection = self
-                .bindings
-                .prepared_promotion_projection(self.scope_tree(), &prepared)
-                .map_err(SessionError::InvalidPublicBindingPromotion)?;
-            if projection.target_scope() != ticket.public_scope {
                 return Err(SessionError::WorldCellPublicationBaseStale);
             }
             let declaration = ticket
@@ -4221,29 +4221,36 @@ impl PersistentSession {
                 .transpose()?;
             let successor = match &world.progress {
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged => {
-                    // The private execution borrowed the public World and
-                    // added no compiler facts. Keep the latest public product;
-                    // a newer public successor must not be rolled back to the
-                    // older borrowed base. A declaration publication without
-                    // a checked successor is a separate progress form with no
-                    // owner here; it is refused rather than silently dropped.
                     if declaration.is_some() {
                         return Err(SessionError::WorldCellPublicationIncomplete);
                     }
                     public.world.clone()
                 }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked => {
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_) => {
                     public.world.promote_private_bindings(
                         &world.association.world,
                         &world.private.world,
                         ticket.public_scope.0,
+                        &world.progress,
                         declaration,
-                        projection.visible_changes().map(|(name, entry)| {
-                            (
-                                name.0.as_str(),
-                                entry.map(|entry| (entry.id, entry.scope.0)),
-                            )
-                        }),
+                        visible_changes
+                            .iter()
+                            .map(|(name, entry)| (name.as_str(), *entry)),
+                    )?
+                }
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::HostChanged(_) => {
+                    if declaration.is_some() {
+                        return Err(SessionError::WorldCellPublicationIncomplete);
+                    }
+                    public.world.promote_private_bindings(
+                        &world.association.world,
+                        &world.private.world,
+                        ticket.public_scope.0,
+                        &world.progress,
+                        None,
+                        visible_changes
+                            .iter()
+                            .map(|(name, entry)| (name.as_str(), *entry)),
                     )?
                 }
                 tidepool_toolchain::compiler_world::PrivateCompilerProgress::Incomplete => {

@@ -124,9 +124,10 @@ pub struct PreparedBindingPromotion {
     selection: SourceSelectionView,
 }
 
-/// One private World execution's exact source-selection delta. The binding
-/// owner freezes the admitted and completed snapshots; publication composes
-/// only their changes over the latest public selection.
+/// An admitted World execution's exact source-selection suffix. The binding
+/// owner issues this from the unchanged private scope and the completed private
+/// scope so publication can apply only the private changes to the latest public
+/// selection. The snapshots are deliberately not public authority.
 #[derive(Clone, Debug)]
 pub struct PreparedWorldExecutionSelection {
     admitted: BindingScopeSnapshot,
@@ -366,30 +367,32 @@ impl SourceSelectionView {
         self.domains.insert_mut(domain, record);
     }
 
-    /// Apply the exact private transition from `admitted` to `completed` over
-    /// the latest public selection. Unchanged private domains are never
-    /// installed, so a public removal or relabel remains authoritative.
+    /// Apply exactly the private changes between `admitted` and `completed`
+    /// over the latest public selection. An unchanged private selection keeps
+    /// every newer public choice. A private edit whose slot already changed
+    /// differently in public is a conflict rather than a last-writer choice.
     fn compose_private_delta(
         latest: &Self,
         admitted: &Self,
         completed: &Self,
     ) -> Result<Self, BindingPromotionError> {
         let mut merged = latest.clone();
-        let private_current_changed = completed.current != admitted.current;
-        if private_current_changed {
-            if latest.current == completed.current {
-                // Latest already selected the private current domain.
-            } else if latest.current == admitted.current {
-                merged.current = completed.current;
-            } else {
+        if completed.current != admitted.current {
+            if latest.current != admitted.current && latest.current != completed.current {
                 return Err(BindingPromotionError::ConflictingSourceOrigin);
+            }
+            merged.current = completed.current;
+            if latest.current == admitted.current
+                && !completed.domains.contains_key(&admitted.current)
+            {
+                merged.domains.remove(&admitted.current);
             }
         }
 
-        let mut domains = admitted
+        let mut domains = completed
             .domains
             .keys()
-            .chain(completed.domains.keys())
+            .chain(admitted.domains.keys())
             .copied()
             .collect::<Vec<_>>();
         domains.sort();
@@ -398,12 +401,24 @@ impl SourceSelectionView {
             let admitted_record = admitted.domains.get(&domain);
             let completed_record = completed.domains.get(&domain);
             let latest_record = latest.domains.get(&domain);
-            if admitted_record.is_some() && completed_record.is_none() {
-                return Err(BindingPromotionError::UnverifiableSourceSelection);
+            if admitted_record == completed_record {
+                continue;
             }
-            let new_private_domain = admitted_record.is_none() && completed_record.is_some();
-            let mut record = latest_record.cloned();
-            let mut changed = false;
+            if completed_record.is_none() {
+                if latest_record.is_none() {
+                    continue;
+                }
+                if latest_record != admitted_record {
+                    return Err(BindingPromotionError::ConflictingSourceOrigin);
+                }
+                merged.domains.remove(&domain);
+                continue;
+            }
+            let latest_record = match latest_record {
+                Some(record) => Some(record),
+                None if admitted_record.is_none() => None,
+                None => return Err(BindingPromotionError::ConflictingSourceOrigin),
+            };
 
             let mut selected = admitted_record
                 .into_iter()
@@ -417,32 +432,6 @@ impl SourceSelectionView {
                 .collect::<Vec<_>>();
             selected.sort();
             selected.dedup();
-            for key in selected {
-                let before = admitted_record.is_some_and(|record| record.selected.contains(&key));
-                let after = completed_record.is_some_and(|record| record.selected.contains(&key));
-                if before == after {
-                    continue;
-                }
-                let current = latest_record.is_some_and(|record| record.selected.contains(&key));
-                if current != before {
-                    if current == after {
-                        continue;
-                    }
-                    return Err(BindingPromotionError::ConflictingSourceOrigin);
-                }
-                if after && latest_record.is_none() && admitted_record.is_some() {
-                    return Err(BindingPromotionError::ConflictingSourceOrigin);
-                }
-                if after {
-                    record
-                        .get_or_insert_with(SourceDomainRecord::empty)
-                        .selected
-                        .insert_mut(key);
-                } else if let Some(record) = record.as_mut() {
-                    let _ = record.selected.remove(&key);
-                }
-                changed = true;
-            }
 
             let mut authored = admitted_record
                 .into_iter()
@@ -456,61 +445,56 @@ impl SourceSelectionView {
                 .collect::<Vec<_>>();
             authored.sort();
             authored.dedup();
-            for owner in authored {
-                let before = admitted_record.and_then(|record| record.authored.get(&owner));
-                let after = completed_record.and_then(|record| record.authored.get(&owner));
+
+            let mut record = latest_record
+                .cloned()
+                .unwrap_or_else(SourceDomainRecord::empty);
+            for key in selected {
+                let before = admitted_record.is_some_and(|record| record.selected.contains(&key));
+                let after = completed_record.is_some_and(|record| record.selected.contains(&key));
+                let current = latest_record.is_some_and(|record| record.selected.contains(&key));
                 if before == after {
                     continue;
                 }
-                let current = latest_record.and_then(|record| record.authored.get(&owner));
                 if current != before {
                     if current == after {
                         continue;
                     }
                     return Err(BindingPromotionError::ConflictingSourceOrigin);
                 }
-                if after.is_some() && latest_record.is_none() && admitted_record.is_some() {
+                if after {
+                    record.selected.insert_mut(key);
+                } else {
+                    record.selected.remove(&key);
+                }
+            }
+            for owner in authored {
+                let before = admitted_record.and_then(|record| record.authored.get(&owner));
+                let after = completed_record.and_then(|record| record.authored.get(&owner));
+                let current = latest_record.and_then(|record| record.authored.get(&owner));
+                if before == after {
+                    continue;
+                }
+                if current != before {
+                    if current == after {
+                        continue;
+                    }
                     return Err(BindingPromotionError::ConflictingSourceOrigin);
                 }
                 match after {
                     Some(origin) => {
-                        record
-                            .get_or_insert_with(SourceDomainRecord::empty)
-                            .authored
-                            .insert_mut(owner, origin.clone());
+                        record.authored.insert_mut(owner, origin.clone());
                     }
                     None => {
-                        if let Some(record) = record.as_mut() {
-                            let _ = record.authored.remove(&owner);
-                        }
+                        record.authored.remove(&owner);
                     }
                 }
-                changed = true;
             }
-            if changed {
-                if let Some(record) = record {
-                    merged.domains.insert_mut(domain, record);
-                }
-            }
-            if new_private_domain && domain == completed.current {
-                merged.domains.insert_mut(
-                    domain,
-                    completed_record
-                        .cloned()
-                        .ok_or(BindingPromotionError::MissingSourceDomain)?,
-                );
-            }
+            merged.domains.insert_mut(domain, record);
         }
-        if private_current_changed
-            && !merged.domains.contains_key(&merged.current)
-            && admitted.domains.contains_key(&merged.current)
-        {
-            return Err(BindingPromotionError::ConflictingSourceOrigin);
+        if !merged.domains.contains_key(&merged.current) {
+            return Err(BindingPromotionError::MissingSourceDomain);
         }
-        merged
-            .domains
-            .get(&merged.current)
-            .ok_or(BindingPromotionError::MissingSourceDomain)?;
         Ok(merged)
     }
 
@@ -808,9 +792,178 @@ pub struct BindingTable {
     /// Explicit lexical installation choices. Custody promotion retains roots
     /// without granting an ambient choice among independent mutable instances.
     source_selection: HashMap<ScopeId, SourceSelectionView>,
-    /// Exact public selection observed when each live World continuation was
-    /// admitted. Publication composes only the private suffix from this value.
+    /// The exact public source selection each live World continuation admitted.
+    /// Publication compares against this owner-issued baseline rather than a
+    /// caller-selected snapshot.
     world_execution_admissions: HashMap<ScopeId, BindingScopeSnapshot>,
+}
+
+#[cfg(test)]
+mod source_selection_delta_tests {
+    use super::*;
+    use crate::prepared_program::{GroupInstanceId, SourceInstanceDomain};
+    use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion, ValueId};
+
+    fn domain(slot: u64) -> SourceInstanceDomain {
+        SourceInstanceDomain::in_view(BindingTipId(1), slot)
+    }
+
+    fn key(raw: u32) -> SourceLeaseKey {
+        SourceLeaseKey {
+            instance: GroupInstanceId::for_test(raw),
+            value: ValueId(0),
+        }
+    }
+
+    fn owner(raw: u8) -> CachedHomeOwner {
+        CachedHomeOwner {
+            unit: "unit".into(),
+            module: "Source".into(),
+            module_version: ModuleVersion([raw; 32]),
+            skinny_iface_sha256: [raw; 32],
+            product_sha256: [raw; 32],
+        }
+    }
+
+    fn view(
+        current: SourceInstanceDomain,
+        selected: &[(SourceInstanceDomain, &[SourceLeaseKey])],
+        authored: &[(SourceInstanceDomain, CachedHomeOwner, SourceInstanceDomain)],
+    ) -> SourceSelectionView {
+        let mut domains = HashTrieMapSync::new_sync();
+        for (domain, keys) in selected {
+            let mut set = HashTrieSetSync::new_sync();
+            for key in *keys {
+                set.insert_mut(key.clone());
+            }
+            domains.insert_mut(
+                *domain,
+                SourceDomainRecord {
+                    selected: set,
+                    authored: HashTrieMapSync::new_sync(),
+                },
+            );
+        }
+        for (domain, owner, origin) in authored {
+            let mut record = domains
+                .get(domain)
+                .cloned()
+                .unwrap_or_else(SourceDomainRecord::empty);
+            record.authored.insert_mut(
+                owner.clone(),
+                AuthoredSourceOrigin {
+                    domain: *origin,
+                    support: None,
+                },
+            );
+            domains.insert_mut(*domain, record);
+        }
+        SourceSelectionView { current, domains }
+    }
+
+    #[test]
+    fn composes_private_and_public_edits_without_resurrecting_latest_removals() {
+        let current = domain(0);
+        let removed = domain(1);
+        let added = domain(2);
+        let public_owner = owner(1);
+        let private_owner = owner(2);
+        let admitted = view(
+            current,
+            &[(current, &[key(1)]), (removed, &[key(7)])],
+            &[(current, public_owner.clone(), current)],
+        );
+        let completed = view(
+            current,
+            &[
+                (current, &[key(1), key(2)]),
+                (removed, &[key(7)]),
+                (added, &[key(3)]),
+            ],
+            &[
+                (current, public_owner.clone(), current),
+                (added, private_owner.clone(), added),
+            ],
+        );
+        let latest = view(
+            current,
+            &[(current, &[key(1), key(9)])],
+            &[
+                (current, public_owner, current),
+                (current, owner(9), current),
+            ],
+        );
+
+        let merged =
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &completed).unwrap();
+        let record = merged.domains.get(&current).unwrap();
+        for expected in [key(1), key(2), key(9)] {
+            assert!(record.selected.contains(&expected));
+        }
+        assert!(merged
+            .domains
+            .get(&added)
+            .unwrap()
+            .authored
+            .contains_key(&private_owner));
+        assert!(record.authored.contains_key(&owner(9)));
+        assert!(merged.domains.contains_key(&added));
+        assert!(!merged.domains.contains_key(&removed));
+    }
+
+    #[test]
+    fn composes_removals_and_current_domain_changes() {
+        let original = domain(0);
+        let next = domain(1);
+        let admitted = view(
+            original,
+            &[(original, &[key(1), key(2)])],
+            &[
+                (original, owner(1), original),
+                (original, owner(2), original),
+            ],
+        );
+        let completed = view(next, &[(next, &[key(1)])], &[(next, owner(1), next)]);
+        let latest = admitted.clone();
+
+        let merged =
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &completed).unwrap();
+        assert_eq!(merged.current, next);
+        let record = merged.domains.get(&next).unwrap();
+        assert!(record.selected.contains(&key(1)));
+        assert!(!record.selected.contains(&key(2)));
+        assert!(record.authored.contains_key(&owner(1)));
+        assert!(!record.authored.contains_key(&owner(2)));
+    }
+
+    #[test]
+    fn divergent_authored_edit_refuses_without_mutating_latest() {
+        let current = domain(0);
+        let private_origin = domain(1);
+        let public_origin = domain(2);
+        let admitted = view(
+            current,
+            &[(current, &[key(1)])],
+            &[(current, owner(1), current)],
+        );
+        let completed = view(
+            current,
+            &[(current, &[key(1)])],
+            &[(current, owner(1), private_origin)],
+        );
+        let latest = view(
+            current,
+            &[(current, &[key(1)])],
+            &[(current, owner(1), public_origin)],
+        );
+        let before = latest.clone();
+
+        assert_eq!(
+            SourceSelectionView::compose_private_delta(&latest, &admitted, &completed),
+            Err(BindingPromotionError::ConflictingSourceOrigin)
+        );
+        assert_eq!(latest, before);
+    }
 }
 
 #[cfg(test)]
@@ -2867,8 +3020,10 @@ impl BindingTable {
         Ok(selection)
     }
 
-    /// Freeze the exact private source-selection suffix while the public base
-    /// still has an authenticated admission record from `seed_world_execution_scope`.
+    /// Freeze the exact private source-selection suffix before the public base
+    /// can advance. `completed` must be the binding owner's current snapshot of
+    /// the live private scope; a foreign or stale snapshot cannot become a
+    /// publication witness.
     pub fn prepare_world_execution_selection_delta(
         &self,
         tree: &ScopeTree,
@@ -2893,10 +3048,8 @@ impl BindingTable {
         })
     }
 
-    /// Compose one owner-issued private source transition over the latest
-    /// public selection. Public-only selections are checked against public
-    /// custody; transferred private selections must be present in the same
-    /// prepared promotion that can commit.
+    /// Continue only the exact native environment of an admitted World
+    /// execution. Custody-only publication does not select its retained inputs.
     pub fn prepare_world_execution_selection(
         &mut self,
         tree: &ScopeTree,
@@ -2911,45 +3064,27 @@ impl BindingTable {
         {
             return Err(BindingPromotionError::ConflictingSourceOrigin);
         }
+        let admitted = &private.admitted.selection;
+        let completed = &private.completed.selection;
+        let selection =
+            SourceSelectionView::compose_private_delta(target_view, admitted, completed)?;
+        // Accepted authored publication has already issued its frozen domain
+        // additions. Compose those same facts over the completed execution.
+        let selection = Self::selection_for_promotion(&prepared.plan, &selection)?;
+        let source_custody = self.source_instance_keys_in(tree, source);
         let target_custody = self.source_instance_keys_in(tree, target);
-        if target_view
+        let public_selected = target_view
             .domains
             .values()
             .flat_map(|record| record.selected.iter())
-            .any(|key| !target_custody.contains(key))
-        {
-            return Err(BindingPromotionError::MissingOrForeignSourceInstance);
-        }
-        let admitted = &private.admitted.selection;
-        let completed = &private.completed.selection;
-        let source_custody = self.source_instance_keys_in(tree, source);
-        for (domain, completed_record) in completed.domains.iter() {
-            let admitted_record = admitted.domains.get(domain);
-            for key in completed_record.selected.iter() {
-                if admitted_record.is_some_and(|record| record.selected.contains(key)) {
-                    continue;
-                }
-                if !source_custody.contains(key) {
-                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
-                }
-                if !target_custody.contains(key) && !prepared.plan.source_instances.contains(key) {
-                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
-                }
-            }
-        }
-        let selection =
-            SourceSelectionView::compose_private_delta(target_view, admitted, completed)?;
-
-        // Accepted authored publication has already issued its frozen domain
-        // additions. Compose those same facts over the public-latest base.
-        let selection = Self::selection_for_promotion(&prepared.plan, &selection)?;
+            .collect::<std::collections::HashSet<_>>();
         let mut entries = Vec::new();
         for (domain, record) in selection.domains.iter() {
             for key in record.selected.iter() {
-                if !source_custody.contains(key)
-                    && !target_custody.contains(key)
-                    && !prepared.plan.source_instances.contains(key)
-                {
+                if !public_selected.contains(key) && !source_custody.contains(key) {
+                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+                }
+                if !target_custody.contains(key) && !prepared.plan.source_instances.contains(key) {
                     return Err(BindingPromotionError::MissingOrForeignSourceInstance);
                 }
                 let instance = self

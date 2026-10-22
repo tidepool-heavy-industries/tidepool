@@ -139,6 +139,11 @@ impl From<ProgramId> for GroupInstanceId {
 }
 
 impl GroupInstanceId {
+    #[cfg(test)]
+    pub(crate) fn for_test(raw: u32) -> Self {
+        Self(ProgramId(raw))
+    }
+
     #[must_use]
     pub fn program(self) -> ProgramId {
         self.0

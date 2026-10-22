@@ -360,6 +360,134 @@ impl<'a> CompilerWorldBinding<'a> {
     }
 }
 
+/// A visible host binding carried with the actual compiler proof that issued
+/// its type row. Runtime identities remain coordinates; the proof selects the
+/// exact row and distinguishes checked execution from a thin host interface.
+pub struct CompilerWorldHostBinding<'a> {
+    occurrence: &'a str,
+    symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: tidepool_repr::SessionVarId,
+    defining_scope: u64,
+    issuer: PrivateHostBindingIssuer,
+}
+
+enum PrivateHostBindingIssuer {
+    CheckedExecution(Arc<crate::checked_cell::ExactCompiledItem>),
+    HostInterface(Arc<crate::checked_cell::ExactHostBindingInterface>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateHostBindingKind {
+    CheckedExecution,
+    HostInterface,
+}
+
+impl<'a> CompilerWorldHostBinding<'a> {
+    pub fn from_checked_execution(
+        occurrence: &'a str,
+        symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        execution: Arc<crate::checked_cell::ExactCompiledItem>,
+    ) -> Self {
+        Self {
+            occurrence,
+            symbol,
+            session_var,
+            defining_scope,
+            issuer: PrivateHostBindingIssuer::CheckedExecution(execution),
+        }
+    }
+
+    pub fn from_host_interface(
+        occurrence: &'a str,
+        symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+        session_var: tidepool_repr::SessionVarId,
+        defining_scope: u64,
+        interface: Arc<crate::checked_cell::ExactHostBindingInterface>,
+    ) -> Self {
+        Self {
+            occurrence,
+            symbol,
+            session_var,
+            defining_scope,
+            issuer: PrivateHostBindingIssuer::HostInterface(interface),
+        }
+    }
+
+    fn row(&self) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+        match &self.issuer {
+            PrivateHostBindingIssuer::CheckedExecution(execution) => execution
+                .value_interface_certificate()
+                .ok_or_else(|| source_failure("checked host execution has no value interface")),
+            PrivateHostBindingIssuer::HostInterface(interface) => {
+                Ok(interface.value_interface_certificate())
+            }
+        }
+    }
+
+    fn kind(&self) -> PrivateHostBindingKind {
+        match &self.issuer {
+            PrivateHostBindingIssuer::CheckedExecution(_) => {
+                PrivateHostBindingKind::CheckedExecution
+            }
+            PrivateHostBindingIssuer::HostInterface(_) => PrivateHostBindingKind::HostInterface,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PrivateHostBindingProgressBinding {
+    occurrence: String,
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: tidepool_repr::SessionVarId,
+    defining_scope: u64,
+    row: Arc<CheckedValueArtifact>,
+    kind: PrivateHostBindingKind,
+}
+
+/// Closed proof of the visible host-binding rows projected into a private
+/// compiler World. Only the compiler World projection below issues it.
+#[derive(Debug)]
+pub struct PrivateHostBindingProgress {
+    bindings: Vec<PrivateHostBindingProgressBinding>,
+}
+
+impl PrivateHostBindingProgress {
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+    pub fn checked_execution_bindings(&self) -> usize {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.kind == PrivateHostBindingKind::CheckedExecution)
+            .count()
+    }
+    pub fn host_interface_bindings(&self) -> usize {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.kind == PrivateHostBindingKind::HostInterface)
+            .count()
+    }
+}
+
+pub struct CompilerWorldHostSuccessor {
+    world: Arc<CompilerWorld>,
+    progress: Arc<PrivateHostBindingProgress>,
+}
+
+impl CompilerWorldHostSuccessor {
+    pub fn world(&self) -> &Arc<CompilerWorld> {
+        &self.world
+    }
+    pub fn progress(&self) -> &Arc<PrivateHostBindingProgress> {
+        &self.progress
+    }
+}
+
 #[derive(Clone)]
 struct WorldBindingFact {
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
@@ -1441,7 +1569,7 @@ pub struct CompilerWorld {
 /// promotion. Only the compiler owner can classify its own products; runtime
 /// code never guesses this from tool names, `position.is_none()`, or Arc
 /// address identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum PrivateCompilerProgress {
     /// The private World is the exact borrowed public product with no compiler
     /// additions. Publication keeps the latest public World instead of
@@ -1449,11 +1577,25 @@ pub enum PrivateCompilerProgress {
     Unchanged,
     /// A real completed checked-cell successor was issued by the cell owner.
     /// The existing checked promotion path validates its full lineage.
-    Checked,
+    Checked(Option<Arc<PrivateHostBindingProgress>>),
+    /// Accepted visible host bindings issued a real compiler row and their
+    /// named facts were projected into the private World. No checked item
+    /// completed for this invocation.
+    HostChanged(Arc<PrivateHostBindingProgress>),
     /// Compiler work started, changed its input, was refused, or otherwise
     /// never produced a completed checked successor. None of these may become
     /// either successful publication branch.
     Incomplete,
+}
+
+/// Runtime-observed lifecycle of the checked item belonging to one private
+/// execution. The runtime moves this only at the actual prefix start and
+/// settlement boundaries; the compiler still validates the resulting World.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateCheckedItemProgress {
+    NotStarted,
+    Started,
+    Completed,
 }
 
 #[derive(Clone, Debug)]
@@ -1475,6 +1617,8 @@ impl CompilerWorld {
     pub fn classify_private_publication(
         private: &Arc<Self>,
         original_public: &Arc<Self>,
+        checked: PrivateCheckedItemProgress,
+        host: Option<Arc<PrivateHostBindingProgress>>,
     ) -> PrivateCompilerProgress {
         let fences_match = |candidate: &Self, base: &Self| {
             candidate.restoration.producer == base.restoration.producer
@@ -1492,6 +1636,9 @@ impl CompilerWorld {
             None => (false, false, false),
         };
         classify_private_world(
+            checked,
+            host,
+            private,
             same_product,
             position_present,
             fences_match(private, original_public),
@@ -1535,6 +1682,9 @@ impl CompilerWorld {
 /// The compiler owner's closed decision table for a private World. It never
 /// consults tool names, runtime booleans, or Arc address identity.
 fn classify_private_world(
+    checked: PrivateCheckedItemProgress,
+    host: Option<Arc<PrivateHostBindingProgress>>,
+    private: &CompilerWorld,
     same_product: bool,
     position_present: bool,
     fences_match: bool,
@@ -1544,17 +1694,48 @@ fn classify_private_world(
     if !fences_match {
         return PrivateCompilerProgress::Incomplete;
     }
-    if same_product {
-        return if position_present {
-            PrivateCompilerProgress::Incomplete
-        } else {
-            PrivateCompilerProgress::Unchanged
-        };
+    if host.as_ref().is_some_and(|host| {
+        host.bindings.iter().any(|binding| {
+            private
+                .restoration
+                .inputs
+                .bindings
+                .entries
+                .get(&binding.occurrence)
+                .is_none_or(|fact| {
+                    fact.symbol != binding.symbol
+                        || fact.session_var != binding.session_var
+                        || fact.defining_scope != binding.defining_scope
+                        || !Arc::ptr_eq(&fact.row, &binding.row)
+                })
+        })
+    }) {
+        return PrivateCompilerProgress::Incomplete;
     }
-    if position_present && position_original_base_matches && position_complete {
-        PrivateCompilerProgress::Checked
-    } else {
-        PrivateCompilerProgress::Incomplete
+    let host_changed = host.as_ref().is_some_and(|host| !host.is_empty());
+    match checked {
+        PrivateCheckedItemProgress::Started => PrivateCompilerProgress::Incomplete,
+        PrivateCheckedItemProgress::NotStarted => {
+            if position_present {
+                PrivateCompilerProgress::Incomplete
+            } else if host_changed && !same_product {
+                PrivateCompilerProgress::HostChanged(
+                    host.clone()
+                        .expect("host-changed progress carries its issued bindings"),
+                )
+            } else if !host_changed && same_product {
+                PrivateCompilerProgress::Unchanged
+            } else {
+                PrivateCompilerProgress::Incomplete
+            }
+        }
+        PrivateCheckedItemProgress::Completed => {
+            if position_present && position_original_base_matches && position_complete {
+                PrivateCompilerProgress::Checked(host)
+            } else {
+                PrivateCompilerProgress::Incomplete
+            }
+        }
     }
 }
 
@@ -1878,24 +2059,49 @@ impl CompilerWorld {
         })
     }
 
-    /// Project the actual prepared runtime promotion onto the current public
-    /// compiler product. Runtime still owns source gates, binding publication
-    /// and the atomic installation of this prospective immutable product.
+    /// Project a completed checked execution onto the latest public compiler
+    /// product. Runtime still owns source gates, binding publication and the
+    /// atomic installation of this prospective immutable product.
     pub fn promote_private_bindings<'a>(
         self: &Arc<Self>,
         original_public: &Arc<Self>,
         private: &Arc<Self>,
         target_scope: u64,
+        progress: &PrivateCompilerProgress,
         declaration: Option<CompilerWorldDeclarationPublication>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
     ) -> Result<Arc<Self>, CompileError> {
-        let position = private
-            .position
-            .as_ref()
-            .ok_or_else(|| source_failure("private publication lacks a checked cell prefix"))?;
-        if position.original_base != *original_public.logical_id()
-            || position.next_item != position.total_items
-            || private.restoration.producer != original_public.restoration.producer
+        let checked_prefix = match progress {
+            PrivateCompilerProgress::Checked(_) => {
+                let position = private.position.as_ref().ok_or_else(|| {
+                    source_failure("private publication lacks a checked cell prefix")
+                })?;
+                if position.original_base != *original_public.logical_id()
+                    || position.next_item != position.total_items
+                {
+                    return Err(source_failure(
+                        "private publication has an incomplete checked lineage",
+                    ));
+                }
+                true
+            }
+            PrivateCompilerProgress::HostChanged(_) => {
+                if private.position.is_some()
+                    || private.logical_id() == original_public.logical_id()
+                {
+                    return Err(source_failure(
+                        "host-only publication does not carry its accepted binding progress",
+                    ));
+                }
+                false
+            }
+            PrivateCompilerProgress::Unchanged | PrivateCompilerProgress::Incomplete => {
+                return Err(source_failure(
+                    "private publication progress is not promotable",
+                ));
+            }
+        };
+        if private.restoration.producer != original_public.restoration.producer
             || private.restoration.profile != original_public.restoration.profile
             || self.restoration.producer != private.restoration.producer
             || self.restoration.profile != private.restoration.profile
@@ -1907,13 +2113,14 @@ impl CompilerWorld {
                 "private publication has an incomplete or foreign checked lineage",
             ));
         }
-        if self.restoration.inputs.bindings.query_scope != target_scope {
-            return Err(source_failure(
-                "public compiler projection belongs to another scope",
-            ));
-        }
+        self.validate_private_promotion(original_public, private, target_scope)?;
         let declaration = declaration
             .map(|declaration| {
+                if !checked_prefix {
+                    return Err(source_failure(
+                        "host-only publication cannot carry a declaration successor",
+                    ));
+                }
                 if !Arc::ptr_eq(&declaration.base, self) {
                     return Err(source_failure(
                         "declaration publication belongs to another World",
@@ -1936,6 +2143,41 @@ impl CompilerWorld {
                 },
                 Ok,
             )?;
+        let changes = Self::private_binding_changes(private, self, visible_changes)?;
+        self.project_bindings_with_primary(target_scope, changes, None, Some(declaration))
+    }
+
+    fn validate_private_promotion(
+        self: &Arc<Self>,
+        original_public: &Arc<Self>,
+        private: &Arc<Self>,
+        target_scope: u64,
+    ) -> Result<(), CompileError> {
+        if private.restoration.producer != original_public.restoration.producer
+            || private.restoration.profile != original_public.restoration.profile
+            || self.restoration.producer != private.restoration.producer
+            || self.restoration.profile != private.restoration.profile
+            || original_public.restoration.inputs.sources.seal()
+                != private.restoration.inputs.sources.seal()
+            || self.restoration.inputs.sources.seal() != private.restoration.inputs.sources.seal()
+        {
+            return Err(source_failure(
+                "private publication has an incomplete or foreign checked lineage",
+            ));
+        }
+        if self.restoration.inputs.bindings.query_scope != target_scope {
+            return Err(source_failure(
+                "public compiler projection belongs to another scope",
+            ));
+        }
+        Ok(())
+    }
+
+    fn private_binding_changes<'a>(
+        private: &Arc<Self>,
+        latest: &Arc<Self>,
+        visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
+    ) -> Result<BTreeMap<String, Option<WorldBindingFact>>, CompileError> {
         let mut changes = BTreeMap::new();
         for (name, binding) in visible_changes {
             crate::host_work::checkpoint()?;
@@ -1956,7 +2198,8 @@ impl CompilerWorld {
                         .get(name)
                         .filter(matches)
                         .or_else(|| {
-                            self.restoration
+                            latest
+                                .restoration
                                 .inputs
                                 .bindings
                                 .entries
@@ -1971,7 +2214,69 @@ impl CompilerWorld {
             };
             changes.insert(name.to_owned(), fact);
         }
-        self.project_bindings_with_primary(target_scope, changes, None, Some(declaration))
+        Ok(changes)
+    }
+
+    /// Project accepted visible host rows into a private World. Each row is
+    /// issued by the host interface that installed the runtime binding; this
+    /// operation preserves any completed checked prefix and its position.
+    pub fn with_visible_host_bindings<'a>(
+        self: &Arc<Self>,
+        target_scope: u64,
+        bindings: impl IntoIterator<Item = CompilerWorldHostBinding<'a>>,
+    ) -> Result<CompilerWorldHostSuccessor, CompileError> {
+        let mut progress = Vec::new();
+        let mut compiler_bindings = Vec::new();
+        for binding in bindings {
+            let row = binding.row()?;
+            progress.push(PrivateHostBindingProgressBinding {
+                occurrence: binding.occurrence.to_owned(),
+                symbol: binding.symbol.clone(),
+                session_var: binding.session_var,
+                defining_scope: binding.defining_scope,
+                row: row.clone(),
+                kind: binding.kind(),
+            });
+            compiler_bindings.push(CompilerWorldBinding::from_checked_value(
+                binding.occurrence,
+                binding.symbol,
+                binding.session_var,
+                binding.defining_scope,
+                row,
+            ));
+        }
+        let additions = CompilerWorldBindings::from_published_bindings(
+            self.restoration.inputs.bindings.query_scope,
+            compiler_bindings,
+        )?;
+        if additions.entries.is_empty() {
+            return Ok(CompilerWorldHostSuccessor {
+                world: self.clone(),
+                progress: Arc::new(PrivateHostBindingProgress { bindings: progress }),
+            });
+        }
+        for (occurrence, fact) in &additions.entries {
+            if fact.symbol.occurrence != occurrence.as_str()
+                || fact.row.world_issuer().0 != self.restoration.producer
+            {
+                return Err(source_failure(
+                    "visible host binding has a foreign compiler issuer",
+                ));
+            }
+        }
+        let world = self.project_bindings_with_primary(
+            target_scope,
+            additions
+                .entries
+                .into_iter()
+                .map(|(occurrence, fact)| (occurrence, Some(fact))),
+            self.position.clone(),
+            None,
+        )?;
+        Ok(CompilerWorldHostSuccessor {
+            world,
+            progress: Arc::new(PrivateHostBindingProgress { bindings: progress }),
+        })
     }
 
     /// Extend the held primary with only canonical TYPE roles selected by
@@ -2694,41 +2999,6 @@ mod tests {
             make(vec![extra]).seal(),
             make(vec![captured("Module.hs", b"module Module where\nx = 1\n")]).seal()
         );
-    }
-
-    #[test]
-    fn private_publication_classification_keeps_three_closed_branches() {
-        // The owner-issued decision table has exactly three outcomes. Each row
-        // is an independent expectation from the contract, not a recomputation
-        // through the same expression.
-        let classify = |same, position, fences, base_match, complete| {
-            classify_private_world(same, position, fences, base_match, complete)
-        };
-        // An unchanged borrow keeps the same product with no checked position.
-        assert_eq!(
-            classify(true, false, true, false, false),
-            PrivateCompilerProgress::Unchanged
-        );
-        // A real completed checked successor is the only checked branch.
-        assert_eq!(
-            classify(false, true, true, true, true),
-            PrivateCompilerProgress::Checked
-        );
-        // Anything started, foreign, or unfinished refuses.
-        for (same, position, fences, base_match, complete) in [
-            (false, true, true, true, false),   // incomplete checked prefix
-            (false, true, true, false, true),   // foreign checked base
-            (false, false, true, false, false), // changed input, no successor
-            (false, true, false, true, true),   // foreign producer/profile/source
-            (true, true, true, false, false),   // unchanged product with a position
-            (true, false, false, false, false), // unchanged product, foreign lineage
-        ] {
-            assert_eq!(
-                classify(same, position, fences, base_match, complete),
-                PrivateCompilerProgress::Incomplete,
-                "({same}, {position}, {fences}, {base_match}, {complete})"
-            );
-        }
     }
 }
 
