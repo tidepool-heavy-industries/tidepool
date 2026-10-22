@@ -57,8 +57,13 @@ pub(super) struct SourceSelections {
 pub(super) struct PreparedSourceSelectionReplacement {
     scope: ScopeId,
     view: Option<SourceSelectionView>,
-    added: Vec<(SourceInstanceDomain, Arc<WorldPackageDomainOwner>)>,
+    added: Vec<(SourceInstanceDomain, PreparedDomainOwner)>,
     removed: Vec<SourceInstanceDomain>,
+}
+
+enum PreparedDomainOwner {
+    Existing(Weak<WorldPackageDomainOwner>),
+    Fresh(Arc<WorldPackageDomainOwner>),
 }
 
 impl PreparedSourceSelectionReplacement {
@@ -105,9 +110,11 @@ impl SourceSelections {
                             .live_views
                             .checked_add(1)
                             .expect("source domain membership exhausted");
-                        record.owner.clone()
+                        PreparedDomainOwner::Existing(Arc::downgrade(&record.owner))
                     })
-                    .unwrap_or_else(|| Arc::new(WorldPackageDomainOwner));
+                    .unwrap_or_else(|| {
+                        PreparedDomainOwner::Fresh(Arc::new(WorldPackageDomainOwner))
+                    });
                 added.push((*domain, owner));
             }
         }
@@ -135,6 +142,12 @@ impl SourceSelections {
     pub(super) fn commit(&mut self, prepared: PreparedSourceSelectionReplacement) {
         self.implicit.remove(&prepared.scope);
         for (domain, owner) in prepared.added {
+            let owner = match owner {
+                PreparedDomainOwner::Existing(owner) => owner
+                    .upgrade()
+                    .expect("exclusive prepared domain remains live"),
+                PreparedDomainOwner::Fresh(owner) => owner,
+            };
             self.domains
                 .entry(domain)
                 .or_insert(DomainMembership {
@@ -323,5 +336,31 @@ impl BindingTable {
                 witness.clone(),
             ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_snapshot_does_not_retain_retired_live_domain() {
+        let mut selections = SourceSelections::default();
+        let parent = ScopeId(1);
+        let child = ScopeId(2);
+        let view = SourceSelectionView::for_scope(parent);
+        selections.replace(parent, view.clone());
+        let original = Arc::downgrade(&selections.domains[&view.current].owner);
+        let uncommitted = selections.prepare_replace(child, Some(view.clone()));
+        selections.remove(&parent);
+        assert!(original.upgrade().is_none(), "neither semantic snapshots nor uncommitted existing-domain preparation keep a live domain owner");
+        drop(uncommitted);
+        selections.replace(parent, view.clone());
+        let replacement = Arc::downgrade(&selections.domains[&view.current].owner);
+        assert!(
+            !original.ptr_eq(&replacement),
+            "same semantic domain coordinates cannot resurrect retired identity"
+        );
+        assert_eq!(selections.get(&parent), Some(&view));
     }
 }
