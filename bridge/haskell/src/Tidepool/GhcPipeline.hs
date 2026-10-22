@@ -3422,8 +3422,8 @@ retainWorldCellOriginal prepared homes graph planned = do
       | owner `Set.member` seen = retainHomes seen table pending
       | otherwise = do
           let candidates = catMaybes
-                [ finalizedHomeModInfo <$> Map.lookup (moduleName owner) (pprFinalizedModules prepared)
-                , lookupHpt homes (moduleName owner)
+                [ lookupHpt homes (moduleName owner)
+                , finalizedHomeModInfo <$> Map.lookup (moduleName owner) (pprFinalizedModules prepared)
                 , lookupHpt (hsc_HPT environment) (moduleName owner)
                 ]
           home <- case candidates of
