@@ -1139,7 +1139,7 @@ mod tests {
                     .ordinary_package_selection("__prepared", &artifact.bind_package_program())
                     .expect("named physical target closes its receipt and prepared owner");
                 assert!(Arc::ptr_eq(
-                    selected.prepared_program().unwrap(),
+                    selected.prepared_program(),
                     artifact.prepared_shared(),
                 ));
                 assert!(owner

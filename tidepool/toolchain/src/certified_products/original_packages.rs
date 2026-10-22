@@ -331,13 +331,6 @@ impl BoundPackageSelection {
                     use_roots: BTreeSet::new(),
                 }))
             }
-            BoundPackageSelectionState::HomeOrFixture { .. } => {
-                Ok(Arc::new(CheckedOriginalPackageAssociations {
-                    stage: None,
-                    slots: BTreeMap::new(),
-                    use_roots: BTreeSet::new(),
-                }))
-            }
         }
     }
 }

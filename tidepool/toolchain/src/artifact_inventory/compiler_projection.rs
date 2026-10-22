@@ -1168,11 +1168,7 @@ pub(crate) fn complete_native_selection(
         Occurrence(u32),
         Held(super::PackageCodeBinding),
     }
-    let source_target = Arc::clone(
-        selection
-            .prepared_program()
-            .ok_or_else(|| failure("native completion lacks its source target"))?,
-    );
+    let source_target = Arc::clone(selection.prepared_program());
     let mut source_associations = BTreeMap::new();
     let original_packages: Arc<crate::certified_products::CheckedOriginalPackageAssociations> =
         selection.checked_original_packages(operation)?;

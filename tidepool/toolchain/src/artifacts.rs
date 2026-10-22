@@ -4568,9 +4568,7 @@ fn admit_native_target_products(
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
-    let prepared = package_selection.prepared_program().ok_or_else(|| {
-        CompileError::ExtractFailed("native target lacks its prepared program".into())
-    })?;
+    let prepared = package_selection.prepared_program();
     let physical = match segment_originals {
         Some(originals) => originals.physical_inputs().physical_cohort()?,
         None => certified
@@ -4582,12 +4580,7 @@ fn admit_native_target_products(
             .physical_cohort()?,
     };
     let target_admission_start = Instant::now();
-    let observed = package_selection
-        .authenticated_imports()
-        .ok_or_else(|| {
-            CompileError::ExtractFailed("native target lacks its authenticated imports".into())
-        })?
-        .clone();
+    let observed = package_selection.authenticated_imports().clone();
     let selected_target = match segment_originals {
         Some(originals) => {
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
@@ -6444,7 +6437,6 @@ fn compile_invocation_inner(
                     .ordinary_package_selection(name, &target.prepared.bind_package_program())?;
                 let observed = package_selection
                     .authenticated_imports()
-                    .expect("closed ordinary imports")
                     .clone();
                 let selected_target = physical.inventory().select_native_target(
                     physical_inputs.physical_cohort()?,

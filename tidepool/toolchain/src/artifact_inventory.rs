@@ -630,11 +630,7 @@ impl CertifiedTargetNativeInputs {
         inherited: &CompilerSourceSupport,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<Self, CompileError> {
-        let prepared = Arc::clone(
-            selection
-                .prepared_program()
-                .ok_or_else(|| failure("native completion lacks its bound prepared program"))?,
-        );
+        let prepared = Arc::clone(selection.prepared_program());
         if !Arc::ptr_eq(self.target.slots.observed.target(), &prepared) {
             return Err(failure(
                 "native completion belongs to another prepared target owner",

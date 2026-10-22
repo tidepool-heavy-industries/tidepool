@@ -393,9 +393,6 @@ enum BoundPackageSelectionState {
         selection: PackageSelection,
         original_packages: Arc<CheckedOriginalPackageAssociations>,
     },
-    HomeOrFixture {
-        links: Arc<PackageLinks>,
-    },
 }
 
 impl BoundPackageSelection {
@@ -426,19 +423,10 @@ impl BoundPackageSelection {
         })
     }
 
-    pub(crate) fn execution_target(&self) -> Option<&str> {
-        match &self.mode {
-            BoundPackageSelectionState::Ordinary { target, .. } => Some(target),
-            BoundPackageSelectionState::Item { selection, .. } => Some(&selection.target),
-            BoundPackageSelectionState::HomeOrFixture { .. } => None,
-        }
-    }
-
     pub(crate) fn occurrences(&self) -> &[PackageOccurrenceRow] {
         match &self.mode {
             BoundPackageSelectionState::Ordinary { links, .. }
-            | BoundPackageSelectionState::Item { links, .. }
-            | BoundPackageSelectionState::HomeOrFixture { links } => &links.occurrences,
+            | BoundPackageSelectionState::Item { links, .. } => &links.occurrences,
         }
     }
 
@@ -448,7 +436,6 @@ impl BoundPackageSelection {
                 links.target_roots.get(target).map_or(&[], Vec::as_slice)
             }
             BoundPackageSelectionState::Item { selection, .. } => &selection.target_roots,
-            BoundPackageSelectionState::HomeOrFixture { .. } => &[],
         }
     }
 
@@ -465,7 +452,6 @@ impl BoundPackageSelection {
             BoundPackageSelectionState::Item { selection, .. } => {
                 (selection.target.as_str(), &selection.home_roots)
             }
-            BoundPackageSelectionState::HomeOrFixture { .. } => return None,
         };
         roots
             .get(&PackageHomeRootKey {
@@ -485,7 +471,6 @@ impl BoundPackageSelection {
             BoundPackageSelectionState::Item { selection, .. } => {
                 (selection.target.as_str(), &selection.home_roots)
             }
-            BoundPackageSelectionState::HomeOrFixture { .. } => return Vec::new(),
         };
         roots
             .keys()
@@ -494,26 +479,17 @@ impl BoundPackageSelection {
             .collect()
     }
 
-    pub(crate) fn prepared_program(&self) -> Option<&Arc<PreparedProgram>> {
+    pub(crate) fn prepared_program(&self) -> &Arc<PreparedProgram> {
         match &self.mode {
             BoundPackageSelectionState::Ordinary { imports, .. }
-            | BoundPackageSelectionState::Item { imports, .. } => Some(imports.target()),
-            BoundPackageSelectionState::HomeOrFixture { .. } => None,
+            | BoundPackageSelectionState::Item { imports, .. } => imports.target(),
         }
     }
 
-    pub(crate) fn authenticated_imports(&self) -> Option<&AuthenticatedTargetImports> {
+    pub(crate) fn authenticated_imports(&self) -> &AuthenticatedTargetImports {
         match &self.mode {
             BoundPackageSelectionState::Ordinary { imports, .. }
-            | BoundPackageSelectionState::Item { imports, .. } => Some(imports),
-            BoundPackageSelectionState::HomeOrFixture { .. } => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn home_fixture(links: Arc<PackageLinks>) -> Self {
-        Self {
-            mode: BoundPackageSelectionState::HomeOrFixture { links },
+            | BoundPackageSelectionState::Item { imports, .. } => imports,
         }
     }
 }
