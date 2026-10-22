@@ -183,10 +183,13 @@ worldAcquisitionDiagnostics = do
   limited <- timeout 5000000 $ captureDiagnostics $
     emitWorldAcquisitionRejection reason (repeat '\x1f30a') (repeat '\n')
   case limited of
-    Just (_,output) | reason `isInfixOf` output
-      , "diagnostic field exceeds 4096 UTF-8 bytes" `isInfixOf` output
-      , emittedBytes output < 74 * 1024 -> pure ()
-    _ -> fail "world acquisition diagnostic did not bound lazy UTF-8 fields"
+    Nothing -> fail "world acquisition diagnostic forced an unbounded lazy tail"
+    Just (_,output) -> do
+      unless (reason `isInfixOf` output && '\x1f30a' `elem` output
+          && "[diagnostic truncated]" `isInfixOf` output)
+        (fail "world acquisition diagnostic lost its bounded UTF-8 prefix or truncation marker")
+      unless (emittedBytes output < 74 * 1024)
+        (fail "world acquisition diagnostic exceeded its escaped UTF-8 allowance")
   (_,escaped) <- captureDiagnostics $
     emitWorldAcquisitionRejection reason (replicate 4096 '\0') (replicate 4096 '\n')
   unless (emittedBytes escaped < 74 * 1024 && "\\u0000" `isInfixOf` escaped)
