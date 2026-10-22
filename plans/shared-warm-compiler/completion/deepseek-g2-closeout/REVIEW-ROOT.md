@@ -1,4 +1,4 @@
-# G2 review candidate `a31c7ce0`
+# G2 review candidate `29231ed3`
 
 This is the single peer-review branch requested after the 2026-10-21 closeout
 wave. It contains the first coherent H, P, T and N repair candidates and remains
@@ -10,23 +10,24 @@ explicitly unqualified.
 |---|---|
 | Base | `90a5456584acb541c104f8da50d8c75e3aaa471d` |
 | Review branch | `root/g2-final-20261021` |
-| Code candidate | `a31c7ce02a98dc7954973f437d3ac407241eacd7` |
+| Code candidate | `29231ed3236bb4dd6d13b6e459315533cd171a3e` |
 | Remote | `github`, same branch and OID |
 | Tree | Clean before this documentation note |
 | G2 status | Unqualified; no matched bundle or fresh Persona run |
 
 The branch joins:
 
-- H support composition: the initial custody repair and every-original
-  follow-up.
-- P exact native/package selection repair at `d5b66d2250` on its lane branch.
-- T registered production histories at `7fac7d7603` on its lane branch.
-- N private preparation and guarded-retirement repair at `1780e2c038` on its
-  lane branch.
+- H support composition: the initial custody repair, every-original follow-up,
+  and shared-contribution review test through `0164a082f6`.
+- P exact native/package selection repair, equivalent to `d5b66d2250`, in
+  `d9ce60c41a`.
+- T's production-history baseline, equivalent to `bbf99842fb`, in
+  `0c0747ac46`.
+- N private preparation and guarded-retirement repair at `1780e2c038`.
 
 The dedicated lane branches remain available for review:
 
-- `g2-next/h-support-20261021` at `1614264490`
+- `g2-next/h-support-20261021` at `0164a082f6`
 - `g2-next/p-native-20261021` at `d5b66d2250`
 - `g2-next/t-histories-20261021` at `7fac7d7603`
 - `g2-next/n-private-20261021` at `1780e2c038`
@@ -55,12 +56,13 @@ owner-census fallback or test-only authority. It adds no `hPutStrLn`.
 
 ## Evidence that passed
 
-- Joined production-source compile: `BUILD SUCCEEDED`, 17 local actions,
-  build `0f331ad3-3e8e-4e47-86d2-853287e3d5f3`.
+- Joined production-source compile on the H/P/T/N tree: `BUILD SUCCEEDED`,
+  build `e4a591c1-cb66-491c-be30-0f34386591cb`, retained in
+  `root-integrated-build.log`.
 - Earlier joined H/P/T compile: `BUILD SUCCEEDED`, 476 local actions, build
   `bfcc6ad1-222f-4936-b427-121bbf0020d0`.
-- H mixed World support: 1/1 passed, build
-  `1543938e-093a-4bde-a884-75503640088d`, 16.6 seconds.
+- H mixed World support on the joined H/P tree: 1/1 passed, build
+  `ddef7411-0344-46d6-9308-34a6b5f65fa0`, 17.1 seconds.
 - H completion custody after role narrowing: 1/1 passed, build
   `5fe23f0a-b53e-4f92-b2d2-3e258d9425cd`.
 - H shared-contribution original custody: 1/1 passed, build
@@ -72,10 +74,10 @@ owner-census fallback or test-only authority. It adds no `hPutStrLn`.
 - P Haskell original-root and declaration controls: 2/2 passed, build
   `997a985b-6c6e-4782-bc28-f98e1764cff8`.
 - P cached-HOME item admission and affected Rust test binary compile passed.
-- N's focused hidden-retirement control passed after guarded retirement.
-- N integrated actor progress reached 3/6 before the final N adjustment:
-  visible abandonment, host-only Text and two independently abandoned visible
-  mounts passed; hidden-input, Job and checked Text exposed later frontiers.
+- The joined registered actor target executed nine cases on the H/P/T/N tree:
+  5 passed and 4 failed. Passing cases were abandoned-visible publication,
+  hidden-input retirement, host-only retained Text, declaration-only progress,
+  and empty/import-only progress.
 
 All retained logs are under
 `/srv/swarm/evidence/inanna/g2-next-wave-90a54565/`.
@@ -89,12 +91,17 @@ All retained logs are under
   - the cached HOME item test expected one row and observed two.
 - The first two are under T/P premise review. The cached-HOME expectation is
   under P review. None of the old nine green cases are being discarded.
-- The integrated six-case actor cohort has not yet completed on the final N+H+P
-  join. N-alone Job and Text failures are expected to move after H/P but are not
-  acceptance evidence.
+- The joined nine-case actor target still fails the production Job carrier with
+  `compiled binder job1 has host authority None`, checked Text with
+  `incomplete fresh source or duplicate original binder inventory`, the extended
+  two-abandonment history with `WorldCellPublicationIncomplete`, and the
+  failed-later-item fixture before its intended boundary. The last is a T test
+  diagnostic/count issue; it is not product acceptance.
 - Ordinary activation A-to-B migration, discovery/notebook/activation/reload
   joined histories, source-publication race, disposal-safe reacquisition and the
   broader qualification gate remain open.
+- T and P have uncommitted follow-up work outside this branch. Their lane tips
+  must not be represented as included until committed and reviewed.
 - Full lint is not green; the P lane retained the baseline's 33 Clippy findings.
 
 ## Attempts the reviewer should not repeat
