@@ -1160,6 +1160,25 @@ impl NativeSelectionCompletions {
                 }
                 continue;
             }
+            if tracing::enabled!(target: "tidepool::artifact_inventory::ambiguity_trace", tracing::Level::DEBUG)
+            {
+                if let Some((binding, _)) =
+                    completion.recorded.rows.iter().find(|(binding, row)| {
+                        retained
+                            .rows
+                            .get(*binding)
+                            .is_some_and(|prior| prior != *row)
+                    })
+                {
+                    if let Some(prior) = retained
+                        .owners
+                        .values()
+                        .find_map(|owner| owner.rows.get(binding))
+                    {
+                        trace_completion_package_correspondence(prior, &completion.rows[binding]);
+                    }
+                }
+            }
             retained.rows =
                 append_native_completion_rows(&retained.rows, &completion.recorded.rows)?;
             retained
@@ -1178,6 +1197,200 @@ impl PartialEq for NativeSelectionCompletions {
     }
 }
 impl Eq for NativeSelectionCompletions {}
+
+// Diagnostic work limits bound an opt-in observation, never valid compiler work.
+// Charge roots, visits, edges and interface witnesses before retaining work;
+// the byte cap includes compared product envelopes and interface bodies.
+// Exhaustion is inconclusive. The correspondence deliberately ignores scope IDs
+// while preserving products, export values, ordered edges and joint aliasing;
+// it cannot authorize reuse or change the exact completion refusal.
+const COMPLETION_DIAGNOSTIC_WORK: usize = 16_384;
+const COMPLETION_DIAGNOSTIC_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+enum CompletionPackageDiagnostic {
+    Corresponding,
+    Mismatch,
+    InconclusiveBudget,
+}
+
+#[derive(Debug)]
+enum CompletionPackageDiscrepancy {
+    HomeSlotCount,
+    HomeSlotKindOrFact,
+    ExportValue,
+    ForwardAliasing,
+    ReverseAliasing,
+    Product,
+    ExportInventory,
+    ChildCount,
+}
+
+fn trace_completion_package_correspondence(
+    prior: &CompletedNativeSourceRow,
+    incoming: &CompletedNativeSourceRow,
+) {
+    use tidepool_repr::execution_schema::ValueId;
+    type Pending = (
+        super::PackageCodeBinding,
+        super::PackageCodeBinding,
+        ValueId,
+        ValueId,
+        usize,
+        Option<usize>,
+    );
+    let mut pending = std::collections::VecDeque::<Pending>::new();
+    let mut forward = BTreeMap::<ArtifactBinding, ArtifactBinding>::new();
+    let mut reverse = BTreeMap::<ArtifactBinding, ArtifactBinding>::new();
+    let mut work = 0usize;
+    let mut product_bytes = 0usize;
+    let mut edges = 0usize;
+    let mut roots = 0usize;
+    let mut root_slot = None;
+    let mut child_slot = None;
+    let mut prior_binding = None;
+    let mut incoming_binding = None;
+    let mut prior_value = None;
+    let mut incoming_value = None;
+    let mut discrepancy = None;
+    let mut expected_binding = None;
+    let mut prior_children = None;
+    let mut incoming_children = None;
+    let outcome = 'compare: {
+        if prior.imports.len() != incoming.imports.len() {
+            discrepancy = Some(CompletionPackageDiscrepancy::HomeSlotCount);
+            break 'compare CompletionPackageDiagnostic::Mismatch;
+        }
+        for (slot, (old, new)) in prior
+            .imports
+            .iter()
+            .zip(incoming.imports.iter())
+            .enumerate()
+        {
+            root_slot = Some(slot);
+            if work == COMPLETION_DIAGNOSTIC_WORK {
+                break 'compare CompletionPackageDiagnostic::InconclusiveBudget;
+            }
+            work += 1;
+            match (old, new) {
+                (
+                    CompletedNativeImport::Package {
+                        binding: old,
+                        value: old_value,
+                    },
+                    CompletedNativeImport::Package {
+                        binding: new,
+                        value: new_value,
+                    },
+                ) => {
+                    roots += 1;
+                    pending.push_back((
+                        old.clone(),
+                        new.clone(),
+                        *old_value,
+                        *new_value,
+                        slot,
+                        None,
+                    ));
+                }
+                _ if old == new => {}
+                _ => {
+                    discrepancy = Some(CompletionPackageDiscrepancy::HomeSlotKindOrFact);
+                    break 'compare CompletionPackageDiagnostic::Mismatch;
+                }
+            }
+        }
+        while let Some((old, new, old_value, new_value, root, child)) = pending.pop_front() {
+            root_slot = Some(root);
+            child_slot = child;
+            prior_binding = Some(old.binding());
+            incoming_binding = Some(new.binding());
+            prior_value = Some(old_value);
+            incoming_value = Some(new_value);
+            if work == COMPLETION_DIAGNOSTIC_WORK {
+                break 'compare CompletionPackageDiagnostic::InconclusiveBudget;
+            }
+            work += 1;
+            if old_value != new_value {
+                discrepancy = Some(CompletionPackageDiscrepancy::ExportValue);
+                break 'compare CompletionPackageDiagnostic::Mismatch;
+            }
+            if let Some(mapped) = forward.get(&old.binding()) {
+                if *mapped != new.binding() {
+                    discrepancy = Some(CompletionPackageDiscrepancy::ForwardAliasing);
+                    expected_binding = Some(*mapped);
+                    break 'compare CompletionPackageDiagnostic::Mismatch;
+                }
+                continue;
+            }
+            if let Some(mapped) = reverse.get(&new.binding()) {
+                expected_binding = Some(*mapped);
+                discrepancy = Some(CompletionPackageDiscrepancy::ReverseAliasing);
+                break 'compare CompletionPackageDiagnostic::Mismatch;
+            }
+            let mut bytes = old
+                .product()
+                .bytes()
+                .len()
+                .saturating_add(new.product().bytes().len());
+            for product in [old.product(), new.product()] {
+                for interface in std::iter::once(product.defining_interface())
+                    .chain(product.import_interface_witnesses().iter())
+                {
+                    if work == COMPLETION_DIAGNOSTIC_WORK {
+                        break 'compare CompletionPackageDiagnostic::InconclusiveBudget;
+                    }
+                    work += 1;
+                    bytes = bytes.saturating_add(interface.bytes().len());
+                }
+            }
+            if bytes > COMPLETION_DIAGNOSTIC_BYTES.saturating_sub(product_bytes) {
+                break 'compare CompletionPackageDiagnostic::InconclusiveBudget;
+            }
+            product_bytes += bytes;
+            if old.product().as_ref() != new.product().as_ref() {
+                discrepancy = Some(CompletionPackageDiscrepancy::Product);
+                break 'compare CompletionPackageDiagnostic::Mismatch;
+            }
+            if !old
+                .product()
+                .code()
+                .exported_values()
+                .eq(new.product().code().exported_values())
+            {
+                discrepancy = Some(CompletionPackageDiscrepancy::ExportInventory);
+                break 'compare CompletionPackageDiagnostic::Mismatch;
+            }
+            prior_children = Some(old.import_links().len());
+            incoming_children = Some(new.import_links().len());
+            if prior_children != incoming_children {
+                discrepancy = Some(CompletionPackageDiscrepancy::ChildCount);
+                break 'compare CompletionPackageDiagnostic::Mismatch;
+            }
+            forward.insert(old.binding(), new.binding());
+            reverse.insert(new.binding(), old.binding());
+            for (slot, ((old, old_value), (new, new_value))) in
+                old.import_links().zip(new.import_links()).enumerate()
+            {
+                if work == COMPLETION_DIAGNOSTIC_WORK {
+                    break 'compare CompletionPackageDiagnostic::InconclusiveBudget;
+                }
+                work += 1;
+                edges += 1;
+                pending.push_back((old, new, old_value, new_value, root, Some(slot)));
+            }
+        }
+        CompletionPackageDiagnostic::Corresponding
+    };
+    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
+        binding = ?prior.binding, ?outcome, ?discrepancy,
+        roots, nodes = forward.len(), edges, work, product_bytes,
+        work_limit = COMPLETION_DIAGNOSTIC_WORK, byte_limit = COMPLETION_DIAGNOSTIC_BYTES,
+        ?root_slot, ?child_slot, ?prior_binding, ?incoming_binding, ?expected_binding,
+        ?prior_value, ?incoming_value, ?prior_children, ?incoming_children,
+        "completed HOME joint package graph diagnostic (not authority)");
+}
+
 
 fn append_native_completion_rows(
     retained: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
