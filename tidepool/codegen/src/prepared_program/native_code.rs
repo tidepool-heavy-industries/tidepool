@@ -59,6 +59,12 @@ impl PreparedNativeCode {
         }
     }
 
+    /// Project an immutable literal using this code's exact package owner.
+    /// This does not install an instance or confer HOME source authority.
+    pub fn package_literal(&self, value: ValueId) -> Option<PackageLiteral> {
+        self.package_image()?.package_literal(value)
+    }
+
     pub fn request(
         self: &Arc<Self>,
         domain: SourceInstanceDomain,

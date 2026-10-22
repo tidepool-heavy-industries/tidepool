@@ -111,6 +111,8 @@ mod bytes_tests;
 mod data_tag;
 mod demand;
 mod native_code;
+#[cfg(test)]
+pub(crate) mod native_code_tests;
 pub use demand::{
     DemandError, DemandedHomeImage, DemandedImage, DemandedPackageImage, GroupInventory,
     InheritedSourceDemand, NativeDomainSelection, NativeInstanceAttachment, NativeInstanceLease,
