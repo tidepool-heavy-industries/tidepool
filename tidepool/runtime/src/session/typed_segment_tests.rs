@@ -1867,3 +1867,240 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
         .unwrap();
     assert_eq!(session.observed(), [1, 3]);
 }
+
+// The finite parser/worker contract has its own artifact-layout and stderr
+// controls. These tests do not establish ordinary World-path acceptance.
+mod finite_component_controls {
+    use super::*;
+
+    struct FiniteControlSession {
+        resident: ProbeSession,
+        public: ScopeId,
+        trace: Arc<CaptureMutex<Vec<i64>>>,
+        effects: TestEffectSurface,
+        images: Arc<ImageRegistry>,
+        _root: tempfile::TempDir,
+    }
+
+    impl FiniteControlSession {
+        fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
+            tidepool_testing::eval_harness::require_extract();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("SegmentProbeSupport.hs"),
+                include_str!("fixtures/typed-segment-probe-support.hs"),
+            )
+            .unwrap();
+            let effects = TestEffectSurface::with_options(
+                &[tidepool_mcp::console_decl()],
+                tidepool_testing::effect_surface::TestEffectSurfaceOptions {
+                    row_args: tidepool_mcp::RowArgs::default().importing(["SegmentProbeSupport"]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let images = Arc::new(ImageRegistry::new());
+            let lib = SessionLib::open(
+                SessionId(1010),
+                root.path(),
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+            let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+            persistent.set_image_registry(images.clone());
+            let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+            let trace = Arc::new(CaptureMutex::new(Vec::new()));
+            let compiler_counts = Arc::new(CaptureMutex::new(Vec::new()));
+            let cancel_after_record = Arc::new(CaptureMutex::new(None));
+            let resident = ResidentSession::from_persistent_for_test(
+                frunk::hlist![ProbeHandler {
+                    trace: trace.clone(),
+                    raw_result,
+                    compiler_counts: compiler_counts.clone(),
+                    cancel_after_record: cancel_after_record.clone()
+                }],
+                QuietOutput,
+                persistent,
+            );
+            Self {
+                resident,
+                public,
+                trace,
+                effects,
+                images,
+                _root: root,
+            }
+        }
+
+        fn execute(
+            &mut self,
+            label: &str,
+            source: &str,
+            declarations: CellDeclarationExpectation,
+            checks: AuthorityChecks<'_>,
+            imports: &SourceImports,
+            observe: impl FnOnce(&tidepool_toolchain::checked_cell::CellProgram),
+        ) {
+            try_execute_cell_with_template_imports_expectation_observed(
+                &mut self.resident,
+                self.public,
+                &self.effects,
+                &self.images,
+                (0, 0),
+                label,
+                source,
+                declarations,
+                &ScalePublication::Ephemeral,
+                checks,
+                imports,
+                None,
+                observe,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn finite_receipts_refuse_cross_item_mutations_before_effects() {
+        let mut session = FiniteControlSession::with_raw_result(None);
+        session.execute(
+            "finite_receipt_baseline",
+            "baselinePlannedValue <- pure (2 :: Int)",
+            CellDeclarationExpectation::Total(0),
+            AuthorityChecks::Configured,
+            &SourceImports::new(),
+            |_| {},
+        );
+        let source = include_str!("fixtures/typed-segment-native-entry.hs");
+        let line = source
+            .lines()
+            .position(|line| line == "boundaryCapture :: Int")
+            .unwrap()
+            + 1;
+        session.execute(
+            "finite_receipt_mutations",
+            source,
+            CellDeclarationExpectation::CapturedAt {
+                name: "boundaryCapture",
+                line,
+            },
+            AuthorityChecks::TypedEntryRefusalBranches(concat!(
+                module_path!(),
+                "::finite_receipts_refuse_cross_item_mutations_before_effects"
+            )),
+            &SourceImports::new(),
+            |_| {},
+        );
+        assert_eq!(*session.trace.lock(), [4]);
+    }
+
+    #[test]
+    fn finite_inference_ledgers_record_single_pass_segments() {
+        use super::super::super::tests::TestEnvGuard;
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _timing = TestEnvGuard::set("TIDEPOOL_TIMING", "1");
+        for count in [1, 4, 8] {
+            let cache = tempfile::tempdir().unwrap();
+            let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
+            let mut session = FiniteControlSession::with_raw_result(None);
+            let source = (1..=count)
+                .map(|ordinal| {
+                    let value = if ordinal == 1 {
+                        "(1 :: Int)".to_owned()
+                    } else {
+                        format!("(count{count}Value{} + 1)", ordinal - 1)
+                    };
+                    format!("count{count}Value{ordinal} <- segmentRecord {value} >> pure {value}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            session.execute(
+                "finite_inference_ledger",
+                &source,
+                CellDeclarationExpectation::Total(0),
+                AuthorityChecks::SegmentWorkCounts(super::super::SegmentWorkShape::CaptureChain(
+                    count,
+                )),
+                &SourceImports::new(),
+                |_| {},
+            );
+            assert_eq!(
+                *session.trace.lock(),
+                (1..=count as i64).collect::<Vec<_>>()
+            );
+        }
+        let results = Arc::new(CaptureMutex::new(Vec::new()));
+        let mut session = FiniteControlSession::with_raw_result(Some(results.clone()));
+        let definitions = include_str!("fixtures/typed-segment-template-helpers.hs")
+            .replace("__EFFECT_ROW__", session.effects.row());
+        let preamble = crate::session::insert_preamble_imports(
+            &crate::session::insert_preamble_imports(
+                &format!("{}\n{definitions}", session.effects.preamble()),
+                "qualified Control.Monad.Freer as SegmentHelperEff",
+            ),
+            "qualified Data.Text as SegmentHelperText",
+        );
+        try_execute_cell_with_template_preamble_observed(
+            &mut session.resident,
+            session.public,
+            &session.effects,
+            &session.images,
+            (0, 0),
+            "finite_signed_template_ledger",
+            include_str!("fixtures/typed-segment-template-helper-use.hs"),
+            CellDeclarationExpectation::Total(0),
+            &ScalePublication::Ephemeral,
+            AuthorityChecks::SegmentWorkCounts(super::super::SegmentWorkShape::IndependentActions(
+                7,
+            )),
+            &SourceImports::new(),
+            None,
+            &preamble,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(results.lock().len(), 1);
+    }
+
+    #[test]
+    fn finite_warm_emission_excludes_previously_issued_owners() {
+        let mut session = FiniteControlSession::with_raw_result(None);
+        let imports = SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]);
+        let mut old_owners = std::collections::BTreeSet::new();
+        session.execute(
+            "finite_emission_baseline",
+            "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
+            CellDeclarationExpectation::Total(0),
+            AuthorityChecks::Configured,
+            &imports,
+            |program| {
+                let native = program.items()[0].native().unwrap();
+                let turn: ciborium::value::Value =
+                    ciborium::de::from_reader(program.items()[0].native_turn_bytes().unwrap())
+                        .unwrap();
+                let fields = turn.as_array().unwrap()[1].as_array().unwrap();
+                let sites =
+                    tidepool_toolchain::artifacts::decode_turn_yield_sites(&fields[3]).unwrap();
+                let context = native
+                    .original_execution_context(&native.target_owned(), native.table(), &sites)
+                    .unwrap();
+                old_owners.extend(
+                    context.recovery_products().iter().map(|product| {
+                        (product.owner().unit.clone(), product.owner().module.clone())
+                    }),
+                );
+            },
+        );
+        assert!(!old_owners.is_empty());
+        session.execute(
+            "finite_warm_emission",
+            include_str!("fixtures/typed-segment-warm-carrier.hs"),
+            CellDeclarationExpectation::Total(0),
+            AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
+            &imports,
+            |_| {},
+        );
+        assert_eq!(*session.trace.lock(), [7]);
+    }
+}
