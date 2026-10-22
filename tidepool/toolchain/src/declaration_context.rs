@@ -12032,6 +12032,27 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 let following = decode_world_source_receipt(program, following.index()).unwrap()
                     .issue_segment_originals(None, &following_produced, &mut validation, continuation)
                     .expect("actual following stage receives authored Source production");
+                let prior_source_observations = following
+                    .originals
+                    .receipt()
+                    .modules
+                    .iter()
+                    .flat_map(|module| &module.groups)
+                    .flat_map(|group| &group.globals)
+                    .filter_map(|global| match &global.owner {
+                        crate::certified_products::ReceiptImportOwner::Source {
+                            module_version: None,
+                            ..
+                        } => Some(global.owner.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                stage_type_anchor_tests::assert_actual_available_prior_source_inputs(
+                    &following.continuation,
+                    &following.inputs,
+                    following.originals.source_selection(),
+                    &prior_source_observations,
+                );
                 let inputs = following.inputs.compiler_inputs();
                 let mut consumed_rows = 0;
                 for (receipt, entry) in &produced_rows {
@@ -12299,21 +12320,6 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &target_source,
             operation,
         );
-        #[cfg(test)]
-        let prior_source_observations = receipt
-            .modules
-            .iter()
-            .flat_map(|module| &module.groups)
-            .flat_map(|group| &group.globals)
-            .chain(receipt.targets.values().flatten())
-            .filter_map(|global| match &global.owner {
-                crate::certified_products::ReceiptImportOwner::Source {
-                    module_version: None,
-                    ..
-                } => Some(global.owner.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
         let originals = crate::certified_products::CertifiedSegmentOriginals::issue(
             raw,
             receipt,
@@ -12338,13 +12344,6 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             );
         })
         .map_err(compiler_evidence_failure)?;
-        #[cfg(test)]
-        stage_type_anchor_tests::assert_actual_prior_source_inputs(
-            &continuation,
-            &inputs,
-            originals.source_selection(),
-            &prior_source_observations,
-        );
         #[cfg(test)]
         stage_type_anchor_tests::assert_completed_current_stage_ceiling(&inputs, &originals);
         Ok(WorldProgramSegment {

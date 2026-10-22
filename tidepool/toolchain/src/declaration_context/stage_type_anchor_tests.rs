@@ -136,9 +136,10 @@ pub(super) fn assert_actual_type_anchors(
     eprintln!("actual World TYPE anchor controls: stage {}, prior {exercised}, omitted {exercised}, wrong facts {}; current structural checks {current_outputs}", actual.initial.stage().index(), exercised * 2);
 }
 
-/// Exercise prior Source only after the actual physical issuer has succeeded.
+/// The named repeated-source fixture chooses an actually available prior group.
+/// These positive execution checks do not impose native demand on Source metadata.
 /// Raw observation mutations below do not create a new certificate or choice.
-pub(super) fn assert_actual_prior_source_inputs(
+pub(super) fn assert_actual_available_prior_source_inputs(
     continuation: &WorldProgramContinuation,
     inputs: &DemandedWorldCompilerInputs,
     selection: &crate::certified_products::CertifiedSourceSelection,
@@ -181,24 +182,23 @@ pub(super) fn assert_actual_prior_source_inputs(
         let ArtifactPayload::Original(product) = &expected_entry.payload else {
             panic!("actual produced Source has its Original payload");
         };
+        let key = crate::artifact_inventory::NativeGroupKey {
+            artifact: expected_entry.descriptor.id,
+            original_ordinal: *original_ordinal,
+        };
+        let expected = receipt.groups(key).collect::<BTreeSet<_>>();
+        if expected.is_empty() {
+            continue;
+        }
         let (entry, ordinal) = selection
             .target_source_entry(reference)
             .expect("actual prior unversioned Source resolves after physical issuance");
         assert_eq!(ordinal, *original_ordinal);
         assert_eq!(entry.descriptor.id, expected_entry.descriptor.id);
-        let key = crate::artifact_inventory::NativeGroupKey {
-            artifact: entry.descriptor.id,
-            original_ordinal: ordinal,
-        };
         let prior = selection
             .target_prior_produced_group(key, &entry)
             .unwrap()
             .expect("actual prior Source retains produced provenance");
-        let expected = receipt.groups(key).collect::<BTreeSet<_>>();
-        assert!(
-            !expected.is_empty(),
-            "actual prior Source owns an available occurrence"
-        );
         assert_eq!(prior.groups().collect::<BTreeSet<_>>(), expected);
         assert!(matches!(
             selection.target_source_origin(key, &entry).unwrap(),
@@ -318,6 +318,10 @@ pub(super) fn assert_actual_prior_source_inputs(
         exercised += 1;
         break;
     }
+    assert!(
+        exercised > 0,
+        "named prior Source fixture owns an actually available group"
+    );
     eprintln!("actual World prior Source controls: stage {}, prior {exercised}, wrong version {exercised}, wrong binder {exercised}, absent ordinal {exercised}, carried provenance {exercised}", inputs.initial.stage().index());
 }
 
