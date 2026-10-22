@@ -1168,6 +1168,14 @@ impl OriginalCompilerInputs {
         }
     }
 
+    /// Observe the immutable fact owner carried by this compiler prefix. This
+    /// transfers recorded facts and grants no physical capture capability.
+    pub(crate) fn native_fact_base(
+        &self,
+    ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
+        self.native_fact_base.as_ref()
+    }
+
     pub(crate) fn issued_native_completions(
         &self,
     ) -> &crate::artifact_inventory::NativeSelectionCompletions {
