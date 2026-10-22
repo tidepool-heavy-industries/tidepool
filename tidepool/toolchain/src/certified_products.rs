@@ -5223,7 +5223,7 @@ impl CertifiedSourceSelection {
                 )?;
             products.push(Arc::clone(product));
         }
-        for (key, roots) in &receipt.package_links.home_roots {
+        for (key, roots) in receipt.package_links.home_roots.iter() {
             if let Some(module) = receipt
                 .modules
                 .iter()
