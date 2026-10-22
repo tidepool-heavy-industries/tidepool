@@ -6695,6 +6695,7 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             .unwrap(),
         &interface
     ));
+    drop(parcel);
     let held_identity = resident
         .state
         .bindings()
@@ -6858,7 +6859,6 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
     original_value_probe(&mut resident, &recipe, "held + 1", 42);
     assert!(Arc::ptr_eq(resident.state.retained_checked_value_artifact(interface.owner()).unwrap(), &interface),
         "the old exact value artifact survives lawful source shadowing and original scope retirement");
-    drop(parcel);
     drop(interface);
     drop(resident);
 }
