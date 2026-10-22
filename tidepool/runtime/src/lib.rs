@@ -1,3 +1,7 @@
+// Cross-thread custody includes nested immutable publication fact maps. Their
+// auto-trait proofs settle at 192 on the pinned compiler; 128 is insufficient.
+#![recursion_limit = "192"]
+
 //! High-level runtime for compiling and executing Haskell source via Tidepool.
 //!
 //! Provides `compile_haskell` (source to a checked prepared-STG program and
