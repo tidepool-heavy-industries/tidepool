@@ -924,6 +924,8 @@ mod tests {
     };
     use proptest::prelude::*;
 
+    mod properties;
+
     fn plan(module: &str, children: &[(&str, usize)], result: i64) -> NativeCodePlan {
         let mut wire = testing::wire_program();
         let Group::NonRecursive(top) = &mut wire.bindings[0] else {

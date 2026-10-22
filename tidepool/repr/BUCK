@@ -88,6 +88,7 @@ rust_filegroup(
         "src/jsonl.rs": "tidepool/repr/src/jsonl.rs",
         "src/lib.rs": "tidepool/repr/src/lib.rs",
         "src/native_code.rs": "tidepool/repr/src/native_code.rs",
+        "src/native_code/tests/properties.rs": "tidepool/repr/src/native_code/tests/properties.rs",
         "src/serial/mod.rs": "tidepool/repr/src/serial/mod.rs",
         "src/serial/read.rs": "tidepool/repr/src/serial/read.rs",
         "src/serial/write.rs": "tidepool/repr/src/serial/write.rs",
@@ -127,6 +128,7 @@ tidepool_rust_isolated_test(
         "tidepool/repr/src/execution_schema/encoding/legacy.rs",
         "tidepool/repr/src/execution_schema/encoding/tests.rs",
         "tidepool/repr/src/lib.rs",
+        "tidepool/repr/src/native_code/tests/properties.rs",
     ],
     visibility = ["PUBLIC"],
 )
@@ -210,6 +212,7 @@ filegroup(
         "tidepool/repr/src/jsonl.rs": "src/jsonl.rs",
         "tidepool/repr/src/lib.rs": "src/lib.rs",
         "tidepool/repr/src/native_code.rs": "src/native_code.rs",
+        "tidepool/repr/src/native_code/tests/properties.rs": "src/native_code/tests/properties.rs",
         "tidepool/repr/src/serial/mod.rs": "src/serial/mod.rs",
         "tidepool/repr/src/serial/read.rs": "src/serial/read.rs",
         "tidepool/repr/src/serial/write.rs": "src/serial/write.rs",

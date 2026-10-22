@@ -42,6 +42,9 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/extract-cmd/src/diagnostics_tests.rs',
         'tidepool/extract-cmd/src/response_properties.rs',
     })),
+    ('tidepool-repr', frozenset({
+        'tidepool/repr/src/native_code/tests/properties.rs',
+    })),
     ('tidepool-codegen', frozenset({
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     })),
