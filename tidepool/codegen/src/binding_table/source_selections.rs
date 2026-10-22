@@ -342,6 +342,7 @@ impl BindingTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn prepared_snapshot_does_not_retain_retired_live_domain() {
@@ -362,5 +363,48 @@ mod tests {
             "same semantic domain coordinates cannot resurrect retired identity"
         );
         assert_eq!(selections.get(&parent), Some(&view));
+    }
+
+    proptest! {
+        #[test]
+        fn live_domain_memberships_match_recomputed_scope_views(
+            actions in prop::collection::vec((1u64..6, any::<bool>(), prop::collection::btree_set(0u64..7, 1..5)), 1..100)
+        ) {
+            let mut selections = SourceSelections::default();
+            let mut model = HashMap::<ScopeId, std::collections::BTreeSet<SourceInstanceDomain>>::new();
+            let mut snapshots = Vec::new();
+            for (scope, remove, domains) in actions {
+                let scope = ScopeId(scope);
+                let before = selections.domains.iter().map(|(domain, record)| (*domain, Arc::downgrade(&record.owner))).collect::<HashMap<_, _>>();
+                if remove {
+                    selections.remove(&scope);
+                    model.remove(&scope);
+                } else {
+                    let domains = domains.into_iter().map(|slot| SourceInstanceDomain::in_view(BindingTipId(1), slot)).collect::<std::collections::BTreeSet<_>>();
+                    let view = SourceSelectionView { current: *domains.first().unwrap(), domains: domains.iter().map(|domain| (*domain, SourceDomainRecord::empty())).collect() };
+                    snapshots.push(view.clone());
+                    let prepared = selections.prepare_replace(scope, Some(view));
+                    selections.commit(prepared);
+                    model.insert(scope, domains);
+                }
+                let mut recomputed = HashMap::<SourceInstanceDomain, usize>::new();
+                for domains in model.values() { for domain in domains { *recomputed.entry(*domain).or_default() += 1; } }
+                prop_assert_eq!(selections.domains.len(), recomputed.len());
+                for (domain, count) in &recomputed {
+                    prop_assert_eq!(selections.domains[domain].live_views, *count);
+                    if let Some(old) = before.get(domain) {
+                        prop_assert!(old.ptr_eq(&Arc::downgrade(&selections.domains[domain].owner)));
+                    }
+                }
+                let retired = selections.retired.drain(..).collect::<Vec<_>>();
+                let removed = before.iter().filter(|(domain, _)| !recomputed.contains_key(*domain)).collect::<Vec<_>>();
+                prop_assert_eq!(retired.len(), removed.len());
+                for (_, old) in removed {
+                    prop_assert!(old.upgrade().is_none(), "retained semantic snapshots cannot retain retired owners");
+                    prop_assert!(retired.iter().any(|retired| retired.owner.ptr_eq(old)));
+                }
+                std::hint::black_box(&snapshots);
+            }
+        }
     }
 }
