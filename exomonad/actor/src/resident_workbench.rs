@@ -5455,6 +5455,7 @@ impl HostInputRetirement {
                 .accept(private)
                 .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
         }
+        self.retire_private = None;
         self.background_retire = Box::new(|| {});
         Ok(())
     }
@@ -5500,6 +5501,14 @@ impl RetainedHostBinding {
 
 impl Drop for HostInputRetirement {
     fn drop(&mut self) {
+        if let (Some(retire), Some(write)) = (self.retire_private.take(), self.write.take()) {
+            tokio::spawn(async move {
+                if let Err(error) = retire(write).await {
+                    tracing::warn!(%error, "failed to retire an abandoned private host binding");
+                }
+            });
+            return;
+        }
         let background = std::mem::replace(&mut self.background_retire, Box::new(|| {}));
         background();
     }
@@ -10989,8 +10998,14 @@ where
                     OwnedHostPayload::Text(value) => HostPayload::Text(value),
                     OwnedHostPayload::Job(value) => HostPayload::Job(value),
                 };
-                let write = match private.as_ref().filter(|_| hidden) {
-                    Some(execution) => session.mount_private_hidden_host_input(
+                let write = match private.as_ref() {
+                    Some(execution) if hidden => session.mount_private_hidden_host_input(
+                        execution,
+                        &carrier,
+                        host_payload,
+                        settlement,
+                    ),
+                    Some(execution) => session.mount_private_visible_host_input(
                         execution,
                         &carrier,
                         host_payload,
@@ -18895,15 +18910,18 @@ pub(crate) mod request_tests {
         preparation_client: crate::CompilerPreparationClient,
     ) {
         use tidepool_runtime::session::turn::HostBindingAuthority;
-        let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, context) = ResidentActorWorkbench::new(
+        let (machines, mut public, source, _root) = actor_registry_fixture();
+        let (captured, source_owner) =
+            world_query_test_source_files_with_support(&[], &source.base_include);
+        public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+        let workbench = ResidentActorWorkbench::new(
             machines,
             (source).bind_preparation(preparation_client.clone()),
             None,
-        )
-        .admit_private_cell_for_test(public.clone())
-        .await
-        .unwrap();
+        );
+        let (workbench, context) = workbench
+            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .await;
         workbench
             .bind_tool_result(context.clone(), "tool_one".into(), "output one".into())
             .await
@@ -19006,10 +19024,18 @@ pub(crate) mod request_tests {
             .unwrap();
         assert_eq!(
             workbench
-                .host_binding_identity_for_test(public, "tool_one")
+                .host_binding_identity_for_test(public.clone(), "tool_one")
                 .await,
             original
         );
+        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        workbench
+            .execute_cell_for_test(
+                fresh,
+                "freshText <- pure tool_two\nfreshMatch <- pure (tool_one == \"output one\")",
+            )
+            .await
+            .expect("fresh private execution reads both published retained Text values");
     }
 
     #[tokio::test]
@@ -19020,15 +19046,18 @@ pub(crate) mod request_tests {
     async fn successful_private_cell_publishes_declarations_and_accepted_host_writes_only_with_compiler_owner(
         preparation_client: crate::CompilerPreparationClient,
     ) {
-        let (machines, public, source, _root) = actor_registry_fixture();
-        let (workbench, private) = ResidentActorWorkbench::new(
+        let (machines, mut public, source, _root) = actor_registry_fixture();
+        let (captured, source_owner) =
+            world_query_test_source_files_with_support(&[], &source.base_include);
+        public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+        let workbench = ResidentActorWorkbench::new(
             machines,
             (source).bind_preparation(preparation_client.clone()),
             None,
-        )
-        .admit_private_cell_for_test(public.clone())
-        .await
-        .unwrap();
+        );
+        let (workbench, private) = workbench
+            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+            .await;
         workbench
             .execute_cell_for_test(
                 private.clone(),
@@ -19092,12 +19121,16 @@ pub(crate) mod request_tests {
         assert!(native_bindings.contains(&accepted));
         assert!(native_bindings.contains(&"completedNative".to_owned()));
         assert!(!native_bindings.contains(&unaccepted_name));
+        let accepted_for_read = accepted.clone();
         workbench
             .access
-            .with_machine(public, move |session, context, _| {
+            .with_machine(public.clone(), move |session, context, _| {
                 let scope = context.placement.lexical_scope;
                 assert_eq!(
-                    session.current_binding_in(scope, &accepted).unwrap().0,
+                    session
+                        .current_binding_in(scope, &accepted_for_read)
+                        .unwrap()
+                        .0,
                     original.0
                 );
                 assert_eq!(
@@ -19118,10 +19151,147 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
+        let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+        workbench
+            .execute_cell_for_test(
+                fresh,
+                &format!(
+                    "freshHost <- pure ({accepted} :: {})\nfreshNative <- pure (completedNative :: Int)",
+                    crate::resident_workbench::HostCarrierKind::Job.type_name(),
+                ),
+            )
+            .await
+            .expect("fresh private execution reads the published host type and checked value");
         assert!(
             unaccepted.accept().is_err(),
             "a sealed cell refuses late effect acceptance"
         );
+    }
+
+    #[tokio::test]
+    async fn host_only_private_execution_publishes_its_exact_retained_text() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let (workbench, private) = workbench
+                .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+                .await;
+            let retained = workbench
+                .bind_tool_result(private.clone(), "hostOnly".into(), "host only".into())
+                .await
+                .expect("mount the retained Text through its production carrier")
+                .accept()
+                .unwrap();
+            let execution = workbench.private_execution.as_ref().unwrap().clone();
+            let published = workbench_runner_for_test(&workbench)
+                .publish_private_execution(private.clone(), execution)
+                .await
+                .unwrap();
+            assert!(matches!(
+                published,
+                PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    ref native_bindings,
+                } if native_bindings == &[retained.clone()]
+            ));
+            let identity = workbench
+                .host_binding_identity_for_test(public.clone(), &retained)
+                .await;
+            let public_for_read = public.clone();
+            let (workbench, fresh) = workbench.admit_private_cell_for_test(public).await.unwrap();
+            workbench
+                .execute_cell_for_test(fresh, &format!("freshHost <- pure {retained}"))
+                .await
+                .expect("fresh World reads the published host-only Text binding");
+            assert_eq!(
+                workbench
+                    .host_binding_identity_for_test(public_for_read, &retained,)
+                    .await,
+                identity
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn abandoned_visible_host_mount_repairs_private_world_and_allows_publication() {
+        with_test_compiler_owner(|preparation_client| async move {
+            let (machines, mut public, source, _root) = actor_registry_fixture();
+            let (captured, source_owner) =
+                world_query_test_source_files_with_support(&[], &source.base_include);
+            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+            let workbench = ResidentActorWorkbench::new(
+                machines,
+                (source).bind_preparation(preparation_client),
+                None,
+            );
+            let (workbench, private) = workbench
+                .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+                .await;
+            let abandoned = workbench
+                .bind_tool_result(private.clone(), "abandonedHost".into(), "unused".into())
+                .await
+                .unwrap();
+            let abandoned_name = abandoned.name().to_owned();
+            drop(abandoned);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let name = abandoned_name.clone();
+                    if workbench
+                        .access
+                        .with_machine(private.clone(), move |session, context, _| {
+                            Ok(session
+                                .current_binding_in(context.placement.lexical_scope, &name)
+                                .is_none())
+                        })
+                        .await
+                        .unwrap()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("visible abandonment settles through the private retirement owner");
+            workbench
+                .execute_cell_for_test(private.clone(), "afterAbandon <- pure (43 :: Int)")
+                .await
+                .unwrap();
+            let execution = workbench.private_execution.as_ref().unwrap().clone();
+            let published = workbench_runner_for_test(&workbench)
+                .publish_private_execution(private.clone(), execution)
+                .await
+                .unwrap();
+            assert!(matches!(
+                published,
+                PrivateExecutionPublication::Manifest {
+                    commit: tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    ..
+                }
+            ));
+            workbench
+                .access
+                .with_machine(public, move |session, context, _| {
+                    assert!(session
+                        .current_binding_in(context.placement.lexical_scope, &abandoned_name)
+                        .is_none());
+                    assert!(session
+                        .current_binding_in(context.placement.lexical_scope, "afterAbandon")
+                        .is_some());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -22326,6 +22496,48 @@ pub(crate) mod request_tests {
                     .expect("fixture has an ephemeral public owner");
             self.admit_private_cell_with_owner_for_test(context, owner)
                 .await
+        }
+
+        async fn admit_private_cell_with_source_for_test(
+            self,
+            public: crate::ActorSessionContext,
+            captured: crate::CheckpointSourceLayer,
+            source_owner: Arc<WorldQueryTestSource>,
+        ) -> (Self, crate::ActorSessionContext) {
+            workbench_runner_for_test(&self)
+                .adopt_final_source_scope(public.clone())
+                .await
+                .expect("admit the captured final source scope");
+            let layers: crate::ActorSourceLayerResolver = source_owner;
+            let (context, authority) = crate::resident_actor::WorkbenchCompilationAuthority::admit(
+                public,
+                captured,
+                None,
+                Some(&layers),
+            )
+            .expect("the captured owner admits its retained private source");
+            let descriptor = crate::ActorDescriptor::new("private-cell-test", context.placement);
+            let owner =
+                crate::resident_actor::WorkbenchPublicOwner::issue(&context, &descriptor, None)
+                    .expect("fixture has an ephemeral public owner");
+            let private = Arc::new(
+                workbench_runner_for_test(&self)
+                    .begin_private_execution(
+                        context.clone(),
+                        owner,
+                        tidepool_runtime::session::PublicationDecision::new(),
+                        None,
+                    )
+                    .await
+                    .expect("begin the retained private source execution"),
+            );
+            let mut context = context;
+            context.placement.lexical_scope = private.private_scope;
+            (
+                self.with_compilation_authority(authority)
+                    .with_private_execution(private),
+                context,
+            )
         }
 
         async fn admit_private_cell_with_owner_for_test(

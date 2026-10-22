@@ -4239,12 +4239,31 @@ impl PersistentSession {
                     }
                     public.world.clone()
                 }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked => {
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_) => {
                     public.world.promote_private_bindings(
                         &world.association.world,
                         &world.private.world,
                         ticket.public_scope.0,
+                        &world.progress,
                         declaration,
+                        projection.visible_changes().map(|(name, entry)| {
+                            (
+                                name.0.as_str(),
+                                entry.map(|entry| (entry.id, entry.scope.0)),
+                            )
+                        }),
+                    )?
+                }
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::HostChanged(_) => {
+                    if declaration.is_some() {
+                        return Err(SessionError::WorldCellPublicationIncomplete);
+                    }
+                    public.world.promote_private_bindings(
+                        &world.association.world,
+                        &world.private.world,
+                        ticket.public_scope.0,
+                        &world.progress,
+                        None,
                         projection.visible_changes().map(|(name, entry)| {
                             (
                                 name.0.as_str(),
