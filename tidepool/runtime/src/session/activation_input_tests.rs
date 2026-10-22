@@ -1239,13 +1239,33 @@ fn plan_fixture_cell(
     source: &str,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
 ) -> Arc<crate::session::RuntimeCellAdmission> {
-    use crate::session::TemplateSelector;
     let imports = SourceImports::new();
+    let specification = fixture_cell_recipe(recipe, source, &imports);
+    let preparation = source_action(resident, |resident, _| {
+        resident.prepare_private_execution(execution.clone(), None)
+    })
+    .expect("capture the current private frontier before fixture planning");
+    let (snapshot, operand) = preparation.into_parts();
+    assert!(operand.is_none());
+    let world = snapshot.world().clone();
+    let plan = parse_fixture_cell(resident, &world, specification);
+    source_action(resident, |resident, _| {
+        resident.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
+    })
+    .unwrap()
+}
+
+fn fixture_cell_recipe(
+    recipe: &InputRecipe,
+    source: &str,
+    imports: &SourceImports,
+) -> Arc<tidepool_extract_cmd::WorldCellRecipe> {
+    use crate::session::TemplateSelector;
     let template =
         resident_cell_check_template(&recipe.preamble, &recipe.row, &imports.template_text());
     let templates =
         resident_workbench_templates(&recipe.preamble, &recipe.row, &imports.template_text());
-    let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+    Arc::new(tidepool_extract_cmd::WorldCellRecipe {
         source: source.to_owned(),
         template,
         turn_templates: templates
@@ -1260,14 +1280,14 @@ fn plan_fixture_cell(
                 (kind.to_owned(), template.source)
             })
             .collect(),
-    });
-    let preparation = source_action(resident, |resident, _| {
-        resident.prepare_private_execution(execution.clone(), None)
     })
-    .expect("capture the current private frontier before fixture planning");
-    let (snapshot, operand) = preparation.into_parts();
-    assert!(operand.is_none());
-    let world = snapshot.world().clone();
+}
+
+fn parse_fixture_cell(
+    resident: &mut TestSession,
+    world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+    specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+) -> turn::RuntimeWorldCellPlan {
     let original = resident.public_source.original_source().clone();
     let settled = original
         .with_source_compiler_transaction(
@@ -1275,15 +1295,10 @@ fn plan_fixture_cell(
             crate::CompilerTransactionCancellation::new(),
             None,
             |_| {},
-            |owner, _| turn::prepare_world_cell_plan_admitted(owner, &world, specification, None),
+            |owner, _| turn::prepare_world_cell_plan_admitted(owner, world, specification, None),
         )
         .unwrap();
-    let plan = turn::finish_world_cell_plan_admitted(settled)
-        .expect("parse fixture through its actual World");
-    source_action(resident, |resident, _| {
-        resident.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
-    })
-    .unwrap()
+    turn::finish_world_cell_plan_admitted(settled).expect("parse fixture through its actual World")
 }
 
 fn try_check_fixture_cell(
@@ -6152,6 +6167,122 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
     drop(scope_lease);
     drop(fixture);
     assert!(prototype_lease.upgrade().is_none());
+}
+
+#[test]
+fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1744),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    let private = execution.private_scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: private,
+            ..resident.public_context()
+        })
+        .unwrap();
+    let preparation = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_host_carrier(execution.clone())
+    })
+    .unwrap();
+    let imports = SourceImports::from_specs([
+        "qualified Data.Text as TidepoolHostText",
+        "qualified Data.Text.Internal as TidepoolHostTextInternal",
+        "qualified GHC.Exts as TidepoolHostExts",
+        "qualified Tidepool.Aeson as TidepoolHostJson",
+    ]);
+    let specification = fixture_cell_recipe(
+        &recipe,
+        "cleanupInput <- pure ((case TidepoolHostExts.noinline (TidepoolHostText.pack \"\") of TidepoolHostTextInternal.Text bytes offset length -> TidepoolHostTextInternal.Text bytes offset length) :: TidepoolHostText.Text)",
+        &imports,
+    );
+    let plan = parse_fixture_cell(&mut resident, preparation.world(), specification);
+    let admission = source_action(&mut resident, |resident, _| {
+        resident.admit_world_planned_private_host_carrier(
+            preparation,
+            plan,
+            "cleanupInput".to_owned(),
+            HostBindingType::TEXT,
+            [19; 32],
+        )
+    })
+    .unwrap();
+    let original = resident.public_source.original_source().clone();
+    let prepared = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, settlement| turn::prepare_cell_program_admitted(owner, admission, settlement),
+        )
+        .unwrap();
+    let (checked, program) = turn::finish_cell_program_admitted(prepared).unwrap();
+    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+    let fixture = CheckedFixtureCell { checked, prefix };
+    let (bound, compiled, item) = fixture.compile_binding(&mut resident, 0);
+    let [binder] = bound.as_slice() else {
+        panic!("the checked cleanup carrier has one original binder");
+    };
+    let binding = SessionVarId::from_extract(binder.var_id);
+    let carrier = HostCarrier::from_checked(
+        item,
+        binder.clone(),
+        compiled.into_code(),
+        HostBindingType::TEXT,
+    )
+    .unwrap();
+    let lease = source_action(&mut resident, |resident, settlement| {
+        resident.mount_private_visible_host_input(
+            &execution,
+            &carrier,
+            HostPayload::Text("retained cleanup"),
+            settlement,
+        )
+    })
+    .unwrap();
+    assert!(lease.write().is_some());
+    assert!(resident.state.bindings().get(binding).is_some());
+    assert_eq!(execution.pending_host_count(), 1);
+    let next = resident
+        .state
+        .prepare_execution_admission_epoch_advance()
+        .unwrap();
+    resident
+        .state
+        .invalidate_execution_admissions_after_owner_transfer(next);
+    drop(lease);
+    resident.settle_dropped_custody();
+    assert_eq!(resident.outstanding_custody(), 1);
+    assert_eq!(execution.pending_host_count(), 1);
+    assert!(resident.state.bindings().get(binding).is_some());
+    let retired = resident.retire_scope(private);
+    assert_eq!(retired.bindings_retired, 1);
+    resident.settle_dropped_custody();
+    assert_eq!(resident.outstanding_custody(), 0);
+    assert_eq!(execution.pending_host_count(), 0);
+    assert!(resident.state.bindings().get(binding).is_none());
+    assert_eq!(resident.retire_scope(private), ScopeRetirement::default());
 }
 
 #[test]
