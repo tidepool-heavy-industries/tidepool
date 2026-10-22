@@ -65,7 +65,14 @@ impl NominalImportOwner {
             receipt => receipt,
         };
         Ok(
-            match normalize_receipt_metadata(receipt, sources, selection, packages, validation)? {
+            match normalize_receipt_metadata(
+                receipt,
+                sources,
+                selection,
+                packages,
+                &mut HomeSourceMetadata::default(),
+                validation,
+            )? {
                 ReceiptImportOwner::Source { .. } => {
                     unreachable!("Source metadata is authenticated directly")
                 }

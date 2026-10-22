@@ -48,7 +48,12 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     let issued = IssuedGroupCandidates::bind(
         candidates
             .into_iter()
-            .map(|(_, group)| nominal_pending_groups(&[group]).0.remove(0))
+            .map(|(_, group)| {
+                nominal_pending_groups(&[group], &InventoryOperation::new(Default::default()))
+                    .unwrap()
+                    .0
+                    .remove(0)
+            })
             .collect::<Vec<_>>()
             .into(),
         &products,
@@ -80,7 +85,12 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
             })
             .unwrap();
         assert!(std::ptr::eq(actual.group(), expected.group()));
-        assert_eq!(actual.imports(), expected.source_imports(product.original_native().unwrap()).unwrap());
+        assert_eq!(
+            actual.imports(),
+            expected
+                .source_imports(product.original_native().unwrap())
+                .unwrap()
+        );
     }
     let repeated =
         crate::declaration_context::certify_selected_artifact_view_groups_with_validation(
@@ -99,8 +109,17 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     let Some(first) = admitted.first() else {
         return;
     };
-    let duplicated =
-        IssuedGroupCandidates::bind(nominal_pending_groups(&[first.clone(), first.clone()]).0.into(), &products).unwrap();
+    let duplicated = IssuedGroupCandidates::bind(
+        nominal_pending_groups(
+            &[first.clone(), first.clone()],
+            &InventoryOperation::new(Default::default()),
+        )
+        .unwrap()
+        .0
+        .into(),
+        &products,
+    )
+    .unwrap();
     assert!(
         crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
             &view,
@@ -112,7 +131,14 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     );
     let mut foreign = first.clone();
     foreign.owner.module_version = ModuleVersion([250; 32]);
-    assert!(IssuedGroupCandidates::bind(nominal_pending_groups(&[foreign]).0.into(), &products).is_err());
+    assert!(IssuedGroupCandidates::bind(
+        nominal_pending_groups(&[foreign], &InventoryOperation::new(Default::default()))
+            .unwrap()
+            .0
+            .into(),
+        &products
+    )
+    .is_err());
     let mut body = first.clone();
     body.group = Arc::new(
         testing::projected_group(testing::wire_program(), first.group().original_ordinal())
@@ -125,7 +151,14 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
     }]
     .into();
     for changed in [body, imports] {
-        let issued = IssuedGroupCandidates::bind(nominal_pending_groups(&[changed]).0.into(), &products).unwrap();
+        let issued = IssuedGroupCandidates::bind(
+            nominal_pending_groups(&[changed], &InventoryOperation::new(Default::default()))
+                .unwrap()
+                .0
+                .into(),
+            &products,
+        )
+        .unwrap();
         assert!(
             crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
                 &view,
