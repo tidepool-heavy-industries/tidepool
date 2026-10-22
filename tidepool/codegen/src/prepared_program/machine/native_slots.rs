@@ -525,6 +525,7 @@ mod tests {
         };
         top.identity = testing::identity("Fixture", "bytes");
         top.binding.rhs = HeapRhs::Bytes(bytes.to_vec());
+        wire.expressions.nodes.clear();
         home_image(wire, owner, ordinal)
     }
 
@@ -956,6 +957,25 @@ mod tests {
         let first = prepare(&first_provider, false);
         let repeated = prepare(&first_provider, true);
         let changed = prepare(&next_provider, false);
+        // Dependency images expose definitions, not host invocation entries.
+        // Exercise the selected definition through an ordinary fresh target.
+        let mut invocation = testing::wire_program();
+        invocation.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        invocation.globals.push(GlobalDecl {
+            identity: testing::identity("LinkedConsumer", "entry"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: Some(SignatureId(0)),
+            required_evaluated: false,
+            required_generation: None,
+        });
+        invocation.expressions.nodes[0] = ExprFrame::Enter {
+            callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
+            signature: SignatureId(0),
+        };
+        let invocation = Arc::new(
+            CompiledProgram::compile_prepared_definitions(&testing::prepare(invocation).unwrap())
+                .unwrap(),
+        );
         assert!(Arc::ptr_eq(first.image(), repeated.image()));
         assert!(
             Arc::ptr_eq(first.image(), changed.image()),
@@ -988,6 +1008,13 @@ mod tests {
                         BatchProgram {
                             image: provider.image().clone(),
                             imports: vec![],
+                        },
+                        BatchProgram {
+                            image: invocation.clone(),
+                            imports: vec![BatchImport::Source {
+                                group: 0,
+                                binding: ValueId(0),
+                            }],
                         },
                     ],
                     vec![BatchLeaseRequest::new(
@@ -1058,7 +1085,7 @@ mod tests {
         for programs in [&installed.programs, &next.programs] {
             let returned = machine
                 .run_entry_retained(
-                    programs[0],
+                    programs[2],
                     ValueId(0),
                     &[],
                     PreparedCallOptions {
