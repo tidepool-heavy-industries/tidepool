@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tidepool_codegen::binding_table::SourceLeaseKey;
+use tidepool_codegen::binding_table::{PreparedWorldExecutionSelection, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::compiler_world::{CompilerWorld, PrivateCompilerProgress};
@@ -73,21 +73,6 @@ pub struct FinalExecutionIntent {
     world: Option<WorldExecutionIntent>,
 }
 
-impl FinalExecutionIntent {
-    pub(super) fn world_native_snapshots(
-        &self,
-    ) -> Option<(
-        &tidepool_codegen::binding_table::BindingScopeSnapshot,
-        &tidepool_codegen::binding_table::BindingScopeSnapshot,
-    )> {
-        self.world.as_ref()?;
-        Some((
-            &self.admitted.source_selection,
-            &self.private.source_selection,
-        ))
-    }
-}
-
 /// The exact published World association and admitted source facts a final
 /// publication must revalidate before installing anything. Cloning shares the
 /// same association, source and lease Arcs; it issues no compiler authority.
@@ -103,6 +88,9 @@ pub(super) struct WorldExecutionIntent {
     /// `Checked`; started/refused/uncertain work is `Incomplete` and can never
     /// become either successful publication branch.
     pub(super) progress: PrivateCompilerProgress,
+    /// Exact source-selection suffix frozen from the private execution's
+    /// admission record and completed scope.
+    pub(super) selection: PreparedWorldExecutionSelection,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -632,6 +620,17 @@ impl PersistentSession {
         }
         let progress =
             CompilerWorld::classify_private_publication(&private.world, &facts.published.world);
+        let completed = self
+            .public_visibility_snapshot_in(admission.private_scope())
+            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let selection = self
+            .bindings()
+            .prepare_world_execution_selection_delta(
+                self.scope_tree(),
+                admission.private_scope(),
+                &completed.source_selection,
+            )
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let world = Some(WorldExecutionIntent {
             association: facts.published,
             source: facts.source,
@@ -639,6 +638,7 @@ impl PersistentSession {
             target: facts.public_target,
             private,
             progress,
+            selection,
         });
         let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
         let intent = self.freeze_execution_intent_from_snapshot(
