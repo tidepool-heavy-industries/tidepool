@@ -1184,10 +1184,10 @@ tidepool_rust_test_cases(
     exact_tests = [
         "artifact_inventory::package_occurrence_linkage_tests::reversed_targets_keep_exact_ordered_package_slots",
         "artifact_inventory::package_occurrence_linkage_tests::transitive_import_prefers_exact_child_over_competing_sibling",
-        "artifact_inventory::package_occurrence_linkage_tests::compiler_deduplicates_repeated_authored_sort_demand",
+        "artifact_inventory::package_occurrence_linkage_tests::repeated_slots_share_immutable_bytes_without_losing_multiplicity",
         "artifact_inventory::package_occurrence_linkage_tests::duplicate_envelope_histories_remain_distinct_bindings",
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots",
-        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_issue_separate_exact_graphs",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately",
     ],
     expected_count = 6,
     ignored = True,
@@ -1197,10 +1197,10 @@ tidepool_rust_test_cases(
     case_compiler_modes = {
         "artifact_inventory::package_occurrence_linkage_tests::reversed_targets_keep_exact_ordered_package_slots": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::transitive_import_prefers_exact_child_over_competing_sibling": "owned-resident",
-        "artifact_inventory::package_occurrence_linkage_tests::compiler_deduplicates_repeated_authored_sort_demand": "owned-resident",
+        "artifact_inventory::package_occurrence_linkage_tests::repeated_slots_share_immutable_bytes_without_losing_multiplicity": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::duplicate_envelope_histories_remain_distinct_bindings": "owned-resident",
         "artifact_inventory::package_occurrence_linkage_tests::multi_ordinal_home_keeps_per_ordinal_package_roots": "owned-resident",
-        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_issue_separate_exact_graphs": "owned-resident",
+        "artifact_inventory::package_occurrence_linkage_tests::historical_same_seal_bodies_select_separately": "owned-resident",
     },
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",

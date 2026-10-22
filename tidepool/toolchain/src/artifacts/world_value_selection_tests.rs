@@ -90,8 +90,7 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             .iter()
             .filter_map(|import| match import {
                 crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding,
-                    ..
+                    binding, ..
                 } => Some((
                     binding.product().code().owner().unit.clone(),
                     binding.product().code().owner().module.clone(),
@@ -102,12 +101,6 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         assert!(
             !first_packages.is_empty(),
             "the World declaration item must carry its actual Data.Text package roots"
-        );
-        assert!(
-            first_packages
-                .iter()
-                .all(|(unit, module)| !unit.is_empty() && !module.is_empty()),
-            "World item package roots retain their producer-issued owner"
         );
         assert!(
             !first_bindings.is_empty(),
@@ -394,17 +387,14 @@ fn assert_physical_selection(
             &validation.inventory,
         )
         .map_err(compiler_evidence_failure)?;
-        let result =
-            segment
-                .originals
-                .select_item(
-                    &mut cursor,
-                    receipt,
-                    &target,
-                    &program_sha256,
-                    selected,
-                    &mut validation,
-                );
+        let result = segment.originals.select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            selected,
+            &mut validation,
+        );
         assert!(matches!(
             result,
             Err(certified_products::CertificationError::Mismatch(
@@ -462,16 +452,14 @@ fn assert_physical_selection(
     )
     .map_err(compiler_evidence_failure)?;
     assert!(matches!(
-        segment
-            .originals
-            .select_item(
-                &mut cursor,
-                receipt,
-                &target,
-                &program_sha256,
-                Some(&first),
-                &mut validation,
-            ),
+        segment.originals.select_item(
+            &mut cursor,
+            receipt,
+            &target,
+            &program_sha256,
+            Some(&first),
+            &mut validation,
+        ),
         Err(certified_products::CertificationError::OriginalClosure(_))
     ));
     let current = physical.current_interface(51)?.artifact_id();

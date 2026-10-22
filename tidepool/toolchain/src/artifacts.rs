@@ -994,11 +994,12 @@ pub fn prepare_world_cell_program(
                     &invocation_output::CapturedNativeOutput::from_world(&program),
                     &certified,
                     segment.package_products(),
-                    crate::artifact_inventory::BoundPackageSelection::item(
+                    crate::certified_products::BoundPackageSelection::item(
                         segment.originals.package_links(),
                         &item_selection,
                         program_sha256,
-                    )?,
+                    )
+                    .map_err(compiler_evidence_failure)?,
                     segment
                         .product_admission()
                         .compiler_inputs()
@@ -2969,9 +2970,9 @@ impl SelectedModuleCandidateOffer {
             &receipt.modules,
             &source_admission.exact().source().evidence(),
         )?;
-        let package_interfaces = certified_products::capture_independent_package_interfaces(
-            &receipt, validation,
-        ).map_err(compiler_evidence_failure)?;
+        let package_interfaces =
+            certified_products::capture_independent_package_interfaces(&receipt, validation)
+                .map_err(compiler_evidence_failure)?;
         let originals = certified_products::CertifiedSegmentOriginals::issue(
             parsed,
             receipt,
@@ -4092,12 +4093,24 @@ fn seal_turn_outputs_with_validation(
         None
     };
     let captured_package_interfaces = native_output
-        .map(|(output, receipt)| certified_products::PackageInterfaceCustody::from_native_output(output, receipt, validation)
-            .map_err(compiler_evidence_failure))
+        .map(|(output, receipt)| {
+            certified_products::PackageInterfaceCustody::from_native_output(
+                output, receipt, validation,
+            )
+            .map_err(compiler_evidence_failure)
+        })
         .transpose()?;
     let package_products = native_output
-        .map(|(output, receipt)| certify_native_package_products(output, receipt,
-            captured_package_interfaces.as_ref().expect("captured native output custody"), validation))
+        .map(|(output, receipt)| {
+            certify_native_package_products(
+                output,
+                receipt,
+                captured_package_interfaces
+                    .as_ref()
+                    .expect("captured native output custody"),
+                validation,
+            )
+        })
         .transpose()?
         .unwrap_or_default();
     let valid =
@@ -4119,117 +4132,118 @@ fn seal_turn_outputs_with_validation(
     };
     let (certified, item_globals, item_packages, item_selection, item_program_sha256) =
         match segment_originals {
-        Some(originals) => {
-            let item = certified_products::decode_segment_item_with_operation(
-                &receipt_bytes,
-                &validation.inventory,
-            )
-            .map_err(compiler_evidence_failure)?;
-            let prepared_paths = std::fs::read_dir(output_dir)?
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension().and_then(|value| value.to_str()) == Some("cbor")
-                        && path
-                            .file_name()
+            Some(originals) => {
+                let item = certified_products::decode_segment_item_with_operation(
+                    &receipt_bytes,
+                    &validation.inventory,
+                )
+                .map_err(compiler_evidence_failure)?;
+                let prepared_paths = std::fs::read_dir(output_dir)?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
                             .and_then(|value| value.to_str())
                             .is_some_and(|value| value.ends_with(".prepared.cbor"))
-                })
-                .collect::<Vec<_>>();
-            let [prepared_path] = prepared_paths.as_slice() else {
-                return Err(CompileError::ExtractFailed(
-                    "segment item lacks one prepared program".into(),
-                ));
-            };
-            let prepared_bytes = certified_products::read_bounded_with_operation(
-                prepared_path,
-                validation.inventory.limits().max_bytes as u64,
-                &validation.inventory,
-            )
-            .map_err(compiler_evidence_failure)?;
-            let program_sha256: [u8; 32] = {
-                use sha2::{Digest, Sha256};
-                Sha256::digest(&prepared_bytes).into()
-            };
-            let (products, globals, packages, selection) = originals
-                .select_item(
-                    segment_cursor
-                        .as_mut()
-                        .ok_or_else(|| {
+                    })
+                    .collect::<Vec<_>>();
+                let [prepared_path] = prepared_paths.as_slice() else {
+                    return Err(CompileError::ExtractFailed(
+                        "segment item lacks one prepared program".into(),
+                    ));
+                };
+                let prepared_bytes = certified_products::read_bounded_with_operation(
+                    prepared_path,
+                    validation.inventory.limits().max_bytes as u64,
+                    &validation.inventory,
+                )
+                .map_err(compiler_evidence_failure)?;
+                let program_sha256: [u8; 32] = {
+                    use sha2::{Digest, Sha256};
+                    Sha256::digest(&prepared_bytes).into()
+                };
+                let (products, globals, packages, selection) = originals
+                    .select_item(
+                        segment_cursor
+                            .as_mut()
+                            .ok_or_else(|| {
+                                CompileError::ExtractFailed(
+                                    "segment item lacks its compiler prefix cursor".into(),
+                                )
+                            })?
+                            .selection,
+                        item,
+                        prepared,
+                        &program_sha256,
+                        Some(produced_types.ok_or_else(|| {
                             CompileError::ExtractFailed(
-                                "segment item lacks its compiler prefix cursor".into(),
+                                "segment item lacks its checked type selection".into(),
                             )
-                        })?
-                        .selection,
-                    item,
-                    prepared,
-                    &program_sha256,
-                    Some(produced_types.ok_or_else(|| {
-                        CompileError::ExtractFailed(
-                            "segment item lacks its checked type selection".into(),
-                        )
-                    })?),
+                        })?),
+                        validation,
+                    )
+                    .map_err(compiler_evidence_failure)?;
+                (
+                    products,
+                    Some(globals),
+                    Some(packages),
+                    Some(selection),
+                    Some(program_sha256),
+                )
+            }
+            None => {
+                let independent_package_interfaces;
+                let package_interfaces = match &captured_package_interfaces {
+                    Some(interfaces) => interfaces,
+                    None => {
+                        independent_package_interfaces =
+                            certified_products::capture_independent_package_interfaces(
+                                ordinary_receipt.as_ref().expect("ordinary receipt"),
+                                validation,
+                            )
+                            .map_err(compiler_evidence_failure)?;
+                        &independent_package_interfaces
+                    }
+                };
+                timing::record_inventory_work(
+                    "products.certify.before",
+                    output_dir,
+                    &validation.inventory,
+                );
+                let mut products = certified_products::certify_products_with_validation(
+                    offer.selected.as_deref(),
+                    ordinary_receipt.as_ref().expect("ordinary receipt"),
+                    fresh_products,
+                    source_admission
+                        .as_ref()
+                        .expect("ordinary source admission"),
+                    output_dir,
+                    &offer.producer,
+                    &offer.include,
+                    authored,
+                    &offer.selected_session_values,
+                    produced_types,
+                    package_interfaces,
                     validation,
                 )
                 .map_err(compiler_evidence_failure)?;
-            (
-                products,
-                Some(globals),
-                Some(packages),
-                Some(selection),
-                Some(program_sha256),
-            )
-        }
-        None => {
-            let independent_package_interfaces;
-            let package_interfaces = match &captured_package_interfaces {
-                Some(interfaces) => interfaces,
-                None => {
-                    independent_package_interfaces = certified_products::capture_independent_package_interfaces(
-                        ordinary_receipt.as_ref().expect("ordinary receipt"), validation,
-                    ).map_err(compiler_evidence_failure)?;
-                    &independent_package_interfaces
-                }
-            };
-            timing::record_inventory_work(
-                "products.certify.before",
-                output_dir,
-                &validation.inventory,
-            );
-            let mut products = certified_products::certify_products_with_validation(
-                offer.selected.as_deref(),
-                ordinary_receipt.as_ref().expect("ordinary receipt"),
-                fresh_products,
-                source_admission
-                    .as_ref()
-                    .expect("ordinary source admission"),
-                output_dir,
-                &offer.producer,
-                &offer.include,
-                authored,
-                &offer.selected_session_values,
-                produced_types,
-                package_interfaces,
-                validation,
-            )
-            .map_err(compiler_evidence_failure)?;
-            crate::declaration_context::issue_certified_product_native_availability(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &offer.producer,
-                )
-                .sha256(),
-                &mut products,
-                request_admission.map(|request| request.compiler_inputs().artifacts()),
-                validation,
-            )?;
-            timing::record_inventory_work(
-                "products.certify.after",
-                output_dir,
-                &validation.inventory,
-            );
-            (products, None, None, None, None)
-        }
-    };
+                crate::declaration_context::issue_certified_product_native_availability(
+                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                        &offer.producer,
+                    )
+                    .sha256(),
+                    &mut products,
+                    request_admission.map(|request| request.compiler_inputs().artifacts()),
+                    validation,
+                )?;
+                timing::record_inventory_work(
+                    "products.certify.after",
+                    output_dir,
+                    &validation.inventory,
+                );
+                (products, None, None, None, None)
+            }
+        };
     let accepted = if let Some(globals) = &item_globals {
         globals.as_slice()
     } else {
@@ -4291,20 +4305,22 @@ fn seal_turn_outputs_with_validation(
         .unwrap_or(&no_inherited_inputs);
     let package_selection = match (segment_originals, item_selection.as_ref()) {
         (Some(originals), Some(selection)) => {
-            crate::artifact_inventory::BoundPackageSelection::item(
+            crate::certified_products::BoundPackageSelection::item(
                 originals.package_links(),
                 selection,
                 item_program_sha256.expect("item program digest"),
-            )?
+            )
+            .map_err(compiler_evidence_failure)?
         }
-        (None, None) => crate::artifact_inventory::BoundPackageSelection::ordinary(
+        (None, None) => crate::certified_products::BoundPackageSelection::ordinary(
             &ordinary_receipt
                 .as_ref()
                 .expect("ordinary receipt")
                 .package_links,
             target,
             [0; 32],
-        )?,
+        )
+        .map_err(compiler_evidence_failure)?,
         _ => {
             return Err(CompileError::ExtractFailed(
                 "native target has an incoherent package selection mode".into(),
@@ -4533,7 +4549,7 @@ fn admit_native_target_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
     certified: &certified_products::CertifiedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
-    package_selection: crate::artifact_inventory::BoundPackageSelection<'_>,
+    package_selection: certified_products::BoundPackageSelection,
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
     accepted: &[certified_products::AcceptedGlobal],
     package_catalog: &PackageInterfaceCatalog<'_>,
@@ -6245,11 +6261,19 @@ fn compile_invocation_inner(
             catalog_inventory::phase(output, catalog_inventory::Phase::ProductCertification)?;
         }
         let receipt = &native.receipt;
-        let captured_package_interfaces = certified_products::PackageInterfaceCustody::from_native_output(
-            &native_output, receipt, &mut validation,
-        ).map_err(compiler_evidence_failure)?;
-        let package_products =
-            certify_native_package_products(&native_output, receipt, &captured_package_interfaces, &mut validation)?;
+        let captured_package_interfaces =
+            certified_products::PackageInterfaceCustody::from_native_output(
+                &native_output,
+                receipt,
+                &mut validation,
+            )
+            .map_err(compiler_evidence_failure)?;
+        let package_products = certify_native_package_products(
+            &native_output,
+            receipt,
+            &captured_package_interfaces,
+            &mut validation,
+        )?;
         invocation_timing.advance("product_decode_and_freshness");
         let fresh_products = certified_products::ParsedModuleProducts::decode_with_operation(
             &product_bytes,
@@ -6450,17 +6474,20 @@ fn compile_invocation_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
+                let program_sha256: [u8; 32] = {
+                    use sha2::{Digest, Sha256};
+                    Sha256::digest(target.prepared.bytes()).into()
+                };
+                let package_selection = receipt
+                    .ordinary_package_selection(name, program_sha256)
+                    .map_err(compiler_evidence_failure)?;
                 let native_inputs = selected_target
                     .with_certified_groups(Arc::clone(&selected_groups))?
                     .complete_native_selection(
                         target.prepared.prepared(),
                         &native_output,
                         &package_products,
-                        crate::artifact_inventory::BoundPackageSelection::ordinary(
-                            &receipt.package_links,
-                            name,
-                            [0; 32],
-                        )?,
+                        package_selection,
                         &inherited_completion_support,
                         &validation.inventory,
                     )?;

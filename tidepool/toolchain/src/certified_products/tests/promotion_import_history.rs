@@ -943,10 +943,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
         globals: vec![],
         packages: BTreeMap::new(),
-        selection: super::empty_package_selection(
-            *shared.receipt.package_links.stage_id(),
-            "item",
-        ),
+        selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
     }));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
     let prepared = testing::prepare(testing::wire_program()).unwrap();
@@ -1044,10 +1041,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let addition = || SegmentItemReceipt {
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
-            selection: super::empty_package_selection(
-                *shared.receipt.package_links.stage_id(),
-                "item",
-            ),
+            selection: empty_package_selection(*shared.receipt.package_links.stage_id(), "item"),
         };
         let (selected, globals, packages, _) = shared
             .select_item(
@@ -1091,7 +1085,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 SegmentItemReceipt {
                     globals: vec![],
                     packages: BTreeMap::new(),
-                    selection: super::empty_package_selection(
+                    selection: empty_package_selection(
                         *shared.receipt.package_links.stage_id(),
                         "item",
                     ),
@@ -1106,7 +1100,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let mut unused = addition();
         unused.globals.clear();
         assert!(matches!(
-            shared.select_item(&mut cursor, unused, &prepared, &[0; 32], None, &mut validation),
+            shared.select_item(
+                &mut cursor,
+                unused,
+                &prepared,
+                &[0; 32],
+                None,
+                &mut validation
+            ),
             Err(CertificationError::Mismatch(
                 "item package has no target demand"
             ))
@@ -1134,7 +1135,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             SegmentItemReceipt {
                 globals: vec![],
                 packages: BTreeMap::new(),
-                selection: super::empty_package_selection(
+                selection: empty_package_selection(
                     *shared.receipt.package_links.stage_id(),
                     "item",
                 ),

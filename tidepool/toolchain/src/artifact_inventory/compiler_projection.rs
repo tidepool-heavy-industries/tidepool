@@ -1013,69 +1013,11 @@ fn append_native_completion_rows(
 
 /// Complete only this acquired target closure. Available unused HOME groups
 /// and unused captured package products do not become executable roots.
-pub(crate) struct BoundPackageSelection<'a> {
-    stage: &'a crate::certified_products::PackageLinks,
-    program_sha256: [u8; 32],
-    target: &'a str,
-    target_roots: &'a [crate::certified_products::PackageLink],
-    home_roots: &'a BTreeMap<
-        (String, String, String, u32),
-        Vec<crate::certified_products::PackageLink>,
-    >,
-}
-
-fn package_selection_failure(message: impl Into<String>) -> CompileError {
-    CompileError::ExtractFailed(format!(
-        "artifact inventory: {}",
-        message.into()
-    ))
-}
-
-impl<'a> BoundPackageSelection<'a> {
-    pub(crate) fn ordinary(
-        stage: &'a crate::certified_products::PackageLinks,
-        target: &'a str,
-        program_sha256: [u8; 32],
-    ) -> Result<Self, CompileError> {
-        let target_roots = stage
-            .target_links(target)
-            .ok_or_else(|| failure("target package selection is absent from its stage"))?;
-        Ok(Self {
-            stage,
-            program_sha256,
-            target,
-            target_roots,
-            home_roots: stage.home_roots(),
-        })
-    }
-
-    pub(crate) fn item(
-        stage: &'a crate::certified_products::PackageLinks,
-        selection: &'a crate::certified_products::PackageSelection,
-        program_sha256: [u8; 32],
-    ) -> Result<Self, CompileError> {
-        if selection.stage_id() != stage.stage_id()
-            || selection.program_sha256() != &program_sha256
-        {
-            return Err(failure(
-                "item package selection is paired with another stage or program",
-            ));
-        }
-        Ok(Self {
-            stage,
-            program_sha256,
-            target: selection.target(),
-            target_roots: selection.target_roots(),
-            home_roots: selection.home_roots(),
-        })
-    }
-}
-
 pub(crate) fn complete_native_selection(
     sources: &crate::artifacts::ResolvedNativeSourceProducts<'_>,
     output: &crate::artifacts::invocation_output::CapturedNativeOutput<'_>,
     products: &[Arc<crate::certified_products::CertifiedPackageCodeProduct>],
-    selection: BoundPackageSelection<'_>,
+    selection: crate::certified_products::BoundPackageSelection,
     inherited: &NativeSelectionCompletions,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Arc<CompletedNativeSelection>, CompileError> {
@@ -1104,20 +1046,20 @@ pub(crate) fn complete_native_selection(
         .iter()
         .map(|old| Arc::clone(&old.packages))
         .collect::<Vec<_>>();
-    let BoundPackageSelection {
-        stage: links,
-        program_sha256: _program_sha256,
-        target,
-        target_roots: selected_target_roots,
-        home_roots: selected_home_roots,
-    } = selection;
     // Every occurrence row names one authenticated fresh product by envelope.
     // The row's owner/defining facts must match that product exactly; the
     // envelope SHA never substitutes for selection or binding identity.
-    let occurrences = links.occurrences();
+    let occurrences = selection.occurrences();
     let mut product_by_envelope = BTreeMap::new();
     for product in products {
-        product_by_envelope.insert(*product.envelope_sha256(), product);
+        if product_by_envelope
+            .insert(*product.envelope_sha256(), product)
+            .is_some()
+        {
+            return Err(failure(
+                "completed output contains duplicate package envelope products",
+            ));
+        }
     }
     let mut occurrence_products = Vec::with_capacity(occurrences.len());
     for occurrence in occurrences {
@@ -1149,18 +1091,61 @@ pub(crate) fn complete_native_selection(
         .iter()
         .map(|product| product.artifact_id())
         .collect::<Vec<_>>();
-    let resolve_link =
-        |link: &PackageLink| -> Result<super::PackageCodeTarget, CompileError> {
-            match link {
-                PackageLink::Local { occurrence } => {
-                    let id = plan_artifact_ids
-                        .get(*occurrence as usize)
-                        .copied()
-                        .ok_or_else(|| failure("package occurrence link is out of range"))?;
-                    Ok(super::PackageCodeTarget::Planned(id))
-                }
+    let planned = |occurrence: u32| -> Result<super::PackageCodeTarget, CompileError> {
+        let id = plan_artifact_ids
+            .get(occurrence as usize)
+            .copied()
+            .ok_or_else(|| failure("package occurrence link is out of range"))?;
+        Ok(super::PackageCodeTarget::Planned(id))
+    };
+    let plan_link = |link: &PackageLink| planned(link.occurrence());
+    fn fresh_occurrence_matches(
+        occurrence: u32,
+        held: &super::PackageCodeBinding,
+        occurrences: &[crate::certified_products::PackageOccurrenceRow],
+        occurrence_products: &[&Arc<crate::certified_products::CertifiedPackageCodeProduct>],
+        seen: &mut BTreeSet<(u32, super::ArtifactBinding)>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<bool, CompileError> {
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let row = occurrences
+            .get(occurrence as usize)
+            .ok_or_else(|| failure("fresh HOME occurrence is out of range"))?;
+        let product = occurrence_products
+            .get(occurrence as usize)
+            .ok_or_else(|| failure("fresh HOME occurrence lacks its product"))?;
+        if product.as_ref() != held.product().as_ref() {
+            return Ok(false);
+        }
+        if !seen.insert((occurrence, held.binding())) {
+            return Ok(true);
+        }
+        let held_children = held.import_links().collect::<Vec<_>>();
+        if row.imports().len() != held_children.len() {
+            return Ok(false);
+        }
+        for (child, (held_child, _)) in row.imports().iter().zip(held_children) {
+            if !fresh_occurrence_matches(
+                child.occurrence(),
+                &held_child,
+                occurrences,
+                occurrence_products,
+                seen,
+                operation,
+            )? {
+                return Ok(false);
             }
-        };
+        }
+        Ok(true)
+    }
+    enum SelectedPackageRoot {
+        Occurrence(u32),
+        Held(super::PackageCodeBinding),
+    }
+    let mut selected_package_roots = Vec::new();
     operation
         .reserve::<CompletedNativeSourceRow>(sources.groups().count())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
@@ -1193,14 +1178,14 @@ pub(crate) fn complete_native_selection(
         }
         row_inputs.push((row, prior));
     }
-    // Resolve HOME package slots in row order. Fresh rows consume their exact
-    // `home_roots` links keyed by (unit, module, original ordinal); retained
-    // rows reuse their prior held binding and never consult a digest-to-many
-    // inventory. Product origin, not the absence of a recomputed prior, owns
-    // that distinction: an unchanged historical Original can be non-fresh
-    // without appearing in this request's inherited completion map.
-    let target_links = selected_target_roots;
-    let mut selected_links = Vec::new();
+    // Fresh rows consume their target-qualified HOME links. A prior completion is
+    // authoritative, but the fresh occurrence must match its product and ordered
+    // children exactly before admission. Non-fresh rows without a prior
+    // completion have no reconstructable choice.
+    let expected_home_keys = selection
+        .home_root_coordinates()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut consumed_home_keys = BTreeSet::new();
     for (row, prior) in &row_inputs {
         let imports = row.imports();
@@ -1213,30 +1198,12 @@ pub(crate) fn complete_native_selection(
             ));
         }
         let owner = row.group().owner();
-        let fresh_links = if row.group().origin()
-            == crate::certified_products::ProductOrigin::Fresh
-        {
-            consumed_home_keys.insert((
-                owner.unit.clone(),
-                owner.module.clone(),
-                row.binding().original_ordinal,
-            ));
+        let fresh = row.group().origin() == crate::certified_products::ProductOrigin::Fresh;
+        let fresh_links = if fresh {
             Some(
-                selected_home_roots
-                    .get(&(
-                        target.to_owned(),
-                        owner.unit.clone(),
-                        owner.module.clone(),
-                        row.binding().original_ordinal,
-                    ))
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| package_selection_failure(format!(
-                        "fresh HOME group lacks package links for target {target}, owner {}:{}:{}, available={:?}",
-                        owner.unit,
-                        owner.module,
-                        row.binding().original_ordinal,
-                        selected_home_roots.keys().collect::<Vec<_>>()
-                    )))?,
+                selection
+                    .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
+                    .ok_or_else(|| failure("fresh HOME group lacks package links"))?,
             )
         } else {
             None
@@ -1253,39 +1220,80 @@ pub(crate) fn complete_native_selection(
                         "package obligation differs from its physical global",
                     ));
                 }
-                if prior.is_some_and(|row| {
-                    !matches!(row.imports[index], CompletedNativeImport::Package { .. })
-                }) {
-                    return Err(failure("completed HOME slot changed its import kind"));
-                }
-                match fresh_links {
-                    Some(list) => {
-                        let slot = list
+                let selected = match prior.map(|row| &row.imports[index]) {
+                    Some(CompletedNativeImport::Package { binding, .. }) => {
+                        check_product(binding.product())?;
+                        if fresh {
+                            let slot = fresh_links
+                                .and_then(|links| links.get(fresh_slot))
+                                .ok_or_else(|| {
+                                    failure("fresh HOME group has too few package links")
+                                })?;
+                            fresh_slot += 1;
+                            if !fresh_occurrence_matches(
+                                slot.occurrence(),
+                                binding,
+                                occurrences,
+                                &occurrence_products,
+                                &mut BTreeSet::new(),
+                                operation,
+                            )? {
+                                return Err(failure(
+                                    "fresh HOME evidence disagrees with its prior exact binding",
+                                ));
+                            }
+                            SelectedPackageRoot::Held(binding.clone())
+                        } else {
+                            SelectedPackageRoot::Held(binding.clone())
+                        }
+                    }
+                    Some(_) => return Err(failure("completed HOME slot changed its import kind")),
+                    None => {
+                        let slot = fresh_links
+                            .ok_or_else(|| {
+                                failure("non-fresh HOME package slot lacks its prior completion")
+                            })?
                             .get(fresh_slot)
                             .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
                         fresh_slot += 1;
-                        selected_links.push(slot);
+                        SelectedPackageRoot::Occurrence(slot.occurrence())
                     }
-                    None if prior.is_some() => {}
-                    None => {
-                        return Err(failure(
-                            "non-fresh HOME package slot lacks its prior completion",
-                        ))
-                    }
-                }
+                };
+                selected_package_roots.push(selected);
             }
         }
         if let Some(list) = fresh_links {
             if fresh_slot != list.len() {
                 return Err(failure("fresh HOME package links were not fully consumed"));
             }
+            consumed_home_keys.insert((
+                owner.unit.clone(),
+                owner.module.clone(),
+                row.binding().original_ordinal,
+            ));
         }
     }
-    let target_resolution = sources.target();
-    let definitions = target_resolution.definitions();
+    if consumed_home_keys != expected_home_keys {
+        return Err(failure(
+            "package HOME roots do not exactly cover the selected fresh groups",
+        ));
+    }
+    let target = sources.target();
+    let definitions = target.definitions();
     if sources.target_requirements().len() != definitions.globals().len() {
         return Err(failure(
             "target completion slots differ from physical definitions",
+        ));
+    }
+    let target_links = selection.target_roots();
+    let target_package_count = sources
+        .target_requirements()
+        .iter()
+        .filter(|link| matches!(link, SelectedNativeTargetImport::Package { .. }))
+        .count();
+    if target_package_count != target_links.len() {
+        return Err(failure(
+            "target package link count differs from its physical globals",
         ));
     }
     let mut target_cursor = 0usize;
@@ -1308,7 +1316,7 @@ pub(crate) fn complete_native_selection(
                     .get(target_cursor)
                     .ok_or_else(|| failure("target package slot exceeds package links"))?;
                 target_cursor += 1;
-                selected_links.push(slot);
+                selected_package_roots.push(SelectedPackageRoot::Occurrence(slot.occurrence()));
             }
             SelectedNativeTargetImport::RetainedCapture {
                 identity,
@@ -1326,160 +1334,50 @@ pub(crate) fn complete_native_selection(
     if target_cursor != target_links.len() {
         return Err(failure("target package links were not fully consumed"));
     }
-    let expected_home_keys = selected_home_roots
-        .keys()
-        .filter(|(issuer, _, _, _)| issuer == target)
-        .map(|(_, unit, module, ordinal)| (unit.clone(), module.clone(), *ordinal))
-        .collect::<BTreeSet<_>>();
-    if consumed_home_keys != expected_home_keys {
-        return Err(package_selection_failure(format!(
-            "target HOME package links were not fully consumed: consumed={consumed_home_keys:?} expected={expected_home_keys:?}"
-        )));
-    }
-    let mut selected_occurrences = BTreeSet::new();
-    let mut pending = selected_links
+    let mut reached = BTreeSet::new();
+    let mut pending = selected_package_roots
         .iter()
-        .map(|link| match link {
-            PackageLink::Local { occurrence } => Ok(*occurrence),
+        .filter_map(|root| match root {
+            SelectedPackageRoot::Occurrence(occurrence) => Some(*occurrence),
+            SelectedPackageRoot::Held(_) => None,
         })
-        .collect::<Result<Vec<_>, CompileError>>()?;
+        .collect::<Vec<_>>();
     while let Some(occurrence) = pending.pop() {
-        if !selected_occurrences.insert(occurrence) {
-            continue;
+        crate::host_work::checkpoint()?;
+        operation
+            .charge(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        if reached.insert(occurrence) {
+            let row = occurrences
+                .get(occurrence as usize)
+                .ok_or_else(|| failure("selected package occurrence is out of range"))?;
+            pending.extend(row.imports().iter().map(PackageLink::occurrence));
         }
-        let row = occurrences
-            .get(occurrence as usize)
-            .ok_or_else(|| failure("package occurrence link is out of range"))?;
-        pending.extend(row.imports().iter().map(|link| match link {
-            PackageLink::Local { occurrence } => *occurrence,
-        }));
     }
-    let mut plans_by_artifact = BTreeMap::new();
-    for occurrence in selected_occurrences {
-        let index = occurrence as usize;
-        let row = occurrences
-            .get(index)
-            .ok_or_else(|| failure("package occurrence link is out of range"))?;
-        let product = occurrence_products
-            .get(index)
-            .ok_or_else(|| failure("package occurrence link is out of range"))?;
+    let mut plans = Vec::with_capacity(reached.len());
+    for occurrence in reached {
+        let row = &occurrences[occurrence as usize];
+        let product = occurrence_products[occurrence as usize];
         let imports = row
             .imports()
             .iter()
-            .map(resolve_link)
+            .map(plan_link)
             .collect::<Result<Vec<_>, _>>()?;
         operation
             .reserve::<super::PackageCodePlan>(1)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let plan = super::PackageCodePlan {
+        plans.push(super::PackageCodePlan {
             product: Arc::clone(product),
             imports,
-        };
-        match plans_by_artifact.entry(plan.artifact_id()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(plan);
-            }
-            std::collections::btree_map::Entry::Occupied(entry)
-                if entry.get().product == plan.product
-                    && entry.get().imports == plan.imports => {}
-            std::collections::btree_map::Entry::Occupied(entry) => {
-                return Err(super::admission_failure(
-                    super::ArtifactInventoryFailure::PackageCode {
-                        artifact: *entry.key(),
-                        reason: super::PackageCodeRefusal::ConflictingPlan,
-                    },
-                ));
-            }
-        }
+        });
     }
-    let mut package_roots = Vec::new();
-    for (row, prior) in &row_inputs {
-        let imports = row.imports();
-        let definitions = row.group().group().definitions();
-        let owner = row.group().owner();
-        let fresh_links = if row.group().origin()
-            == crate::certified_products::ProductOrigin::Fresh
-        {
-            Some(
-                selected_home_roots
-                    .get(&(
-                        target.to_owned(),
-                        owner.unit.clone(),
-                        owner.module.clone(),
-                        row.binding().original_ordinal,
-                    ))
-                    .map(Vec::as_slice)
-                    .ok_or_else(|| package_selection_failure(format!(
-                        "fresh HOME group lacks package links for target {target}, owner {}:{}:{}, available={:?}",
-                        owner.unit,
-                        owner.module,
-                        row.binding().original_ordinal,
-                        selected_home_roots.keys().collect::<Vec<_>>()
-                    )))?,
-            )
-        } else {
-            None
-        };
-        let mut local_cursor = 0usize;
-        for (index, (link, global)) in imports.iter().zip(definitions.globals()).enumerate() {
-            if let SelectedNativeImport::Package {
-                identity,
-                interface_digest: _,
-            } = link
-            {
-                if identity != &global.identity {
-                    return Err(failure(
-                        "package obligation differs from its physical global",
-                    ));
-                }
-                match prior.map(|row| &row.imports[index]) {
-                    Some(CompletedNativeImport::Package { binding, .. }) => {
-                        check_product(binding.product())?;
-                        if let Some(list) = fresh_links {
-                            let slot = list.get(local_cursor).ok_or_else(|| {
-                                failure("fresh HOME group has too few package links")
-                            })?;
-                            let selected = resolve_link(slot)?;
-                            if !planned_selection_matches(
-                                &selected,
-                                binding,
-                                &plans_by_artifact,
-                            )? {
-                                return Err(failure(
-                                    "fresh HOME evidence disagrees with prior completion",
-                                ));
-                            }
-                        }
-                        package_roots.push(super::PackageCodeTarget::Held(binding.clone()));
-                    }
-                    Some(_) => {
-                        return Err(failure("completed HOME slot changed its import kind"))
-                    }
-                    None => {
-                        let slot = fresh_links
-                            .ok_or_else(|| {
-                                failure("non-fresh HOME package slot lacks its prior completion")
-                            })?
-                            .get(local_cursor)
-                            .ok_or_else(|| failure("fresh HOME group has too few package links"))?;
-                        package_roots.push(resolve_link(slot)?);
-                    }
-                }
-                if fresh_links.is_some() {
-                    local_cursor += 1;
-                }
-            }
-        }
-        if let Some(list) = fresh_links {
-            if local_cursor != list.len() {
-                return Err(failure("fresh HOME package links were not fully consumed"));
-            }
-        }
-    }
-    for slot in target_links {
-        package_roots.push(resolve_link(slot)?);
-    }
-    let plans = plans_by_artifact.into_values().collect::<Vec<_>>();
+    let package_roots = selected_package_roots
+        .into_iter()
+        .map(|root| match root {
+            SelectedPackageRoot::Occurrence(occurrence) => planned(occurrence),
+            SelectedPackageRoot::Held(binding) => Ok(super::PackageCodeTarget::Held(binding)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let packages = super::IssuedPackageCodeGraph::issue(
         sources.acquired_artifacts(),
         plans,
@@ -1628,47 +1526,6 @@ pub(crate) fn complete_native_selection(
         )?,
         target_imports,
     }))
-}
-
-fn planned_selection_matches(
-    selected: &super::PackageCodeTarget,
-    held: &super::PackageCodeBinding,
-    plans: &BTreeMap<
-        super::ArtifactId,
-        super::PackageCodePlan,
-    >,
-) -> Result<bool, CompileError> {
-    fn compare(
-        selected: &super::PackageCodeTarget,
-        held: &super::PackageCodeBinding,
-        plans: &BTreeMap<super::ArtifactId, super::PackageCodePlan>,
-        seen: &mut BTreeSet<(super::ArtifactId, super::ArtifactBinding)>,
-    ) -> Result<bool, CompileError> {
-        match selected {
-            super::PackageCodeTarget::Held(other) => Ok(other == held),
-            super::PackageCodeTarget::Planned(id) => {
-                if *id != held.product().artifact_id()
-                    || !seen.insert((*id, held.binding()))
-                {
-                    return Ok(*id == held.product().artifact_id());
-                }
-                let plan = plans.get(id).ok_or_else(|| {
-                    failure("selected package occurrence lacks its graph plan")
-                })?;
-                let held_imports = held.imports().collect::<Vec<_>>();
-                if plan.imports.len() != held_imports.len() {
-                    return Ok(false);
-                }
-                for (selected, held) in plan.imports.iter().zip(&held_imports) {
-                    if !compare(selected, held, plans, seen)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-        }
-    }
-    compare(selected, held, plans, &mut BTreeSet::new())
 }
 
 /// Matched compiler roles and exact custody selected by their existing issuer.
@@ -3307,9 +3164,11 @@ impl CompilerSourceSupport {
             mut selected,
             input_decisions,
         } = inputs;
-        let artifacts = native_completions.iter().try_fold(artifacts, |view, completion| {
-            view.retain_custody(completion.artifacts())
-        })?;
+        let artifacts = native_completions
+            .iter()
+            .try_fold(artifacts, |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
         timing.advance("retain_issued_offer_custody");
         let mut offers = Vec::new();
         let mut native_offer_facts = prior.map(|p| p.offers.clone()).unwrap_or_default();
@@ -4074,30 +3933,20 @@ impl CompilerSourceSupport {
         let Some(selected_original) = role.original() else {
             return Ok(InputNativeDecision::UnissuedPolicy);
         };
-        let admitted = self
-            .selected
-            .get(&owner)
-            .ok_or_else(|| {
-                InputDecisionRefusal::ArtifactIdentityMismatch(ArtifactIdentityMismatch {
-                    expected_original: Some(original),
-                    expected_canonical: Some(canonical),
-                    ..ArtifactIdentityMismatch::refused(
-                        ArtifactIdentityStage::MissingSelectedRow,
-                    )
-                })
-            })?;
-        let (_, entry) = admitted
-            .original
-            .as_ref()
-            .ok_or_else(|| {
-                InputDecisionRefusal::ArtifactIdentityMismatch(ArtifactIdentityMismatch {
-                    expected_original: Some(original),
-                    expected_canonical: Some(canonical),
-                    ..ArtifactIdentityMismatch::refused(
-                        ArtifactIdentityStage::MissingOriginalSlot,
-                    )
-                })
-            })?;
+        let admitted = self.selected.get(&owner).ok_or_else(|| {
+            InputDecisionRefusal::ArtifactIdentityMismatch(ArtifactIdentityMismatch {
+                expected_original: Some(original),
+                expected_canonical: Some(canonical),
+                ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::MissingSelectedRow)
+            })
+        })?;
+        let (_, entry) = admitted.original.as_ref().ok_or_else(|| {
+            InputDecisionRefusal::ArtifactIdentityMismatch(ArtifactIdentityMismatch {
+                expected_original: Some(original),
+                expected_canonical: Some(canonical),
+                ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::MissingOriginalSlot)
+            })
+        })?;
         if selected_original != original
             || entry.descriptor.id != original
             || role.interface() != canonical
@@ -4126,9 +3975,7 @@ impl CompilerSourceSupport {
                     observed_original: Some(entry.descriptor.id),
                     observed_canonical: Some(admitted.interface.1.descriptor.id),
                     observed_kind: Some(entry.payload.artifact_kind()),
-                    ..ArtifactIdentityMismatch::refused(
-                        ArtifactIdentityStage::NonOriginalPayload,
-                    )
+                    ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::NonOriginalPayload)
                 },
             ));
         };
@@ -4230,7 +4077,9 @@ impl CompilerSourceSupport {
         for (identity, recorded) in facts {
             crate::host_work::checkpoint()?;
             if recorded.identity_in(Some(&validation.inventory))? != *identity {
-                return Err(failure("native completion fact commitment differs from its record"));
+                return Err(failure(
+                    "native completion fact commitment differs from its record",
+                ));
             }
             let completion = restore_native_completion(recorded, &self.artifacts, validation)?;
             restored = restored.append(&NativeSelectionCompletions::one(completion))?;
@@ -4243,7 +4092,9 @@ impl CompilerSourceSupport {
         draft.close()
     }
 
-    pub(crate) fn native_completion_facts(&self) -> &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>> {
+    pub(crate) fn native_completion_facts(
+        &self,
+    ) -> &imbl::OrdMap<[u8; 32], Arc<NativeCompletionSnapshotFacts>> {
         self.native_completions.recorded_facts()
     }
 
@@ -4310,7 +4161,9 @@ impl CompilerSourceSupport {
             None => self.native_availability.clone(),
         };
         let completions = match fragment {
-            Some(fragment) => self.native_completions.append(fragment.issued_native_completions())?,
+            Some(fragment) => self
+                .native_completions
+                .append(fragment.issued_native_completions())?,
             None => self.native_completions.clone(),
         };
         let support = Self::new_with_native_facts(
@@ -4388,8 +4241,14 @@ impl CompilerSourceSupport {
         &self,
         snapshot: &crate::exact_context::ExactContextSnapshot,
     ) -> Result<Self, CompileError> {
-        if snapshot.native_completions.values().any(|facts| facts.producer_sha256 != snapshot.producer) {
-            return Err(failure("native completion belongs to another context producer"));
+        if snapshot
+            .native_completions
+            .values()
+            .any(|facts| facts.producer_sha256 != snapshot.producer)
+        {
+            return Err(failure(
+                "native completion belongs to another context producer",
+            ));
         }
         let restored = self.restore_native_maps(
             &snapshot.roles,
@@ -4609,42 +4468,7 @@ impl CompilerSourceSupport {
             available =
                 available.project_roles(|owner, role| (owner != &generated).then(|| role.clone()));
         }
-        // The compiler's narrowed namespace can keep an inherited SOURCE body
-        // as RetainedCore (body custody without a selected Original). A source
-        // import, or an owner in its exact Original dependency closure, that
-        // still carries an authenticated Original body keeps that body so the
-        // native dependency closure stays acquirable. Unrelated dependencies
-        // and interface-only roles without bodies stay interface-only.
-        let metadata = artifacts.metadata_snapshot();
-        let issued_rows = inputs.native_availability();
-        let mut original_by_owner = BTreeMap::new();
-        for entry in metadata.artifacts.values() {
-            if matches!(&entry.payload, ArtifactPayload::Original(_))
-                && issued_rows.issued_row(entry.descriptor.id).is_some()
-            {
-                original_by_owner.insert(entry.descriptor.owner.clone(), entry.descriptor.id);
-            }
-        }
-        let mut source_originals = owners.clone();
-        let mut promote_pending = owners.iter().cloned().collect::<Vec<_>>();
-        let mut promote_seen = BTreeSet::new();
-        while let Some(owner) = promote_pending.pop() {
-            if !promote_seen.insert(owner.clone()) {
-                continue;
-            }
-            source_originals.insert(owner.clone());
-            let Some(original_id) = original_by_owner.get(&owner).copied() else {
-                continue;
-            };
-            let Some(entry) = metadata.artifacts.get(&original_id) else {
-                continue;
-            };
-            for required in &entry.requirements {
-                if original_by_owner.contains_key(required) {
-                    promote_pending.push(required.clone());
-                }
-            }
-        }
+        let available = available.world_stage_roles(&owners);
         let operation = program.validation().inventory.as_ref();
         let charge = |result: Result<(), tidepool_repr::execution_schema::ParseError>| {
             result.map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))
@@ -4689,20 +4513,7 @@ impl CompilerSourceSupport {
                 .roles
                 .get(&owner)
                 .ok_or_else(|| failure("World source fragment lacks a required compiler role"))?;
-            let role = if source_originals.contains(&owner) {
-                match (role.original(), original_by_owner.get(&owner)) {
-                    (Some(_), _) => role.clone(),
-                    (None, Some(original)) => CompilerInputRole::ReusableOriginal {
-                        interface: role.interface(),
-                        original: *original,
-                    },
-                    (None, None) => role.clone(),
-                }
-            } else {
-                CompilerInputRole::InterfaceOnly {
-                    interface: role.interface(),
-                }
-            };
+            let role = role.clone();
             for id in std::iter::once(role.interface()).chain(role.original()) {
                 let entry =
                     artifacts.lease.payloads.get(&id).ok_or_else(|| {
@@ -5792,6 +5603,21 @@ impl CompilerInputProjection {
         projected
     }
 
+    /// A World stage selects compiler implementations only for its direct
+    /// source imports. Dependencies remain part of that issuer's native
+    /// availability without being promoted into compiler namespace roles.
+    pub(crate) fn world_stage_roles(&self, source_owners: &BTreeSet<ExactModuleIdentity>) -> Self {
+        self.project_roles(|owner, role| {
+            Some(if source_owners.contains(owner) {
+                role.clone()
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: role.interface(),
+                }
+            })
+        })
+    }
+
     pub(crate) fn from_issued_entries(
         entries: &[Arc<ArtifactEntry>],
     ) -> Result<Self, CompileError> {
@@ -5806,7 +5632,9 @@ impl CompilerInputProjection {
                     ),
                     Some(entry.descriptor.id),
                 ),
-                ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => (entry.descriptor.id, None),
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => {
+                    (entry.descriptor.id, None)
+                }
                 ArtifactPayload::PackageCode(_) => continue,
             };
             let role = match original_reuse {
@@ -6238,9 +6066,7 @@ impl CompilerInputProjection {
         interface: &'a Arc<ArtifactEntry>,
         original: impl FnOnce(ArtifactId) -> Option<&'a Arc<ArtifactEntry>>,
     ) -> Result<&'a Arc<ArtifactEntry>, CompileError> {
-        if &interface.descriptor.owner != owner
-            || !interface.is_compiler_interface()
-        {
+        if &interface.descriptor.owner != owner || !interface.is_compiler_interface() {
             return Err(failure("compiler interface role has another owner or kind"));
         }
         match role.original() {
@@ -6295,7 +6121,8 @@ mod tests {
                         }
                     }
                     if result.iter().any(|prior| {
-                        prior.identity == completion.identity && prior.recorded != completion.recorded
+                        prior.identity == completion.identity
+                            && prior.recorded != completion.recorded
                     }) {
                         return Err(failure("slow commitment collision"));
                     }
@@ -6320,25 +6147,22 @@ mod tests {
                         .unwrap();
                     reference = slow_append(&reference, &[Arc::clone(completion)]).unwrap();
                     assert_eq!(indexed.owners.len(), reference.len());
-                    assert!(
-                        reference
-                            .iter()
-                            .all(|owner| indexed.iter().any(|actual| actual == owner))
-                    );
+                    assert!(reference
+                        .iter()
+                        .all(|owner| indexed.iter().any(|actual| actual == owner)));
                     let repeated = indexed.append(&indexed).unwrap();
                     assert!(repeated.owners.ptr_eq(&indexed.owners));
                     assert!(repeated.rows.ptr_eq(&indexed.rows));
                     assert_eq!(indexed, repeated);
                 }
-                let replay =
-                    order
-                        .iter()
-                        .rev()
-                        .fold(NativeSelectionCompletions::default(), |prior, owner| {
-                            prior
-                                .append(&NativeSelectionCompletions::one(Arc::clone(owner)))
-                                .unwrap()
-                        });
+                let replay = order.iter().rev().fold(
+                    NativeSelectionCompletions::default(),
+                    |prior, owner| {
+                        prior
+                            .append(&NativeSelectionCompletions::one(Arc::clone(owner)))
+                            .unwrap()
+                    },
+                );
                 assert_eq!(indexed, replay);
                 assert_eq!(indexed.recorded, replay.recorded);
             }
@@ -6356,18 +6180,14 @@ mod tests {
             let original = NativeSelectionCompletions::one(Arc::clone(actual));
             let mut collision = copy();
             Arc::make_mut(&mut collision.recorded).profile_sha256[0] ^= 1;
-            assert!(
-                original
-                    .append(&NativeSelectionCompletions::one(Arc::new(collision)))
-                    .is_err()
-            );
+            assert!(original
+                .append(&NativeSelectionCompletions::one(Arc::new(collision)))
+                .is_err());
             let mut inconsistent = copy();
             inconsistent.producer_sha256[0] ^= 1;
-            assert!(
-                original
-                    .append(&NativeSelectionCompletions::one(Arc::new(inconsistent)))
-                    .is_err()
-            );
+            assert!(original
+                .append(&NativeSelectionCompletions::one(Arc::new(inconsistent)))
+                .is_err());
             assert!(Arc::ptr_eq(&original.owners[&actual.identity], actual));
         }
     }
@@ -6520,7 +6340,8 @@ mod tests {
             package_roots: vec![package, package].into(),
         };
         let encoded = fvm_ipld_encoding::to_vec(&facts).unwrap();
-        let decoded: NativeCompletionSnapshotFacts = fvm_ipld_encoding::from_slice(&encoded).unwrap();
+        let decoded: NativeCompletionSnapshotFacts =
+            fvm_ipld_encoding::from_slice(&encoded).unwrap();
         assert_eq!(decoded, facts);
         assert_eq!(decoded.identity().unwrap(), facts.identity().unwrap());
         for duplicate in [false, true] {
@@ -9934,5 +9755,4 @@ mod tests {
             );
         }
     }
-
 }
