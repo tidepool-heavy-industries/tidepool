@@ -1,81 +1,82 @@
-# T/V: discriminating joined gates
+# G2 joined qualification gates
 
-Current source base: code `29231ed323`, incoming documentation `5b3e15d7dc`.
-No new behavioral tests were run by the peer review. REVIEW-ROOT's retained
-counts are not qualification of a newly assembled candidate.
+Accepted implementation base `ac2440926e`; use current exact integration OID for
+each run. [NEXT-WAVE](NEXT-WAVE.md) defines the repairs. Existing evidence is in
+`/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
+Do not add counts from different checkpoints into one passing suite.
 
-## Correct premises before interpreting failures
+## Ordered gates
 
-- Fix the untyped later-item fixture with the actual effect alias; unmerged
-  7fac7d7603 leaves literal Eff {} in a plain string. Prove first-item runtime
-  progress and the intended second-item failure before asserting nonpublication.
-- Separate forward/reverse retirement tests so one panic does not hide the other.
-- Actual empty source/import planning decides zero-item coverage; do not assert
-  an import is necessarily empty. Cover real zero-item and declaration-only paths.
-- Package oracle corrections are in PACKAGE-CLOSEOUT. Retain useful old controls.
-- Rebuild source-race fixture through real private A/public B World admission.
-  Test unchanged A, disjoint A edit and same-slot conflict. Binding-only
-  snapshot_publication WIP does not qualify this contract.
-- Positive re-admission after publication needs the actual source resolver too.
-  Remove test-only positive authority shortcuts after migration.
+1. Compile affected production AND unit/integration consumers: Haskell worker and
+   its affected test binaries, codegen, toolchain, runtime, actor and host. Host
+   unit callers need fresh compilation. Compile each coherent tranche early.
+2. First exact reproductions: `//exomonad/actor:actor_notebook_acknowledgement_test`
+   (1), and runtime actor libtest
+   `resident_workbench::request_tests::tool_result_mounts_retain_original_checked_interfaces`
+   (1). Known failures at the base should not be rerun without a relevant repair.
+3. Run affected issuance/representation/retirement controls, package linkage11,
+   real crossed-target installer refusal followed by honest execution, and the
+   newly added package lifetime/prior Source histories.
+4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner5,
+   typed segment semantics18 after validating/migrating their positive premises.
+5. Ordinary query/discovery/status; successful/frozen/cancelled/caller-loss default
+   reload and explicit force refusal; uncertain END; package/source and historical
+   Original recovery; declaration/lifetime/durable publication; captured caller
+   loss; actual compiler World disposal and reacquisition with immutable custody.
+6. Haskell JSON authority, compiled recovery closure, original product projection,
+   original package projection: each exact leaf executes1. Run recovered-base
+   prepared corpus after affected translation/serialization changes.
+7. On one clean source/profile/compiler/assets contract, build production catalog
+   and native_runtime_bundle, freeze through the central qualification owner,
+   execute frozen subset below, then bounded real DeepSeek smoke.
 
-## Earliest joined checks
+Named target declarations own their filters/counts. Do not narrow them by adding
+an exact filter. Direct libtest recipes must supply their owned-resident resources
+and expected nonzero count. Check V-HANDOFF for exact current labels and commands.
 
-Inspect the current just/native workflow and target declarations before executing.
-World actor cases need their registered owned-resident resources. Do not call a
-bare test-lib route and interpret missing resources as product failure.
+## Required behavioral controls
 
-1. Compile runtime/toolchain/actor production AND unit/integration/host consumers.
-   Also compile the changed Haskell prepared-recovery caller. A production worker
-   build misses test-only arity failures.
-2. Rerun checked-in `//exomonad/actor:actor_notebook_contract_tests`: four cases.
-   The retained failing five-case T run used a branch lacking P3. It cannot prove
-   this integrated producer still has missing transitive HOME links.
-3. Deliberately register the already-authored fifth parked Job reuse history after
-   reviewing the T BUCK patch and regeneration. It must settle one real command
-   and consume its Job later, without replay.
-4. Run `//exomonad/actor:actor_n2_publication_tests` with corrected fixtures and
-   N/C repair. Extend independent histories for multi-program, ready-snapshot
-   race, parked freeze refusal, activation custody and completed->discovery.
-5. Corrected `//tidepool/toolchain:toolchain_package_occurrence_linkage_tests`
-   should execute all eleven intended controls. Follow with actual runtime
-   source resolution/installation/execution and meaningful crossed refusals.
+PACKAGE reuse follows actual machine liveness, not handle disappearance or
+installed metadata. Cover implicit live parent, inherited fork anchors, retained
+closure/parked work, detached roots, failed install, stale token and conflicting
+independent instance. Preserve real conflict refusal.
 
-If notebook setup still fails, retain its actual worker hash and final target,
-selected HOME edges and package manifest. First distinguish missing demanded data
-from excess retained availability. Do not launch five unrelated notebook repairs.
+Prior Source: expression -> declaration -> actual generated Display use;
+packageful and package-free target-only first later demand; later World use;
+nominal evidence without executable offer; wrong issuer/stage/binder/ordinal;
+exact prior HOME package order and item-stage equality. No role promotion merely
+because physical evidence remains available.
 
-## Ordinary G2 histories
+Source-conflict coverage must use expressible production World admission. If a
+proposed same-slot history cannot be constructed by production, retain evidence
+of that boundary and test its real refusal rather than create test authority.
+Compiler disposal means actual owner-released compiler World backing followed by
+reacquisition, not just a cold flag. Whole-service death matrices remain G3.
 
-On one consolidated source run:
-actual typed activation A->B, discovery's supported operations, accepted Text and
-parked Job reuse, retained bindings/declarations/imports/mixed/empty programs,
-compile-before-effects refusal, default successful/frozen/caller-loss reload,
-cancellation and uncertain compiler END, public/private source race, and
-compiler disposal/reacquisition while immutable custody survives.
+## Frozen G2 subset
 
-Existing host targets include facade_introspection_service_test and the coherent
-reload cohorts; discover their exact current labels. The notebook refusal/control
-cohort does not prove successful reload publication. Dead-process heap restoration
-is not ordinary compiler disposal/reacquisition.
+Run descriptor-owned persona-startup with these four exact selections, jobs1:
 
-Then build/freeze ONE matched bundle via build/package/qualification.py. Verify
-Persona spec selection, tools and initial memory, and perform bounded real DeepSeek
-multi-turn smoke. No generic/stale launch and no overwriting authored files.
+- actor_host::startup_persona_acceptance_tests::actual_persona_arrives_refreshes_and_retires_without_judgment
+- actor_host::startup_persona_acceptance_tests::persona_web_selection_retains_native_judgment_and_empty_control
+- actor_host::startup_persona_acceptance_tests::persona_with_shared_workspace_keeps_effects_and_later_cells_usable
+- actor_host::coherent_reload_acceptance_tests::coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work
 
-## Evidence and resources
+Use four repeated --exact-test options; report4, not the full persona-startup7.
+Then persona-release-contracts2. Verify actual selected Persona spec, registered
+tools and rendered memory; real DeepSeek multi-turn smoke must retain actual
+provider/tool receipts and use the same bundle. Start fresh conversation state,
+preserve authored files and memory. Never substitute a generic or stale binary.
 
-For every run retain source OID plus dirty patch/hash if relevant, actual native
-binary AND compiler/resource identity, command, profile, selected/executed counts,
-exit and log. Capture those before starting; do not infer OID from commit time.
-Never mix T-lane worker output with joined-P acceptance.
+## Resources and evidence
 
-At peer-review preflight scratch was approximately 114 GiB free with a 100 GiB
-floor; RAM available ~108 GiB, build.slice ~23.2 GiB. This is not a reservation.
-No new heavy build was admitted in this review. Measure prospective growth and
-installed swarm-build flags; use warm lanes or approved scoped retirement if
-growth would cross the floor. Do not bypass admission or purge arbitrary outputs.
+Keep source pinned for each run and record source OID, native/compiler/resource
+hashes, argv/profile, selected/executed counts, exit and cleanup evidence. Root
+releases source pins before integration. Same-checkout Buck invocations serialize
+under the exclusive output lease; actual parallelism uses runner jobs2 or admitted
+independent output owners. Preserve100GiB scratch including prospective growth.
+Recheck memory/headroom before increasing concurrency or cold graph admission.
 
-Full force/fork/callback/worker-loss/dead-process recovery matrices, full M1–M3,
-packaged timings/map and reviewed release/main convergence are G3. Maintain
-explicit unsupported refusals at G2 and an exact open G3 inventory.
+A supported operation failing remains a G2 blocker. Full force/fork/callback,
+worker-loss/dead-process matrices, full M1-M3, packaged perf and release/main
+convergence are separate G3 work; retain explicit unsupported refusals.

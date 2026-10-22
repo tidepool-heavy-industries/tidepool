@@ -1,81 +1,134 @@
-# Finish G2 from the joined checkpoint
+# G2 ownership closeout
 
-Base code: `29231ed323`; incoming tip: `5b3e15d7dc`;
-branch: `root/g2-final-20261021`. Read [STATE](STATE.md) and
-[REVIEW-29231ed3](REVIEW-29231ed3.md). These assignments supersede the 5c759554
-wave. Preserve its useful integrated code; do not restart the architecture.
+Implementation base: `ac2440926ea64a4e2a99ee20f4ec3b98d48407f5` on
+`root/g2-final-20261021`. This is the accepted 2026-10-22 continuation.
+[STATE](STATE.md) records evidence; [TEST-GATES](TEST-GATES.md) owns qualification.
+The semantic [G2 contract](../g2-completion.md) remains controlling.
 
-## Direction
+## Delivery and ownership
 
-Keep one current World in the session. The private lifecycle carries a small
-owner-issued settled frontier, not another World/history graph. Local compiler
-cursors prove one program; the frontier proves the accumulated private history.
-Host-origin evidence comes from the actual admitted compiler context. A physical
-native row and current-source association travel intact into installation.
+G2 is one matched frozen bundle supporting ordinary Persona startup, notebook
+history, discovery, retained values and default reload, followed by bounded real
+DeepSeek smoke. Preserve authored files/memory; use fresh conversation state.
+Full G3 matrices/performance/release convergence are separate. A later error
+frontier is not acceptance.
 
-There are three production repair fronts, with narrow leaves. These are
-assignments for the next DeepSeek supervisor, not claims of running agents.
-
-| Owner | Owned result | First discriminating evidence |
+| Lane | Owner | Implementation boundary |
 |---|---|---|
-| N | Private lifecycle/frontier/readiness/freeze, runtime publication | Two successful programs with no mounts publish together; parked freeze refuses without mutation |
-| N actor leaf | Affine acceptance/retirement and activation adapters after N interface | Real input from A used/published by B; exact cleanup retained on refusal |
-| C | Haskell typed origin evidence and producer stage certification | Cold/warm Job authority; typed reason for mixed Text/declaration refusal |
-| P | Physical row issuance, exact source association, ordinary target pairing | Repeated target -> completion -> real installation, crossed receipt refuses before mutation |
-| H | Narrowed native custody in named projection helpers | Parent contains unrelated payload; narrowed result drops it, required payload still executes |
-| T | Correct fixture premises through production issuers | Three corrected package controls and typed later-item failure actually reach their boundaries |
-| V | Joined compilation, registered cohort, evidence, matched bundle | Same exact source/worker across notebook and native controls |
+| A | g2_actor_custody | codegen source-domain membership and machine PACKAGE occupancy |
+| B | review_private_progress | runtime resolve/install/publication/retirement; joins A |
+| P | review_package_selection | Rust prior Source evidence and all consumers |
+| C | review_support_text | Haskell reached prior HOME/package demand; joins P |
+| T | review_g2_completeness | production fixture migrations and missing histories |
+| V | g2_validation | exact joined builds/execution, resources and frozen qualification |
 
-N alone edits the private lifecycle and its runtime publication functions.
-Its actor leaf coordinates hunks with T. P owns native row/current-source types;
-C owns Haskell producer code. H and P coordinate named functions in shared
-artifact_inventory files. T owns fixtures/oracles, not substitute authority APIs.
-V may integrate small reviewed fixture/signature repairs before larger cuts.
+Root owns shared contracts, direct critical-path review, integration and pushes.
+Independent reviewers inspect exact candidates and joined failure paths. Workers
+use isolated source checkouts based on this checkpoint, exchange contracts early,
+and send coherent commits before the entire tranche is complete. Coordinate
+shared files, not unrelated work. Preserve historical dirty checkouts.
 
-## Start now, in parallel
+## A/B: actual live PACKAGE instance ownership
 
-1. V freezes source identity, inspects resource headroom and compiles the affected
-   Haskell test caller after its bounded signature migration. Run the existing
-   joined notebook target on this checkpoint as the earliest useful discriminator;
-   its old T-lane failure used the wrong producer for current conclusions.
-2. C captures typed Job origin/representation refusal and splits the ambiguous
-   stage certificate refusal. Run the mixed Text/declaration cell once with that
-   discriminating evidence. Fix the observed ownership route, not a guessed guard.
-3. N implements the coherent state transition cut in PRIVATE-STATE. Do not
-   independently delegate freeze, revisions and progress to competing writers.
-4. P finishes physical-row issuance and source association using the useful
-   preserved WIP; strict identity follows the issuer fix, not a premature removal
-   of the equality fallback. H fixes physical custody narrowing independently.
-5. T corrects the actual producer premises. Keep genuine refusal cases. The
-   source-race World history must be reconstructed through its real owner.
+Canonical occupancy belongs to PreparedMachine, keyed by an opaque live source
+domain identity and exact native binding. Maintain forward and group-reverse
+indexes; neither index roots heap objects. Installed roots-attached state owns
+an immutable liveness marker. Invalidate before detach_roots, with metadata
+release an idempotent backstop. Closure/parked-frame/pin/transitive liveness is
+owned by the existing collector, not inferred from BindingTable handle count.
 
-## Integrate by vertical result
+SourceSelections owns all actual scope view replacements/removals and unique
+live-domain membership. A prepared replacement pre-reserves capacity and commits
+infallibly, returning retired-domain metadata deltas. Materialize an implicit
+empty parent view before WorldContinuation admission or PACKAGE permit issuance.
+Snapshots keep semantic evidence, not live tokens. Retiring the final logical
+view removes aliases; a stale token cannot regain authority by numeric equality.
 
-First join: ordinary installation works; Job's proof reaches Rust; accepted Text
-is usable by the next private program; two completed programs publish coherently.
-Second join: parked command continuation, cancellation/refusal cleanup, activation,
-source races, default reload and disposal-safe reacquisition.
-Use the same production source path for re-admission after publication.
+Selected physical anchors take precedence over vacant occupancy. Fork relabels
+semantic domains while preserving already captured physical leases: seed its
+requested alias from that exact inherited group, idempotently, and refuse a
+different live group. Do not select broad inherited inventories. Independent
+unseeded domains may have distinct instances.
 
-Compile each coherent join's production, cfg(test), integration and host consumers.
-A later error frontier is diagnosis, not acceptance. Tasty source and embedded
-Haskell fixtures are compiled through their declared targets, not merely Rust.
+An opaque PACKAGE permit authorizes only a checked plan's requested exports in
+its live scope. Reuse existing exact table tokens when present; otherwise root
+the requested export through the actual live machine group witness. Preserve
+original ProgramFacts. Do not relax generic inherited-anchor or HOME checks.
 
-Then build/freeze one matched bundle, verify actual Persona spec/tools and rendered
-initial memory, and run bounded DeepSeek multi-turn smoke. Do not launch a stale
-binary or a generic root as Persona. Keep the user's files and memory intact.
+Resolve once where current synchronous ownership permits; any necessary phase
+split must retain one prepared decision rather than reconstruct demand. Publish
+fresh occupancy only after real engine staging and source-custody admission.
+Rollback releases staged roots without poisoning existing slots. All ordinary,
+closed, current and recovery consumers use the common installer. Publication,
+declaration capture and scope drain apply retirement deltas under that owner.
+No new locks, permanent CAF roots, shared mutable Arc maps or fallback installer.
 
-## Scope and escalation
+Acceptance: actual notebook acknowledgement; memoizing CAF same-domain reuse;
+empty parent -> child first use -> retained closure -> child retirement -> parent
+sibling export; relabelled fork; actual root detachment with metadata retained;
+failed install/source admission; stale permits; multi-export reanchoring; distinct
+bindings/domains; independently installed same-domain conflict refusal. Generate
+membership histories against independent recomputation. Delete unused wrappers.
 
-No new event store, generic workflow, compiler registry, broad cache or compatibility
-adapter. Keep exact local cursor, source owner, checked prefix and runtime grants.
-Delete the old route after migration. Reuse immutable facts instead of copying or
-re-certifying them per target.
+## P/C: carry physical evidence without promoting compiler roles
 
-Escalate only a real contract conflict with the smallest history and two viable
-alternatives. Finish independent work meanwhile. Missing diagnostic evidence is
-a targeted measurement task, not a mandate for a broad rewrite.
+ProgramSourceSupportRow retains one physical_product reference from the actual
+completed output independently of its canonical SOURCE/TYPE role. append_fragment
+is its issuer; extend/continuations preserve exact identity and imports. Do not
+add a parallel nominal/native registry or select all available physical products.
 
-G3 preparation may inventory remaining force/fork/callback/worker-loss/cold-process
-tests in parallel. Full matrices, M1–M3, packaged timings/map and release/main
-convergence follow G2; ordinary supported workflows are not deferred into G3.
+Make current product, prior program product and selected input explicit source
+cases. Nominal membership, own offered group availability and target selection
+are distinct operations using the same physical proof. Migrate metadata,
+nominal-owner, native-dependency and target-selection consumers together.
+
+Prepare the checked World stage, operation and immediate predecessor once before
+receipt decoding. Borrow prior proof from that actual continuation; ordinary
+readers remain current-only. On successful segment issuance retain one immutable
+slice of only completed-product Arcs actually consulted by this stage on
+CertifiedSourceSelection. Item selection and returned products share it. No
+self-referential continuation, entire World retention or all-prior-group index.
+
+The Haskell prior dependency query returns package leaves AND only reached prior
+HOME groups with exact owner/version/ordinal and ordered direct package imports.
+Pass this through existing target-qualified HOME association issuance. Include
+zero-link rows for reached package-free prior groups: their empty import list is
+a real contract and carries target-only membership without decoding targets twice.
+Internal reached provenance and the exact prior compiler context authorize those
+rows. Existing wire shape suffices; do not invent a WorldOriginalReference for a
+same-program Source. Preserve the separate cross-World Original-use route.
+
+Haskell validation, Rust decode and select_item must agree on current/prior HOME
+membership, exact import order/count and item-to-stage manifest equality. Metadata
+does not authorize target execution. Missing actual offers remain unavailable.
+
+Compile two coherent increments: physical owner plus all Source consumers, then
+prior HOME/package associations. Tests: original Text case; three-stage generated
+Display execution; target-only prior Source with nonempty AND empty package imports;
+subsequent World execution/recovery; wrong issuer/operation/predecessor/ordinal;
+equal interfaces with different bodies/edges; missing offer; wrong package rows;
+failed selection leaves cursor/public state unchanged. Published instance methods
+are future execution obligations, not unused metadata to prune.
+
+## T/V: prove the ordinary workflow
+
+Use real admission/issuance APIs for positive histories. Migrate retired fixture
+construction; keep real malformed-input and conflict refusals. Close actual
+same-source-slot World conflict coverage where production can express it. If the
+API makes the proposed history impossible, demonstrate that construction boundary
+and test its real refusal rather than fabricate an authority factory.
+
+Prove actual compiler World disposal/reacquisition while immutable native custody
+survives; whole-service death matrices remain G3. A cache flag alone is not proof
+of disposal. Trace the owner-issued release and restoration receipts.
+
+Run the two exact reproductions first, then coherent ordinary cohorts, then one
+frozen bundle. Preserve source/artifact/profile/command/count/exit/cleanup evidence.
+A report spanning revisions is not a final joined pass. Review sibling consumers
+and surviving bypass routes after each integrated tranche.
+
+Use measured headroom and warm outputs. Same-checkout Buck commands serialize
+under an exclusive output lease. Runner jobs=2 is actual parallelism; separate
+shells are not. Keep 100 GiB scratch free including prospective growth; do not
+admit cold graphs or bundle growth without room. Retire only inspected idle owned
+outputs after independent retention; never manually unlink uncertain compiler roots.

@@ -1,90 +1,66 @@
 # Current G2 campaign state
 
-**Implementation is active; G2 remains unqualified.** The Sol tranche follows
-[NEXT-WAVE](NEXT-WAVE.md), with the additional exact Original package handoff
-repair below. The peer review is [REVIEW-29231ed3](REVIEW-29231ed3.md).
+**Implementation active; G2 unqualified.** Accepted implementation base:
+`ac2440926ea64a4e2a99ee20f4ec3b98d48407f5`, branch `root/g2-final-20261021`,
+checkout `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
+Root owns integration/push to `github`; `origin` is local replication.
 
-- Integration checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-- Branch: `root/g2-final-20261021`; code checkpoint `b8c58aa224`.
-- Push remote: `github`; `origin` is local replication. Reconcile release/main
-  separately; the isolated checkout's strict status reports `local_main_missing`.
-- The interactive `/srv/swarm/checkouts/tidepool` is unrelated; preserve its work.
-- No bundle or fresh Persona has been qualified or deployed by this tranche.
+[NEXT-WAVE](NEXT-WAVE.md) supersedes earlier assignment/design proposals.
+[TEST-GATES](TEST-GATES.md) states current counts and qualification order.
+The [G2 contract](../g2-completion.md) controls acceptance.
 
-## Integrated work and remaining evidence
+## Confirmed blockers
 
-| Owner | Integrated result | Remaining work |
-|---|---|---|
-| H | Native custody narrowing preserves required payload without restoring unrelated parent custody | Joined acceptance beyond the two passing focused controls |
-| N | Cumulative settled frontier, exact snapshot/operand issuance, active freeze refusal, private query lease, private carrier token, exact retirement | Execute real multi-program, parked, cancellation and publication histories |
-| A | Issuer-returned affine host lease; original-epoch confirmed cleanup; Final activation intent; exact inherited activation replacement | Compile and execute joined activation/reuse/refusal controls |
-| C | World-issued host TYPE origins; typed producer diagnostics; ordinary types avoid origin scanning | Warm World and parked Job; exact mixed Text outcome remains unresolved |
-| P | Physical issued rows and operation ownership; target-local source association; closed ordinary target; real parsed test inputs | Repeat-target issuer passed before strict cut; equality escape now removed; retest strict identity and real installation |
-| D / Rust leaf | Target-specific Original-use package occurrences; join to exact retained group/slot obligations; format v4/item v2 | Emitted-stage owner closure integrated; execute producer/decoder mutations and real notebook |
-| T | Real World histories, package premises, generated ownership, canonical cached-HOME producer identity | Execute repaired controls; same-source-slot transfer and durable reopen remain explicitly limited |
-| V | One warm joined validation lane, exact source/artifact/command receipts | Next joined compiler/runtime/actor compilation, then discriminating cohorts |
+- Notebook acknowledgement executes A park, B commit/acknowledgement and consumer,
+  then rejects two PACKAGE instances for the same domain/binding at A publication.
+  A/B repair actual live machine reuse; the conflict guard remains correct.
+- Text clears the empty native-product compiler guard, then loses prior Source
+  evidence for generated Display dependencies in Rust. P/C preserve the actual
+  physical proof and its reached package associations. The later same-program
+  prior HOME association gap is source-confirmed but not yet executed.
 
-The Original package defect is not the ordinary producer omitting Core5526:
-that ordinary receipt already contains it. A newly acquired stage Original has
-exact package obligations in Rust, while the compiler's chosen occurrence was
-lost before completion. The repair carries the actual per-target/use occurrence
-choice and joins it to the retained demand owner. It does not reconstruct a
-closure from module inventory, broaden HOME roots, or repeat the judgment.
-ArtifactBinding and NativeGroupBinding identifiers belong to different domains;
-their differing selection IDs alone are not an identity defect.
+Two failures are known; unrun ordinary histories may expose others. No bundle,
+frozen Persona qualification or deployment is established by this tranche.
 
-The item package selection now derives its retained demand from the same emitted
-stage inside the existing issuer. Associations are checked before advancing the
-private cursor and carried forward. The raw item and unused fixture constructors
-are removed; authenticated imports and prepared programs are always present.
+## Implementing
 
-## Executed evidence
+A/B: codegen instance lifecycle and runtime installation.
+P/C: Rust source evidence and Haskell prior dependency projection.
+T: production fixtures and source-conflict/disposal histories.
+V: measured resources, exact joined compilation/execution and qualification.
+Root: shared contracts, critical reviews, consolidation, source pins and delivery.
 
-Evidence root: `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/`.
-Independent review reports are in `reviews/`; exact commands, hashes and counts
-are in `validation/`. T records are also in the peer-review evidence directory.
+## Existing evidence
 
-- `7e0b1610e1`: worker and affected toolchain/runtime/actor/host consumers compiled;
-  two focused custody controls executed and passed.
-- `600e3f9772`: first N cut compiled production and unit targets for runtime and
-  toolchain. This is compilation, not lifecycle execution acceptance.
-- `2c34f01f7a`: production Haskell worker/test binary compiled; focused host
-  authority case passed 1/1, including cold Job and changed-source refusal.
-- Package cohort at `2c34f01f7a`: nine cases passed; one executed case failed
-  because its fixture passed raw producer bytes where the canonical digest was
-  required (repair integrated). One case failed before libtest during Nix root
-  enumeration. It is not eleven executed cases. Malformed `dnix/store` text was
-  absent from selected argv; startup investigation is retained separately.
-- `dc556799e4`: compilation stopped in P production/cfg(test) API migrations;
-  no actor/runtime execution established. Bounded repairs are now integrated.
-- `e18e226316`: exact repeated-target issuer passed 1/1 with owned compiler cleanup
-  confirmed; Haskell original recovery/reachability case passed 1/1 (8.84s).
-  Joined compilation exposed six caller/type migrations; fixes are integrated
-  but not yet recompiled. Strict identity and the final stage-owner cut follow
-  these runs, so these counts do not qualify the new checkpoint.
-- Baseline notebook at `3ad3aafc`: four executed failures shared the missing
-  Original package completion boundary; no passing notebook claim yet.
+Authoritative receipts and commands:
+`/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
+Focused executed passes include strict issuer reuse/ordinary closure, recorded
+facts codec/lifetime, source merge/refusal, actual crossed-source installation,
+private-host retirement, original product/package projection and recovered corpus.
+They span multiple checkpoints and are not one final-revision passing suite.
 
-## Next sequence
+Current declared cohorts: notebook5, publication14, package linkage11, custody3,
+runtime owner5. Host test consumers and broader ordinary histories remain pending.
+Original/package projection leaves passed at bb357a1b18/ac2440926e respectively.
+The withdrawn type-alias emptiness fixture is not acceptance evidence.
 
-1. Compile the paired Haskell/Rust package format and all changed production,
-   unit, actor and host consumers through the admitted pinned commands.
-2. Execute exact P repeated-target and real source installer controls, cached
-   HOME receipt mutations, native producer tests, then the registered notebook
-   and private-publication/custody histories. Diagnose first shared failure.
-3. Retest strict issuance after the removed equality escape, preserving genuine
-   crossed/stale refusals and final stage-owner/mutation controls.
-4. Once ordinary G2 histories pass on one source, freeze one matched bundle,
-   verify Persona spec/tools/initial memory and run bounded DeepSeek smoke.
-5. G3 force/fork/worker-loss/full qualification and main/release convergence
-   remain separate gates. No stale-binary launch or authored-file overwrite.
+## Resource and retention boundaries
 
-## Resource and handoff rules
+Last planning sample: 109.31 GiB scratch available, 100 GiB floor. Recheck before
+admission and include prospective growth. Existing warm outputs are preserved;
+owned Buck daemon was stopped. Ordinary compilation may restart it in build.slice.
+The installed swarm-build lacks staged reservation switches; inspect before use.
 
-Use the warm integration outputs; available scratch was about 111 GiB at the
-last validation observation, with a 100 GiB floor. Recheck actual headroom before
-admission. V pins source while compiling/running; release the pin before edits.
-Independent workers own isolated sources and send exact commits for review.
-No broad output cleanup, shared service restart or source deletion occurred.
-Preserved older P/T/N patches are historical evidence, not unreviewed work to
-apply automatically. The current implementation replaces the reviewed gaps.
+One interrupted diagnostic retained 76 last-observed compiler GC roots without a
+complete retirement receipt. Cleanup is uncertain. Use owning recovery or retain
+that uncertainty, never infer cleanup from absent PIDs or unlink roots manually.
+Older dirty H/P/N/T work remains preserved outside this integration checkout.
+No historical patch is an automatic merge candidate. Interactive tidepool checkout
+is unrelated and must not be switched or overwritten.
+
+## Exit
+
+Coherent ordinary gates -> one matched frozen bundle -> four non-cold Persona
+cases + two release contracts -> actual Persona spec/tools/rendered memory ->
+bounded real DeepSeek smoke and fresh user session. Preserve authored state.
+Full G3 matrices, M1-M3/performance and main/release convergence remain distinct.
