@@ -5983,96 +5983,81 @@ impl CompilerInputProjection {
 mod tests {
     use super::*;
 
-    impl IssuedNativeSelectionCompletion {
-        /// Inspect actual issued owners; poisoned copies below enter only
-        /// collection refusal checks and never an inventory or compiler input.
-        pub(crate) fn assert_collection_history(owners: &[Arc<Self>]) {
-            fn slow_append(
-                retained: &[Arc<IssuedNativeSelectionCompletion>],
-                incoming: &[Arc<IssuedNativeSelectionCompletion>],
-            ) -> Result<Vec<Arc<IssuedNativeSelectionCompletion>>, CompileError> {
-                let mut result = retained.to_vec();
-                for completion in incoming {
-                    if result.iter().any(|prior| prior == completion) {
-                        continue;
-                    }
-                    for prior in &result {
-                        for (binding, row) in &completion.rows {
-                            if prior.rows.get(binding).is_some_and(|old| old != row) {
-                                return Err(failure("slow exact HOME conflict"));
-                            }
-                        }
-                    }
-                    if result.iter().any(|prior| {
-                        prior.identity == completion.identity
-                            && prior.recorded != completion.recorded
-                    }) {
-                        return Err(failure("slow commitment collision"));
-                    }
-                    result.push(Arc::clone(completion));
-                }
-                Ok(result)
-            }
+    impl AcquiredNativeClosures {
+        /// Observe real issued owners. The independent reference model retains
+        /// pointers, so equal immutable records cannot erase acquisition choices.
+        pub(crate) fn assert_collection_history(
+            owners: &[Arc<crate::linked_native::AcquiredNativeClosure>],
+        ) {
             assert!(
                 !owners.is_empty(),
-                "the production owner census is nonempty"
+                "actual acquired owner census is nonempty"
             );
+            assert!(owners.iter().all(|owner| owner.acquired().len() > 0));
+            let mut home_demands = 0;
             for reverse in [false, true] {
                 let mut order = owners.to_vec();
                 if reverse {
                     order.reverse();
                 }
-                let mut indexed = AcquiredNativeClosures::default();
-                let mut reference = Vec::new();
-                for completion in &order {
-                    indexed = indexed
-                        .append(&AcquiredNativeClosures::one(Arc::clone(completion)))
+                let mut actual = Self::default();
+                let mut expected = Vec::new();
+                for owner in &order {
+                    actual = actual
+                        .append(&Self::one(Arc::clone(owner)).unwrap())
                         .unwrap();
-                    reference = slow_append(&reference, &[Arc::clone(completion)]).unwrap();
-                    assert_eq!(indexed.owners.len(), reference.len());
-                    assert!(reference
-                        .iter()
-                        .all(|owner| indexed.iter().any(|actual| actual == owner)));
-                    let repeated = indexed.append(&indexed).unwrap();
-                    assert!(repeated.owners.ptr_eq(&indexed.owners));
-                    assert!(repeated.rows.ptr_eq(&indexed.rows));
-                    assert_eq!(indexed, repeated);
+                    if !expected.iter().any(|prior| Arc::ptr_eq(prior, owner)) {
+                        expected.push(Arc::clone(owner));
+                    }
+                    assert_eq!(actual.iter().count(), expected.len());
+                    assert!(expected.iter().all(|owner| actual.contains_owner(owner)));
+                    let repeated = actual.append(&actual).unwrap();
+                    assert!(actual.owners.ptr_eq(&repeated.owners));
+                    assert!(actual.components.ptr_eq(&repeated.components));
+                    assert!(actual.recorded.ptr_eq(&repeated.recorded));
+                    assert!(actual.packages.ptr_eq(&repeated.packages));
+                    assert!(actual.same_held_owners(&repeated));
                 }
-                let replay =
-                    order
-                        .iter()
-                        .rev()
-                        .fold(AcquiredNativeClosures::default(), |prior, owner| {
-                            prior
-                                .append(&AcquiredNativeClosures::one(Arc::clone(owner)))
+                let replay = order.iter().rev().fold(Self::default(), |prior, owner| {
+                    prior
+                        .append(&Self::one(Arc::clone(owner)).unwrap())
+                        .unwrap()
+                });
+                assert!(actual.same_held_owners(&replay));
+                assert_eq!(actual.components, replay.components);
+                assert_eq!(actual.recorded, replay.recorded);
+                let operation =
+                    tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+                for owner in &order {
+                    for acquired in owner.acquired() {
+                        if let crate::linked_native::NativeCodeGrant::Home {
+                            binding,
+                            product,
+                            ..
+                        } = acquired.grant()
+                        {
+                            home_demands += 1;
+                            let selected = actual
+                                .group_owner(binding, &operation)
                                 .unwrap()
-                        });
-                assert_eq!(indexed, replay);
-                assert_eq!(indexed.recorded, replay.recorded);
+                                .expect("real held HOME demand remains available");
+                            assert_eq!(selected.code().id(), acquired.code().id());
+                            let crate::linked_native::NativeCodeGrant::Home {
+                                product: selected_product,
+                                ..
+                            } = selected.grant()
+                            else {
+                                panic!("HOME lookup preserves its grant kind")
+                            };
+                            assert!(selected_product.same_issuance(product));
+                        }
+                    }
+                }
             }
-            let actual = &owners[0];
-            let copy = || Self {
-                producer_sha256: actual.producer_sha256,
-                profile_sha256: actual.profile_sha256,
-                artifacts: actual.artifacts.clone(),
-                rows: actual.rows.clone(),
-                packages: Arc::clone(&actual.packages),
-                retained: Arc::clone(&actual.retained),
-                recorded: Arc::clone(&actual.recorded),
-                identity: actual.identity,
-            };
-            let original = AcquiredNativeClosures::one(Arc::clone(actual));
-            let mut collision = copy();
-            Arc::make_mut(&mut collision.recorded).profile_sha256[0] ^= 1;
-            assert!(original
-                .append(&AcquiredNativeClosures::one(Arc::new(collision)))
-                .is_err());
-            let mut inconsistent = copy();
-            inconsistent.producer_sha256[0] ^= 1;
-            assert!(original
-                .append(&AcquiredNativeClosures::one(Arc::new(inconsistent)))
-                .is_err());
-            assert!(Arc::ptr_eq(&original.owners[&actual.identity], actual));
+            assert!(
+                home_demands > 0,
+                "actual dependent target exercises HOME demand lookup"
+            );
         }
     }
 

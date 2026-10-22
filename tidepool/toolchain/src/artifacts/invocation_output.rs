@@ -1313,79 +1313,70 @@ mod tests {
             })
             .expect("actual finite native package output through common admission");
         assert_eq!(executions, 1);
-        let completed = |target: &str| {
+        use crate::linked_native::{LinkedNativeTargetImport, NativeCodeGrant};
+        let linked = |target: &str| {
             Arc::clone(
                 output.targets[target]
-                    .native_inputs
-                    .as_ref()
-                    .expect("finite target has its actual native inputs")
-                    .completed_selection()
-                    .expect("finite target has its coissued completion"),
+                    .linked_native_target()
+                    .expect("finite target has its actual issued linked owner"),
             )
         };
-        let first = completed("first");
-        let second = completed("second");
-        crate::artifact_inventory::IssuedNativeSelectionCompletion::assert_collection_history(&[
-            Arc::clone(first.completion()),
-            Arc::clone(second.completion()),
+        let first = linked("first");
+        let second = linked("second");
+        assert!(
+            !Arc::ptr_eq(first.closure(), second.closure()),
+            "distinct physical targets retain distinct actual closure owners"
+        );
+        crate::artifact_inventory::AcquiredNativeClosures::assert_collection_history(&[
+            Arc::clone(first.closure()),
+            Arc::clone(second.closure()),
+            Arc::clone(first.closure()),
         ]);
         for name in ["first", "second"] {
             let target = &output.targets[name];
-            let selection = completed(name);
-            let globals = target.prepared.prepared().globals();
+            let selected = linked(name);
+            assert!(Arc::ptr_eq(selected.prepared(), target.prepared_owner()));
+            let globals = selected.prepared().globals();
             assert_eq!(
-                selection.target_imports().len(),
+                selected.imports().len(),
                 globals.len(),
-                "each completed target keeps exactly its own ordered slots"
+                "each target retains its own ordered slots"
             );
-            for (global, selected) in globals.iter().zip(selection.target_imports()) {
-                match selected {
-                    crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                        binding,
-                        value,
-                    } => {
-                        assert_eq!(binding.exported_value(&global.identity), Some(*value));
-                    }
-                    crate::artifact_inventory::CompletedNativeTargetImport::Source {
-                        binding,
-                        value,
-                    } => {
-                        let row = selection
-                            .completion()
-                            .rows()
-                            .find(|row| row.binding() == *binding)
-                            .unwrap();
-                        assert!(row
-                            .product()
-                            .group()
+            for (global, import) in globals.iter().zip(selected.imports()) {
+                match import {
+                    LinkedNativeTargetImport::Code { acquired, value } => {
+                        assert!(acquired
+                            .code()
+                            .body()
                             .exported_values()
                             .any(|(identity, exported)| identity == &global.identity
                                 && exported == *value));
                     }
-                    crate::artifact_inventory::CompletedNativeTargetImport::RetainedCapture {
-                        identity,
-                        generation,
-                    } => {
-                        assert_eq!(identity, &global.identity);
-                        assert_eq!(Some(*generation), global.required_generation);
+                    LinkedNativeTargetImport::RetainedCapture(requirement) => {
+                        assert_eq!(requirement.identity(), &global.identity);
+                        assert_eq!(Some(requirement.generation()), global.required_generation);
                     }
                 }
             }
         }
         drop(output);
-        let package_bindings = |selection: &crate::artifact_inventory::CompletedNativeSelection| {
+        let package_codes = |target: &crate::linked_native::LinkedNativeTarget| {
             let mut products = BTreeMap::<_, BTreeSet<_>>::new();
-            for binding in selection.completion().package_bindings() {
-                let exact = binding.binding();
-                products.entry(exact.artifact).or_default().insert(exact);
+            for acquired in target.acquired() {
+                if let NativeCodeGrant::Package { product, .. } = acquired.grant() {
+                    products
+                        .entry(product.artifact_id())
+                        .or_default()
+                        .insert(acquired.code().id());
+                }
             }
             products
         };
-        let first_packages = package_bindings(&first);
-        let second_packages = package_bindings(&second);
+        let first_packages = package_codes(&first);
+        let second_packages = package_codes(&second);
         assert!(
             !first_packages.is_empty(),
-            "reverse must use actual package code"
+            "reverse must demand actual package code"
         );
         assert!(
             !second_packages.is_empty(),
@@ -1393,8 +1384,13 @@ mod tests {
         );
         {
             // Exercise storage with an actual compiler-issued package owner.
-            let package_binding = first.completion().package_bindings().next().unwrap();
-            let product = package_binding.product();
+            let product = first
+                .acquired()
+                .find_map(|acquired| match acquired.grant() {
+                    NativeCodeGrant::Package { product, .. } => Some(Arc::clone(product)),
+                    _ => None,
+                })
+                .expect("nonempty actual package acquisition");
             for mode in [
                 crate::recovery_artifacts::MaterializationMode::Durable,
                 crate::recovery_artifacts::MaterializationMode::Scratch,
@@ -1420,7 +1416,6 @@ mod tests {
                         &reference,
                     );
                 assert_eq!(product.descriptor(), &descriptor);
-                assert_eq!(product.artifact_id(), package_binding.binding().artifact);
                 let restored = certified_products::CertifiedPackageCodeProduct::restore(
                     storage.path(),
                     &reference,
@@ -1445,7 +1440,7 @@ mod tests {
                 let mut corrupt = product.bytes().to_vec();
                 corrupt[0] ^= 1;
                 std::fs::write(&envelope_path, corrupt).unwrap();
-                for held in [product, &restored] {
+                for held in [&product, &restored] {
                     assert!(matches!(
                         held.materialize(
                             storage.path(), mode, &mut PackageInterfaceValidation::default(),
@@ -1464,88 +1459,52 @@ mod tests {
             }
         }
         let mut shared_products = 0;
-        for (product, first_bindings) in &first_packages {
-            if let Some(second_bindings) = second_packages.get(product) {
+        for (product, first_codes) in &first_packages {
+            if let Some(second_codes) = second_packages.get(product) {
                 shared_products += 1;
                 assert_eq!(
-                    first_bindings.len(),
-                    1,
-                    "one exact binding per common package product"
-                );
-                assert_eq!(
-                    second_bindings.len(),
-                    1,
-                    "one exact binding per common package product"
-                );
-                assert_eq!(
-                    first_bindings, second_bindings,
-                    "every common package product keeps its exact already-issued binding"
+                    first_codes, second_codes,
+                    "common physical package products preserve their linked dependency code"
                 );
             }
         }
         assert!(
             shared_products > 0,
-            "the two targets must demand overlapping actual package code"
+            "the actual targets must demand overlapping package code"
         );
-        assert!(!first.target_imports().is_empty());
-        assert!(!second.target_imports().is_empty());
-        let roots = first
-            .target_imports()
-            .iter()
-            .filter_map(|import| match import {
-                crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding, ..
-                } => Some(binding.binding()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(!roots.is_empty());
-        let operation = InventoryOperation::new(Default::default());
-        let package_only = crate::artifact_inventory::IssuedPackageCodeGraph::from_issued(
-            first.completion().artifacts(),
-            &roots,
-            &operation,
-        )
-        .unwrap();
-        assert_eq!(package_only.roots(), roots.as_slice());
-        let package_snapshot = package_only.artifacts().capture_graph_selection();
-        assert!(package_snapshot.namespace.is_empty());
-        assert!(package_snapshot.roots.is_empty());
-        assert!(package_snapshot.native_groups.is_empty());
-        assert_eq!(
-            package_snapshot
-                .bindings
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>(),
-            first_packages
-                .values()
-                .flat_map(|bindings| bindings.iter().copied())
-                .collect::<BTreeSet<_>>()
-        );
-        let later = crate::artifact_inventory::CompilerSourceSupport::empty()
-            .with_native_selection_completion(&first)
+        assert!(!first.imports().is_empty());
+        assert!(!second.imports().is_empty());
+        let empty = crate::artifact_inventory::CompilerSourceSupport::empty();
+        let later = empty
+            .with_linked_native_target(&first)
             .unwrap()
-            .with_native_selection_completion(&second)
+            .with_linked_native_target(&second)
             .unwrap();
-        // The enriched support is immediately consumable: its mandatory fact
-        // owner pairs the completion-enriched views without a caller refresh.
-        let enriched_facts = later.native_fact_owner();
         assert_eq!(
-            enriched_facts
-                .offers
-                .keys()
-                .copied()
-                .collect::<BTreeSet<_>>(),
+            later.recorded_input_decisions(),
+            empty.recorded_input_decisions(),
+            "acquisition custody creates no compiler input decisions"
+        );
+        assert_eq!(
             later.native_offer_observations().unwrap(),
-            "maintained facts carry the enriched offer facts"
+            empty.native_offer_observations().unwrap(),
+            "acquisition custody creates no body availability"
         );
         assert_eq!(
-            enriched_facts.input_decisions,
-            later.recorded_input_decisions().clone()
+            later.artifacts().capture_graph_selection(),
+            empty.artifacts().capture_graph_selection(),
+            "package payload custody does not create compiler roles or artifact graph roots"
         );
-        // Repeated identical enrichment is a no-op on the closed owner.
-        let repeated = later.with_native_completions_from(&later).unwrap();
+        assert!(later
+            .acquired_native_closures()
+            .contains_owner(first.closure()));
+        assert!(later
+            .acquired_native_closures()
+            .contains_owner(second.closure()));
+        let repeated = later.with_acquired_native_closures_from(&later).unwrap();
+        assert!(repeated
+            .acquired_native_closures()
+            .same_held_owners(later.acquired_native_closures()));
         assert!(Arc::ptr_eq(
             repeated.native_fact_owner(),
             later.native_fact_owner()
@@ -1555,31 +1514,28 @@ mod tests {
             .chain(second_packages.keys())
             .copied()
             .collect::<BTreeSet<_>>();
+        let retained_first = Arc::clone(first.closure());
         drop(first);
         drop(second);
-        assert_eq!(
-            later
-                .artifacts()
-                .entries_for_artifacts(&package_ids)
-                .unwrap()
-                .len(),
-            package_ids.len(),
-            "later projection owns every actual package payload after its original parent drops"
-        );
+        for id in &package_ids {
+            let product = later.acquired_native_closures().package_product(id).expect(
+                "closed prefix retains every demanded package payload after target owners drop",
+            );
+            assert_eq!(product.artifact_id(), *id);
+            assert!(!product.bytes().is_empty());
+        }
         drop(later);
-        let retained_package_only = crate::artifact_inventory::ArtifactInventory::default()
-            .empty_view()
-            .retain_custody(package_only.artifacts())
-            .unwrap();
-        drop(package_only);
-        let first_package_ids = first_packages.keys().copied().collect::<BTreeSet<_>>();
+        let held_packages = retained_first
+            .acquired()
+            .filter_map(|acquired| match acquired.grant() {
+                NativeCodeGrant::Package { product, .. } => Some(product.artifact_id()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            retained_package_only
-                .entries_for_artifacts(&first_package_ids)
-                .unwrap()
-                .len(),
-            first_package_ids.len(),
-            "actual package-only payload custody survives later projection"
+            held_packages,
+            first_packages.keys().copied().collect(),
+            "an actual retained closure keeps its own package payloads after prefix retirement"
         );
     }
 
