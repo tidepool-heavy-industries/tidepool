@@ -15990,17 +15990,18 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
+        let mut validation = PackageInterfaceValidation::default();
         let mut selection = CertifiedSourceSelection::from_compiler_projection(
             &projection,
             &artifacts.metadata_snapshot(),
-            &InventoryOperation::new(Default::default()),
+            &validation.inventory,
         )
         .unwrap();
         let stage = crate::declaration_context::CapturedCompilerStage::issue(
             &mut selection,
             &artifacts.inventory().empty_view(),
             vec![entry],
-            &mut PackageInterfaceValidation::default(),
+            &mut validation,
         )
         .unwrap();
         let proof = crate::compile_input::seal(
@@ -19411,7 +19412,7 @@ pub(crate) mod tests {
                 module: original.owner().module.clone(),
             }
         ));
-        let operation = InventoryOperation::new(Default::default());
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
         let assert_namespace_ids = |selection: &CertifiedSourceSelection,
                                     view: &crate::artifact_inventory::ArtifactView,
                                     namespace_original: bool| {
@@ -19510,7 +19511,7 @@ pub(crate) mod tests {
                 &mut selection,
                 &view,
                 vec![native.clone()],
-                &mut PackageInterfaceValidation::default(),
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
             )
             .unwrap();
             let mut carried = selection;
@@ -19878,7 +19879,7 @@ pub(crate) mod tests {
                         "broader Full proof custody must not widen the normalized input row"
                     );
                     assert_eq!(row.permits(9001), ordinals.contains(&9001));
-                    let operation = InventoryOperation::new(Default::default());
+                    let operation = Arc::new(InventoryOperation::new(Default::default()));
                     let mut selection =
                         CertifiedSourceSelection::from_compiler_inputs(&request, &operation)
                             .unwrap();
@@ -19917,7 +19918,7 @@ pub(crate) mod tests {
                         &mut selection,
                         request.artifacts(),
                         vec![fresh_entry.clone()],
-                        &mut PackageInterfaceValidation::default(),
+                        &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
                     )
                     .and_then(|stage| {
                         assert_eq!(
@@ -20271,7 +20272,7 @@ pub(crate) mod tests {
                                 grant_full || selected == Some(ordinal)
                             );
                         }
-                        let operation = InventoryOperation::new(Default::default());
+                        let operation = Arc::new(InventoryOperation::new(Default::default()));
                         let mut selection =
                             CertifiedSourceSelection::from_compiler_inputs(input, &operation)
                                 .unwrap();
@@ -20300,9 +20301,15 @@ pub(crate) mod tests {
                                 .iter()
                                 .map(|index| entries[*index].clone())
                                 .collect(),
-                            &mut PackageInterfaceValidation::default(),
+                            &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
                         )
                         .and_then(|stage| {
+                            assert!(stage
+                                .compiler_inputs()
+                                .native_availability()
+                                .issued_row(entries[3].descriptor.id)
+                                .unwrap()
+                                .permits(7));
                             assert_eq!(
                                 stage
                                     .compiler_inputs()
@@ -20639,7 +20646,7 @@ pub(crate) mod tests {
             let parent_request = ExactCompileContext::new(parent_context.clone())
                 .prepare_compilation(parent_root.path(), PRODUCER)
                 .unwrap();
-            let operation = InventoryOperation::new(Default::default());
+            let operation = Arc::new(InventoryOperation::new(Default::default()));
             let mut selection = CertifiedSourceSelection::from_compiler_inputs(
                 parent_request.compiler_inputs(),
                 &operation,
@@ -20665,7 +20672,7 @@ pub(crate) mod tests {
                 &mut selection,
                 parent_request.compiler_inputs().artifacts(),
                 vec![parent_entry.clone()],
-                &mut PackageInterfaceValidation::default(),
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
             )
             .unwrap();
             let parent_input = stage.compiler_inputs().as_ref().clone();
@@ -21659,7 +21666,7 @@ pub(crate) mod tests {
                     assert!(input_bindings.is_empty());
                     None
                 };
-                let operation = InventoryOperation::new(Default::default());
+                let operation = Arc::new(InventoryOperation::new(Default::default()));
                 let mut selection =
                     CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
                 selection
@@ -21680,7 +21687,7 @@ pub(crate) mod tests {
                     &mut selection,
                     input.artifacts(),
                     vec![output_entry.clone()],
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
                 )
                 .unwrap();
                 let completed_row = completed
@@ -21703,8 +21710,24 @@ pub(crate) mod tests {
                         .is_some());
                 }
                 if !expected {
-                    let observations =
-                        source_target_observations(&[(output_product, required_edges[0].0)]);
+                    let ordinal = required_edges[0].0;
+                    let definitions =
+                        original_native_group_definitions(output_product, ordinal).unwrap();
+                    let mut exports = definitions.export_contracts();
+                    let contract = exports.next().unwrap().unwrap();
+                    let observations = vec![AcceptedGlobal {
+                        identity: contract.identity.clone(),
+                        rep: contract.rep,
+                        entry_signature: contract.entry_signature.cloned(),
+                        required_evaluated: contract.evaluated,
+                        owner: ReceiptImportOwner::Source {
+                            unit: output_product.owner().unit.clone(),
+                            module: output_product.owner().module.clone(),
+                            module_version: Some(output_product.owner().module_version.clone()),
+                            original_ordinal: ordinal,
+                            binder: contract.identity.clone(),
+                        },
+                    }];
                     let prepared = prepared_target_fixture(&observations);
                     let mut validation = PackageInterfaceValidation::default();
                     let observed = AuthenticatedTargetImports::issue(
@@ -21942,7 +21965,7 @@ pub(crate) mod tests {
             let request = ExactCompileContext::new(baseline.clone())
                 .prepare_compilation(&root.path().join("inputs"), producer_bytes)
                 .unwrap();
-            let operation = InventoryOperation::new(Default::default());
+            let operation = Arc::new(InventoryOperation::new(Default::default()));
             let mut selection = CertifiedSourceSelection::from_compiler_inputs(
                 request.compiler_inputs(),
                 &operation,
@@ -21965,7 +21988,7 @@ pub(crate) mod tests {
                 &mut selection,
                 request.compiler_inputs().artifacts(),
                 vec![output.clone()],
-                &mut PackageInterfaceValidation::default(),
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
             )
             .unwrap();
             let completed = stage.compiler_inputs().as_ref().clone();
@@ -22190,7 +22213,7 @@ pub(crate) mod tests {
             .prepare_compilation(root.path(), producer_bytes)
             .unwrap();
         let request = exact_request.compiler_inputs();
-        let operation = InventoryOperation::new(Default::default());
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
         let mut selection =
             CertifiedSourceSelection::from_compiler_inputs(request, &operation).unwrap();
         selection
@@ -22212,7 +22235,7 @@ pub(crate) mod tests {
             vec![Arc::new(
                 ArtifactEntry::original(producer.sha256(), fresh.clone()).unwrap(),
             )],
-            &mut PackageInterfaceValidation::default(),
+            &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
         )
         .and_then(|stage| {
             let entry = stage
@@ -23850,17 +23873,18 @@ pub(crate) mod tests {
                     .unwrap();
                 let projection =
                     CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+                let mut validation = PackageInterfaceValidation::default();
                 let mut selection = CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &available.metadata_snapshot(),
-                    &InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .unwrap();
                 let stage = crate::declaration_context::CapturedCompilerStage::issue(
                     &mut selection,
                     &inventory.empty_view(),
                     vec![entry.clone()],
-                    &mut PackageInterfaceValidation::default(),
+                    &mut validation,
                 )
                 .unwrap();
                 let view = stage.issued_artifacts().clone();
@@ -24938,7 +24962,7 @@ pub(crate) mod tests {
             .artifacts()
             .artifact_ids()
             .contains(&entry.descriptor.id));
-        let operation = InventoryOperation::new(Default::default());
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
         let mut selection =
             CertifiedSourceSelection::from_compiler_inputs(input, &operation).unwrap();
         selection
@@ -24958,7 +24982,7 @@ pub(crate) mod tests {
             &mut selection,
             input.artifacts(),
             vec![entry.clone()],
-            &mut PackageInterfaceValidation::default(),
+            &mut PackageInterfaceValidation::with_inventory(Arc::clone(&operation)),
         )
         .unwrap();
         let completed = stage.compiler_inputs().as_ref().clone();
@@ -31900,7 +31924,7 @@ pub(crate) mod tests {
                     &mut selection,
                     &inventory.empty_view(),
                     entries,
-                    &mut PackageInterfaceValidation::default(),
+                    &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
                 )
                 .unwrap();
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
@@ -32305,7 +32329,7 @@ None,
                     &mut selection,
                     inputs.artifacts(),
                     vec![entry],
-                    &mut PackageInterfaceValidation::default(),
+                    &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
                 )
                 .unwrap();
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
@@ -33325,7 +33349,7 @@ None,
                     &mut selection,
                     &inventory.empty_view(),
                     entries,
-                    &mut PackageInterfaceValidation::default(),
+                    &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
                 )
                 .unwrap();
                 crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
@@ -33424,7 +33448,9 @@ None,
                         &mut selection,
                         &inventory.empty_view(),
                         entries,
-                        &mut PackageInterfaceValidation::default(),
+                        &mut PackageInterfaceValidation::with_inventory(Arc::clone(
+                            marker_parsed.operation(),
+                        )),
                     )
                     .unwrap();
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
@@ -33623,7 +33649,7 @@ None,
                 &mut selection,
                 request.compiler_inputs().artifacts(),
                 output_entries,
-                &mut PackageInterfaceValidation::default(),
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
             )
             .unwrap();
             let private = stage.compiler_inputs().as_ref().clone();
@@ -34141,7 +34167,9 @@ None,
                         &mut selection,
                         inputs.artifacts(),
                         entries,
-                        &mut PackageInterfaceValidation::default(),
+                        &mut PackageInterfaceValidation::with_inventory(Arc::clone(
+                            parsed.operation(),
+                        )),
                     )
                     .unwrap();
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
