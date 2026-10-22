@@ -1297,27 +1297,33 @@ def actor_private_publication_test_cases(binary):
 
 def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
-    tests = ["resident_local_actor::" + name for name in (
-        "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
+    acknowledgement = "resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control"
+    tests = [acknowledgement] + ["resident_local_actor::" + name for name in (
         "reload_progress::invalid_authored_reload_arguments_release_the_invocation",
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
         "resident_captured_source_retains_the_parked_job_for_a_later_cell",
     )]
     env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
-    return "\n".join([
-        "tidepool_rust_test_cases(",
-        '    name = "actor_notebook_contract_tests",',
-        f"    binary = {json.dumps(':' + binary)},",
-        "    exact_tests = [", render_strings(tests, 8), "    ],",
-        f"    expected_count = {len(tests)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
-        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
-        '    case_compiler_modes = {' + ", ".join(
-            json.dumps(test) + ': "owned-resident"' for test in tests
-        ) + "},",
-        runtime_arguments(env, resources, worker),
-        '    visibility = ["PUBLIC"],', ")", "",
-    ])
+    rules = []
+    for target, selected in [
+        ("actor_notebook_contract_tests", tests),
+        ("actor_notebook_acknowledgement_test", [acknowledgement]),
+    ]:
+        rules.append("\n".join([
+            "tidepool_rust_test_cases(",
+            f"    name = {json.dumps(target)},",
+            f"    binary = {json.dumps(':' + binary)},",
+            "    exact_tests = [", render_strings(selected, 8), "    ],",
+            f"    expected_count = {len(selected)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
+            f"    test_rule_timeout_ms = {(len(selected) * 600 + 60) * 1000},",
+            '    case_compiler_modes = {' + ", ".join(
+                json.dumps(test) + ': "owned-resident"' for test in selected
+            ) + "},",
+            runtime_arguments(env, resources, worker),
+            '    visibility = ["PUBLIC"],', ")", "",
+        ]))
+    return "\n".join(rules)
 
 
 def runtime_test_cases(binary):
