@@ -2674,6 +2674,9 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
       Right packageFacts -> do
         RetainedOriginalInputs _ decoder _ _ <- readMVar state
         let artifacts = [artifact | ScopeInterfaceInput (artifact,_,_) _ <- Map.elems rows]
+            originals = [artifact | ScopeInterfaceInput (artifact,_,_) evidence <- Map.elems rows
+              , evidence /= CheckedValueEvidence]
+            values = [artifact | ScopeInterfaceInput (artifact,_,_) CheckedValueEvidence <- Map.elems rows]
             readInput artifact = capturedRequestInputToken (worldInputsCustody facts)
               (exactPath artifact) (exactSha256 artifact)
         bodies <- Map.fromList <$> mapM (\artifact -> do
@@ -2681,7 +2684,7 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
           pure (exactPath artifact,body)) artifacts
         let selectedBody artifact = maybe (fail "world type closure lost its captured interface token") pure
               (Map.lookup (exactPath artifact) bodies)
-        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env artifacts []
+        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder selectedBody env originals values
         pure $ do
           verified <- closure
           interfaces <- selectVerifiedExactInterfaceProducts verified artifacts
@@ -2709,19 +2712,18 @@ readWorldTypeInputs (ExactInputOwner _ state) env facts roots = case walk Map.em
               && all (\(key,sha) -> Map.lookup key seals == Just sha) (Map.toAscList requirements))
             (Left "world native declaration requirements differ from selected exact interfaces")
         LexicalJoinEvidence -> pure ()
-        CheckedValueEvidence -> Left "world primary type closure contains a checked value role"
+        CheckedValueEvidence -> unless (checkedValueOwner artifact)
+          (Left "world checked value type input has another owner")
       pure rows
     walk selected [] = Right selected
     walk selected (key:rest) | Map.member key selected = walk selected rest
     walk selected (key:rest) = do
       association <- maybe (Left "demanded type lacks its exact Context association") Right
         (Map.lookup key (worldPrimarySelected (worldInputsPrimary facts)))
-      let row@(ScopeInterfaceInput (artifact,_,_) evidence) = worldPrimaryRow association
+      let row@(ScopeInterfaceInput (artifact,_,_) _) = worldPrimaryRow association
       unless ((exactUnit artifact,exactModule artifact) == key)
         (Left "world demanded type has another selected interface owner")
-      case evidence of
-        CheckedValueEvidence -> Left "world primary type closure contains a checked value role"
-        _ -> walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
+      walk (Map.insert key row selected) (exactRequirements artifact ++ rest)
 
 -- An offered export vector is passive until it has been compared to GHC's
 -- normalized exports from the selected, hydrated exact interface.
