@@ -677,7 +677,7 @@ fn source_boot_candidate_packet_producer() {
                 let source_context = ExactDeclarationContext::from_issued_output(
                     producer_sha,
                     &output,
-                    surface.lexical,
+                    &source_admission,
                     target.clone(),
                     &required,
                 )

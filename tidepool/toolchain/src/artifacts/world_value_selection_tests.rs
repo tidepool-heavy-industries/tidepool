@@ -336,18 +336,24 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         unit: "main".into(),
         module: "CachedPackageWorldHome".into(),
     };
+    // This fixture needs the issued native/instance support for a protected
+    // compiler import. It does not publish authored source or grant lexical scope.
     let primary = Arc::new(
-        crate::declaration_join::ExactDeclarationContext::from_issued_output(
+        crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 &compiled_home
                     .producer_identity
                     .expect("the production compiler binds its producer identity"),
             )
             .sha256(),
-            compiled_home
-                .issued_output
-                .as_ref()
-                .expect("fresh compiler selection"),
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                compiled_home
+                    .issued_output
+                    .as_ref()
+                    .expect("fresh compiler selection")
+                    .compiler_inputs(),
+            )
+            .expect("the actual issued output closes its compiler support"),
             vec![crate::declaration_join::ExactLexicalNode {
                 owner: owner.clone(),
                 imports: Vec::new(),
