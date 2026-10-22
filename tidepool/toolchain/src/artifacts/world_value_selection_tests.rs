@@ -559,14 +559,15 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     assert_eq!(program.items().len(), 5);
     for (index, packageful) in [(2, false), (4, true)] {
         let products = program.items()[index].native_products().unwrap();
-        let completed = products.completed_native_selection().unwrap();
+        let selection = products.completed_native_selection().unwrap();
         assert_eq!(
-            completed
+            selection
                 .package_selection()
                 .assert_prior_home_contract_controls(&checked.validation().inventory),
             1,
             "named owner-local representation controls require an actual prior HOME contract"
         );
+        let completed = selection.completion();
         let actual_binder = products
             .pending_imports()
             .iter()
@@ -625,6 +626,7 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
         .unwrap();
     assert!(
         !first
+            .completion()
             .rows()
             .any(|row| row.product().owner().module == "Module"),
         "initial target does not demand the later bodies"
