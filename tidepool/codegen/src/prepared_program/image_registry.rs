@@ -1839,17 +1839,18 @@ mod tests {
             selection: [3; 32],
             ..key
         };
+        let foreign_request = super::super::NativeExportRequest::for_package(
+            Arc::clone(&package),
+            foreign_key,
+            domains[0],
+            ValueId(1),
+        )
+        .unwrap();
+        let foreign_permit = table
+            .native_slot_permit_in(&tree, scopes[0], &foreign_request)
+            .unwrap();
         assert!(machine
-            .retain_native_sibling(
-                &anchor,
-                super::super::NativeExportRequest::for_package(
-                    Arc::clone(&package),
-                    foreign_key,
-                    domains[0],
-                    ValueId(1)
-                )
-                .unwrap()
-            )
+            .lookup_world_native_slot(&foreign_permit, Some(&anchor))
             .is_err());
         let closed_with_live_import = vec![BatchProgram {
             image: Arc::clone(&target),
@@ -1866,17 +1867,25 @@ mod tests {
             BatchProgram::validate_closed(&closed_with_live_import).is_err(),
             "closed code cannot acquire a live root"
         );
+        let request = super::super::NativeExportRequest::for_package(
+            Arc::clone(&package),
+            key,
+            domains[0],
+            ValueId(1),
+        )
+        .unwrap();
+        let permit = table
+            .native_slot_permit_in(&tree, scopes[0], &request)
+            .unwrap();
+        let witness = machine
+            .lookup_world_native_slot(&permit, Some(&anchor))
+            .unwrap()
+            .unwrap();
         let sibling = machine
-            .retain_native_sibling(
-                &anchor,
-                super::super::NativeExportRequest::for_package(
-                    Arc::clone(&package),
-                    key,
-                    domains[0],
-                    ValueId(1),
-                )
-                .unwrap(),
-            )
+            .retain_world_native_export(&witness, &permit)
+            .unwrap();
+        let slots = machine
+            .prepare_world_native_slot_publication(vec![(permit.clone(), witness.instance())])
             .unwrap();
         assert_eq!(sibling.lease().instance(), anchor.instance());
         let sibling_handle = sibling.lease().handle();
@@ -1884,8 +1893,9 @@ mod tests {
             .register_source_instances_in_domains(&tree, scopes[0], vec![sibling], &machine)
             .ok()
             .unwrap();
+        machine.commit_world_native_slots(slots);
         let reused = table
-            .retained_native_sibling_attachment(domains[0], &anchor, ValueId(1))
+            .retained_world_native_attachment(&permit, &witness)
             .unwrap();
         assert_eq!(reused.lease().handle(), sibling_handle);
         let repeated = table
@@ -2090,7 +2100,7 @@ mod tests {
             )
         };
         let tree = crate::scope::ScopeTree::new();
-        let table = crate::binding_table::BindingTable::new();
+        let mut table = crate::binding_table::BindingTable::new();
         let domain = table
             .native_domain_selection_in(&tree, crate::scope::ScopeId::ROOT)
             .unwrap()
@@ -2135,6 +2145,15 @@ mod tests {
                 .unwrap()],
             )
             .unwrap();
+        let initial_admission = table
+            .register_source_instances_in_domains(
+                &tree,
+                crate::scope::ScopeId::ROOT,
+                receipt.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
         let anchor = &receipt.leases[0];
         let package_program = anchor.instance().program();
         let run = |machine: &mut PreparedMachine<'_>, program| {
@@ -2170,35 +2189,64 @@ mod tests {
             machine.handle_current_pointer(generic),
             machine.handle_current_pointer(anchor.handle())
         );
-        let sibling = machine
-            .retain_native_sibling(
-                anchor,
-                NativeExportRequest::for_package(Arc::clone(&package), key, domain, ValueId(1))
-                    .unwrap(),
-            )
+        let request =
+            NativeExportRequest::for_package(Arc::clone(&package), key, domain, ValueId(1))
+                .unwrap();
+        let permit = table
+            .native_slot_permit_in(&tree, crate::scope::ScopeId::ROOT, &request)
             .unwrap();
+        let witness = machine
+            .lookup_world_native_slot(&permit, Some(anchor))
+            .unwrap()
+            .unwrap();
+        let sibling = machine
+            .retain_world_native_export(&witness, &permit)
+            .unwrap();
+        let slots = machine
+            .prepare_world_native_slot_publication(vec![(permit, witness.instance())])
+            .unwrap();
+        let sibling_handle = sibling.lease().handle();
+        let sibling_signature = sibling.lease().entry_signature().cloned();
         assert_eq!(sibling.lease().instance(), anchor.instance());
+        let sibling_admission = table
+            .register_source_instances_in_domains(
+                &tree,
+                crate::scope::ScopeId::ROOT,
+                vec![sibling],
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        machine.commit_world_native_slots(slots);
         let sibling_consumer = machine
             .install_shared_batch(vec![BatchProgram {
                 image: consumer("sibling"),
                 imports: vec![BatchImport::Existing {
-                    handle: sibling.lease().handle(),
-                    entry_signature: sibling.lease().entry_signature().cloned(),
+                    handle: sibling_handle,
+                    entry_signature: sibling_signature,
                 }],
             }])
             .unwrap()[0];
         let returned = run(&mut machine, sibling_consumer);
         assert!(machine.release(returned));
-        assert!(machine.release(anchor.handle()));
-        assert!(machine
-            .handle_is_evaluated(sibling.lease().handle())
-            .unwrap());
+        for lease in table
+            .rollback_source_admission(crate::scope::ScopeId::ROOT, &initial_admission)
+            .unwrap()
+        {
+            assert!(machine.release(lease.handle()));
+        }
+        assert!(machine.handle_is_evaluated(sibling_handle).unwrap());
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert!(
             !retired.programs.contains(&package_program),
             "the updated sibling owns defining-instance custody too"
         );
-        assert!(machine.release(sibling.lease().handle()));
+        for lease in table
+            .rollback_source_admission(crate::scope::ScopeId::ROOT, &sibling_admission)
+            .unwrap()
+        {
+            assert!(machine.release(lease.handle()));
+        }
         let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert!(
             retired.programs.contains(&package_program),

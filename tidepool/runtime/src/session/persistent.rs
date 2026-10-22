@@ -7502,7 +7502,7 @@ mod checkpoint_scope_tests {
         let (first, _, _first_placement) =
             install_runtime_fixture_in(&mut session, a, targets, "first");
         let b = session.mint_detached_scope(a).unwrap();
-        let _b_placement = session.prepared_lexical_scope_lease(b).unwrap();
+        let b_placement = session.prepared_lexical_scope_lease(b).unwrap();
         let before = session.bindings.source_instance_keys_in(&session.scopes, b);
         let (second, delta, _second_placement) =
             install_runtime_fixture_in(&mut session, a, targets, "second");
@@ -7510,10 +7510,10 @@ mod checkpoint_scope_tests {
             .bindings
             .native_domain_selection_in(&session.scopes, b)
             .unwrap();
-        let (anchor_key, anchor) = selected
+        let anchor = selected
             .roots()
-            .iter()
-            .find(|(_, lease)| lease.export().occurrence == "first")
+            .values()
+            .find(|lease| lease.export().occurrence == "first")
             .expect("real recursive first export is held by capture");
         let stale = session
             .bindings
@@ -7527,31 +7527,93 @@ mod checkpoint_scope_tests {
             "actual recursive group premise"
         );
         assert_eq!(stale.instance(), anchor.instance());
-        let held = session
-            .bindings
-            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
+        let compiled =
+            super::super::turn::CompiledTurn::from_runtime_target(targets, "second").unwrap();
+        let plan = super::super::prepared::ClosedInstantiationPlan::prepare(
+            &compiled,
+            &session.certified_image_registry(),
+        )
+        .unwrap();
+        let origin = super::super::resident::CapturedSourceOrigin::from_runtime_targets(targets);
+        let settled = session
+            .with_source_compiler_transaction(
+                targets.source.clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    session.admit_source_lease(source.clone()).unwrap();
+                    session.admit_source_lease(b_placement.clone()).unwrap();
+                    let resolved = session.resolve_closed_turn_in(b, &plan, &origin).unwrap();
+                    let plan = resolved.instantiation.plan();
+                    let admitted_metadata = session
+                        .stage_install_metadata(
+                            Some(compiled.table()),
+                            plan.target_constructors(),
+                            plan.dependency_constructors(),
+                        )
+                        .unwrap();
+                    let staged = session
+                        .machine
+                        .as_mut()
+                        .unwrap()
+                        .install_native_turn(
+                            &resolved.instantiation,
+                            &resolved.sources,
+                            &session.bindings,
+                            &session.scopes,
+                            b,
+                            &resolved.captures,
+                        )
+                        .unwrap();
+                    assert!(
+                        staged
+                            .domain_leases
+                            .iter()
+                            .any(|attachment| attachment.lease().handle() == stale.handle()),
+                        "actual production stage retains the already-owned sibling descriptor"
+                    );
+                    assert!(session.prepared_mut().unwrap().unpin(second));
+                    assert!(session.retire_failed_turn_source_instances(a, &delta));
+                    assert!(!session.prepared_mut().unwrap().release(stale.handle()));
+                    let revision = session.bindings.mutation_revision();
+                    let snapshot = session.bindings.scope_snapshot(&session.scopes, b).unwrap();
+                    let metadata = session.session_table().clone();
+                    assert!(matches!(
+                        session.finish_certified_turn_in(b, None, staged, admitted_metadata),
+                        Err(PreparedRuntimeError::SourceScopeAdmission)
+                    ));
+                    assert_eq!(session.bindings.mutation_revision(), revision);
+                    assert_eq!(
+                        session.bindings.scope_snapshot(&session.scopes, b).unwrap(),
+                        snapshot
+                    );
+                    assert_eq!(session.session_table(), &metadata);
+                    assert_eq!(
+                        session.bindings.source_instance_keys_in(&session.scopes, b),
+                        before
+                    );
+                    assert!(
+                        !session
+                            .bindings
+                            .source_instances_in(&session.scopes, a)
+                            .iter()
+                            .any(|lease| lease.handle() == stale.handle()),
+                        "released descriptor is absent from actual source custody"
+                    );
+                    let (fresh, _, placement) =
+                        install_runtime_fixture_in(session, b, targets, "second");
+                    Ok::<_, PreparedRuntimeError>((fresh, placement))
+                },
+            )
             .unwrap();
-        assert!(session.prepared_mut().unwrap().unpin(second));
-        assert!(session.retire_failed_turn_source_instances(a, &delta));
-        assert!(!session.prepared_mut().unwrap().release(stale.handle()));
-        let revision = session.bindings.mutation_revision();
-        assert!(session
-            .machine
-            .as_ref()
-            .unwrap()
-            .admit_source_instances(&mut session.bindings, &session.scopes, b, vec![held])
-            .is_err());
-        assert_eq!(session.bindings.mutation_revision(), revision);
-        assert_eq!(
-            session.bindings.source_instance_keys_in(&session.scopes, b),
-            before
-        );
-        assert!(session
-            .bindings
-            .retained_native_sibling_attachment(anchor_key.domain, anchor, stale.value())
-            .is_none());
-        let (fresh, _, _fresh_placement) =
-            install_runtime_fixture_in(&mut session, b, targets, "second");
+        let outcome = settled.into_outcome();
+        assert!(matches!(
+            outcome.close,
+            crate::CompilerTransactionClose::Clean | crate::CompilerTransactionClose::NotStarted
+        ));
+        let (fresh, _fresh_placement) = outcome.action.unwrap();
         let live = session
             .bindings
             .source_instances_in(&session.scopes, b)

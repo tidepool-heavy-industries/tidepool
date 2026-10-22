@@ -385,39 +385,6 @@ struct Candidate {
 }
 
 impl PreparedMachine<'_> {
-    /// Root a newly requested export in the exact already selected instance.
-    /// Registration must still validate the retained anchor in the target domain.
-    pub fn retain_native_sibling(
-        &mut self,
-        anchor: &NativeInstanceLease,
-        request: NativeExportRequest,
-    ) -> Result<super::super::NativeInstanceAttachment, ExecutionError> {
-        self.handle_is_evaluated(anchor.handle())?;
-        let image = self
-            .programs
-            .get(&anchor.instance().program())
-            .ok_or(ExecutionError::UnknownProgram(anchor.instance().program()))?
-            .program
-            .get();
-        if anchor.binding_key() != request.binding_key()
-            || !std::ptr::eq(image, request.image.as_ref())
-        {
-            return Err(ExecutionError::BatchSourceContract(Box::new(
-                anchor.export().clone(),
-            )));
-        }
-        let domain = request.domain;
-        let handle = self.retain_top(anchor.instance().program(), request.binding)?;
-        self.handles
-            .retain_native_instance(handle.raw, anchor.instance().program());
-        let lease = request.into_lease(anchor.instance(), handle);
-        Ok(super::super::NativeInstanceAttachment::from_anchor(
-            domain,
-            lease,
-            anchor.clone(),
-        ))
-    }
-
     /// Root a newly demanded sibling binder from an exact lexical group
     /// instance already held by `anchor`. The original program's CAFs stay
     /// shared; this creates one new scoped handle without reinstalling code.
