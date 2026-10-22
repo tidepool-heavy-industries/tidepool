@@ -565,7 +565,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
         };
         let NativeGroupCandidates::IssuedAvailability(bindings) = current
             .certified
-            .source_selection
+            .source_selection()
             .native_group_candidates(key, &selected_owner)
             .unwrap()
         else {
@@ -575,7 +575,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
         for binding in &bindings {
             let Some(CertifiedNativeGroupSupport::Issued(offer)) = current
                 .certified
-                .source_selection
+                .source_selection()
                 .native_group_support(key, &selected_owner, *binding)
             else {
                 panic!("completed availability retains its exact issuing offer");
@@ -590,7 +590,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     }
     let rebound_result = current
         .certified
-        .source_selection
+        .source_selection()
         .selected_original_closure(&rebound);
     assert!(
         matches!(&rebound_result,
@@ -629,7 +629,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
         );
         let originals = current
             .certified
-            .source_selection
+            .source_selection()
             .selected_original_closure(&view)
             .unwrap();
         assert_eq!(originals.products().len(), 1);
@@ -659,14 +659,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             }
         });
         let exact = (&current.request).product_admission(&current.source);
-        assert!(crate::declaration_context::IssuedOriginalOutput::issue(
-            current.certified.source_selection.clone(), view.inventory().empty_view(),
-        ).is_err(), "an issued output cannot pair this source selection with missing canonical/native custody");
-        let output = crate::declaration_context::IssuedOriginalOutput::issue(
-            current.certified.source_selection.clone(),
-            view.clone(),
-        )
-        .unwrap();
+        let output = current.completed_output();
         let certified = crate::declaration_join::certify_same_offer_planned_declaration(
             module,
             &format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n"),
@@ -804,7 +797,7 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
             );
             let selected = selected_issue
                 .certified
-                .source_selection
+                .source_selection()
                 .selected_original_closure(&view)
                 .unwrap();
             prop_assert_eq!(selected.products().len(), 1);
@@ -835,11 +828,7 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
             });
             let exact = (&selected_issue.request).product_admission(&selected_issue.source);
             let source = format!("module {module_name} where\nentry_7 = 3\nentry_11 = 4\n");
-            let output = crate::declaration_context::IssuedOriginalOutput::issue(
-                selected_issue.certified.source_selection.clone(),
-                view.clone(),
-            )
-            .unwrap();
+            let output = selected_issue.completed_output();
             let joined = crate::declaration_join::certify_same_offer_planned_declaration(
                 module,
                 &source,

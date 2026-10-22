@@ -128,11 +128,13 @@ fn hydrate_context_roots(
     let mut receipts = Vec::new();
     let mut bindings = BTreeSet::new();
     let mut edges = BTreeSet::new();
-    for root in demanded {
-        let receipt = graph
-            .acquire_context(&root)
-            .map_err(|error| recovery::graph_error(&owner.path, error))?;
+    let mut package_products = BTreeSet::new();
+    let acquired = graph
+        .acquire_contexts(&demanded)
+        .map_err(|error| recovery::graph_error(&owner.path, error))?;
+    for (root, receipt) in demanded.into_iter().zip(acquired) {
         let snapshot = receipt.snapshot();
+        package_products.extend(snapshot.native_package_artifacts_introduced(None));
         let selection = snapshot
             .graph_selection()
             .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))?;
@@ -144,10 +146,11 @@ fn hydrate_context_roots(
         );
         receipts.push((root, receipt));
     }
-    let artifacts = bindings
+    let mut artifacts = bindings
         .iter()
         .map(|binding| binding.artifact)
         .collect::<BTreeSet<_>>();
+    artifacts.extend(package_products);
     let mut references = Vec::new();
     let mut descriptors = Vec::new();
     for id in artifacts {
@@ -172,11 +175,12 @@ fn hydrate_context_roots(
             &edges.into_iter().collect::<Vec<_>>(),
         )
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
-    let mut restored = Vec::new();
-    for (root, receipt) in receipts {
-        let context = graph.recover_compiler_context(&inventory, &root, receipt)?;
-        restored.push((root, context));
-    }
+    let contexts = graph.recover_compiler_contexts(&inventory, &receipts)?;
+    let restored = receipts
+        .into_iter()
+        .zip(contexts)
+        .map(|((root, _), context)| (root, context))
+        .collect::<Vec<_>>();
     owner.validate_owner()?;
     graph
         .store()
@@ -556,7 +560,10 @@ impl SessionLib {
                 external_imports: SourceImports::new(),
                 sources: Vec::new(),
                 workbench_imports: SourceImports::from_specs(imports),
-                items: evidence.exports().iter().map(ExportItem::try_from)
+                items: evidence
+                    .exports()
+                    .iter()
+                    .map(ExportItem::try_from)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| invalid(error.to_string()))?,
                 value_types: BTreeMap::new(),

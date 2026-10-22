@@ -1660,8 +1660,7 @@ pub struct TurnCertification {
     /// Retain the actual output's selecting owner. Group summaries cannot
     /// reconstruct its exact target roots or ordered dependency choices.
     pub(super) original_output: Option<Arc<tidepool_toolchain::artifacts::SealedTurnProducts>>,
-    pub(super) native_selection:
-        Option<Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>>,
+    pub(super) linked_target: Option<Arc<tidepool_toolchain::linked_native::LinkedNativeTarget>>,
     pub(crate) artifact_view: tidepool_toolchain::artifact_inventory::ArtifactView,
     pub groups: Arc<[PendingCertifiedGroup]>,
     pub target_owners: Vec<PendingImportOwner>,
@@ -1681,7 +1680,7 @@ pub(super) struct CurrentNativeSources<'a> {
 impl<'a> CurrentNativeSources<'a> {
     pub(super) fn target(
         &self,
-        selection: &Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+        selection: &Arc<tidepool_toolchain::linked_native::LinkedNativeTarget>,
     ) -> Result<super::resident::NativeSourceCustody, super::prepared::PreparedRuntimeError> {
         self.products
             .validate_source_target(selection)
@@ -1700,8 +1699,8 @@ impl<'a> CurrentNativeSources<'a> {
 
     pub(super) fn group(
         &self,
-        selection: &Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
-        selected: &tidepool_toolchain::artifact_inventory::CompletedNativeSourceRow,
+        selection: &Arc<tidepool_toolchain::linked_native::LinkedNativeTarget>,
+        selected: &tidepool_toolchain::linked_native::AcquiredNativeCode,
     ) -> Result<Option<super::resident::NativeSourceCustody>, super::prepared::PreparedRuntimeError>
     {
         self.products
@@ -1790,7 +1789,7 @@ impl Default for TurnCertification {
     fn default() -> Self {
         Self {
             original_output: None,
-            native_selection: None,
+            linked_target: None,
             artifact_view: tidepool_toolchain::artifact_inventory::ArtifactInventory::default()
                 .empty_view(),
             groups: Arc::from([]),
@@ -1842,7 +1841,7 @@ impl TurnCertification {
         target: &crate::TargetArtifact,
     ) -> Self {
         Self {
-            native_selection: target.completed_native_selection().cloned(),
+            linked_target: target.linked_native_target().cloned(),
             artifact_view: artifacts.artifact_view.clone(),
             groups: artifacts.certified_groups.clone().into(),
             target_owners: target.pending_imports.clone(),
@@ -1986,7 +1985,7 @@ impl CompiledTurn {
         let execution = item.native().ok_or_else(missing)?;
         let certification = TurnCertification {
             original_output: Some(Arc::clone(products)),
-            native_selection: products.completed_native_selection().cloned(),
+            linked_target: products.linked_native_target().cloned(),
             artifact_view: products.artifact_view().clone(),
             groups: products.certified_groups.clone(),
             target_owners: products.pending_imports().to_vec(),
@@ -5006,7 +5005,7 @@ fn compiled_native_output(
         .map(|products| -> Result<_, CompileError> {
             Ok(TurnCertification {
                 original_output: Some(Arc::clone(products)),
-                native_selection: products.completed_native_selection().cloned(),
+                linked_target: products.linked_native_target().cloned(),
                 artifact_view: products.artifact_view().clone(),
                 groups: products.certified_groups.clone(),
                 target_owners: products.pending_imports().to_vec(),

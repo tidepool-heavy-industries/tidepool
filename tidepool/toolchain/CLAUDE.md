@@ -331,14 +331,12 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Context snapshots use version 7 and persist normalized native availability and
-the input issuer's per-original decision domain alongside compact exact Group
-references. An explicitly empty decision differs from no issued choice; neither
-grants native availability or
-executes a group. Older context versions require regeneration and are refused.
-Custody attachment preserves these decisions, narrowing withdraws removed
-choices, and only the checked publication endorsement can rebind a decision to
-its new published role. Arbitrary role replacement cannot inherit a choice.
+Context snapshots use version 8 and persist normalized native availability plus
+references to the same linked native components and acquired occurrence records
+held by compiler prefixes. Restore authenticates exact product/source custody and
+ordered occurrence choices through the linked owner before returning usable code.
+Decoded records grant no source claim, runtime instance or execution progress.
+Older context versions require regeneration and are refused before child hydration.
 
 Compiler transport combines authenticated body availability while retaining each
 offer's exact issued graph. Equal payload IDs and ordinals can belong to distinct

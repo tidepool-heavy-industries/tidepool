@@ -96,17 +96,17 @@ pub(crate) struct RecoveryPublicSourceInstance {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// Installed-instance observations are staleness evidence only. Code identity
+// cannot reconstruct an acquisition grant or a live physical instance.
 pub(crate) enum RecoveryNativeBinding {
     Home {
-        artifact: [u8; 32],
-        selection: [u8; 32],
+        code_id: [u8; 32],
         original_ordinal: u32,
         module_version: [u8; 32],
         binder: RecoverySourceIdentity,
     },
     Package {
-        artifact: [u8; 32],
-        selection: [u8; 32],
+        code_id: [u8; 32],
         binder: RecoverySourceIdentity,
     },
 }
@@ -482,6 +482,9 @@ pub(crate) fn materialize_missing_context_artifacts(
                 .map(|base| base.snapshot().selection().as_ref()),
         )
         .map_err(|error| crate::session::SessionError::RecoverySnapshot(Box::new(error)))?;
+    introduced.extend(
+        snapshot.native_package_artifacts_introduced(base.as_ref().map(|base| base.snapshot())),
+    );
     introduced.retain(|id| !graph.contains_artifact(*id));
     use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
     Ok(context

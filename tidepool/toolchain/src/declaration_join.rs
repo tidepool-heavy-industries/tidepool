@@ -3137,7 +3137,6 @@ mod authored_tests {
                 .inventory()
                 .select_native_target(
                     physical.physical_cohort(),
-                    &selection,
                     observed,
                     None,
                     None,
@@ -3179,7 +3178,6 @@ mod authored_tests {
                     .inventory()
                     .select_native_target(
                         physical.physical_cohort(),
-                        &selection,
                         denied,
                         None,
                         None,

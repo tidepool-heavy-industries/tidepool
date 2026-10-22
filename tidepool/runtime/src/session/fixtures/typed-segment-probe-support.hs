@@ -1,10 +1,12 @@
 {-# LANGUAGE GHC2024 #-}
 module SegmentProbeSupport
   ( segmentRecord
+  , segmentRecordRendered
   , carrierBaseline
   , lateCarrierIncrement
   , lateCarrierDouble
   , lateCarrierNegate
+  , lateCarrierTextLength
   ) where
 
 import Prelude (Int)
@@ -15,6 +17,9 @@ import Tidepool.Effects (Console(..))
 
 segmentRecord :: Member Console effects => Int -> Eff effects ()
 segmentRecord value = send (Print (T.pack (P.show value)))
+
+segmentRecordRendered :: Member Console effects => T.Text -> Eff effects ()
+segmentRecordRendered value = send (Print value)
 
 -- Keep reuse-test demand as original call edges rather than inlining or
 -- specialization. The uncalled negate helper distinguishes partial selection.
@@ -33,3 +38,7 @@ lateCarrierDouble value = value P.* 2 P.+ 1
 {-# OPAQUE lateCarrierNegate #-}
 lateCarrierNegate :: Int -> Int
 lateCarrierNegate value = P.negate value
+
+{-# OPAQUE lateCarrierTextLength #-}
+lateCarrierTextLength :: P.String -> Int
+lateCarrierTextLength value = T.length (T.pack value)

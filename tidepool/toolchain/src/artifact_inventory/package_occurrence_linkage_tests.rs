@@ -1,28 +1,30 @@
-//! P3 independent oracle controls for exact package occurrence linkage.
+//! Actual compiler and authenticated-product controls for package linkage.
 //!
-//! Every positive history here is produced by the real compiler through
-//! `test_support::compile_invocation`; no test-only certificate constructor
-//! grants package authority. The assertions read the compiler-issued
-//! selection, never a re-derivation of the repaired index.
+//! Native histories come from the real compiler through `compile_invocation`.
+//! Historical product DATA comes from authenticated frozen compiler envelopes.
+//! No test constructor grants acquisition or installation authority.
 //!
 //! These tests are ignored by default because they require the rooted
 //! compiler service; the joined qualification runs them in that environment.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use crate::artifact_inventory::{
-    ArtifactBinding, CompletedNativeImport, CompletedNativeTargetImport, PackageCodeBinding,
-};
+use crate::artifact_inventory::NativeGroupBinding;
 use crate::artifacts::test_support::compile_invocation;
 use crate::artifacts::CompileInvocation;
+use crate::linked_native::{
+    AcquiredNativeCode, AcquiredNativeImport, LinkedNativeTarget, LinkedNativeTargetImport,
+    NativeCodeGrant,
+};
+use tidepool_repr::execution_schema::ValueId;
+use tidepool_repr::native_code::NativeCodeId;
 
-/// A finite observation of one issued package graph. Nodes are keyed by their
-/// exact artifact binding, so cycles terminate without silently truncating the
-/// graph and repeated edges retain their positions.
+/// Observe actual code bodies and ordered edges, independently of receipt-local
+/// package stage/occurrence coordinates. Content alone grants no acquisition.
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PackageGraphObservation {
-    root: ArtifactBinding,
-    nodes: BTreeMap<ArtifactBinding, PackageGraphNode>,
+    root: NativeCodeId,
+    nodes: BTreeMap<NativeCodeId, PackageGraphNode>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -31,74 +33,85 @@ struct PackageGraphNode {
     envelope_sha256: [u8; 32],
     interface_sha256: [u8; 32],
     body_sha256: [u8; 32],
-    imports: Vec<ArtifactBinding>,
+    imports: Vec<(NativeCodeId, ValueId)>,
 }
 
-/// One ordered package slot of a completed target: the defining identity and
-/// the exact issued graph selected for that slot.
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PackageSlotRecord {
     identity: String,
     graph: PackageGraphObservation,
 }
 
-fn collect_package_plans(
-    binding: &PackageCodeBinding,
-    plans: &mut BTreeMap<
-        crate::artifact_inventory::ArtifactId,
-        crate::artifact_inventory::PackageCodePlan,
-    >,
-) {
-    let id = binding.product().artifact_id();
-    if plans.contains_key(&id) {
-        return;
+fn package_product(
+    acquired: &AcquiredNativeCode,
+) -> &Arc<crate::certified_products::CertifiedPackageCodeProduct> {
+    match acquired.grant() {
+        NativeCodeGrant::Package { product, .. } => product,
+        _ => panic!("actual package occurrence required"),
     }
-    let imports = binding
+}
+
+fn home_product(
+    acquired: &AcquiredNativeCode,
+) -> &Arc<crate::certified_products::PendingCertifiedGroup> {
+    match acquired.grant() {
+        NativeCodeGrant::Home { product, .. } => product,
+        _ => panic!("actual HOME occurrence required"),
+    }
+}
+
+fn home_binding(acquired: &AcquiredNativeCode) -> NativeGroupBinding {
+    match acquired.grant() {
+        NativeCodeGrant::Home { binding, .. } => binding,
+        _ => panic!("actual HOME occurrence required"),
+    }
+}
+
+fn package_children(acquired: &AcquiredNativeCode) -> Vec<AcquiredNativeCode> {
+    acquired
         .imports()
-        .map(crate::artifact_inventory::PackageCodeTarget::Held)
-        .collect();
-    plans.insert(
-        id,
-        crate::artifact_inventory::PackageCodePlan {
-            product: Arc::clone(binding.product()),
-            imports,
-        },
-    );
+        .filter_map(|import| match import {
+            AcquiredNativeImport::Code { acquired, .. }
+                if matches!(acquired.grant(), NativeCodeGrant::Package { .. }) =>
+            {
+                Some(acquired)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
-fn issue_package_graph(
-    binding: &PackageCodeBinding,
-    inherited: &[Arc<crate::artifact_inventory::IssuedPackageCodeGraph>],
-) -> Result<Arc<crate::artifact_inventory::IssuedPackageCodeGraph>, crate::CompileError> {
-    let mut plans = BTreeMap::new();
-    collect_package_plans(binding, &mut plans);
-    let inventory = crate::artifact_inventory::ArtifactInventory::default();
-    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-    crate::artifact_inventory::IssuedPackageCodeGraph::issue(
-        &inventory.empty_view(),
-        plans.into_values().collect(),
-        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
-            binding.product().artifact_id(),
-        )],
-        inherited,
-        &operation,
-    )
+fn homes(target: &LinkedNativeTarget) -> impl Iterator<Item = AcquiredNativeCode> + '_ {
+    target
+        .acquired()
+        .filter(|acquired| matches!(acquired.grant(), NativeCodeGrant::Home { .. }))
 }
 
-fn observe_package_graph(binding: &PackageCodeBinding) -> PackageGraphObservation {
-    let root = binding.binding();
+fn observe_package_graph(acquired: &AcquiredNativeCode) -> PackageGraphObservation {
+    let root = acquired.code().id();
     let mut nodes = BTreeMap::new();
-    let mut pending = VecDeque::from([binding.clone()]);
-    while let Some(binding) = pending.pop_front() {
-        let exact = binding.binding();
+    let mut pending = VecDeque::from([acquired.clone()]);
+    while let Some(acquired) = pending.pop_front() {
+        let exact = acquired.code().id();
         if nodes.contains_key(&exact) {
             continue;
         }
-        let product = binding.product();
-        let imports = binding
+        let product = package_product(&acquired);
+        let mut children = Vec::new();
+        let imports = acquired
             .imports()
-            .map(|child| child.binding())
-            .collect::<Vec<_>>();
+            .map(|import| match import {
+                AcquiredNativeImport::Code { acquired, value } => {
+                    assert!(matches!(acquired.grant(), NativeCodeGrant::Package { .. }));
+                    let edge = (acquired.code().id(), value);
+                    children.push(acquired);
+                    edge
+                }
+                AcquiredNativeImport::Retained { .. } => {
+                    panic!("PACKAGE cannot import retained runtime values")
+                }
+            })
+            .collect();
         nodes.insert(
             exact,
             PackageGraphNode {
@@ -113,7 +126,7 @@ fn observe_package_graph(binding: &PackageCodeBinding) -> PackageGraphObservatio
                 imports,
             },
         );
-        pending.extend(binding.imports());
+        pending.extend(children);
     }
     PackageGraphObservation { root, nodes }
 }
@@ -124,26 +137,19 @@ struct HomePackageRoot {
     imports: Vec<PackageGraphObservation>,
 }
 
-fn home_package_roots(
-    selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
-) -> BTreeMap<u32, HomePackageRoot> {
+fn home_package_roots(target: &LinkedNativeTarget) -> BTreeMap<u32, HomePackageRoot> {
     let mut roots = BTreeMap::new();
-    for row in selection.completion().rows() {
-        let imports = row
-            .imports()
+    for acquired in homes(target) {
+        let imports = package_children(&acquired)
             .iter()
-            .filter_map(|import| match import {
-                CompletedNativeImport::Package { binding, .. } => {
-                    Some(observe_package_graph(binding))
-                }
-                _ => None,
-            })
+            .map(observe_package_graph)
             .collect::<Vec<_>>();
         if imports.is_empty() {
             continue;
         }
-        let finder_binder = row
-            .product()
+        let product = home_product(&acquired);
+        let binding = home_binding(&acquired);
+        let finder_binder = product
             .group()
             .binders()
             .iter()
@@ -151,23 +157,23 @@ fn home_package_roots(
             .find(|binder| matches!(*binder, "byList" | "byText"))
             .unwrap_or_else(|| {
                 panic!(
-                    "HOME package row ordinal {} has no fixture binder: {:?}",
-                    row.binding().original_ordinal,
-                    row.product().group().binders()
+                    "HOME package ordinal {} has no fixture binder: {:?}",
+                    binding.original_ordinal,
+                    product.group().binders()
                 )
             })
             .to_owned();
         assert!(
             roots
                 .insert(
-                    row.binding().original_ordinal,
+                    binding.original_ordinal,
                     HomePackageRoot {
                         finder_binder,
-                        imports,
-                    },
+                        imports
+                    }
                 )
                 .is_none(),
-            "one completed HOME row per issued ordinal"
+            "one acquired HOME occurrence per issued ordinal"
         );
     }
     roots
@@ -175,27 +181,30 @@ fn home_package_roots(
 
 fn package_slot_records(
     output: &crate::artifacts::CompiledArtifacts,
-    selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
+    target_owner: &LinkedNativeTarget,
     target: &str,
 ) -> Vec<PackageSlotRecord> {
     let globals = output.targets[target].prepared.prepared().globals();
-    let links = selection.target_imports();
     assert_eq!(
         globals.len(),
-        links.len(),
-        "{target} completion must have one ordered slot per physical global"
+        target_owner.imports().len(),
+        "{target} has one ordered import per physical global"
     );
     globals
         .iter()
-        .zip(links)
-        .filter_map(|(global, link)| match link {
-            CompletedNativeTargetImport::Package { binding, .. } => Some(PackageSlotRecord {
-                identity: format!(
-                    "{}:{}:{}",
-                    global.identity.unit, global.identity.module, global.identity.occurrence
-                ),
-                graph: observe_package_graph(binding),
-            }),
+        .zip(target_owner.imports())
+        .filter_map(|(global, import)| match import {
+            LinkedNativeTargetImport::Code { acquired, .. }
+                if matches!(acquired.grant(), NativeCodeGrant::Package { .. }) =>
+            {
+                Some(PackageSlotRecord {
+                    identity: format!(
+                        "{}:{}:{}",
+                        global.identity.unit, global.identity.module, global.identity.occurrence
+                    ),
+                    graph: observe_package_graph(acquired),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -219,14 +228,87 @@ fn compile_fixture(source: &str, targets: &[&str]) -> crate::artifacts::Compiled
     .expect("actual finite native package output through common admission")
 }
 
-fn completed_selection(
+fn assert_current_handles_are_target_bound(
     output: &crate::artifacts::CompiledArtifacts,
     target: &str,
-) -> Arc<crate::artifact_inventory::CompletedNativeSelection> {
+) {
+    use crate::linked_native::NativeCodeGrant;
+    let linked = output.targets[target]
+        .linked_native_target()
+        .expect("actual finite target owns its linked code");
+    let sources = output
+        .native_source_products(target)
+        .expect("actual source receipt resolves")
+        .expect("finite target source receipt");
+    let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        output
+            .issued_output
+            .as_ref()
+            .expect("actual compiler output owner")
+            .compiler_inputs(),
+    )
+    .unwrap()
+    .with_linked_native_target(linked)
+    .unwrap();
+    let narrowed = support
+        .for_source_owners(&BTreeSet::new())
+        .unwrap()
+        .finalize_namespace()
+        .unwrap();
+    assert!(narrowed
+        .projection()
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(narrowed.artifacts().selected_native_groups().is_empty());
+    assert!(
+        narrowed
+            .acquired_native_closures()
+            .contains_owner(linked.closure()),
+        "role narrowing keeps the actual acquired code owner without selecting execution"
+    );
+    let mut checked = 0;
+    for acquired in linked.acquired() {
+        let NativeCodeGrant::Home {
+            binding,
+            current: Some(_),
+            ..
+        } = acquired.grant()
+        else {
+            continue;
+        };
+        assert!(sources
+            .physical_current_for(linked, &acquired)
+            .expect("receiving target handle retains Current")
+            .is_some());
+        let historical = linked
+            .closure()
+            .home(binding)
+            .expect("same exact closure lends a historical handle");
+        assert!(matches!(
+            historical.grant(),
+            NativeCodeGrant::Home { current: None, .. }
+        ));
+        assert!(
+            sources.physical_current_for(linked, &historical).is_err(),
+            "a historical handle cannot borrow receiving Current authority"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "the fresh multi-ordinal fixture demands Current HOME code"
+    );
+}
+
+fn linked_target(
+    output: &crate::artifacts::CompiledArtifacts,
+    target: &str,
+) -> Arc<LinkedNativeTarget> {
     Arc::clone(
         output.targets[target]
-            .completed_native_selection()
-            .expect("finite target has its coissued completion"),
+            .linked_native_target()
+            .expect("actual finite target has issued linkage"),
     )
 }
 
@@ -241,8 +323,8 @@ fn reversed_targets_preserve_exact_package_graphs() {
         ["packThenUnpack", "onlyPack"],
     ] {
         let output = compile_fixture(source, &targets);
-        let only_pack = completed_selection(&output, "onlyPack");
-        let pack_then_unpack = completed_selection(&output, "packThenUnpack");
+        let only_pack = linked_target(&output, "onlyPack");
+        let pack_then_unpack = linked_target(&output, "packThenUnpack");
 
         // Both targets retain actual package code resolved through the export
         // contract. Ordering a target first or second must not change its own
@@ -273,8 +355,8 @@ fn shared_package_symbol_graph_is_order_invariant() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/TransitiveCompetitor.hs");
     let output = compile_fixture(source, &["viaText", "directText"]);
-    let via_text = completed_selection(&output, "viaText");
-    let direct_text = completed_selection(&output, "directText");
+    let via_text = linked_target(&output, "viaText");
+    let direct_text = linked_target(&output, "directText");
 
     // Shared package products must keep their exact issued graphs when target
     // order changes. This is order-invariance coverage, not a competing-child
@@ -305,7 +387,7 @@ fn shared_package_symbol_graph_is_order_invariant() {
 fn compiler_deduplicates_physical_sort_global() {
     let source = include_str!("../../tests/fixtures/package-occurrence-linkage/RepeatedSlots.hs");
     let output = compile_fixture(source, &["threeSorts"]);
-    let selection = completed_selection(&output, "threeSorts");
+    let selection = linked_target(&output, "threeSorts");
     // Three identical `sort` demands resolve through one shared immutable
     // `actualSort` body (plus the Ord dictionary). Byte sharing must not
     // duplicate the retained payload.
@@ -328,8 +410,8 @@ fn duplicate_envelope_smoke_compiles_both_targets() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/DuplicateEnvelope.hs");
     let output = compile_fixture(source, &["firstHistory", "secondHistory"]);
-    let first = completed_selection(&output, "firstHistory");
-    let second = completed_selection(&output, "secondHistory");
+    let first = linked_target(&output, "firstHistory");
+    let second = linked_target(&output, "secondHistory");
     // One payload under two child histories keeps two distinct occurrences.
     // The manifest must keep their ordered slots distinct even when envelope
     // bytes are shared.
@@ -357,15 +439,35 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
     let output = compile_invocation(
         &CompileInvocation {
             source,
-            targets: &["result"],
+            targets: &["result", "emptyTarget"],
             include: &[root.path().to_owned()],
             fallback_module_name: "MultiOrdinalHomeConsumer",
         },
         |_, _, _| {},
     )
     .expect("fresh multi-ordinal HOME module compiles through common admission");
+    assert_current_handles_are_target_bound(&output, "result");
+    let empty = output.targets["emptyTarget"]
+        .linked_native_target()
+        .expect("actual literal target has an issued linked owner");
+    assert!(
+        empty.prepared().globals().is_empty(),
+        "literal target must actually have no dependency globals"
+    );
+    assert_eq!(empty.acquired().len(), 0);
+    let baseline = crate::artifact_inventory::CompilerSourceSupport::empty();
+    let unchanged = baseline.with_linked_native_target(empty).unwrap();
+    assert!(unchanged
+        .acquired_native_closures()
+        .same_held_owners(baseline.acquired_native_closures()));
+    assert!(unchanged.native_component_records().is_empty());
+    assert!(unchanged.native_closure_records().is_empty());
+    assert!(Arc::ptr_eq(
+        unchanged.native_fact_owner(),
+        baseline.native_fact_owner()
+    ));
 
-    let selection = completed_selection(&output, "result");
+    let selection = linked_target(&output, "result");
     let roots = home_package_roots(&selection);
     assert_eq!(
         roots.len(),
@@ -454,83 +556,67 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
     };
 
     let forward = compile(&["result", "result2"]);
-    let result = completed_selection(&forward, "result");
-    let result2 = completed_selection(&forward, "result2");
+    let result = linked_target(&forward, "result");
+    let result2 = linked_target(&forward, "result2");
     let result_roots = home_package_roots(&result);
     let result2_roots = home_package_roots(&result2);
     assert_eq!(result_roots.len(), 2);
     assert_eq!(result2_roots, result_roots);
-    for (target, selection) in [("result", &result), ("result2", &result2)] {
+    for (target, selected) in [("result", &result), ("result2", &result2)] {
         let sources = forward.targets[target]
             .native_source_products()
-            .expect("issued target resolves its source products")
-            .expect("issued target has native source products");
-        for row in selection.completion().rows() {
+            .unwrap()
+            .unwrap();
+        for acquired in homes(selected) {
             assert!(
                 sources
-                    .physical_current_for(selection, row)
-                    .expect("exact target source receipt")
+                    .physical_current_for(selected, &acquired)
+                    .unwrap()
                     .is_some(),
-                "{target} preserves current-source custody for ordinal {}",
-                row.binding().original_ordinal
+                "{target} preserves receiving Current for ordinal {}",
+                home_binding(&acquired).original_ordinal
             );
         }
     }
-
-    let left_sources = forward.targets["result"].native_source_products().unwrap().unwrap();
-    let shared_row = result.completion().rows().next().expect("shared current HOME row");
-    assert!(left_sources.physical_current_for(&result2, shared_row).is_err(),
-        "equal linkage in another target cannot authenticate this target's source receipt");
-
-    let package_bindings =
-        |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>, ordinal: u32| {
-            selection
-                .completion()
-                .rows()
-                .find(|row| row.binding().original_ordinal == ordinal)
-                .expect("shared HOME row")
-                .imports()
-                .iter()
-                .filter_map(|import| match import {
-                    CompletedNativeImport::Package { binding, .. } => Some(binding.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
+    let left_sources = forward.targets["result"]
+        .native_source_products()
+        .unwrap()
+        .unwrap();
+    let shared = homes(&result)
+        .next()
+        .expect("actual current HOME occurrence");
+    assert!(
+        left_sources
+            .physical_current_for(&result2, &shared)
+            .is_err(),
+        "another target cannot authenticate the same source receipt"
+    );
     for (ordinal, left) in &result_roots {
-        let left_product = result
-            .completion()
-            .rows()
-            .find(|row| row.binding().original_ordinal == *ordinal)
-            .expect("result HOME row")
-            .product();
-        let right_product = result2
-            .completion()
-            .rows()
-            .find(|row| row.binding().original_ordinal == *ordinal)
-            .expect("result2 HOME row")
-            .product();
+        let left_owner = homes(&result)
+            .find(|home| home_binding(home).original_ordinal == *ordinal)
+            .unwrap();
+        let right_owner = homes(&result2)
+            .find(|home| home_binding(home).original_ordinal == *ordinal)
+            .unwrap();
         assert!(
-            Arc::ptr_eq(left_product, right_product),
-            "ordinal {ordinal} reuses the same HOME product custody"
+            home_product(&left_owner).same_issuance(home_product(&right_owner)),
+            "ordinal {ordinal} retains its exact HOME issuer"
         );
-        let left_bindings = package_bindings(&result, *ordinal);
-        let right_bindings = package_bindings(&result2, *ordinal);
-        assert_eq!(
-            left_bindings.len(),
-            left.imports.len(),
-            "ordinal {ordinal} keeps its exact root cardinality"
-        );
-        assert_eq!(right_bindings.len(), left_bindings.len());
-        for (left, right) in left_bindings.iter().zip(&right_bindings) {
+        assert_eq!(left_owner.code().id(), right_owner.code().id());
+        let left_children = package_children(&left_owner);
+        let right_children = package_children(&right_owner);
+        assert_eq!(left_children.len(), left.imports.len());
+        assert_eq!(right_children.len(), left_children.len());
+        for (left, right) in left_children.iter().zip(&right_children) {
+            assert_eq!(left.code().id(), right.code().id());
             assert_eq!(
-                left.binding(),
-                right.binding(),
-                "ordinal {ordinal} reuses the same exact package binding"
+                left.occurrence(),
+                right.occurrence(),
+                "an already selected HOME keeps its ordered package receipt intact"
             );
             assert!(
-                Arc::ptr_eq(left.product(), right.product()),
-                "ordinal {ordinal} reuses immutable payload custody"
+                Arc::ptr_eq(package_product(left), package_product(right)),
+                "selected HOME retains its immutable package custody"
             );
         }
     }
@@ -538,12 +624,12 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
 
     let reversed = compile(&["result2", "result"]);
     assert_eq!(
-        home_package_roots(&completed_selection(&reversed, "result")),
+        home_package_roots(&linked_target(&reversed, "result")),
         result_roots,
         "target order cannot change result's exact HOME roots"
     );
     assert_eq!(
-        home_package_roots(&completed_selection(&reversed, "result2")),
+        home_package_roots(&linked_target(&reversed, "result2")),
         result2_roots,
         "target order cannot change result2's exact HOME roots"
     );
@@ -576,97 +662,65 @@ fn transitive_home_package_demand_reaches_the_final_target() {
         |_, _, _| {},
     )
     .expect("the target-local transitive HOME graph compiles through common admission");
-    let selection = completed_selection(&output, "target");
+    let selection = linked_target(&output, "target");
     let row = |module: &str, binder: &str| {
-        selection
-            .completion()
-            .rows()
-            .find(|row| {
-                row.product().owner().module == module
-                    && row
-                        .product()
+        homes(&selection)
+            .find(|home| {
+                let product = home_product(home);
+                product.owner().module == module
+                    && product
                         .group()
                         .binders()
                         .iter()
                         .any(|symbol| symbol.occurrence == binder)
             })
-            .unwrap_or_else(|| {
-                panic!("completed target lacks its exact {module}.{binder} HOME row")
-            })
+            .unwrap_or_else(|| panic!("target lacks actual {module}.{binder} HOME occurrence"))
     };
-    let target = &output.targets["target"];
-    let globals = target.prepared.prepared().globals();
-    assert_eq!(globals.len(), selection.target_imports().len());
+    let globals = output.targets["target"].prepared.prepared().globals();
+    assert_eq!(globals.len(), selection.imports().len());
     let middle = row("TransitiveHomeMiddle", "middleValue");
     let leaf = row("TransitiveHomeLeaf", "leafValue");
+    assert!(globals.iter().zip(selection.imports()).any(|(global, import)| {
+        global.identity.module == "TransitiveHomeMiddle" && global.identity.occurrence == "middleValue"
+            && matches!(import, LinkedNativeTargetImport::Code { acquired, .. }
+                if matches!(acquired.grant(), NativeCodeGrant::Home { binding, .. } if binding == home_binding(&middle)))
+    }), "final target directly imports its exact Middle HOME occurrence");
+    assert!(selection.imports().iter().all(|import| !matches!(import,
+        LinkedNativeTargetImport::Code { acquired, .. } if matches!(acquired.grant(), NativeCodeGrant::Package { .. }))),
+        "final target reaches PACKAGE through HOME rather than direct package slots");
+    assert!(middle.imports().any(|import| matches!(import,
+        AcquiredNativeImport::Code { acquired, .. }
+            if matches!(acquired.grant(), NativeCodeGrant::Home { binding, .. } if binding == home_binding(&leaf)))),
+        "Middle imports its exact transitive Leaf HOME occurrence");
     assert!(
-        globals
-            .iter()
-            .zip(selection.target_imports())
-            .any(|(global, import)| {
-                global.identity.module == "TransitiveHomeMiddle"
-                    && global.identity.occurrence == "middleValue"
-                    && matches!(import, CompletedNativeTargetImport::Source { binding, .. }
-                if *binding == middle.binding())
-            }),
-        "the optimized final target directly imports its exact Middle HOME row"
+        homes(&selection).all(|home| home_product(&home).owner().module != "TransitiveHomeTarget"),
+        "the target is not its own dependency HOME occurrence"
     );
-    assert!(
-        selection
-            .target_imports()
-            .iter()
-            .all(|import| { !matches!(import, CompletedNativeTargetImport::Package { .. }) }),
-        "the final target reaches package code through HOME rather than a direct package slot"
-    );
-    assert!(
-        middle.imports().iter().any(|import| {
-            matches!(import, CompletedNativeImport::Source { binding, .. }
-            if *binding == leaf.binding())
-        }),
-        "Middle imports the exact transitive Leaf HOME row"
-    );
-    assert!(
-        selection
-            .completion()
-            .rows()
-            .all(|row| { row.product().owner().module != "TransitiveHomeTarget" }),
-        "the final target is not reclassified as its own dependency HOME row"
-    );
-    let middle_packages = middle
-        .imports()
+    let middle_packages = package_children(&middle)
         .iter()
-        .filter_map(|import| match import {
-            CompletedNativeImport::Package { binding, .. } => {
-                Some(binding.product().code().owner().module.clone())
-            }
-            _ => None,
-        })
+        .map(|package| package_product(package).code().owner().module.clone())
         .collect::<Vec<_>>();
     assert!(
         middle_packages
             .iter()
             .all(|module| module != "Data.Text.Internal"),
-        "the package demand is reached through the second HOME edge: {middle_packages:?}"
+        "Text package demand occurs through the second HOME edge: {middle_packages:?}"
     );
-    let mut seen = std::collections::BTreeSet::new();
-    let mut pending = vec![leaf.binding()];
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![leaf];
     let mut leaf_packages = Vec::new();
-    while let Some(binding) = pending.pop() {
-        if !seen.insert(binding) {
+    while let Some(home) = pending.pop() {
+        if !seen.insert(home.occurrence()) {
             continue;
         }
-        let row = selection
-            .completion()
-            .rows()
-            .find(|row| row.binding() == binding)
-            .expect("every reached exact HOME import has its issued completion row");
-        for import in row.imports() {
-            match import {
-                CompletedNativeImport::Source { binding, .. } => pending.push(*binding),
-                CompletedNativeImport::Package { binding, .. } => {
-                    leaf_packages.push(binding.product().code().owner().module.clone());
+        for import in home.imports() {
+            if let AcquiredNativeImport::Code { acquired, .. } = import {
+                match acquired.grant() {
+                    NativeCodeGrant::Home { .. } => pending.push(acquired),
+                    NativeCodeGrant::Package { product, .. } => {
+                        leaf_packages.push(product.code().owner().module.clone())
+                    }
                 }
-                CompletedNativeImport::Retained { .. } => {}
             }
         }
     }
@@ -674,173 +728,74 @@ fn transitive_home_package_demand_reaches_the_final_target() {
         leaf_packages
             .iter()
             .any(|module| module == "Data.Text.Internal"),
-        "the target-local HOME walk retains the transitive Data.Text package: {leaf_packages:?}"
+        "actual HOME traversal retains transitive Text code: {leaf_packages:?}"
     );
     drop(output);
 }
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
-fn same_direct_package_with_different_children_has_a_real_premise() {
+fn same_direct_package_ignores_unrelated_dictionary_cohort() {
     let source = include_str!(
         "../../tests/fixtures/package-occurrence-linkage/SameDirectDifferentChildren.hs"
     );
     let ints = compile_fixture(source, &["sortInts"]);
     let strings = compile_fixture(source, &["sortStrings"]);
-    let int_selection = completed_selection(&ints, "sortInts");
-    let string_selection = completed_selection(&strings, "sortStrings");
-    let int_slots = package_slot_records(&ints, &int_selection, "sortInts");
-    let string_slots = package_slot_records(&strings, &string_selection, "sortStrings");
-    let mut crossed_children = Vec::new();
-    let mut crossed_indices = None;
-    for (left_index, left) in int_slots.iter().enumerate() {
-        let left = &left.graph.nodes[&left.graph.root];
-        for (right_index, right) in string_slots.iter().enumerate() {
-            let right = &right.graph.nodes[&right.graph.root];
-            if left.owner == right.owner
-                && left.interface_sha256 == right.interface_sha256
-                && left.envelope_sha256 == right.envelope_sha256
-                && left.body_sha256 == right.body_sha256
-                && left.imports != right.imports
-            {
-                crossed_indices = Some((left_index, right_index));
-                crossed_children.push((
-                    left.owner.clone(),
-                    left.envelope_sha256,
-                    left.imports.clone(),
-                    right.imports.clone(),
-                ));
+    let left = linked_target(&ints, "sortInts");
+    let right = linked_target(&strings, "sortStrings");
+    let direct_packages = |target: &LinkedNativeTarget| {
+        target
+            .imports()
+            .iter()
+            .filter_map(|import| match import {
+                LinkedNativeTargetImport::Code { acquired, .. }
+                    if matches!(acquired.grant(), NativeCodeGrant::Package { .. }) =>
+                {
+                    Some(acquired.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let left_packages = direct_packages(&left);
+    let right_packages = direct_packages(&right);
+    let mut shared = 0;
+    let mut different_receipt = 0;
+    for left in &left_packages {
+        for right in &right_packages {
+            if package_product(left).artifact_id() == package_product(right).artifact_id() {
+                shared += 1;
+                assert_eq!(
+                    observe_package_graph(left),
+                    observe_package_graph(right),
+                    "unrelated target dictionaries cannot change a shared package's closed code"
+                );
+                if left.occurrence() != right.occurrence() {
+                    different_receipt += 1;
+                }
             }
         }
     }
-    assert_eq!(
-        crossed_children.len(),
-        1,
-        "exactly one direct package identity must have two real child histories: {crossed_children:#?}"
-    );
-    let package_bindings =
-        |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>| {
-            selection
-                .target_imports()
-                .iter()
-                .filter_map(|import| match import {
-                    CompletedNativeTargetImport::Package { binding, .. } => Some(binding.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-    let int_bindings = package_bindings(&int_selection);
-    let string_bindings = package_bindings(&string_selection);
-    let Some((left_index, right_index)) = crossed_indices else {
-        unreachable!("the crossed child premise was asserted above")
-    };
-    let left = &int_bindings[left_index];
-    let right = &string_bindings[right_index];
-    assert_eq!(
-        left.product().artifact_id(),
-        right.product().artifact_id(),
-        "equal direct package content keeps one product identity"
-    );
-    assert_eq!(
-        left.product().bytes(),
-        right.product().bytes(),
-        "the discriminator starts from equal package bytes"
-    );
-    let issued_left = issue_package_graph(left, &[]).unwrap();
-    let issued_right = issue_package_graph(right, &[]).unwrap();
-    assert_eq!(
-        issued_left.roots()[0].artifact,
-        issued_right.roots()[0].artifact
-    );
-    assert_ne!(
-        issued_left.roots()[0].selection,
-        issued_right.roots()[0].selection,
-        "equal content with different ordered children receives distinct issuance"
-    );
-    let reused_left = issue_package_graph(left, &[Arc::clone(&issued_right)]).unwrap();
-    assert_eq!(
-        reused_left.roots(),
-        issued_left.roots(),
-        "an unused equal-content issuance cannot change the selected child history"
-    );
-    let reused_reverse =
-        issue_package_graph(left, &[Arc::clone(&issued_left), Arc::clone(&issued_right)]).unwrap();
-    assert_eq!(reused_reverse.roots(), issued_left.roots());
-    let selected = reused_reverse.get(reused_reverse.roots()[0]).unwrap();
-    assert_eq!(
-        selected
-            .imports()
-            .map(|child| child.binding())
-            .collect::<Vec<_>>(),
-        left.imports()
-            .map(|child| child.binding())
-            .collect::<Vec<_>>(),
-        "reissuance retains the producer's exact ordered children",
-    );
-    let reused_exact =
-        issue_package_graph(left, &[Arc::clone(&issued_right), Arc::clone(&issued_left)]).unwrap();
-    assert_eq!(
-        reused_exact.roots(),
-        issued_left.roots(),
-        "the exact selected issuance wins over its equal-content sibling"
-    );
-    let mut conflicting_plan = crate::artifact_inventory::PackageCodePlan {
-        product: Arc::clone(left.product()),
-        imports: left
-            .imports()
-            .map(|_| {
-                crate::artifact_inventory::PackageCodeTarget::Held(
-                    right
-                        .imports()
-                        .next()
-                        .expect("crossed package has an ordered child"),
-                )
-            })
-            .collect(),
-    };
-    let left_plan = crate::artifact_inventory::PackageCodePlan {
-        product: Arc::clone(left.product()),
-        imports: left
-            .imports()
-            .map(crate::artifact_inventory::PackageCodeTarget::Held)
-            .collect(),
-    };
-    if conflicting_plan.imports == left_plan.imports {
-        conflicting_plan.imports.reverse();
-    }
-    let mut plans = BTreeMap::new();
-    collect_package_plans(left, &mut plans);
-    plans.insert(left.product().artifact_id(), conflicting_plan);
-    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-    let inventory = crate::artifact_inventory::ArtifactInventory::default();
-    let refusal = crate::artifact_inventory::IssuedPackageCodeGraph::issue(
-        &inventory.empty_view(),
-        std::iter::once(left_plan)
-            .chain(plans.into_values())
-            .collect(),
-        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
-            left.product().artifact_id(),
-        )],
-        &[],
-        &operation,
-    )
-    .expect_err("one selected package id cannot issue two child histories");
     assert!(
-        matches!(
-            refusal,
-            crate::CompileError::ArtifactInventory(ref error)
-                if matches!(
-                    error.failure,
-                    crate::artifact_inventory::ArtifactInventoryFailure::PackageCode {
-                        reason: crate::artifact_inventory::PackageCodeRefusal::ConflictingPlan,
-                        ..
-                    }
-                )
-        ),
-        "the same selected issuance must reject conflicting content: {refusal:?}"
+        shared > 0,
+        "actual separate target histories share a direct package product"
     );
-    drop(ints);
-    drop(strings);
+    assert!(
+        different_receipt > 0,
+        "equal closed code is compared across distinct actual receipt occurrences"
+    );
+    let left_codes = left_packages
+        .iter()
+        .map(|package| package.code().id())
+        .collect::<BTreeSet<_>>();
+    let right_codes = right_packages
+        .iter()
+        .map(|package| package.code().id())
+        .collect::<BTreeSet<_>>();
+    assert_ne!(
+        left_codes, right_codes,
+        "the target histories must actually select different dictionary code siblings"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -848,9 +803,10 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
 //
 // The two package pairs below are decoded from immutable compiler envelopes
 // retained in the P3 fixture tree and listed in `historical/manifest.json`.
-// Authority comes only from those authenticated bytes through the production
+// Authenticated product DATA comes from those bytes through the production
 // reader (`CertifiedPackageCodeProduct::restore` -> `parse_code` ->
-// `PackageGroupCode::admit`); no test constructs a package owner or product.
+// `PackageGroupCode::admit`). Pure code identities grant no acquisition; no
+// test constructs a package owner, product or manifest occurrence.
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -992,34 +948,29 @@ fn restore_historical_product(
     .expect("authenticated envelope restores through the production reader")
 }
 
-fn issue_historical_product(
-    view: &crate::artifact_inventory::ArtifactView,
-    operation: &tidepool_repr::execution_schema::InventoryOperation,
-    product: &std::sync::Arc<crate::certified_products::CertifiedPackageCodeProduct>,
-) -> std::sync::Arc<crate::artifact_inventory::IssuedPackageCodeGraph> {
-    crate::artifact_inventory::IssuedPackageCodeGraph::issue(
-        view,
-        vec![crate::artifact_inventory::PackageCodePlan {
-            product: std::sync::Arc::clone(product),
+fn historical_code_identity(
+    product: &Arc<crate::certified_products::CertifiedPackageCodeProduct>,
+) -> NativeCodeId {
+    use tidepool_repr::native_code::{NativeCodeBody, NativeCodeComponent, NativeCodePlan};
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let code = NativeCodeComponent::link(
+        &[NativeCodePlan {
+            body: NativeCodeBody::Package(product.code().clone()),
             imports: Vec::new(),
         }],
-        vec![crate::artifact_inventory::PackageCodeTarget::Planned(
-            product.artifact_id(),
-        )],
-        &[],
-        operation,
+        &[0],
+        &operation,
     )
-    .expect("authenticated package body issues through the exact graph issuer")
+    .expect("restored zero-import package body links as immutable DATA");
+    assert_eq!(code.len(), 1);
+    code[0].id()
 }
 
 #[test]
 #[ignore = "decodes retained historical envelopes through the counted owned-resident runner"]
-fn historical_same_seal_bodies_select_separately() {
+fn historical_same_seal_bodies_keep_distinct_code_identities() {
     let manifest = historical_manifest();
     assert_eq!(manifest.pairs.len(), 2, "two authenticated package pairs");
-    let inventory = crate::artifact_inventory::ArtifactInventory::default();
-    let view = inventory.empty_view();
-    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
     let root = tempfile::tempdir().unwrap();
 
     for pair in &manifest.pairs {
@@ -1117,40 +1068,13 @@ fn historical_same_seal_bodies_select_separately() {
             pair.label
         );
 
-        // Select each same-seal body separately by its own occurrence
-        // coordinate (ArtifactId), through the existing graph issuer.
-        let complete_graph = issue_historical_product(&view, &operation, complete);
-        let minimal_graph = issue_historical_product(&view, &operation, minimal);
-        assert_eq!(
-            complete_graph.roots().len(),
-            1,
-            "{} complete root",
-            pair.label
-        );
-        assert_eq!(
-            minimal_graph.roots().len(),
-            1,
-            "{} minimal root",
-            pair.label
-        );
-        assert_eq!(
-            complete_graph.roots()[0].artifact,
-            complete.artifact_id(),
-            "{} complete graph selects the complete body",
-            pair.label
-        );
-        assert_eq!(
-            minimal_graph.roots()[0].artifact,
-            minimal.artifact_id(),
-            "{} minimal graph selects the minimal body",
-            pair.label
-        );
-
         assert_ne!(
-            complete_graph.roots()[0].artifact,
-            minimal_graph.roots()[0].artifact,
-            "{} exact roots select distinct same-seal bodies",
+            historical_code_identity(complete),
+            historical_code_identity(minimal),
+            "{} actual differing bodies with equal nominal seals retain distinct pure code identities",
             pair.label
         );
+        // These immutable DATA observations create no manifest occurrence,
+        // acquired closure, compiler selection or installation permission.
     }
 }

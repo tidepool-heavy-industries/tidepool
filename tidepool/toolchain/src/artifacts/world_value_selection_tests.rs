@@ -6,12 +6,37 @@ use crate::compiler_world::{
     CompilerWorldBindings, CompilerWorldCellOperand, CompilerWorldLexicalSurface,
     WorldCellOperandExposure, WorldSourceSelection,
 };
+use crate::linked_native::{
+    AcquiredNativeCode, AcquiredNativeImport, LinkedNativeTargetImport, NativeCodeGrant,
+};
 use crate::recovery_artifacts::PackageInterfaceValidation;
 use crate::toolchain::AdmittedCompilerEndpoint;
 use tidepool_extract_cmd::{
     settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
     CompilerTransactionClose, CompilerTransactionOrigin, HostAdmissionCancellation,
 };
+use tidepool_repr::native_code::NativeCodeBody;
+
+fn package_children(acquired: &AcquiredNativeCode) -> Vec<AcquiredNativeCode> {
+    acquired
+        .imports()
+        .filter_map(|import| match import {
+            AcquiredNativeImport::Code { acquired, .. }
+                if matches!(acquired.code().body(), NativeCodeBody::Package(_)) =>
+            {
+                Some(acquired)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn package_module(acquired: &AcquiredNativeCode) -> &str {
+    let NativeCodeBody::Package(body) = acquired.code().body() else {
+        panic!("actual package occurrence")
+    };
+    &body.owner().module
+}
 
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
@@ -80,38 +105,50 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
         let second = program.items()[1]
             .native_products()
             .expect("second target owner");
-        let first_bindings = first.target.artifacts().selected_native_binding_rows().1;
-        let second_bindings = second.target.artifacts().selected_native_binding_rows().1;
-        let first_packages = first
-            .target
-            .completed_selection()
-            .expect("first item has package completion")
-            .target_imports()
+        let first_target = first.linked_native_target().expect("first actual target");
+        let second_target = second.linked_native_target().expect("second actual target");
+        let first_packages = first_target
+            .imports()
             .iter()
             .filter_map(|import| match import {
-                crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding, ..
-                } => Some((
-                    binding.product().code().owner().unit.clone(),
-                    binding.product().code().owner().module.clone(),
-                )),
+                LinkedNativeTargetImport::Code { acquired, .. }
+                    if matches!(acquired.code().body(), NativeCodeBody::Package(_)) =>
+                {
+                    Some(package_module(acquired))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert!(
             !first_packages.is_empty(),
-            "the World declaration item must carry its actual Data.Text package roots"
+            "World declaration item demands actual Data.Text package roots"
         );
         assert!(
-            !first_bindings.is_empty(),
+            first_target.acquired().len() > 0,
             "first item selects executable code"
         );
-        for binding in first_bindings {
-            assert!(
-                second_bindings.contains(&binding),
-                "ordered native progress must retain the prior target's exact binding"
-            );
-            assert!(second.target.certified_groups().get(binding).is_some());
+        let prefix = second
+            .original_execution_context()
+            .expect("second item retains its actual prepared prefix");
+        assert!(prefix.compiler_source_support().acquired_native_closures().contains_owner(first_target.closure()), "prepared prefix retains the exact prior acquired owner independently of the second target demand");
+        for acquired in first_target.acquired() {
+            let NativeCodeGrant::Home {
+                binding, product, ..
+            } = acquired.grant()
+            else {
+                continue;
+            };
+            if let Some(common) = second_target.closure().home(binding) {
+                assert_eq!(common.code().id(), acquired.code().id());
+                let NativeCodeGrant::Home {
+                    product: second_product,
+                    ..
+                } = common.grant()
+                else {
+                    panic!("common HOME occurrence")
+                };
+                assert!(second_product.same_issuance(product));
+            }
         }
         let requires_operand = program.items().iter().any(|item| {
             item.native()
@@ -149,30 +186,28 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
     let products = first.items()[0]
         .native_products()
         .expect("package item owns native products");
-    let selection = products
-        .completed_native_selection()
-        .expect("package item owns its exact completed selection");
+    let selected = products
+        .linked_native_target()
+        .expect("package item owns actual linked selection");
     assert_eq!(
         products
             .native_source_products()
-            .expect("item source products resolve through the item issuer")
+            .expect("item source products resolve through item issuer")
             .target()
             .definitions()
             .globals()
             .len(),
-        selection.target_imports().len(),
-        "the item target has exactly one selected link per physical global"
+        selected.imports().len(),
+        "item target retains one selected link per physical global"
     );
-    let package_roots = selection
-        .target_imports()
+    let package_roots = selected
+        .imports()
         .iter()
         .filter_map(|import| match import {
-            crate::artifact_inventory::CompletedNativeTargetImport::Package { binding, .. } => {
-                Some(format!(
-                    "{}:{}",
-                    binding.product().code().owner().unit,
-                    binding.product().code().owner().module
-                ))
+            LinkedNativeTargetImport::Code { acquired, .. }
+                if matches!(acquired.code().body(), NativeCodeBody::Package(_)) =>
+            {
+                Some(package_module(acquired))
             }
             _ => None,
         })
@@ -180,85 +215,56 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
     assert_eq!(
         package_roots.len(),
         3,
-        "Data.List.sort retains its three ordered package roots: {package_roots:?}"
+        "Data.List.sort retains three ordered package roots: {package_roots:?}"
     );
     assert!(
         package_roots.iter().all(|owner| owner.ends_with("Resume")),
-        "the ordered roots retain their issued package owner: {package_roots:?}"
+        "ordered roots retain issued package owners: {package_roots:?}"
     );
-    let home_rows = selection
-        .completion()
-        .rows()
-        .filter(|row| {
-            row.imports()
-                .iter()
-                .filter_map(|import| match import {
-                    crate::artifact_inventory::CompletedNativeImport::Package {
-                        binding, ..
-                    } => Some(binding.product().code().owner().module.as_str()),
-                    _ => None,
-                })
-                .eq(["GHC.Classes", "GHC.Internal.Data.OldList"])
+    let home_rows = selected
+        .acquired()
+        .filter(|acquired| {
+            matches!(acquired.code().body(), NativeCodeBody::Home(_))
+                && package_children(acquired)
+                    .iter()
+                    .map(package_module)
+                    .eq(["GHC.Classes", "GHC.Internal.Data.OldList"])
         })
         .collect::<Vec<_>>();
     assert_eq!(home_rows.len(), 1, "one package-using HOME declaration");
-    let home = home_rows[0];
-    assert_eq!(home.binding().original_ordinal, 0);
-    let home_packages = home
-        .imports()
-        .iter()
-        .filter_map(|import| match import {
-            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
-                Some(binding)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let NativeCodeGrant::Home { binding, .. } = home_rows[0].grant() else {
+        panic!("actual HOME declaration")
+    };
+    assert_eq!(binding.original_ordinal, 0);
+    let home_packages = package_children(&home_rows[0]);
     assert_eq!(home_packages.len(), 2);
+    assert_eq!(package_module(&home_packages[0]), "GHC.Classes");
     assert_eq!(
-        home_packages[0].product().code().owner().module,
-        "GHC.Classes"
-    );
-    assert_eq!(
-        home_packages[1].product().code().owner().module,
+        package_module(&home_packages[1]),
         "GHC.Internal.Data.OldList"
     );
     assert_eq!(home_packages[1].imports().len(), 2);
-    let transitive_home_rows = selection
-        .completion()
-        .rows()
-        .filter(|row| {
-            row.imports()
-                .iter()
-                .filter_map(|import| match import {
-                    crate::artifact_inventory::CompletedNativeImport::Package {
-                        binding, ..
-                    } => Some(binding.product().code().owner().module.as_str()),
-                    _ => None,
-                })
-                .eq(["Tidepool.Internal.Resume", "Tidepool.Internal.Resume"])
+    let transitive_home_rows = selected
+        .acquired()
+        .filter(|acquired| {
+            matches!(acquired.code().body(), NativeCodeBody::Home(_))
+                && package_children(acquired)
+                    .iter()
+                    .map(package_module)
+                    .eq(["Tidepool.Internal.Resume", "Tidepool.Internal.Resume"])
         })
         .collect::<Vec<_>>();
     assert_eq!(
         transitive_home_rows.len(),
         1,
-        "the transitively reached HOME row retains its package obligations"
+        "transitively reached HOME row retains package obligations"
     );
-    let transitive_packages = transitive_home_rows[0]
-        .imports()
-        .iter()
-        .filter_map(|import| match import {
-            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
-                Some(binding.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let transitive_packages = package_children(&transitive_home_rows[0]);
     assert_eq!(transitive_packages.len(), 2);
     assert_ne!(
-        transitive_packages[0].binding(),
-        transitive_packages[1].binding(),
-        "the transitive HOME row keeps both exact package bindings"
+        transitive_packages[0].occurrence(),
+        transitive_packages[1].occurrence(),
+        "ordered slots retain two actual cohort occurrence choices"
     );
     let execution = first.items()[0]
         .native()
@@ -295,15 +301,15 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
         .expect("later item owns native products");
     assert!(
         later_products
-            .completed_native_selection()
-            .expect("later item owns its exact completion")
-            .target_imports()
+            .linked_native_target()
+            .expect("later item owns actual linked target")
+            .imports()
             .iter()
             .all(|import| match import {
-                crate::artifact_inventory::CompletedNativeTargetImport::Package {
-                    binding, ..
-                } => {
-                    let module = &binding.product().code().owner().module;
+                LinkedNativeTargetImport::Code { acquired, .. }
+                    if matches!(acquired.code().body(), NativeCodeBody::Package(_)) =>
+                {
+                    let module = package_module(acquired);
                     module != "GHC.Classes" && module != "GHC.Internal.Data.OldList"
                 }
                 _ => true,
@@ -378,53 +384,48 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let products = output.items()[0]
         .native_products()
         .expect("cached HOME item owns native products");
-    let selection = products
-        .completed_native_selection()
-        .expect("cached HOME item owns its completed selection");
-    let home_rows = selection
-        .completion()
-        .rows()
-        .filter(|row| row.product().owner().module == "CachedPackageWorldHome")
-        .collect::<Vec<_>>();
+    let selected = products
+        .linked_native_target()
+        .expect("cached HOME owns actual linked target");
+    let home_rows = selected.acquired().filter(|acquired| matches!(acquired.code().body(), NativeCodeBody::Home(body) if body.owner().module == "CachedPackageWorldHome")).collect::<Vec<_>>();
     assert!(
         !home_rows.is_empty(),
-        "the World target selects Original HOME code"
+        "World target demands Original HOME code"
     );
-    for row in &home_rows {
+    for acquired in &home_rows {
+        let NativeCodeGrant::Home {
+            binding, product, ..
+        } = acquired.grant()
+        else {
+            panic!("actual HOME grant")
+        };
         let offered = primary
             .compiler_source_support()
             .native_availability()
-            .issued_row(row.binding().binding.artifact())
-            .expect("the selected group belongs to the actual Original input");
+            .issued_row(binding.binding.artifact())
+            .expect("selected group belongs to actual Original input");
         assert!(
-            offered.exact_group_support(row.binding()).is_some(),
-            "the World completion must retain the input's exact group issuer"
+            offered.exact_group_support(binding).is_some(),
+            "target retains exact input group issuer"
         );
         let issued = products
             .target_native_inputs()
             .certified_groups()
-            .get(row.binding())
-            .expect("the actual target certifier owns the selected group before completion");
+            .get(binding)
+            .expect("actual target certifier owns selected group");
         assert!(
-            row.product().same_issuance(issued),
-            "native completion preserves the target's selected issuing product"
+            product.same_issuance(issued),
+            "linked acquisition retains selected issuing product"
         );
     }
     let packages = home_rows
         .iter()
-        .flat_map(|row| row.imports())
-        .filter_map(|import| match import {
-            crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } => {
-                Some(binding.product().code().owner().module.as_str())
-            }
-            _ => None,
-        })
+        .flat_map(package_children)
+        .map(|acquired| package_module(&acquired).to_owned())
         .collect::<Vec<_>>();
     assert!(
-        packages
-            .iter()
-            .any(|module| *module == "Data.Text.Internal"),
-        "the cached HOME row retains its Data.Text package roots: {packages:?}"
+        packages.iter().any(|module| module == "Data.Text.Internal"),
+        "cached HOME retains Data.Text package roots: {packages:?}"
     );
     let source_products = products
         .native_source_products()
@@ -482,6 +483,7 @@ fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() 
 #[ignore = "requires the declared rooted compiler service"]
 fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     let mut ingress = Vec::new();
+    let mut manifest_stages = BTreeMap::new();
     let ((prepared, checked), admission) = settle(|| {
         // Typed declaration stages import Display in their generated scaffold.
         let (endpoint, world, source) = open_world_with_primary_and_module(
@@ -558,6 +560,7 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
                 let [ordinal] = checked.stages()[stage].ordinals() else {
                     panic!("one real checked item per first-demand fixture stage")
                 };
+                manifest_stages.insert(*ordinal, *originals.package_links().stage_id());
                 if checked
                     .item(*ordinal)
                     .expect("actual checked stage item")
@@ -582,18 +585,15 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
         ordered_refusals += controls.ordered_refusals;
         count_refusals += controls.count_refusals;
         for (group, prior) in controls.unused {
-            let completion = program.items()[item_ordinal]
+            let target = program.items()[item_ordinal]
                 .native_products()
                 .expect("unused annotation control belongs to an executable stage")
-                .completed_native_selection()
+                .linked_native_target()
                 .unwrap();
             assert!(
-                !completion
-                    .completion()
-                    .rows()
-                    .any(|row| row.binding().binding.artifact() == group.artifact
-                        && row.binding().original_ordinal == group.original_ordinal),
-                "the actual selected closure contains no binding for the unused physical group"
+                !target.acquired().any(|acquired| matches!(acquired.grant(), NativeCodeGrant::Home { binding, .. }
+                    if binding.binding.artifact() == group.artifact && binding.original_ordinal == group.original_ordinal)),
+                "the actual acquired closure contains no binding for the unused physical group"
             );
             if prior {
                 unused_prior += 1;
@@ -617,8 +617,7 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     // transport mutation or an injected-prior end-to-end metamorphic control.
     for (index, packageful) in [(2, false), (4, true)] {
         let products = program.items()[index].native_products().unwrap();
-        let selection = products.completed_native_selection().unwrap();
-        let completed = selection.completion();
+        let target = products.linked_native_target().unwrap();
         let actual_binder = products
             .pending_imports()
             .iter()
@@ -632,56 +631,72 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
             })
             .expect("target carries its actual prior Source binder");
         assert!(
-            completed
-                .rows()
-                .any(|row| row.product().owner().module == "Module"
-                    && row.product().group().binders().contains(actual_binder)),
+            target
+                .acquired()
+                .any(|acquired| match acquired.code().body() {
+                    NativeCodeBody::Home(body) =>
+                        body.owner().module == "Module"
+                            && body
+                                .exported_values()
+                                .any(|(binder, _)| binder == actual_binder),
+                    _ => false,
+                }),
             "actual non-inline prior Source export must be selected"
         );
-        for row in completed
-            .rows()
-            .filter(|row| row.product().owner().module == "Module")
-        {
+        let mut packages = 0;
+        for acquired in target.acquired() {
+            let NativeCodeBody::Home(body) = acquired.code().body() else {
+                continue;
+            };
+            if body.owner().module != "Module" {
+                continue;
+            }
+            let NativeCodeGrant::Home {
+                binding, product, ..
+            } = acquired.grant()
+            else {
+                panic!("HOME body retains actual HOME grant")
+            };
             let exact = products
                 .target_native_inputs()
                 .certified_groups()
-                .get(row.binding())
-                .expect("the selected prior Source group has its actual exact physical binding");
+                .get(binding)
+                .expect("selected prior Source group has its actual physical binding");
             assert!(
-                row.product().same_issuance(exact),
-                "completion must preserve the exact prior Source physical product and issuer"
+                product.same_issuance(exact),
+                "acquisition preserves exact prior physical product and issuer"
             );
-            assert_eq!(row.product().owner(), exact.owner());
-            assert_eq!(
-                row.product().group().original_ordinal(),
-                exact.group().original_ordinal()
-            );
+            assert_eq!(body.owner(), exact.owner());
+            assert_eq!(body.original_ordinal(), exact.group().original_ordinal());
+            packages += acquired.imports().filter(|import| matches!(import, AcquiredNativeImport::Code { acquired, .. } if matches!(acquired.code().body(), NativeCodeBody::Package(_)))).count();
         }
-        let packages = completed
-            .rows()
-            .filter(|row| row.product().owner().module == "Module")
-            .flat_map(|row| row.product().imports())
-            .filter(|owner| {
-                matches!(
-                    owner,
-                    certified_products::PendingImportOwner::Package { .. }
-                )
-            })
-            .count();
         assert_eq!(packages > 0, packageful, "optimized package slot premise");
     }
     let first = program.items()[0]
         .native_products()
         .unwrap()
-        .completed_native_selection()
+        .linked_native_target()
         .unwrap();
-    assert!(
-        !first
-            .completion()
-            .rows()
-            .any(|row| row.product().owner().module == "Module"),
-        "initial target does not demand the later bodies"
-    );
+    assert!(!first.acquired().any(|acquired| matches!(acquired.code().body(), NativeCodeBody::Home(body) if body.owner().module == "Module")), "initial target does not demand later bodies");
+    let mut previous = Vec::<Arc<crate::linked_native::LinkedNativeTarget>>::new();
+    let mut borrowed_cohorts = 0;
+    for (item_ordinal, manifest_stage) in manifest_stages {
+        let Some(products) = program.items()[item_ordinal].native_products() else {
+            continue;
+        };
+        let target = products
+            .linked_native_target()
+            .expect("actual executable stage target");
+        for prior in &previous {
+            borrowed_cohorts += crate::linked_native::tests::assert_borrowed_cohort_witnesses(
+                prior,
+                target,
+                manifest_stage,
+            );
+        }
+        previous.push(Arc::clone(target));
+    }
+    assert!(borrowed_cohorts > 0, "actual stages must share a package-bearing HOME head while the incoming package manifest changes");
     let request = checked.native_demand_completion();
     let stage = &checked.stages()[0];
     let unknown = Arc::new(stage.as_ref().clone());
@@ -1112,7 +1127,7 @@ fn assert_physical_selection(
                 .module_name(),
         };
         assert_eq!(
-            certified.source_selection.interface_only_artifact(&owner),
+            certified.source_selection().interface_only_artifact(&owner),
             expected
         );
     }
@@ -1159,16 +1174,14 @@ fn assert_physical_selection(
         module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(52)).module_name(),
     };
     assert!(!certified
-        .original_inputs
-        .as_ref()
+        .compiler_inputs()
         .expect("first compiler owner")
         .role_projection()
         .snapshot_roles()
         .contains_key(&owner));
     assert_eq!(
         second
-            .original_inputs
-            .as_ref()
+            .compiler_inputs()
             .expect("second compiler owner")
             .role_projection()
             .snapshot_roles()

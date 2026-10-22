@@ -532,7 +532,7 @@ enum OriginalInputDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     native_fact_base: Option<Arc<crate::exact_context::PublicationNativeFacts>>,
-    native_completions: crate::artifact_inventory::NativeSelectionCompletions,
+    native_closures: crate::artifact_inventory::AcquiredNativeClosures,
     demand: OriginalInputDemand,
     projection: CompilerInputProjection,
     artifacts: ArtifactView,
@@ -553,7 +553,8 @@ pub(crate) struct CapturedCompilerStage {
 
 impl std::fmt::Debug for CapturedCompilerStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("CapturedCompilerStage")
+        formatter
+            .debug_struct("CapturedCompilerStage")
             .field("facts", &self.facts)
             .field("groups", &self.groups)
             .finish_non_exhaustive()
@@ -566,9 +567,28 @@ impl std::fmt::Debug for CapturedCompilerStage {
 #[derive(Clone, Copy)]
 pub(crate) struct PhysicalCohortInputs<'a> {
     stage: &'a CapturedCompilerStage,
+    selection: &'a crate::certified_products::CertifiedSourceSelection,
 }
 
 impl<'a> PhysicalCohortInputs<'a> {
+    pub(crate) fn from_issued_products(
+        products: &'a crate::certified_products::CertifiedProducts,
+    ) -> Result<Self, CompileError> {
+        let stage = products
+            .captured_stage()
+            .ok_or_else(|| failure("compiler products lack their captured stage owner"))?;
+        Ok(Self {
+            stage,
+            selection: products.source_selection(),
+        })
+    }
+
+    pub(crate) fn source_selection(
+        &self,
+    ) -> &'a crate::certified_products::CertifiedSourceSelection {
+        self.selection
+    }
+
     pub(crate) fn artifacts(&self) -> &'a ArtifactView {
         self.stage.issued_artifacts()
     }
@@ -615,8 +635,14 @@ impl<'a> PhysicalCohortInputs<'a> {
     }
 
     pub(crate) fn demanded_products(&self) -> Result<Arc<[PendingCertifiedGroup]>, CompileError> {
-        let issued = self.stage.groups.lock().expect("physical group issuance lock");
-        self.stage.operation.reserve::<PendingCertifiedGroup>(issued.len())
+        let issued = self
+            .stage
+            .groups
+            .lock()
+            .expect("physical group issuance lock");
+        self.stage
+            .operation
+            .reserve::<PendingCertifiedGroup>(issued.len())
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         Ok(issued
             .values()
@@ -652,7 +678,7 @@ impl PartialEq for OriginalCompilerInputs {
         }) && self.projection == other.projection
             && self.artifacts == other.artifacts
             && self.native_offers == other.native_offers
-            && self.native_completions == other.native_completions
+            && self.native_closures == other.native_closures
             && self.native_availability == other.native_availability
     }
 }
@@ -683,7 +709,10 @@ fn retain_native_offers(
 
 impl CapturedCompilerStage {
     pub(crate) fn physical_cohort(&self) -> PhysicalCohortInputs<'_> {
-        PhysicalCohortInputs { stage: self }
+        PhysicalCohortInputs {
+            stage: self,
+            selection: self.source_selection(),
+        }
     }
 
     pub(crate) fn output(&self) -> &IssuedOriginalOutput {
@@ -774,11 +803,10 @@ impl CapturedCompilerStage {
             groups: Default::default(),
         })
     }
-
 }
 
-/// One strict output issuer binds source decisions and the target view to its
-/// completed compiler inputs. Publication borrows this owner without reissuance.
+/// One carried output binds its source decisions and view to the completed
+/// compiler prefix. Publication borrows this owner without physical reissuance.
 #[derive(Clone, Debug)]
 pub(crate) struct IssuedOriginalOutput {
     selection: crate::certified_products::CertifiedSourceSelection,
@@ -791,11 +819,10 @@ impl IssuedOriginalOutput {
         products: &crate::certified_products::CertifiedProducts,
     ) -> Result<Self, CompileError> {
         let inputs = products
-            .original_inputs
-            .as_ref()
-            .ok_or_else(|| failure("item lacks its physical compiler prefix owner"))?;
+            .compiler_inputs()
+            .ok_or_else(|| failure("item lacks its issued compiler prefix owner"))?;
         Ok(Self {
-            selection: products.source_selection.clone(),
+            selection: products.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
             inputs: Arc::clone(inputs),
         })
@@ -1071,8 +1098,8 @@ impl OriginalCompilerInputs {
             let native_offers =
                 preserve_native_offers(&projection, source.artifacts(), source.native_offers())?;
             Some(Self {
-                    native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-                native_completions: source.native_completions().clone(),
+                native_fact_base: Some(Arc::clone(source.native_fact_owner())),
+                native_closures: source.acquired_native_closures().clone(),
                 native_availability: source
                     .native_availability()
                     .for_compiler_roles(&projection, source.artifacts())?,
@@ -1099,7 +1126,7 @@ impl OriginalCompilerInputs {
         let source = &context.owner.facts.compiler_support;
         let selected = Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+            native_closures: source.acquired_native_closures().clone(),
             native_availability: source.native_availability().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().for_source_owners(&selected),
@@ -1159,7 +1186,7 @@ impl OriginalCompilerInputs {
     ) -> Self {
         Self {
             native_fact_base: Some(Arc::clone(source.native_fact_owner())),
-            native_completions: source.native_completions().clone(),
+            native_closures: source.acquired_native_closures().clone(),
             demand: OriginalInputDemand::Issued(source.input_decisions().clone()),
             projection: source.projection().clone(),
             artifacts: source.artifacts().clone(),
@@ -1176,10 +1203,10 @@ impl OriginalCompilerInputs {
         self.native_fact_base.as_ref()
     }
 
-    pub(crate) fn issued_native_completions(
+    pub(crate) fn acquired_native_closures(
         &self,
-    ) -> &crate::artifact_inventory::NativeSelectionCompletions {
-        &self.native_completions
+    ) -> &crate::artifact_inventory::AcquiredNativeClosures {
+        &self.native_closures
     }
 
     fn normalize_selection(
@@ -1221,7 +1248,7 @@ impl OriginalCompilerInputs {
         let artifacts = retain_native_offers(artifacts, &native_offers)?;
         Ok(Self {
             native_fact_base: selection.native_fact_base().cloned(),
-            native_completions: selection.native_completions(),
+            native_closures: selection.acquired_native_closures(),
             native_availability,
             demand: OriginalInputDemand::Issued(
                 crate::artifact_inventory::IssuedInputNativeDecisions::from_certified_continuation(
@@ -1274,7 +1301,7 @@ impl OriginalCompilerInputs {
         };
         Ok(Self {
             native_fact_base: self.native_fact_base.clone(),
-            native_completions: self.native_completions.clone(),
+            native_closures: self.native_closures.clone(),
             native_availability: self
                 .native_availability
                 .for_compiler_roles(&projection, &artifacts)?,
@@ -1298,7 +1325,7 @@ impl OriginalCompilerInputs {
         }
         let demand = OriginalInputDemand::Issued(decisions);
         Ok(Self {
-            native_completions: self.native_completions.append(&other.native_completions)?,
+            native_closures: self.native_closures.append(&other.native_closures)?,
             native_fact_base: self
                 .native_fact_base
                 .clone()
@@ -3530,32 +3557,42 @@ impl DemandNativeInputs {
             BTreeMap::<crate::artifact_inventory::NativeGroupBinding, SelectedNativeGroupRow>::new(
             );
         for contribution in &selected_contributions {
-            let mut previous = BTreeMap::new();
+            let mut held_products = BTreeMap::new();
             for id in contribution.originals() {
                 for binding in contribution.original_groups(*id) {
-                    let held = self
+                    let held_owner = self
                         .cold
                         .source_support
-                        .native_completions()
-                        .group_product(binding, &operation)?;
-                    let local = certified.get(&binding).map(|row| row.product());
+                        .acquired_native_closures()
+                        .group_owner(binding, &operation)?;
+                    let held = held_owner.as_ref().and_then(|owner| match owner.grant() {
+                        crate::linked_native::NativeCodeGrant::Home { product, .. } => {
+                            Some(product)
+                        }
+                        crate::linked_native::NativeCodeGrant::Package { .. } => None,
+                    });
+                    let local = certified.get(&binding).map(|row| row.issued.product());
                     if let (Some(held), Some(local)) = (held, local) {
                         if !held.same_issuance(local) {
                             return Err(failure(
-                                "selected HOME binding changed its completed occurrence",
+                                "selected HOME binding changed its acquired occurrence",
                             ));
                         }
                     }
-                    if let Some(product) = held.map(Arc::as_ref).or(local) {
+                    if let Some(product) = held.or(local) {
                         budget.reserve::<(
                             crate::artifact_inventory::NativeGroupBinding,
-                            &PendingCertifiedGroup,
+                            Arc<PendingCertifiedGroup>,
                             [usize; 4],
                         )>(1)?;
-                        previous.insert(binding, product);
+                        held_products.insert(binding, Arc::clone(product));
                     }
                 }
             }
+            let previous = held_products
+                .iter()
+                .map(|(binding, product)| (*binding, product.as_ref()))
+                .collect();
             let certification = group_validation
                 .certify_selected_scope(
                     crate::certified_products::SelectedOriginalGroupScope::Contribution(
@@ -4377,8 +4414,11 @@ impl RequestCompilerInputs {
         }
         let support = self
             .source_support
-            .with_native_completions_from(issued.compiler_source_support())?;
-        if support.native_completions() == self.source_support.native_completions() {
+            .with_acquired_native_closures_from(issued.compiler_source_support())?;
+        if support
+            .acquired_native_closures()
+            .same_held_owners(self.source_support.acquired_native_closures())
+        {
             return Ok(WorldPrimaryProgramSupport {
                 inputs: Arc::clone(self),
                 context: Arc::clone(primary),
@@ -4602,15 +4642,6 @@ impl RequestCompilerInputs {
         &self,
     ) -> Arc<crate::artifact_inventory::CompilerSourceSupport> {
         Arc::clone(&self.source_support)
-    }
-
-    /// Immutable native completion custody acquired by this exact context.
-    /// These references do not add compiler roles or executable target demand.
-    pub fn issued_native_completions(
-        &self,
-    ) -> impl Iterator<Item = &Arc<crate::artifact_inventory::IssuedNativeSelectionCompletion>>
-    {
-        self.compiler_source_support().native_completions().iter()
     }
 
     pub(crate) fn compiler_source_support(
@@ -5651,7 +5682,13 @@ impl RecoveredArtifactInventory {
                 .iter()
                 .map(|binding| binding.artifact)
                 .collect::<BTreeSet<_>>()
-                != actual.keys().copied().collect()
+                != captured
+                    .entries
+                    .iter()
+                    .filter_map(|(id, entry)| {
+                        (!matches!(entry.payload, ArtifactPayload::PackageCode(_))).then_some(*id)
+                    })
+                    .collect()
             || edges.iter().cloned().collect::<BTreeSet<_>>().len() != edges.len()
             || edges
                 .iter()
@@ -5856,6 +5893,37 @@ impl RecoveredArtifactInventory {
         expected: &crate::exact_context::ContextRoot,
         acquired: &crate::exact_context::MaterializedContext,
     ) -> Result<ExactDeclarationContext, CompileError> {
+        self.context_for_expected_snapshot_with_validation(
+            expected,
+            acquired,
+            &mut PackageInterfaceValidation::default(),
+        )
+    }
+
+    /// Authenticate a demanded context set in one operation. Shared pure code
+    /// keeps one owner; each context must still supply all of its exact grants.
+    pub fn contexts_for_expected_snapshots(
+        &self,
+        expected: &[(
+            crate::exact_context::ContextRoot,
+            Arc<crate::exact_context::MaterializedContext>,
+        )],
+    ) -> Result<Vec<ExactDeclarationContext>, CompileError> {
+        let mut validation = PackageInterfaceValidation::default();
+        expected
+            .iter()
+            .map(|(root, acquired)| {
+                self.context_for_expected_snapshot_with_validation(root, acquired, &mut validation)
+            })
+            .collect()
+    }
+
+    fn context_for_expected_snapshot_with_validation(
+        &self,
+        expected: &crate::exact_context::ContextRoot,
+        acquired: &crate::exact_context::MaterializedContext,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<ExactDeclarationContext, CompileError> {
         if acquired.root() != expected {
             return Err(CompileError::CompilerEvidence(Box::new(
                 crate::certified_products::CertificationError::Mismatch(
@@ -5882,11 +5950,26 @@ impl RecoveredArtifactInventory {
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
                 .replace(snapshot.lexical())?,
         });
+        let acquired_packages = snapshot
+            .native_package_artifacts_introduced(None)
+            .into_iter()
+            .map(|id| {
+                let entry = self.entries.get(&id).ok_or_else(|| {
+                    failure("recorded package occurrence lacks acquired product custody")
+                })?;
+                let ArtifactPayload::PackageCode(product) = &entry.payload else {
+                    return Err(failure(
+                        "recorded package occurrence references another payload kind",
+                    ));
+                };
+                Ok((id, Arc::clone(product)))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let updated = context
             .owner
             .facts
             .compiler_support
-            .restore_snapshot_evidence(snapshot)?;
+            .restore_snapshot_evidence(snapshot, &acquired_packages, validation)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
         context = context.finish()?;
         context.bind_snapshot_baseline(acquired)?;
@@ -7514,7 +7597,7 @@ impl ProgramSourceSupportState {
 
     fn admit_program_support_inner(
         &mut self,
-        producer_sha256: [u8; 32],
+        request: ExactRequestIdentity<'_>,
         context: Arc<ExactDeclarationContext>,
         support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
@@ -7522,6 +7605,9 @@ impl ProgramSourceSupportState {
         segment_input: Option<&ExactDeclarationContext>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        // Only newly supplied receipts are correlated here. Already admitted
+        // prefix rows retain their original owner and request independently.
+        SourceAdmissionBundle::check_finite_request(&request, admissions)?;
         let dependencies = CompilerDependencies::merge(admissions)?;
         let issued = selection
             .compiler_support_projection(support, admissions)
@@ -7558,7 +7644,7 @@ impl ProgramSourceSupportState {
         let imports = admission.dependencies().adjacency();
         let extend_start = std::time::Instant::now();
         let mut context = (*context).clone();
-        context = context.admit_producer(producer_sha256)?;
+        context = context.admit_producer(request.producer_sha256)?;
         for descriptor in support.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
@@ -10199,8 +10285,9 @@ impl ExactCompilationRequest {
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         segment.validate_request(self)?;
+        let request = ExactRequestIdentity::from_request(self).into_owned();
         self.program.admit_program_support_inner(
-            self.producer_sha256,
+            request,
             context,
             support,
             segment.admissions(),
@@ -10217,8 +10304,9 @@ impl ExactCompilationRequest {
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let request = ExactRequestIdentity::from_request(self).into_owned();
         self.program.admit_program_support_inner(
-            self.producer_sha256,
+            request,
             context,
             support,
             admissions,
@@ -10355,7 +10443,7 @@ impl ProgramAdmissionContinuation {
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         self.program.admit_program_support_inner(
-            self.physical.producer_sha256,
+            ExactRequestIdentity::from_request(&self.physical),
             context,
             support,
             admissions,
@@ -10468,7 +10556,7 @@ impl ProgramAdmissionContinuation {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         segment.validate_request(&self.physical)?;
         self.program.admit_program_support_inner(
-            self.physical.producer_sha256,
+            ExactRequestIdentity::from_request(&self.physical),
             context,
             support,
             segment.admissions(),
@@ -11730,7 +11818,8 @@ pub(crate) fn assert_completed_nominal_program_support(
 ) {
     let cohort = physical.physical_cohort();
     let operation = &cohort.stage.operation;
-    let expected = physical.source_selection()
+    let expected = physical
+        .source_selection()
         .produced_source_receipt(owner, physical.issued_artifacts())
         .unwrap()
         .expect("the existing physical issuer owns a completed receipt");
@@ -11752,8 +11841,10 @@ pub(crate) fn assert_completed_nominal_program_support(
         .source_support
         .implementation_entry(owner)
         .is_none());
-    let fragment =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(physical.compiler_inputs()).unwrap();
+    let fragment = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+        physical.compiler_inputs(),
+    )
+    .unwrap();
     // This control borrows a completed physical row only. It intentionally
     // issues no lexical source claim.
     let support = ProgramSourceSupport {
@@ -13147,13 +13238,13 @@ impl ExactDeclarationContext {
             .retain_custody(target.artifacts())?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
-    pub(crate) fn retain_completed_native_selection(
+    pub(crate) fn retain_linked_native_target(
         self,
-        completed: &crate::artifact_inventory::CompletedNativeSelection,
+        completed: &crate::linked_native::LinkedNativeTarget,
     ) -> Result<Self, CompileError> {
         let support = self
             .compiler_source_support()
-            .with_native_selection_completion(completed)?;
+            .with_linked_native_target(completed)?;
         Ok(self.rebuild(|facts| facts.compiler_support = support))
     }
 
@@ -13230,6 +13321,9 @@ impl ExactDeclarationContext {
         let artifacts = support.artifacts();
         for descriptor in artifacts.descriptors() {
             self = self.admit_producer(descriptor.producer_sha256)?;
+        }
+        for product in support.acquired_native_closures().package_products() {
+            self = self.admit_producer(product.code().owner().compiler_sha256)?;
         }
         let support = self.owner.facts.compiler_support.merge(support)?;
         self = self.rebuild(|facts| facts.compiler_support = support);
@@ -13757,7 +13851,7 @@ impl ExactDeclarationContext {
             .collect()
     }
 
-    /// Materialize exactly the requested payloads from this view. The run retains
+    /// Materialize exactly the requested payloads from this context's custody. The run retains
     /// previously published references; this batch does not issue compiler roles.
     pub fn materialize_recovery_artifacts(
         &self,
@@ -13767,12 +13861,27 @@ impl ExactDeclarationContext {
         if artifacts.is_empty() {
             return Ok(Vec::new());
         }
-        let entries = self
+        let packages = self
+            .owner
+            .facts
+            .compiler_support
+            .selected_package_products(artifacts)?;
+        let selected = artifacts
+            .iter()
+            .filter(|id| !packages.contains_key(id))
+            .copied()
+            .collect();
+        let mut entries = self
             .owner
             .facts
             .compiler_support
             .artifacts()
-            .entries_for_artifacts(artifacts)?;
+            .entries_for_artifacts(&selected)?;
+        entries.extend(
+            packages
+                .into_values()
+                .map(|product| Arc::new(ArtifactEntry::package_code(product))),
+        );
         self.materialize_recovery_entries(root, &entries)
     }
 
@@ -13984,11 +14093,17 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .recorded_input_decisions()
                 .clone(),
-            native_completions: self
+            native_components: self
                 .owner
                 .facts
                 .compiler_support
-                .native_completion_facts()
+                .native_component_records()
+                .clone(),
+            native_closures: self
+                .owner
+                .facts
+                .compiler_support
+                .native_closure_records()
                 .clone(),
         }
     }
@@ -14011,8 +14126,6 @@ impl ExactDeclarationContext {
             || self.snapshot().offers != snapshot.offers
             || self.owner.facts.compiler_support.recorded_input_decisions()
                 != &snapshot.input_decisions
-            || self.owner.facts.compiler_support.native_completion_facts()
-                != &snapshot.native_completions
         {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",
@@ -15998,13 +16111,12 @@ pub(crate) fn issue_certified_product_native_availability(
         validation,
     )?;
     let inputs = Arc::new(crate::declaration_context::CapturedCompilerStage::issue(
-        &mut products.source_selection,
+        &mut products.unissued_source_selection,
         &view,
         entries,
         validation,
     )?);
-    products.original_inputs = Some(Arc::clone(inputs.compiler_inputs()));
-    products.captured_stage = Some(Arc::clone(&inputs));
+    products.bind_captured_stage(Arc::clone(&inputs));
     Ok(inputs)
 }
 
@@ -18901,9 +19013,10 @@ mod tests {
             )
         })()
         .unwrap();
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output.compiler_inputs())
-                .unwrap();
+        let support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            output.compiler_inputs(),
+        )
+        .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -19017,7 +19130,7 @@ mod tests {
             .admit_fixture_support(
                 empty.clone(),
                 &source_offer,
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -19255,7 +19368,14 @@ mod tests {
     fn support_admission(root: &Path) -> ExactSourceAdmission {
         let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let request = program_request(root, context);
-        let receipt = support_receipt(root, &request);
+        support_admission_for_request(root, &request)
+    }
+
+    fn support_admission_for_request(
+        root: &Path,
+        request: &ExactCompilationRequest,
+    ) -> ExactSourceAdmission {
+        let receipt = support_receipt(root, request);
         request
             .validate_receipt(&receipt, None, request.context())
             .unwrap()
@@ -21149,7 +21269,6 @@ mod tests {
             .inventory()
             .select_native_target(
                 physical.physical_cohort(),
-                &selected,
                 observed,
                 None,
                 None,
@@ -21393,7 +21512,6 @@ mod tests {
                 .inventory()
                 .select_native_target(
                     physical.physical_cohort(),
-                    &selected,
                     observed,
                     None,
                     None,
@@ -26194,7 +26312,6 @@ mod tests {
                     .unwrap();
             let target = inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,
@@ -26875,7 +26992,6 @@ mod tests {
                 .inventory()
                 .select_native_target(
                     physical.physical_cohort(),
-                    &selection,
                     observed,
                     None,
                     None,
@@ -27059,7 +27175,11 @@ mod tests {
         .unwrap()
         .retain_custody(&retained)
         .unwrap()
-        .restore_snapshot_evidence(&snapshot)
+        .restore_snapshot_evidence(
+            &snapshot,
+            &BTreeMap::new(),
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
         .unwrap();
         assert_eq!(
             support.input_decisions().recorded_facts(),
@@ -29016,21 +29136,38 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             sha256: sha256(source.as_bytes()),
         });
         evidence.resolutions.clear();
-        evidence.modules = vec![crate::cache::ModuleEvidence {
-            unit: unit.into(),
-            module: "Tidepool.Agent.Ref".into(),
-            boot: false,
-            source: path,
-            imports: vec![],
-            product: crate::cache::ProductAvailability::InterfaceOnly,
-        }];
+        let mut target = evidence
+            .modules
+            .into_iter()
+            .find(|module| module.module == "Target")
+            .unwrap();
+        target.imports.clear();
+        evidence.modules = vec![
+            crate::cache::ModuleEvidence {
+                unit: unit.into(),
+                module: "Tidepool.Agent.Ref".into(),
+                boot: false,
+                source: path,
+                imports: vec![],
+                product: crate::cache::ProductAvailability::InterfaceOnly,
+            },
+            target,
+        ];
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
-        fields[8] = Value::Array(vec![Value::Array(vec![
-            text(unit),
-            text("Tidepool.Agent.Ref"),
-            Value::Bool(false),
-            Value::Array(vec![]),
-        ])]);
+        fields[8] = Value::Array(
+            evidence
+                .modules
+                .iter()
+                .map(|module| {
+                    Value::Array(vec![
+                        text(&module.unit),
+                        text(&module.module),
+                        Value::Bool(module.boot),
+                        Value::Array(vec![]),
+                    ])
+                })
+                .collect(),
+        );
         write_receipt(&receipt, &value);
         request
             .validate_receipt(&receipt, None, request.context())
@@ -29467,7 +29604,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     .cloned(),
             )
             .unwrap()
-            .restore_snapshot_evidence(&issued.snapshot())
+            .restore_snapshot_evidence(
+                &issued.snapshot(),
+                &BTreeMap::new(),
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
             .unwrap();
             assert_eq!(
                 support.input_decisions().recorded_facts(),
@@ -29500,7 +29641,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_fixture_support(
                 baseline.clone(),
                 &offer,
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -29628,7 +29769,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
         );
         let mut request = program_request(directory.path(), baseline.clone());
-        let admission = support_admission(directory.path());
+        let admission = support_admission_for_request(directory.path(), &request);
         let context = request
             .admit_fixture_support(
                 baseline.clone(),
@@ -29744,6 +29885,46 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     }
 
     #[test]
+    fn program_support_refuses_foreign_request_before_mutation_and_allows_honest_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let foreign = support_admission(directory.path());
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&match support_offer(&[support_product(
+                    "Unrelated",
+                )]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), Arc::clone(&baseline));
+        let receipt = support_receipt(directory.path(), &request);
+        let honest = request.validate_receipt(&receipt, None, &baseline).unwrap();
+        let before = baseline.semantic_sha256();
+        let output = support_offer(&[]);
+        let refusal = request
+            .admit_fixture_support(Arc::clone(&baseline), &output, &[foreign], None)
+            .unwrap_err();
+        assert!(matches!(refusal, CompileError::SourceAdmission(ref error)
+            if error.reason == SourceAdmissionRefusal::WrongRequest
+                && error.boundary == SourceAdmissionBoundary::FiniteRequest));
+        assert_eq!(request.context().semantic_sha256(), before);
+        assert!(request.program.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        let unchanged = request
+            .admit_fixture_support(baseline, &output, &[honest], None)
+            .unwrap();
+        assert_eq!(unchanged.semantic_sha256(), before);
+        assert!(request.program_source_lexical().is_empty());
+    }
+
+    #[test]
     fn program_support_refuses_retained_hidden_owner_and_forged_source() {
         let directory = tempfile::tempdir().unwrap();
         let products = [
@@ -29763,13 +29944,20 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 })
                 .unwrap(),
         );
-        let mut request = program_request(directory.path(), baseline.clone());
-        let before = baseline.semantic_sha256();
+        let mut request = program_request(
+            directory.path(),
+            Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
+        );
+        let receipt = support_receipt(directory.path(), &request);
+        let admitted = request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap();
+        let before = request.context().semantic_sha256();
         let refusal = request
             .admit_fixture_support(
                 baseline.clone(),
                 &support_offer(&products),
-                &[support_admission(directory.path())],
+                &[admitted],
                 None,
             )
             .unwrap_err();
@@ -29781,10 +29969,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(request.program.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
         // The same request can still carry these owners as dependencies.
+        let baseline_before = baseline.semantic_sha256();
         let unchanged = request
             .admit_fixture_support(baseline, &support_offer(&products), &[], None)
             .unwrap();
-        assert_eq!(unchanged.semantic_sha256(), before);
+        assert_eq!(unchanged.semantic_sha256(), baseline_before);
         assert!(request.program_source_lexical().is_empty());
         let original = support_admission(directory.path());
         let mut forged = Arc::unwrap_or_clone(original.evidence).into_evidence();
@@ -29801,7 +29990,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
         let mut request = program_request(directory.path(), empty.clone());
-        let original = support_admission(directory.path());
+        let original = support_admission_for_request(directory.path(), &request);
         let receipt = support_receipt(directory.path(), &request);
         let mut wire = read_receipt(&receipt);
         let fields = wire.as_array_mut().unwrap();
@@ -30129,7 +30318,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -30387,7 +30576,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             request.admit_program_support_with_selection(
                 baseline,
                 fixture.artifacts(),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
                 &selection,
             )
@@ -30878,7 +31067,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     support_product("InstanceOwner"),
                     support_product("InstanceRelay"),
                 ]),
-                &[support_admission(directory.path())],
+                &[support_admission_for_request(directory.path(), &request)],
                 None,
             )
             .unwrap();
@@ -31193,7 +31382,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .inventory()
             .select_native_target(
                 physical.physical_cohort(),
-                &selection,
                 observed,
                 None,
                 None,

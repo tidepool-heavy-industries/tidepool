@@ -671,14 +671,13 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
             )
             .unwrap();
-        let issued =
-            crate::declaration_context::CapturedCompilerStage::issue(
-                &mut selection,
-                &physical,
-                entries,
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+        let issued = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &physical,
+            entries,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         let output = issued;
         let empty = CompilerSourceSupport::close_complete_output(&output)
             .unwrap()
@@ -716,8 +715,8 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             }
         }
         let closure = selection
-                    .selected_original_closure(output.issued_artifacts())
-                    .unwrap();
+            .selected_original_closure(output.issued_artifacts())
+            .unwrap();
         let support = empty.certify_original_closure(&closure).unwrap();
         // The explicit selection consumes all three completed output bodies here;
         // the later target demand independently selects only its exact closure.
@@ -815,13 +814,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let initial_bindings = selected_bindings(inputs.artifacts());
             assert!(expected.is_subset(&initial_bindings));
             let inventory = inputs.artifacts().inventory();
-            assert!(
-                crate::declaration_context::OriginalCompilerInputs::from_issued_support(
-                    inputs.compiler_source_support(),
-                )
-                .physical_cohort()
-                .is_err()
-            );
             let physical = inventory
                 .bind_segment(inputs.artifacts(), vec![], &receipt, &mut validation)
                 .unwrap();
@@ -834,7 +826,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let target = inventory
                 .select_native_target(
                     physical.captured_stage().physical_cohort(),
-                    &receipt,
                     observed,
                     None,
                     None,
@@ -871,7 +862,6 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
             let refused = inventory
                 .select_native_target(
                     physical.captured_stage().physical_cohort(),
-                    &receipt,
                     observed,
                     None,
                     None,
@@ -1513,13 +1503,18 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         .unwrap();
                     let physical_projection =
                         CompilerInputProjection::from_issued_entries(&entries).unwrap();
+                    let mut phase_validation =
+                        crate::recovery_artifacts::PackageInterfaceValidation::default();
                     let mut physical_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &physical_projection, &physical.metadata_snapshot(),
-                        &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                        &phase_validation.inventory,
                     ).unwrap();
                     let issued = crate::declaration_context::CapturedCompilerStage::issue(
-                        &mut physical_selection, &inventory.empty_view(), entries,
-                     &mut crate::recovery_artifacts::PackageInterfaceValidation::default());
+                        &mut physical_selection,
+                        &inventory.empty_view(),
+                        entries,
+                        &mut phase_validation,
+                    );
                     if !published[domain] {
                         let missing = issued.expect_err(
                             "physical issuance requires group 11's actual captured value owner",
@@ -1556,6 +1551,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         let private = issued.unwrap();
                         let root_id = catalog.original(module, version).descriptor.id;
                         let offer = private
+                            .compiler_inputs()
                             .native_offers()
                             .iter()
                             .find(|offer| offer.original() == root_id)
@@ -1622,7 +1618,12 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                         ).unwrap();
                                 continued.selected_original_closure(inputs.artifacts())
                             };
-                        let empty = receive(private).expect_err("Full availability with empty executable roots must refuse direct Original demand");
+                        let rooted =
+                            CompilerSourceSupport::close_complete_output(private.compiler_inputs())
+                                .unwrap()
+                                .certify_original_closure(&selected)
+                                .unwrap();
+                        let empty = receive(private.compiler_inputs().as_ref().clone()).expect_err("Full availability with empty executable roots must refuse direct Original demand");
                         let crate::certified_products::CertificationError::OriginalClosure(error) =
                             empty
                         else {
@@ -1641,11 +1642,9 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             "the empty continuation must keep its typed root-choice refusal"
                         );
                         let private =
-                            crate::declaration_context::OriginalCompilerInputs::from_selection(
-                                &physical_selection,
-                                selected.native_closure(),
-                            )
-                            .unwrap();
+                            crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                                &rooted,
+                            );
                         let original = receive(private).unwrap();
                         assert_original(&original);
                         let actual = original.native_closure();

@@ -27,6 +27,34 @@ declaration prefix -> later package-free and package-bearing demand -> generated
 Display. Run through toolchain then small runtime harness before actor overhead.
 Do not fake effectful success or create test-only source authority.
 
+The owning generator declares these early controls, both expected count 1 and
+`owned-resident`, using existing compiler resources:
+
+- `//tidepool/toolchain:toolchain_staged_world_first_demands_test` selects
+  `artifacts::world_value_selection_tests::prior_source_home_links_bind_first_packagefree_and_packageful_targets`.
+  It checks actual stage issuance and demand before runtime execution.
+- `//tidepool/runtime:runtime_staged_world_first_demands_test` selects
+  `session::turn::scaling_tests::typed_segment_tests::staged_world_acceptance::declarations_precede_first_native_demands_and_display_without_replaying_effects`.
+  It reuses the semantic World executor for real effects, settlement, publication,
+  private retirement and a fresh consumer. Actual immutable carrier bytes must
+  contain both helpers before either is demanded; target-resolved semantic
+  binders establish first demand and zero/nonzero package-slot premises. Forced
+  `WorkbenchDisplay` text crosses the real Console interpreter; a bare expression
+  alone would retain a lazy result. Value/effect expectations come from a separate
+  GHC computation. The ordinary semantics18 and finite component3 rosters remain
+  unchanged. Source registration is not compilation or execution evidence.
+
+The compiler-free reader control is
+`declaration_context::tests::program_source_support_history::bounded_source_closure_reader_histories_match_set_oracle`
+(exact count 1). It compares `keyed_source_lexical_closure` with independent set
+saturation over all 64 directed three-node graphs: cycles, shared descendants,
+duplicate/reordered edges, unrelated rows, reached missing rows, repair and captured
+plain-data histories. It issues no source authority. It replaces the old arbitrary
+`ProgramSourceSupport` history, whose synthetic consumer incorrectly treated consumed
+adjacency as lexical permission. The old artifact/source-admission counters are
+not equivalent coverage. Actual source classification, refusal without mutation
+and honest publication belong to the common issuer and staged World controls.
+
 Compile all affected production/cfg(test)/integration consumers each coherent
 tranche. Execute Text1 and acknowledgement1 after relevant owner migrations, then
 the existing G2 notebook/publication/custody/World/owner/package/semantic cohorts,

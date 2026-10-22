@@ -6732,16 +6732,18 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             _ => None,
         })
         .expect("taking the function selects its actual non-inline HOME body");
-    let a_selection = a_certification.native_selection.as_ref().unwrap();
+    let a_target = a_certification.linked_target.as_ref().unwrap();
     assert!(
-        a_selection
-            .completion()
-            .rows()
-            .filter(|row| row.product().owner().module == f_owner)
-            .flat_map(|row| row.product().imports())
-            .any(|owner| matches!(owner,
-            PendingImportOwner::Retained { identity, generation }
-                if identity == &held_identity && *generation == held_generation)),
+        a_target.acquired().any(|code| {
+            let tidepool_repr::native_code::NativeCodeBody::Home(body) = code.code().body() else {
+                return false;
+            };
+            body.owner().module == f_owner
+                && code.imports().any(|import| matches!(import,
+                    tidepool_toolchain::linked_native::AcquiredNativeImport::Retained { requirement, .. }
+                    if requirement.identity() == &held_identity
+                        && requirement.generation() == held_generation))
+        }),
         "the original HOME body really captures the old exact value generation"
     );
     let (f_key, f_instance) = selected_home(&resident, a.private_scope(), &f_binder);
@@ -6835,22 +6837,25 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
         "captureHistory <- pure (fb 1, freshHome 1, held + 1)",
         Some(serde_json::json!([1_000_000, 42, 42])),
     );
-    let later_selection = after
+    let later_target = after
         .certification
         .as_ref()
         .unwrap()
-        .native_selection
+        .linked_target
         .as_ref()
         .unwrap();
-    assert!(later_selection.target_imports().iter().any(|import| matches!(import,
-        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
-            if identity == &fb_identity)),
-        "later Val use crosses the exact retained callable boundary");
     assert!(
-        !later_selection
-            .completion()
-            .rows()
-            .any(|row| row.product().owner().module == fb_identity.module),
+        later_target.imports().iter().any(|import| matches!(import,
+        tidepool_toolchain::linked_native::LinkedNativeTargetImport::RetainedCapture(requirement)
+            if requirement.identity() == &fb_identity)),
+        "later Val use crosses the exact retained callable boundary"
+    );
+    assert!(
+        !later_target
+            .acquired()
+            .any(|code| matches!(code.code().body(),
+            tidepool_repr::native_code::NativeCodeBody::Home(body)
+                if body.owner().module == fb_identity.module)),
         "a later cell must not reinterpret the generated Val body as Source"
     );
     drop(after);
@@ -7247,39 +7252,40 @@ pub(in crate::session) fn run_checked_native_source_selection() {
         0,
     );
     assert_eq!(cell.checked.items.len(), 2);
-    let mut previous_selection = None;
+    let mut previous_target = None;
     let mut crossed_targets = 0;
     for index in 0..2 {
         let (bound, compiled, reservation) = cell.compile_binding(&mut resident, index);
         let [binder] = bound.as_slice() else {
             panic!("each source-control target binds one number");
         };
-        if let Some(previous) = previous_selection.take() {
+        if let Some(previous) = previous_target.take() {
             let mut crossed = compiled.code();
             crossed
                 .certification
                 .to_mut()
                 .as_mut()
                 .unwrap()
-                .native_selection = Some(previous);
+                .linked_target = Some(previous);
             source_action(&mut resident, |resident, _| {
                 resident.assert_checked_native_source_selection(&compiled.code(), &crossed);
             });
             crossed_targets += 1;
         }
-        previous_selection = compiled
+        previous_target = compiled
             .certification
             .as_ref()
             .unwrap()
-            .native_selection
+            .linked_target
             .clone();
         assert!(
-            previous_selection
+            previous_target
                 .as_ref()
                 .unwrap()
-                .completion()
-                .rows()
-                .any(|row| { row.product().owner().module == "CheckedHomeValue" }),
+                .acquired()
+                .any(|code| matches!(code.code().body(),
+                    tidepool_repr::native_code::NativeCodeBody::Home(body)
+                        if body.owner().module == "CheckedHomeValue")),
             "the real target must select the non-inlined HOME body"
         );
         let outcome = source_action(&mut resident, |resident, settlement| {
@@ -7375,13 +7381,12 @@ fn prior_source_home_contracts_execute_first_demands_and_published_originals() {
             panic!("one checked result per prior Source demand")
         };
         let certification = compiled.certification.as_ref().unwrap();
-        let selection = certification.native_selection.as_ref().unwrap();
+        let target = certification.linked_target.as_ref().unwrap();
         if binder.name == "priorSeed" {
             assert!(
-                !selection
-                    .completion()
-                    .rows()
-                    .any(|row| row.product().owner().module == "PriorSourceBodies"),
+                !target.acquired().any(|code| matches!(code.code().body(),
+                    tidepool_repr::native_code::NativeCodeBody::Home(body)
+                        if body.owner().module == "PriorSourceBodies")),
                 "the first target must not select either later-demanded body"
             );
         } else {
@@ -7402,15 +7407,19 @@ fn prior_source_home_contracts_execute_first_demands_and_published_originals() {
                     _ => None,
                 })
                 .expect("the same-program target names its actual prior Source binder");
-            assert!(selection.completion().rows().any(|row| row.product().owner().module == "PriorSourceBodies"
-                && row.product().group().binders().contains(actual_binder)),
+            assert!(target.acquired().any(|code| matches!(code.code().body(),
+                tidepool_repr::native_code::NativeCodeBody::Home(body)
+                    if body.owner().module == "PriorSourceBodies" && body.binders().contains(actual_binder))),
                 "the actual non-inline prior body is selected, including an optimized worker if issued");
-            let packages = selection
-                .completion()
-                .rows()
-                .filter(|row| row.product().owner().module == "PriorSourceBodies")
-                .flat_map(|row| row.product().imports())
-                .filter(|owner| matches!(owner, PendingImportOwner::Package { .. }))
+            let packages = target
+                .acquired()
+                .filter(|code| matches!(code.code().body(),
+                    tidepool_repr::native_code::NativeCodeBody::Home(body)
+                        if body.owner().module == "PriorSourceBodies"))
+                .flat_map(|code| code.imports().collect::<Vec<_>>())
+                .filter(|import| matches!(import,
+                    tidepool_toolchain::linked_native::AcquiredNativeImport::Code { acquired, .. }
+                        if matches!(acquired.code().body(), tidepool_repr::native_code::NativeCodeBody::Package(_))))
                 .count();
             if expected == "plainNumber" {
                 assert_eq!(packages, 0, "package-free prior HOME witness premise");

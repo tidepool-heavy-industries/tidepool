@@ -1196,6 +1196,10 @@ pub(crate) fn package_interface_io() -> (u64, u64) {
 
 pub(crate) struct PackageInterfaceValidation {
     pub(crate) inventory: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    // Canonical code owners may be shared across contexts admitted by this one
+    // operation. Their presence never supplies a missing product or source grant.
+    pub(crate) native_code_components:
+        BTreeMap<[u8; 32], Arc<tidepool_repr::native_code::NativeCodeComponent>>,
     captured: BTreeMap<PathBuf, CapturedPackageInterface>,
     // Budget for copied file-read payloads. Captured-output Arcs already have
     // a physical owner and share their bytes without another payload copy.
@@ -1296,6 +1300,7 @@ impl PackageInterfaceValidation {
     ) -> Self {
         Self {
             inventory,
+            native_code_components: BTreeMap::new(),
             captured: BTreeMap::new(),
             retained_bytes: 0,
             hash_bytes: 0,
@@ -1395,22 +1400,33 @@ impl PackageInterfaceValidation {
         interface: &crate::certified_products::CertifiedPackageInterface,
     ) -> Result<(), RecoveryArtifactError> {
         if !logical_path.is_absolute() {
-            return Err(RecoveryArtifactError::InvalidPackageImports(logical_path.to_path_buf()));
+            return Err(RecoveryArtifactError::InvalidPackageImports(
+                logical_path.to_path_buf(),
+            ));
         }
         if let Some(previous) = self.captured.get(logical_path) {
             if previous.sha256 != *interface.sha256()
-                || previous._bytes.as_ref() != interface.bytes().as_ref() {
-                return Err(RecoveryArtifactError::DigestMismatch(logical_path.to_path_buf()));
+                || previous._bytes.as_ref() != interface.bytes().as_ref()
+            {
+                return Err(RecoveryArtifactError::DigestMismatch(
+                    logical_path.to_path_buf(),
+                ));
             }
             return Ok(());
         }
-        self.inventory.reserve::<CapturedPackageInterface>(1).map_err(accounting_charge_error)?;
-        self.inventory.charge(logical_path.as_os_str().as_encoded_bytes().len())
+        self.inventory
+            .reserve::<CapturedPackageInterface>(1)
             .map_err(accounting_charge_error)?;
-        self.captured.insert(logical_path.to_path_buf(), CapturedPackageInterface {
-            _bytes: Arc::clone(interface.bytes()),
-            sha256: *interface.sha256(),
-        });
+        self.inventory
+            .charge(logical_path.as_os_str().as_encoded_bytes().len())
+            .map_err(accounting_charge_error)?;
+        self.captured.insert(
+            logical_path.to_path_buf(),
+            CapturedPackageInterface {
+                _bytes: Arc::clone(interface.bytes()),
+                sha256: *interface.sha256(),
+            },
+        );
         Ok(())
     }
 
@@ -1776,7 +1792,12 @@ pub(crate) fn validate_package_import_evidence_with_validation(
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
     let obligations = decode_package_import_obligations(
-        bytes, unit, module, skinny_iface_sha256, sidecar_path, validation,
+        bytes,
+        unit,
+        module,
+        skinny_iface_sha256,
+        sidecar_path,
+        validation,
     )?;
     for (path, seal) in obligations.roots.values() {
         validation.verify(path, seal)?;
@@ -1798,9 +1819,13 @@ impl PackageImportObligations {
     ) -> Result<BTreeMap<(String, String), [u8; 32]>, RecoveryArtifactError> {
         let mut seals = BTreeMap::new();
         for (owner, (_, seal)) in &self.roots {
-            validation.inventory.reserve::<((String, String), [u8; 32])>(1)
+            validation
+                .inventory
+                .reserve::<((String, String), [u8; 32])>(1)
                 .map_err(accounting_charge_error)?;
-            validation.inventory.charge(owner.0.len().saturating_add(owner.1.len()))
+            validation
+                .inventory
+                .charge(owner.0.len().saturating_add(owner.1.len()))
                 .map_err(accounting_charge_error)?;
             seals.insert(owner.clone(), *seal);
         }
@@ -1809,8 +1834,11 @@ impl PackageImportObligations {
 
     fn into_validated(self) -> ValidatedPackageImports {
         ValidatedPackageImports {
-            roots: self.roots.into_iter().map(|(owner, (path, seal))|
-                (owner, (path, hex(&seal)))).collect(),
+            roots: self
+                .roots
+                .into_iter()
+                .map(|(owner, (path, seal))| (owner, (path, hex(&seal))))
+                .collect(),
             compiler_provided: self.compiler_provided,
         }
     }
@@ -1822,7 +1850,8 @@ pub(crate) fn validate_package_imports_with_custody(
     validation: &mut PackageInterfaceValidation,
 ) -> Result<ValidatedPackageImports, RecoveryArtifactError> {
     for (owner, (path, seal)) in &obligations.roots {
-        let interface = custody.get(owner)
+        let interface = custody
+            .get(owner)
             .filter(|interface| interface.sha256() == seal)
             .ok_or_else(|| RecoveryArtifactError::InvalidPackageImports(path.clone()))?;
         validation.register_package_interface(path, interface)?;
@@ -1932,10 +1961,13 @@ pub(crate) fn decode_package_import_obligations(
             };
             expected[index] = digit(pair[0]) * 16 + digit(pair[1]);
         }
-        if selected.insert(
-            (package_unit.to_owned(), package_module.to_owned()),
-            (package_path.to_path_buf(), expected),
-        ).is_some() {
+        if selected
+            .insert(
+                (package_unit.to_owned(), package_module.to_owned()),
+                (package_path.to_path_buf(), expected),
+            )
+            .is_some()
+        {
             return Err(invalid());
         }
     }
@@ -1980,7 +2012,10 @@ fn checked_relative(path: &Path) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-pub(crate) fn resolve_owned(recovery_root: &Path, relative: &Path) -> Result<PathBuf, RecoveryArtifactError> {
+pub(crate) fn resolve_owned(
+    recovery_root: &Path,
+    relative: &Path,
+) -> Result<PathBuf, RecoveryArtifactError> {
     if !checked_relative(relative) {
         return Err(RecoveryArtifactError::InvalidReference);
     }
@@ -2342,7 +2377,9 @@ impl ValidatedInterfaceInput {
         mode: MaterializationMode,
     ) -> Result<MaterializedInterfaceInput, RecoveryArtifactError> {
         let (bytes, packages) = match &self.entry.payload {
-            crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return Err(RecoveryArtifactError::InvalidReference),
+            crate::artifact_inventory::ArtifactPayload::PackageCode(_) => {
+                return Err(RecoveryArtifactError::InvalidReference)
+            }
             crate::artifact_inventory::ArtifactPayload::Original(product) => {
                 (product.interface_bytes(), product.package_imports_bytes())
             }
@@ -2704,9 +2741,7 @@ pub(crate) fn recover_module_interface(
         &obligations.interface_seals(validation)?,
         validation,
     )
-    .map_err(|error| {
-        recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
-    })?;
+    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?;
     validate_package_imports_with_custody(obligations, &package_interfaces, validation)?;
     let certificate = capture_module_payload(
         root,
@@ -2895,12 +2930,20 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
             }
             let interface_path = home_interface_path(owner);
             let package_imports_path = package_sidecar_path(&interface_path);
-            product.module_interface().ok_or(RecoveryArtifactError::InvalidReference)?
+            product
+                .module_interface()
+                .ok_or(RecoveryArtifactError::InvalidReference)?
                 .validate_package_interfaces(validation)?;
-            product.original_native().ok_or(RecoveryArtifactError::InvalidReference)?
+            product
+                .original_native()
+                .ok_or(RecoveryArtifactError::InvalidReference)?
                 .validate_package_interfaces(validation)
-                .map_err(|error| recovery_validation_error(error,
-                    RecoveryArtifactError::InvalidPackageImports(package_imports_path.clone())))?;
+                .map_err(|error| {
+                    recovery_validation_error(
+                        error,
+                        RecoveryArtifactError::InvalidPackageImports(package_imports_path.clone()),
+                    )
+                })?;
             if product.package_imports_bytes.len() as u64 > PACKAGE_IMPORTS_LIMIT {
                 return Err(RecoveryArtifactError::InvalidPackageImports(
                     package_imports_path,
@@ -3090,10 +3133,14 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
                 certification_path,
                 certification_sha256,
                 product_path,
-                package_interfaces: product.original_native()
+                package_interfaces: product
+                    .original_native()
                     .ok_or(RecoveryArtifactError::InvalidReference)?
-                    .package_interfaces().materialize(recovery_root, mode, validation)
-                    .map_err(|error| recovery_validation_error(error, RecoveryArtifactError::InvalidReference))?,
+                    .package_interfaces()
+                    .materialize(recovery_root, mode, validation)
+                    .map_err(|error| {
+                        recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
+                    })?,
                 module_interface: Some(interface.materialize(recovery_root, validation, mode)?),
                 execution_source,
             });
@@ -4797,7 +4844,9 @@ mod tests {
         fs::write(&physical_path, &bytes).unwrap();
         let expected: [u8; 32] = Sha256::digest(&bytes).into();
         let before = package_interface_io();
-        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(Default::default()));
+        let operation = Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+            Default::default(),
+        ));
         let (_, observations) =
             PackageInterfaceValidation::capture_entry(root.path(), operation, |validation| {
                 validation.verify_captured(&issuing_path, &physical_path, &expected, &bytes)?;

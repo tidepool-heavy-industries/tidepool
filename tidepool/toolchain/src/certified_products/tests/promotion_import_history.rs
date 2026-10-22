@@ -486,7 +486,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert!(initial_a.original_native().unwrap().groups.iter().all(|g| {
         matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
-    assert!(initial.original_inputs.is_none());
+    assert!(initial.compiler_inputs().is_none());
     let initial_output = crate::declaration_context::issue_certified_product_native_availability(
         canonical_producer,
         &mut initial,
@@ -507,7 +507,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             module: product.owner().module.clone(),
         };
         let receipt = initial
-            .source_selection
+            .source_selection()
             .produced_source_receipt(&owner, initial_output.issued_artifacts())
             .unwrap()
             .unwrap();
@@ -788,7 +788,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     )
     .unwrap();
     let selected_owners = certified
-        .source_selection
+        .source_selection()
         .receipt_native_body_owners()
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -985,12 +985,12 @@ fn check_retained_core_promotion_history(item_count: usize) {
             &shared.products.module_interfaces
         ));
         assert!(Arc::ptr_eq(
-            &selected.source_selection.modules,
-            &shared.products.source_selection.modules
+            &selected.source_selection().modules,
+            &shared.products.source_selection().modules
         ));
         assert_eq!(
             selected
-                .source_selection
+                .source_selection()
                 .receipt_native_body_owners()
                 .cloned()
                 .collect::<BTreeSet<_>>(),
@@ -1084,8 +1084,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .issued_artifacts()
             .inventory()
             .select_native_target(
-                physical.physical_cohort(),
-                &selected.source_selection,
+                selected.physical_cohort().unwrap(),
                 observed,
                 None,
                 None,
@@ -1501,7 +1500,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             root.path(),
         );
         let selected = next
-            .source_selection
+            .source_selection()
             .receipt_native_body_owners()
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -1572,8 +1571,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .recover_fixture_projection(projection)
             .unwrap();
         let output = next
-            .original_inputs
-            .as_ref()
+            .compiler_inputs()
             .expect("promotion helper retains its actual physical issuer");
         let completed =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)

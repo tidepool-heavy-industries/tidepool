@@ -216,14 +216,13 @@ fn admit_fixture_scope(
     // Admit the complete interface closure before selecting any native
     // owner. Type-only dependencies cannot be inferred as packages.
     let view = certified
-        .original_inputs
-        .as_ref()
+        .compiler_inputs()
         .expect("fixture products passed physical cohort issuance")
         .issued_artifacts()
         .clone();
     let support = crate::declaration_context::recover_fixture_compiler_support(
         certified
-            .source_selection
+            .source_selection()
             .compiler_projection(&view)
             .unwrap(),
         view.clone(),
@@ -312,8 +311,7 @@ fn admit_fixture_scope(
                 .expect("native custody must match its certified canonical module");
         }
         let output = certified
-            .original_inputs
-            .as_ref()
+            .compiler_inputs()
             .expect("fixture native products passed physical cohort issuance");
         let closed =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)
@@ -658,11 +656,12 @@ fn source_boot_candidate_packet_producer() {
                     std::slice::from_ref(target),
                     "published target must be the authenticated completed source owner"
                 );
-                let view = certified
-                    .original_inputs
-                    .as_ref()
-                    .expect("published fixture products passed physical cohort issuance")
-                    .issued_artifacts();
+                let output =
+                    crate::declaration_join::IssuedOriginalOutput::from_segment_item(&certified)
+                        .expect(
+                            "published fixture products retain their completed compiler output",
+                        );
+                let view = output.artifacts();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(target),
                     &fixture_source_imports(&certified),
@@ -675,10 +674,9 @@ fn source_boot_candidate_packet_producer() {
                     .iter()
                     .map(|node| node.owner.clone())
                     .collect::<Vec<_>>();
-                let source_context = ExactDeclarationContext::from_source_selection(
+                let source_context = ExactDeclarationContext::from_issued_output(
                     producer_sha,
-                    &certified.source_selection,
-                    &view,
+                    &output,
                     surface.lexical,
                     target.clone(),
                     &required,

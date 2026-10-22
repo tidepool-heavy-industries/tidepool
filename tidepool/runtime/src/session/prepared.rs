@@ -729,22 +729,18 @@ impl From<LinkError> for PreparedRuntimeError {
 /// The facts about an installed program the session still needs after the
 /// machine has taken its code: the declared entry and, per top-level binding,
 /// the identity and entry signature an importer links against.
-enum NativeProductProof {
-    SelectedHome {
-        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
-        _binding: tidepool_toolchain::artifact_inventory::NativeGroupBinding,
+enum NativeProgramCode {
+    Dependency {
+        code: Arc<tidepool_codegen::prepared_program::PreparedNativeCode>,
     },
-    Package {
-        _binding: tidepool_toolchain::artifact_inventory::PackageCodeBinding,
-    },
-    SelectedTarget {
-        _selection: Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
+    Invocation {
+        _target: Arc<tidepool_toolchain::linked_native::LinkedNativeTarget>,
     },
 }
 
 struct ProgramFacts {
     native_sources: NativeSourceCustody,
-    native_product: Option<NativeProductProof>,
+    code_owner: Option<NativeProgramCode>,
     entry: Option<ValueId>,
     definitions: Arc<DefinitionFacts>,
     /// The `Tidepool.Internal.Resume.Settled` constructors this program
@@ -1367,7 +1363,7 @@ impl ProgramFacts {
             native_sources: NativeSourceCustody::unknown(
                 definitions.sites.iter().map(|site| site.site),
             ),
-            native_product: None,
+            code_owner: None,
             entry,
             settled: None,
             definitions,
@@ -5496,17 +5492,22 @@ pub(super) mod tests {
         )
         .unwrap();
         let code = compiled.code();
-        let selection = code
+        let target = code
             .certification()
             .unwrap()
-            .native_selection
+            .linked_target
             .as_ref()
             .unwrap();
-        let owners = selection
-            .completion()
-            .rows()
-            .filter(|row| row.product().owner().module == module)
-            .map(|row| row.product().owner().clone())
+        let owners = target
+            .acquired()
+            .filter_map(|acquired| match acquired.code().body() {
+                tidepool_repr::native_code::NativeCodeBody::Home(body)
+                    if body.owner().module == module =>
+                {
+                    Some(body.owner().clone())
+                }
+                _ => None,
+            })
             .collect::<Vec<_>>();
         let owner = owners
             .first()
@@ -5787,8 +5788,7 @@ pub(super) mod tests {
                 panic!("HOME fixture published package custody");
             };
             let super::super::recovery::RecoveryNativeBinding::Home {
-                artifact,
-                selection,
+                code_id,
                 original_ordinal,
                 module_version,
                 binder,
@@ -5796,8 +5796,7 @@ pub(super) mod tests {
             else {
                 panic!("HOME recovery observation lost its kind");
             };
-            assert_eq!(*artifact, lease.binding().issuer.artifact);
-            assert_eq!(*selection, lease.binding().issuer.selection);
+            assert_eq!(code_id, lease.binding().as_bytes());
             assert_eq!(*original_ordinal, lease.original_ordinal());
             assert_eq!(*module_version, lease.binder().version.0);
             assert_eq!(binder.unit, lease.binder().binder.unit);

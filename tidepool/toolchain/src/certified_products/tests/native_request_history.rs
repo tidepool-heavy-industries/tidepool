@@ -752,7 +752,6 @@ fn replay_native_transport_history(
                 .unwrap();
         let admitted = inputs.artifacts().inventory().select_native_target(
             fixed.captured_stage().physical_cohort(),
-            fixed.source_selection(),
             observed,
             None,
             Some(inputs.artifacts()),
@@ -785,7 +784,6 @@ fn replay_native_transport_history(
         AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory).unwrap();
     let demanded = inputs.artifacts().inventory().select_native_target(
         fixed.captured_stage().physical_cohort(),
-        fixed.source_selection(),
         observed,
         None,
         Some(inputs.artifacts()),
@@ -809,7 +807,7 @@ fn replay_native_transport_history(
         assert_eq!(groups, BTreeSet::from([child(0).0]));
         coverage.successful_demands += 1;
     }
-    let handoff = OriginalCompilerInputs::from_selection(&selected, inputs.artifacts()).unwrap();
+    let handoff = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     let next = ExactCompileContext::new(base_context.clone())
         .prepare_compilation_with_private_input(
             &root.path().join("handoff"),
@@ -914,7 +912,8 @@ fn replay_native_transport_history(
     );
     coverage.dependent_issuances += 1;
     let proof = produced
-        .compiler_inputs().native_offers()
+        .compiler_inputs()
+        .native_offers()
         .iter()
         .filter(|offer| offer.original() == dependent_entry.descriptor.id)
         .find_map(|offer| offer.proof())
@@ -946,7 +945,8 @@ fn replay_native_transport_history(
         .insert(*dependent_group, dependent_carrier)
         .is_none());
     let dependent_offer = produced
-        .compiler_inputs().native_offers()
+        .compiler_inputs()
+        .native_offers()
         .iter()
         .find(|offer| offer.original() == dependent_entry.descriptor.id)
         .unwrap()
@@ -996,7 +996,8 @@ fn replay_native_transport_history(
     let (admission, source) =
         generated_source_admission_fixture(&root.path().join("receipt"), &request);
     let continued = produced
-        .compiler_inputs().for_program_continuation(&support, &[admission], &source)
+        .compiler_inputs()
+        .for_program_continuation(&support, &[admission], &source)
         .unwrap();
     coverage.continuations += 1;
     assert_eq!(
@@ -1073,7 +1074,6 @@ fn replay_native_transport_history(
             .inventory()
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
-                fixed.source_selection(),
                 observed,
                 None,
                 Some(view),

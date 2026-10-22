@@ -37,13 +37,11 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
     ('tidepool-repr', frozenset({
         'tidepool/repr/src/execution_schema/encoding/legacy.rs',
         'tidepool/repr/src/execution_schema/encoding/tests.rs',
+        'tidepool/repr/src/native_code/tests/properties.rs',
     })),
     ('tidepool-extract-cmd', frozenset({
         'tidepool/extract-cmd/src/diagnostics_tests.rs',
         'tidepool/extract-cmd/src/response_properties.rs',
-    })),
-    ('tidepool-repr', frozenset({
-        'tidepool/repr/src/native_code/tests/properties.rs',
     })),
     ('tidepool-codegen', frozenset({
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
@@ -114,6 +112,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/registry_properties.rs',
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
         'tidepool/runtime/src/session/typed_segment_tests.rs',
+        'tidepool/runtime/src/session/staged_world_acceptance_tests.rs',
     })),
     ('tidepool-toolchain', frozenset({
         'tidepool/toolchain/src/artifact_inventory/view_read_properties.rs',
@@ -301,6 +300,7 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/runtime/src/session/fixtures/typed-segment-let-generalization.hs',
         'tidepool/runtime/src/session/fixtures/typed-segment-oracle.hs',
         'tidepool/runtime/src/session/fixtures/typed-segment-probe-support.hs',
+        'tidepool/runtime/src/session/fixtures/staged-world-first-demands.hs',
         'tidepool/runtime/src/session/fixtures/typed-segment-retained-bottom.hs',
         'tidepool/runtime/src/session/fixtures/typed-segment-strict-publication.hs',
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',

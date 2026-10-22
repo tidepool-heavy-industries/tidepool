@@ -1170,8 +1170,8 @@ def toolchain_package_occurrence_test_cases(binary):
         "duplicate_envelope_smoke_compiles_both_targets",
         "multi_ordinal_home_keeps_per_ordinal_package_roots",
         "repeated_fresh_home_targets_reuse_exact_ordinal_bindings",
-        "same_direct_package_with_different_children_has_a_real_premise",
-        "historical_same_seal_bodies_select_separately",
+        "same_direct_package_ignores_unrelated_dictionary_cohort",
+        "historical_same_seal_bodies_keep_distinct_code_identities",
         "transitive_home_package_demand_reaches_the_final_target",
     )]
     tests += ["artifacts::world_value_selection_tests::" + name for name in (
@@ -1413,6 +1413,21 @@ def runtime_test_cases(binary):
             json.dumps(test) + ': "owned-resident"' for test in semantic_tests
         ) + "},",
         runtime_arguments(semantic_env, semantic_resources, semantic_worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
+    staged_history = "session::turn::scaling_tests::typed_segment_tests::staged_world_acceptance::declarations_precede_first_native_demands_and_display_without_replaying_effects"
+    staged_env, staged_resources, staged_worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_staged_world_first_demands_test"
+    )
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_staged_world_first_demands_test",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings([staged_history], 8), "    ],",
+        "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
+        "    test_rule_timeout_ms = 660000,",
+        '    case_compiler_modes = {' + json.dumps(staged_history) + ': "owned-resident"},',
+        runtime_arguments(staged_env, staged_resources, staged_worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
     finite_tests = ["session::turn::scaling_tests::typed_segment_tests::finite_component_controls::" + name for name in (
@@ -2280,6 +2295,7 @@ tidepool_buildscript_run(
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
                 ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
                 ("toolchain_world_reference_history_test", "artifacts::world_value_selection_tests::real_world_reference_history_restores_same_owner_and_rejects_crossed_ready"),
+                ("toolchain_staged_world_first_demands_test", "artifacts::world_value_selection_tests::prior_source_home_links_bind_first_packagefree_and_packageful_targets"),
             ]:
                 world_env, world_resources, world_worker = compiler_service_test_inputs(
                     package_name, world_target

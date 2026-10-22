@@ -382,9 +382,9 @@ pub(crate) fn assert_actual_world_original_package_refusals(
     let mut controls = 0;
     let mut package_uses = 0;
     for (index, item) in program.items().iter().enumerate() {
-        let Some(products) = item.native_products() else {
+        if item.native_products().is_none() {
             continue;
-        };
+        }
         let relative = PathBuf::from(format!("item-{index}"));
         let item_bytes =
             world_output_bytes(checked, &relative.join("certified-products.cbor")).unwrap();
@@ -413,10 +413,17 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         )
         .unwrap();
         let item_outputs = produced.for_item(index).unwrap();
-        let selection = products
-            .completed_native_selection()
-            .unwrap()
-            .package_selection();
+        let mut observation_cursor = cursor.clone();
+        let (_, _, _, selection) = segment
+            .originals
+            .select_item(
+                &mut observation_cursor,
+                actual.clone(),
+                &artifact.bind_package_program(),
+                Some(&item_outputs),
+                &mut validation,
+            )
+            .expect("actual item issues its package association through the owning cursor");
         let actual_packages = selection.checked_original_packages(operation).unwrap();
         assert!(!actual_packages.use_roots().is_empty());
         let packet: Value = ciborium::de::from_reader(item_bytes.as_ref()).unwrap();

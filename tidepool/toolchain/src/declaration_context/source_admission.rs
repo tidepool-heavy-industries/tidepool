@@ -18,6 +18,7 @@ pub enum SourceLexicalClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceAdmissionRefusal {
+    WrongRequest,
     ProducedTypeClaim,
     HiddenOriginalPromotion,
     ChangedCanonical,
@@ -49,7 +50,7 @@ impl std::error::Error for SourceAdmissionFailure {}
 
 /// Consumed compiler adjacency carries no lexical permission. Its construction
 /// is private to an already authenticated source receipt.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CompilerDependencies {
     adjacency: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
 }
@@ -58,7 +59,9 @@ impl CompilerDependencies {
     pub(super) fn merge<'a>(
         admissions: impl IntoIterator<Item = &'a ExactSourceAdmission>,
     ) -> Result<Self, CompileError> {
-        let mut result = Self::default();
+        let mut result = Self {
+            adjacency: BTreeMap::new(),
+        };
         for admission in admissions {
             for (owner, edges) in admission.compiler_dependencies().adjacency() {
                 charge_owner(&admission.claims.operation, owner, 1)?;
@@ -296,6 +299,27 @@ impl std::fmt::Debug for SourceAdmissionBundle {
 }
 
 impl SourceAdmissionBundle {
+    pub(super) fn check_finite_request(
+        expected: &ExactRequestIdentity<'_>,
+        admissions: &[ExactSourceAdmission],
+    ) -> Result<(), CompileError> {
+        for admission in admissions {
+            if !matches!(&admission.compilation_binding, SourceCompilationBinding::Exact(actual) if actual == expected)
+            {
+                let error = SourceAdmissionFailure {
+                    owner: admission.claims.compilation_root().clone(),
+                    boundary: SourceAdmissionBoundary::FiniteRequest,
+                    claim: None,
+                    held: None,
+                    reason: SourceAdmissionRefusal::WrongRequest,
+                };
+                tracing::warn!(owner = ?error.owner, boundary = ?error.boundary, reason = ?error.reason, "source admission refused");
+                return Err(CompileError::SourceAdmission(Box::new(error)));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn issue<'a>(
         boundary: SourceAdmissionBoundary,
         compiler: Arc<crate::artifact_inventory::CompilerSourceSupport>,

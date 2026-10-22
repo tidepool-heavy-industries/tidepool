@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group() {
-    use tidepool_codegen::prepared_program::NativeBindingKey;
+    use tidepool_repr::native_code::NativeCodeBody;
     tidepool_testing::eval_harness::require_extract();
     let targets = tidepool_testing::with_settlement(|settlement| {
         crate::compile_runtime_targets(
@@ -78,16 +78,36 @@ fn sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group()
                     groups
                 };
                 let b_groups = native_groups(session, b);
+                let is_home = |key| {
+                    code.certification()
+                        .unwrap()
+                        .linked_target
+                        .as_ref()
+                        .unwrap()
+                        .acquired()
+                        .any(|acquired| {
+                            acquired.code().id() == key
+                                && matches!(acquired.code().body(), NativeCodeBody::Home(_))
+                        })
+                };
+                let is_package = |key| {
+                    code.certification()
+                        .unwrap()
+                        .linked_target
+                        .as_ref()
+                        .unwrap()
+                        .acquired()
+                        .any(|acquired| {
+                            acquired.code().id() == key
+                                && matches!(acquired.code().body(), NativeCodeBody::Package(_))
+                        })
+                };
                 assert!(
-                    b_groups
-                        .keys()
-                        .any(|key| matches!(key, NativeBindingKey::Home(_))),
+                    b_groups.keys().any(|key| is_home(*key)),
                     "the real fixture must demand HOME custody"
                 );
                 assert!(
-                    b_groups
-                        .keys()
-                        .any(|key| matches!(key, NativeBindingKey::Package(_))),
+                    b_groups.keys().any(|key| is_package(*key)),
                     "the real fixture must demand PACKAGE custody"
                 );
                 let residency = session.residency();
@@ -114,9 +134,7 @@ fn sibling_native_slot_install_refuses_recorded_vacancy_then_reuses_live_group()
                     .into_parts();
                 let a_groups = native_groups(session, a);
                 assert!(
-                    a_groups
-                        .keys()
-                        .any(|key| matches!(key, NativeBindingKey::Home(_))),
+                    a_groups.keys().any(|key| is_home(*key)),
                     "fresh sibling resolution must actually request a HOME group"
                 );
                 // Anchored groups already retain their transitive dependencies;

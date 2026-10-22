@@ -5770,7 +5770,9 @@ mod tests {
             ReceiptImportOwner,
         };
         use crate::recovery_artifacts::PackageInterfaceValidation;
-        use tidepool_repr::execution_schema::{testing, GlobalDecl, Group, ModuleVersion, RuntimeRep};
+        use tidepool_repr::execution_schema::{
+            testing, GlobalDecl, Group, ModuleVersion, RuntimeRep,
+        };
         let products = ["Authored", "Wrapper"]
             .iter()
             .map(|module| {
@@ -5979,7 +5981,6 @@ mod tests {
         let authored_admission = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(authored_entry.clone()),
                 None,
@@ -5995,7 +5996,6 @@ mod tests {
         let wrong_body = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(changed_entry),
                 None,
@@ -6027,7 +6027,6 @@ mod tests {
         let complete_admission = inventory
             .select_native_target(
                 physical,
-                fixed.source_selection(),
                 observed,
                 Some(entry.clone()),
                 None,
@@ -6101,7 +6100,6 @@ mod tests {
             let denied = inventory
                 .select_native_target(
                     physical,
-                    fixed.source_selection(),
                     observed.unwrap(),
                     Some(entry.clone()),
                     None,
@@ -6156,7 +6154,6 @@ mod tests {
         assert!(missing_inventory
             .select_native_target(
                 missing_fixed.captured_stage().physical_cohort(),
-                missing_fixed.source_selection(),
                 observed,
                 Some(entry),
                 None,
@@ -6539,18 +6536,23 @@ mod tests {
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let selection =
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                     &projection,
                     &artifacts.metadata_snapshot(),
-                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                    &validation.inventory,
                 )
                 .unwrap();
-            let output = crate::declaration_context::OriginalCompilerInputs::from_selection(
-                &selection, &artifacts,
+            let stage = crate::declaration_context::CapturedCompilerStage::issue(
+                &mut selection,
+                &artifacts,
+                Vec::new(),
+                &mut validation,
             )
             .unwrap();
-            let support = CompilerSourceSupport::close_complete_output(&output).unwrap();
+            let output = stage.compiler_inputs();
+            let support = CompilerSourceSupport::close_complete_output(output).unwrap();
             Arc::new(
                 crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()

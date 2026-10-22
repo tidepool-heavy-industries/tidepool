@@ -2998,9 +2998,8 @@ impl PersistentSession {
                     NativeInstanceLease::Home(home) => {
                         let key = home.binding();
                         super::recovery::RecoveryNativeBinding::Home {
-                            artifact: key.issuer.artifact,
-                            selection: key.issuer.selection,
-                            original_ordinal: key.original_ordinal,
+                            code_id: *key.as_bytes(),
+                            original_ordinal: home.original_ordinal(),
                             module_version: home.binder().version.0,
                             binder,
                         }
@@ -3008,8 +3007,7 @@ impl PersistentSession {
                     NativeInstanceLease::Package(package) => {
                         let key = package.binding();
                         super::recovery::RecoveryNativeBinding::Package {
-                            artifact: key.artifact,
-                            selection: key.selection,
+                            code_id: *key.as_bytes(),
                             binder,
                         }
                     }
@@ -7400,16 +7398,17 @@ mod checkpoint_scope_tests {
                     let owner = code
                         .certification()
                         .unwrap()
-                        .native_selection
+                        .linked_target
                         .as_ref()
                         .unwrap()
-                        .completion()
-                        .rows()
-                        .next()
-                        .expect("actual producer selects a HOME group")
-                        .product()
-                        .owner()
-                        .clone();
+                        .acquired()
+                        .find_map(|code| match code.code().body() {
+                            tidepool_repr::native_code::NativeCodeBody::Home(body) => {
+                                Some(body.owner().clone())
+                            }
+                            tidepool_repr::native_code::NativeCodeBody::Package(_) => None,
+                        })
+                        .expect("actual producer selects a HOME group");
                     mint_fixture_origin(&mut session, scope, owner);
                     let after = session.public_visibility_snapshot_in(scope).unwrap();
                     assert_eq!(before.source_instances, after.source_instances);

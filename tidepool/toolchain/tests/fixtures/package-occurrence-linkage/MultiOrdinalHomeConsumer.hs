@@ -13,3 +13,7 @@ result = (byList, byText)
 -- reused while the fresh per-ordinal evidence is still fully checked.
 result2 :: ([Int] -> [Int], String -> Text)
 result2 = (byList, byText)
+
+-- This literal target has no dependency code to lend into a later prefix.
+emptyTarget :: Int
+emptyTarget = 7

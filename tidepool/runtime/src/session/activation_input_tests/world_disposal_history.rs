@@ -149,11 +149,11 @@ fn released_compiler_world_restores_while_retained_native_custody_executes() {
         .collect::<String>();
     let (bound, compiled, reservation) = checked.compile_binding(&mut resident, 0);
     let held_program = compiled.prepared().clone();
-    let held_selection = compiled
+    let held_target = compiled
         .certification
         .as_ref()
         .unwrap()
-        .native_selection
+        .linked_target
         .clone()
         .unwrap();
     let disposed = disposed_world(&world_name, 0);
@@ -234,10 +234,10 @@ fn released_compiler_world_restores_while_retained_native_custody_executes() {
             .certification
             .as_ref()
             .unwrap()
-            .native_selection
+            .linked_target
             .as_ref()
             .unwrap(),
-        &held_selection
+        &held_target
     ));
     publish_checked_fixture(&mut resident, &execution, 1);
     original_value_probe(&mut resident, &recipe, "P.fst heldNative", 41);
