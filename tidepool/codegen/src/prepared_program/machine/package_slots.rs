@@ -449,6 +449,10 @@ mod tests {
 
     fn literal_consumer(package: &DemandedPackageImage) -> Arc<CompiledProgram> {
         let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("LiteralConsumer", "entry");
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
         wire.expressions.nodes[0] =
             ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
