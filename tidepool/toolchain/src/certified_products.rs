@@ -15219,6 +15219,261 @@ pub(crate) mod tests {
         .product
     }
 
+    fn world_stage_choice_products() -> (
+        crate::recovery_artifacts::CertifiedRecoveryProduct,
+        crate::recovery_artifacts::CertifiedRecoveryProduct,
+        crate::recovery_artifacts::CertifiedRecoveryProduct,
+        crate::recovery_artifacts::CertifiedRecoveryProduct,
+    ) {
+        let child_a = full_native_fixture("WorldStageChildA", vec![(5, vec![])], 7);
+        let child_b = full_native_fixture("WorldStageChildB", vec![(5, vec![])], 7);
+        let import = |child: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
+            PendingImportOwner::Source {
+                owner: child.owner().clone(),
+                original_ordinal: 5,
+                binder: testing::identity(&child.owner().module, "entry_5"),
+            }
+        };
+        let root_a = full_native_fixture("WorldStageChoice", vec![(11, vec![import(&child_a)])], 7);
+        let root_b = full_native_fixture("WorldStageChoice", vec![(11, vec![import(&child_b)])], 7);
+        (root_a, child_a, root_b, child_b)
+    }
+
+    fn issue_world_stage_choice(
+        retained: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+        selected: &crate::recovery_artifacts::CertifiedRecoveryProduct,
+    ) -> crate::artifact_inventory::CompilerSourceSupport {
+        let entries = retained
+            .iter()
+            .map(|product| {
+                Arc::new(
+                    crate::artifact_inventory::ArtifactEntry::original([1; 32], product.clone())
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_id =
+            crate::artifact_inventory::ArtifactEntry::original_artifact_id([1; 32], selected);
+        let selected_entry = entries
+            .iter()
+            .find(|entry| entry.descriptor.id == selected_id)
+            .cloned()
+            .unwrap();
+        let inventory = crate::artifact_inventory::ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let projection =
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                selected_entry,
+            ])
+            .unwrap();
+        crate::declaration_context::issue_fixture_compiler_support(projection, view).unwrap()
+    }
+
+    fn world_stage_availability(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> (
+        crate::artifact_inventory::CompilerInputProjection,
+        crate::declaration_context::RequestNativeAvailability,
+    ) {
+        let roles = support
+            .projection()
+            .world_stage_roles(&BTreeSet::from([owner.clone()]));
+        let availability = support
+            .native_availability()
+            .for_compiler_roles(&roles, support.artifacts())
+            .unwrap();
+        (roles, availability)
+    }
+
+    #[test]
+    fn world_stage_fixture_roles_follow_issued_carrier_without_owner_census() {
+        use crate::artifact_inventory::{
+            ArtifactEntry, ArtifactInventory, CompilerInputRole, NativeGroupKey,
+        };
+        let (root_a, child_a, root_b, child_b) = world_stage_choice_products();
+        assert_eq!(
+            root_a.module_interface().unwrap().interface_sha256(),
+            root_b.module_interface().unwrap().interface_sha256(),
+            "the alternatives share the selected interface"
+        );
+        assert_eq!(
+            root_a.module_interface().unwrap().requirements(),
+            root_b.module_interface().unwrap().requirements(),
+        );
+        assert_ne!(root_a.owner().product_sha256, root_b.owner().product_sha256);
+        let root_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: root_a.owner().unit.clone(),
+            module: root_a.owner().module.clone(),
+        };
+        let root_a_id = ArtifactEntry::original_artifact_id([1; 32], &root_a);
+        let root_b_id = ArtifactEntry::original_artifact_id([1; 32], &root_b);
+        let child_a_id = ArtifactEntry::original_artifact_id([1; 32], &child_a);
+        let child_b_id = ArtifactEntry::original_artifact_id([1; 32], &child_b);
+        assert_ne!(root_a_id, root_b_id);
+        assert_ne!(child_a_id, child_b_id);
+
+        let support_a = issue_world_stage_choice(
+            &[
+                root_a.clone(),
+                child_a.clone(),
+                root_b.clone(),
+                child_b.clone(),
+            ],
+            &root_a,
+        );
+        let (roles_a, availability_a) = world_stage_availability(&support_a, &root_owner);
+        assert_eq!(
+            roles_a.snapshot_roles()[&root_owner].original(),
+            Some(root_a_id)
+        );
+        let rows_a = availability_a
+            .rows()
+            .map(|row| row.original_artifact_id())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(rows_a, BTreeSet::from([root_a_id, child_a_id]));
+
+        let support_b = issue_world_stage_choice(
+            &[
+                root_b.clone(),
+                child_b.clone(),
+                root_a.clone(),
+                child_a.clone(),
+            ],
+            &root_b,
+        );
+        let (roles_b, availability_b) = world_stage_availability(&support_b, &root_owner);
+        assert_eq!(
+            roles_b.snapshot_roles()[&root_owner].original(),
+            Some(root_b_id)
+        );
+        assert_eq!(
+            availability_b
+                .rows()
+                .map(|row| row.original_artifact_id())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_b_id, child_b_id])
+        );
+
+        let extra_inventory = ArtifactInventory::default();
+        let extra = extra_inventory
+            .admit_shared(
+                &extra_inventory.empty_view(),
+                vec![
+                    Arc::new(ArtifactEntry::original([1; 32], root_b).unwrap()),
+                    Arc::new(ArtifactEntry::original([1; 32], child_b.clone()).unwrap()),
+                ],
+            )
+            .unwrap();
+        let with_extra = support_a.artifacts().retain_custody(&extra).unwrap();
+        let roles_with_extra = support_a
+            .projection()
+            .world_stage_roles(&BTreeSet::from([root_owner.clone()]));
+        let availability_with_extra = support_a
+            .native_availability()
+            .for_compiler_roles(&roles_with_extra, &with_extra)
+            .unwrap();
+        assert_eq!(
+            roles_with_extra.snapshot_roles()[&root_owner].original(),
+            Some(root_a_id)
+        );
+        assert_eq!(
+            availability_with_extra
+                .rows()
+                .map(|row| row.original_artifact_id())
+                .collect::<BTreeSet<_>>(),
+            rows_a,
+            "retaining an unused equal-interface history cannot alter A's exact closure"
+        );
+
+        let interface_support = crate::declaration_context::recover_fixture_compiler_support(
+            support_a.projection().interface_only(),
+            support_a.artifacts().clone(),
+            support_a.native_offers().iter().cloned(),
+        )
+        .unwrap();
+        let (interface_roles, interface_availability) =
+            world_stage_availability(&interface_support, &root_owner);
+        assert!(matches!(
+            interface_roles.snapshot_roles()[&root_owner],
+            CompilerInputRole::InterfaceOnly { .. }
+        ));
+        assert!(
+            interface_support
+                .artifacts()
+                .artifact_ids()
+                .contains(&root_a_id),
+            "interface-only metadata retains the body bytes without selecting an Original"
+        );
+        assert!(interface_availability.rows().next().is_none());
+
+        let partial_root = full_native_fixture(
+            "WorldStagePartial",
+            vec![
+                (
+                    11,
+                    vec![PendingImportOwner::Source {
+                        owner: child_a.owner().clone(),
+                        original_ordinal: 5,
+                        binder: testing::identity("WorldStageChildA", "entry_5"),
+                    }],
+                ),
+                (
+                    9001,
+                    vec![PendingImportOwner::Source {
+                        owner: child_b.owner().clone(),
+                        original_ordinal: 5,
+                        binder: testing::identity("WorldStageChildB", "entry_5"),
+                    }],
+                ),
+            ],
+            7,
+        );
+        let partial_owner = crate::declaration_join::ExactModuleIdentity {
+            unit: partial_root.owner().unit.clone(),
+            module: partial_root.owner().module.clone(),
+        };
+        let partial_root_id = ArtifactEntry::original_artifact_id([1; 32], &partial_root);
+        let entries = [&partial_root, &child_a, &child_b]
+            .into_iter()
+            .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
+            .collect::<Vec<_>>();
+        let selected = BTreeSet::from([
+            NativeGroupKey {
+                artifact: partial_root_id,
+                original_ordinal: 11,
+            },
+            NativeGroupKey {
+                artifact: child_a_id,
+                original_ordinal: 5,
+            },
+        ]);
+        let inventory = ArtifactInventory::default();
+        let partial_view = inventory
+            .admit_recovery_selection(&inventory.empty_view(), entries, &selected)
+            .unwrap();
+        let selected_entry = Arc::new(ArtifactEntry::original([1; 32], partial_root).unwrap());
+        let partial = crate::declaration_context::issue_fixture_compiler_support(
+            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&[
+                selected_entry,
+            ])
+            .unwrap(),
+            partial_view,
+        )
+        .unwrap();
+        let (_, partial_availability) = world_stage_availability(&partial, &partial_owner);
+        let root_row = partial_availability.issued_row(partial_root_id).unwrap();
+        assert!(root_row.permits(11));
+        assert!(!root_row.permits(9001));
+        assert!(partial_availability.issued_row(child_a_id).is_some());
+        assert!(
+            partial_availability.issued_row(child_b_id).is_none(),
+            "partial permission cannot acquire the unrelated child"
+        );
+    }
+
     #[test]
     fn full_availability_validation_preserves_refusals_without_materializing_groups() {
         use crate::artifact_inventory::{ArtifactId, NativeGroupKey};
@@ -19495,16 +19750,13 @@ pub(crate) mod tests {
                 &IssuedGroupCandidates::bind(Arc::from([]), &[product.clone()]).unwrap(),
             )
             .unwrap();
-        let physical = input
-            .artifacts()
-            .inventory()
-            .admit_shared_with_demand(
-                input.artifacts(),
-                vec![original.clone()],
-                NativeArtifactDemand::ScopeInterfaces,
-            )
-            .unwrap();
-        let completed = OriginalCompilerInputs::from_selection(&selection, &physical).unwrap();
+        let completed = OriginalCompilerInputs::issue_segment_native_availability(
+            &mut selection,
+            input.artifacts(),
+            vec![original.clone()],
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         assert!(
             matches!(completed.role_projection().snapshot_roles()[&original.descriptor.owner],
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { interface }
@@ -19518,6 +19770,26 @@ pub(crate) mod tests {
         let closed =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&completed)
                 .unwrap();
+        let retained_owner = original.descriptor.owner.clone();
+        let world_roles = closed
+            .projection()
+            .world_stage_roles(&BTreeSet::from([retained_owner.clone()]));
+        assert!(matches!(
+            world_roles.snapshot_roles()[&retained_owner],
+            crate::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
+        ));
+        let world_availability = completed
+            .native_availability()
+            .for_compiler_roles(&world_roles, completed.issued_artifacts())
+            .unwrap();
+        let retained_row = world_availability
+            .issued_row(original.descriptor.id)
+            .expect("RetainedCore keeps its issued native availability row");
+        assert_eq!(
+            world_availability.snapshot_facts().unwrap()[&original.descriptor.id].mode,
+            crate::declaration_context::NativeTransportMode::Full
+        );
+        assert!(retained_row.permits(7));
         let full = closed
             .native_offers()
             .iter()
