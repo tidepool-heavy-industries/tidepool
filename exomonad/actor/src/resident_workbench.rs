@@ -11362,7 +11362,10 @@ where
                 let (preparation, leased_input) = self
                     .access
                     .with_compiler_machine(context.clone(), move |session, _, _, _| {
-                        let prepare = |write| session.prepare_private_execution(execution, write);
+                        let prepare =
+                            |write: Option<&tidepool_runtime::session::PendingHostValueWrite>| {
+                                session.prepare_private_execution(execution, write)
+                            };
                         let preparation = match leased_input.as_ref() {
                             Some(input) => input.with_write(prepare),
                             None => prepare(None),
@@ -11458,16 +11461,17 @@ where
                         ),
                     },
                     CellPreparationPurpose::PrivateExecution(execution) => {
-                        let admit = |write| {
-                            session.admit_world_planned_cell_with_snapshot(
-                                execution.admission.clone(),
-                                preparation
-                                    .clone()
-                                    .expect("authored preparation has a snapshot"),
-                                plan,
-                                write,
-                            )
-                        };
+                        let admit =
+                            |write: Option<&tidepool_runtime::session::PendingHostValueWrite>| {
+                                session.admit_world_planned_cell_with_snapshot(
+                                    execution.admission.clone(),
+                                    preparation
+                                        .clone()
+                                        .expect("authored preparation has a snapshot"),
+                                    plan,
+                                    write,
+                                )
+                            };
                         match leased_input.as_ref() {
                             Some(input) => input.with_write(admit),
                             None => admit(None),
