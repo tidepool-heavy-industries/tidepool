@@ -568,7 +568,9 @@ impl NativeInstantiationPlan {
                 .and_then(|(key, lease)| {
                     (key.domain == occurrence.domain && key.binding == binding).then_some(lease)
                 });
-            let request = program.request(occurrence.domain, value)?;
+            let request = program
+                .request(occurrence.domain, value)
+                .map_err(PreparedRuntimeError::Install)?;
             let (permit, witness) = native_slot(&request, anchor)?;
             if anchor.is_some() && witness.is_none() {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners);
@@ -620,7 +622,9 @@ impl NativeInstantiationPlan {
                 continue;
             }
             let program = &self.programs[&occurrence.program];
-            let request = program.request(occurrence.domain, value)?;
+            let request = program
+                .request(occurrence.domain, value)
+                .map_err(PreparedRuntimeError::Install)?;
             let (permit, witness) = native_slot(&request, anchors.get(&occurrence))?;
             if witness.as_ref().map(|w| w.instance())
                 != native_anchors.get(&occurrence).map(|w| w.instance())
