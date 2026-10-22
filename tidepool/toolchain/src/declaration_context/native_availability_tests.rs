@@ -9643,107 +9643,158 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
-    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
-    let authored = |generation, version| {
-        let module =
-            tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation)).module_name();
-        let native = crate::certified_products::fixture_native_declaration_product(
-            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
-                "main",
-                &module,
-                vec![(7, vec![]), (9001, vec![])],
-                version,
-                &BTreeMap::new(),
-                b"same authored canonical interface".to_vec(),
-                &BTreeMap::new(),
-                &[],
-            ),
-            producer.sha256(),
-            generation,
-        );
-        recovered_witness_fixtures(&[native]).remove(0).product
+    let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
+    let sources = directory.path().join("sources");
+    std::fs::create_dir(&sources).unwrap();
+    let input = directory.path().join("quote-input");
+    let executions = directory.path().join("quote-input.executions");
+    std::fs::write(
+        sources.join("QuotedProvider.hs"),
+        include_str!("../../tests/fixtures/completed-source/QuotedProvider.hs"),
+    )
+    .unwrap();
+    std::fs::write(
+        sources.join("QuotedOriginal.hs"),
+        include_str!("../../tests/fixtures/completed-source/QuotedOriginal.hs")
+            .replace("QUOTE_INPUT_PATH", input.to_str().unwrap()),
+    )
+    .unwrap();
+    let target_path = sources.join("PreparedOriginal.hs");
+    std::fs::write(
+        &target_path,
+        include_str!("../../tests/fixtures/completed-source/PreparedOriginal.hs"),
+    )
+    .unwrap();
+    let frozen = crate::artifacts::FrozenEntrySources::capture(&[sources], &target_path).unwrap();
+    let endpoint = tidepool_extract_cmd::ExtractCmd::new()
+        .unwrap()
+        .bind()
+        .unwrap();
+    let producer =
+        CanonicalProducerIdentity::from_producer_bytes(endpoint.identity().producer_bytes());
+    let prepare = |name: &str| {
+        crate::artifacts::test_support::prepare_frozen_production_entry(
+            &frozen,
+            directory.path(),
+            &directory.path().join(name),
+        )
+        .unwrap()
     };
-    let current = product("PublishedFallbackOwner", 151);
-    let historical = product("PublishedFallbackOwner", 152);
-    let fallback = authored(2, 153);
+    std::fs::write(&input, "37").unwrap();
+    let historical_output = prepare("historical");
+    let previous_executions = std::fs::read_to_string(&executions).unwrap();
+    assert!(!previous_executions.is_empty());
+    assert!(previous_executions.lines().all(|value| value == "37"));
+    std::fs::write(&input, "91").unwrap();
+    let current_output = prepare("current");
+    let current_executions = std::fs::read_to_string(&executions).unwrap();
+    let new_executions = current_executions
+        .strip_prefix(&previous_executions)
+        .unwrap();
+    assert!(
+        !new_executions.is_empty(),
+        "the second producer executes its quotation"
+    );
+    assert!(new_executions.lines().all(|value| value == "91"));
+    let historical_source = historical_output
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let current_source = current_output
+        .products()
+        .original_execution_context()
+        .unwrap();
+    assert_eq!(
+        historical_source.toolchain_identity_sha256(),
+        producer.sha256()
+    );
+    assert_eq!(
+        current_source.toolchain_identity_sha256(),
+        producer.sha256()
+    );
+    let original = |context: &ExactDeclarationContext| {
+        context
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.descriptor.owner.module == "QuotedOriginal"
+                    && matches!(entry.payload, ArtifactPayload::Original(_))
+            })
+            .expect("the actual producer captured QuotedOriginal")
+    };
+    let old = original(&historical_source);
+    let entry = original(&current_source);
+    let (ArtifactPayload::Original(historical), ArtifactPayload::Original(current)) =
+        (&old.payload, &entry.payload)
+    else {
+        unreachable!()
+    };
     assert!(matches!(
         current.module_interface().unwrap().origin(),
         crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
     ));
-    assert!(matches!(
-        historical.module_interface().unwrap().origin(),
-        crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
-    ));
-    assert!(matches!(
-        fallback.module_interface().unwrap().origin(),
-        crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
-    ));
-    assert_eq!(current.module_interface(), historical.module_interface());
-    let entry = Arc::new(ArtifactEntry::original(producer.sha256(), current.clone()).unwrap());
-    let old = Arc::new(ArtifactEntry::original(producer.sha256(), historical.clone()).unwrap());
-    assert_ne!(entry.descriptor.id, old.descriptor.id);
+    assert_eq!(
+        current.module_interface(),
+        historical.module_interface(),
+        "the two real bodies must share the exact canonical source interface"
+    );
+    assert_ne!(
+        entry.descriptor.id, old.descriptor.id,
+        "the external quotation input must produce distinct native bodies"
+    );
+    assert!(current_source
+        .source_scope()
+        .admits(&entry.descriptor.owner));
+    let old_offers = historical_source
+        .compiler_source_support()
+        .native_offers()
+        .iter()
+        .filter(|offer| offer.original() == old.descriptor.id)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        old_offers.iter().any(|offer| offer.is_full()),
+        "the historical producer really issued a Full offer for this body"
+    );
+
+    let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(2)).module_name();
+    let fallback = crate::certified_products::fixture_native_declaration_product(
+        crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+            "main",
+            &module,
+            vec![(7, vec![]), (9001, vec![])],
+            153,
+            &BTreeMap::new(),
+            b"unrelated authored canonical interface".to_vec(),
+            &BTreeMap::new(),
+            &[],
+        ),
+        producer.sha256(),
+        2,
+    );
+    let fallback = recovered_witness_fixtures(&[fallback]).remove(0).product;
     let target = Arc::new(ArtifactEntry::canonical(
         fallback.module_interface().unwrap().clone(),
     ));
     let inventory = ArtifactInventory::default();
-    let view = inventory
-        .admit_shared(&inventory.empty_view(), vec![entry.clone(), target.clone()])
+    let interfaces = inventory
+        .admit_shared(&inventory.empty_view(), vec![target.clone()])
         .unwrap();
-    let projection =
-        CompilerInputProjection::from_issued_entries(&[entry.clone(), target.clone()]).unwrap();
-    let source = ExactDeclarationContext::from_authenticated_execution(
+    let fallback_context = ExactDeclarationContext::from_authenticated_interfaces(
         producer.sha256(),
-        &view,
-        projection,
-        vec![
-            ExactLexicalNode {
-                owner: target.descriptor.owner.clone(),
-                imports: vec![entry.descriptor.owner.clone()],
-            },
-            ExactLexicalNode {
-                owner: entry.descriptor.owner.clone(),
-                imports: vec![],
-            },
-        ],
-        target.descriptor.owner.clone(),
-        &[
-            target.descriptor.owner.clone(),
-            entry.descriptor.owner.clone(),
-        ],
+        &interfaces,
+        CompilerInputProjection::from_issued_entries(std::slice::from_ref(&target)).unwrap(),
     )
     .unwrap();
-    let old_input = (|| -> Result<OriginalCompilerInputs, CompileError> {
-        let producer = producer;
-        let entries = (std::slice::from_ref(&historical))
-            .iter()
-            .map(|product| {
-                ArtifactEntry::original(producer.sha256(), product.clone()).map(Arc::new)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inventory = ArtifactInventory::default();
-        let artifacts = inventory.admit_shared_with_demand(
-            &inventory.empty_view(),
-            entries.clone(),
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-        )?;
-        let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        let mut validation = PackageInterfaceValidation::default();
-        let mut selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &projection,
-                &artifacts.metadata_snapshot(),
-                &validation.inventory,
-            )
-            .map_err(compiler_evidence_failure)?;
-        CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
-            .map(|stage| stage.compiler_inputs().as_ref().clone())
-    })()
-    .unwrap();
-    assert!(old_input
-        .native_offers()
-        .iter()
-        .any(|offer| offer.is_full()));
+    assert!(fallback_context.source_scope().rows().is_empty());
+    let source = current_source
+        .as_ref()
+        .clone()
+        .extend_interface_context(&fallback_context)
+        .unwrap();
     let publication = source
         .issue_published_source_original("revision", "input", &entry.descriptor.owner)
         .unwrap();
@@ -9751,7 +9802,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         .context()
         .as_ref()
         .clone()
-        .extend_interface_context(&type_context(std::slice::from_ref(&fallback)))
+        .extend_interface_context(&fallback_context)
         .expect("publication narrows to B; the type owner explicitly admits unrelated C afterward");
     for published in [false, true] {
         let baseline = if published {
@@ -9762,7 +9813,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         let before = baseline.artifact_view().capture_graph_selection();
         let mixed = baseline
             .clone()
-            .retain_issued_native_offers(old_input.native_offers().iter().cloned())
+            .retain_issued_native_offers(old_offers.iter().cloned())
             .unwrap();
         assert_eq!(
             mixed.artifact_view().capture_graph_selection().roots,

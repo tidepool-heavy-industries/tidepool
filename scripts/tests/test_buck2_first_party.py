@@ -510,8 +510,9 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
             "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes",
             "declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand",
+            "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner",
         ])
-        self.assertEqual(group["expected_count"], 3)
+        self.assertEqual(group["expected_count"], 4)
         self.assertIs(group["ignored"], True)
         self.assertIs(group["haskell_worker"], True)
         for resource in (
@@ -1741,7 +1742,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'owned-resident',
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof': 'owned-resident',
             'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes': 'owned-resident',
-            'declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand': 'owned-resident'})
+            'declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand': 'owned-resident',
+            'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner': 'owned-resident'})
         self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
                          '$(location //build/package:compiler_deployment)')
         self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT'],
@@ -1753,13 +1755,14 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof':
             'owned-resident',
             'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes': 'owned-resident',
-            'declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand': 'owned-resident'})
+            'declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand': 'owned-resident',
+            'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner': 'owned-resident'})
         self.assertNotIn('TIDEPOOL_TEST_TRACE_PROFILE', history['env'])
         for target in ('toolchain_source_proof_pairing_test', 'toolchain_accepted_join_custody_test',
                        'toolchain_catalog_captured_inputs_test', 'toolchain_linked_entry_reopen_test',
                        'toolchain_retained_entry_refusal_test'):
             native = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
-            self.assertEqual(native['expected_count'], 3 if target == 'toolchain_source_proof_pairing_test' else 1)
+            self.assertEqual(native['expected_count'], 4 if target == 'toolchain_source_proof_pairing_test' else 1)
             if target == 'toolchain_retained_entry_refusal_test':
                 self.assertFalse(native.get('ignored', False))
             self.assertEqual(native['case_compiler_modes'],
