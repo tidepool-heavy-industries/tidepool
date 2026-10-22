@@ -5262,7 +5262,9 @@ impl ArtifactInventory {
             .iter()
             .any(|id| !issuing_payloads.contains_key(id))
         {
-            return Err(failure("native admission lost its acquired payload custody"));
+            return Err(failure(
+                "native admission lost its acquired payload custody",
+            ));
         }
         // Validate proof retention before publishing the immutable scope. No payload
         // is retained for an unselected source row in an ancestor proof.
