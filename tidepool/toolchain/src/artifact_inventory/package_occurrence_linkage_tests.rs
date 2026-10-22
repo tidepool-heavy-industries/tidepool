@@ -53,13 +53,10 @@ fn collect_package_plans(
     if plans.contains_key(&id) {
         return;
     }
-    let mut imports = Vec::new();
-    for child in binding.imports() {
-        collect_package_plans(&child, plans);
-        imports.push(crate::artifact_inventory::PackageCodeTarget::Planned(
-            child.product().artifact_id(),
-        ));
-    }
+    let imports = binding
+        .imports()
+        .map(crate::artifact_inventory::PackageCodeTarget::Held)
+        .collect();
     plans.insert(
         id,
         crate::artifact_inventory::PackageCodePlan {
@@ -572,38 +569,99 @@ fn transitive_home_package_demand_reaches_the_final_target() {
     )
     .expect("the target-local transitive HOME graph compiles through common admission");
     let selection = completed_selection(&output, "target");
-    let row = |module: &str| {
+    let row = |module: &str, binder: &str| {
         selection
             .completion()
             .rows()
-            .find(|row| row.product().owner().module == module)
-            .unwrap_or_else(|| panic!("completed target lacks its {module} HOME row"))
-    };
-    let package_modules = |module: &str| {
-        row(module)
-            .imports()
-            .iter()
-            .filter_map(|import| match import {
-                CompletedNativeImport::Package { binding, .. } => {
-                    Some(binding.product().code().owner().module.clone())
-                }
-                _ => None,
+            .find(|row| {
+                row.product().owner().module == module
+                    && row
+                        .product()
+                        .group()
+                        .binders()
+                        .iter()
+                        .any(|symbol| symbol.occurrence == binder)
             })
-            .collect::<Vec<_>>()
+            .unwrap_or_else(|| {
+                panic!("completed target lacks its exact {module}.{binder} HOME row")
+            })
     };
-
+    let target = &output.targets["target"];
+    let globals = target.prepared.prepared().globals();
+    assert_eq!(globals.len(), selection.target_imports().len());
+    let middle = row("TransitiveHomeMiddle", "middleValue");
+    let leaf = row("TransitiveHomeLeaf", "leafValue");
     assert!(
-        package_modules("TransitiveHomeTarget").is_empty(),
-        "the final target directly names HOME code, not the package leaf"
+        globals
+            .iter()
+            .zip(selection.target_imports())
+            .any(|(global, import)| {
+                global.identity.module == "TransitiveHomeMiddle"
+                    && global.identity.occurrence == "middleValue"
+                    && matches!(import, CompletedNativeTargetImport::Source { binding, .. }
+                if *binding == middle.binding())
+            }),
+        "the optimized final target directly imports its exact Middle HOME row"
     );
-    let middle_packages = package_modules("TransitiveHomeMiddle");
+    assert!(
+        selection
+            .target_imports()
+            .iter()
+            .all(|import| { !matches!(import, CompletedNativeTargetImport::Package { .. }) }),
+        "the final target reaches package code through HOME rather than a direct package slot"
+    );
+    assert!(
+        middle.imports().iter().any(|import| {
+            matches!(import, CompletedNativeImport::Source { binding, .. }
+            if *binding == leaf.binding())
+        }),
+        "Middle imports the exact transitive Leaf HOME row"
+    );
+    assert!(
+        selection
+            .completion()
+            .rows()
+            .all(|row| { row.product().owner().module != "TransitiveHomeTarget" }),
+        "the final target is not reclassified as its own dependency HOME row"
+    );
+    let middle_packages = middle
+        .imports()
+        .iter()
+        .filter_map(|import| match import {
+            CompletedNativeImport::Package { binding, .. } => {
+                Some(binding.product().code().owner().module.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert!(
         middle_packages
             .iter()
             .all(|module| module != "Data.Text.Internal"),
         "the package demand is reached through the second HOME edge: {middle_packages:?}"
     );
-    let leaf_packages = package_modules("TransitiveHomeLeaf");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pending = vec![leaf.binding()];
+    let mut leaf_packages = Vec::new();
+    while let Some(binding) = pending.pop() {
+        if !seen.insert(binding) {
+            continue;
+        }
+        let row = selection
+            .completion()
+            .rows()
+            .find(|row| row.binding() == binding)
+            .expect("every reached exact HOME import has its issued completion row");
+        for import in row.imports() {
+            match import {
+                CompletedNativeImport::Source { binding, .. } => pending.push(*binding),
+                CompletedNativeImport::Package { binding, .. } => {
+                    leaf_packages.push(binding.product().code().owner().module.clone());
+                }
+                CompletedNativeImport::Retained { .. } => {}
+            }
+        }
+    }
     assert!(
         leaf_packages
             .iter()
@@ -697,6 +755,20 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
         issued_left.roots(),
         "an unused equal-content issuance cannot change the selected child history"
     );
+    let reused_reverse =
+        issue_package_graph(left, &[Arc::clone(&issued_left), Arc::clone(&issued_right)]).unwrap();
+    assert_eq!(reused_reverse.roots(), issued_left.roots());
+    let selected = reused_reverse.get(reused_reverse.roots()[0]).unwrap();
+    assert_eq!(
+        selected
+            .imports()
+            .map(|child| child.binding())
+            .collect::<Vec<_>>(),
+        left.imports()
+            .map(|child| child.binding())
+            .collect::<Vec<_>>(),
+        "reissuance retains the producer's exact ordered children",
+    );
     let reused_exact =
         issue_package_graph(left, &[Arc::clone(&issued_right), Arc::clone(&issued_left)]).unwrap();
     assert_eq!(
@@ -709,13 +781,11 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
         imports: left
             .imports()
             .map(|_| {
-                crate::artifact_inventory::PackageCodeTarget::Planned(
+                crate::artifact_inventory::PackageCodeTarget::Held(
                     right
                         .imports()
                         .next()
-                        .expect("crossed package has an ordered child")
-                        .product()
-                        .artifact_id(),
+                        .expect("crossed package has an ordered child"),
                 )
             })
             .collect(),
@@ -724,9 +794,7 @@ fn same_direct_package_with_different_children_has_a_real_premise() {
         product: Arc::clone(left.product()),
         imports: left
             .imports()
-            .map(|child| {
-                crate::artifact_inventory::PackageCodeTarget::Planned(child.product().artifact_id())
-            })
+            .map(crate::artifact_inventory::PackageCodeTarget::Held)
             .collect(),
     };
     if conflicting_plan.imports == left_plan.imports {

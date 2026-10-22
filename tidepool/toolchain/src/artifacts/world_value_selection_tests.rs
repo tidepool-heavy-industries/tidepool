@@ -327,30 +327,44 @@ fn real_cached_home_world_item_admits_its_package_roots() {
         |_, _, _| {},
     )
     .expect("the cached HOME owner comes from the production compiler");
-    let original = crate::declaration_context::OriginalCompilerInputs::from_selection(
-        compiled_home
-            .source_selection
-            .as_ref()
-            .expect("fresh compiler selection"),
-        &compiled_home.artifact_view,
-    )
-    .unwrap();
-    let support =
-        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&original).unwrap();
+    let owner = crate::declaration_join::ExactModuleIdentity {
+        unit: "main".into(),
+        module: "CachedPackageWorldHome".into(),
+    };
     let primary = Arc::new(
-        crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new())
-            .unwrap()
-            .extend_issued_compiler_support(&support)
-            .unwrap(),
+        crate::declaration_join::ExactDeclarationContext::from_source_selection(
+            compiled_home
+                .producer_identity
+                .expect("the production compiler binds its producer identity"),
+            compiled_home
+                .source_selection
+                .as_ref()
+                .expect("fresh compiler selection"),
+            &compiled_home.artifact_view,
+            vec![crate::declaration_join::ExactLexicalNode {
+                owner: owner.clone(),
+                imports: Vec::new(),
+            }],
+            owner.clone(),
+            &[owner],
+        )
+        .unwrap(),
     );
     let ((_endpoint, _world, _source, prepared), admission) = settle(|| {
         let (endpoint, world, source) = open_empty_world_with_primary(Some(primary))?;
-        let checked = prepare_package_checked(
+        let template = include_str!("../../tests/fixtures/world-native/PackageCellTemplate.hs")
+            .replace(
+                "{{CELL_IMPORTS}}",
+                "import qualified CachedPackageWorldHome as Cached\n{{CELL_IMPORTS}}",
+            );
+        let checked = prepare_checked_with_template(
             &endpoint,
             &world,
             &source,
-            include_str!("../../tests/fixtures/world-native/CachedPackageWorldItem.hs"),
+            include_str!("../../tests/fixtures/world-native/CachedPackageWorldItem.hs").into(),
+            None,
             &[(41, "cachedWorldValue")],
+            template,
         )?;
         assert_eq!(checked.stages().len(), 1);
         let prepared = prepare_world_cell_program(checked)?;

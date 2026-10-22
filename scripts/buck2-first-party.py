@@ -1162,6 +1162,40 @@ def toolchain_compiler_free_test_cases(binary):
     return "\n".join(lines)
 
 
+def toolchain_package_occurrence_test_cases(binary):
+    tests = ["artifact_inventory::package_occurrence_linkage_tests::" + name for name in (
+        "reversed_targets_preserve_exact_package_graphs",
+        "shared_package_symbol_graph_is_order_invariant",
+        "compiler_deduplicates_physical_sort_global",
+        "duplicate_envelope_smoke_compiles_both_targets",
+        "multi_ordinal_home_keeps_per_ordinal_package_roots",
+        "repeated_fresh_home_targets_reuse_exact_ordinal_bindings",
+        "same_direct_package_with_different_children_has_a_real_premise",
+        "historical_same_seal_bodies_select_separately",
+        "transitive_home_package_demand_reaches_the_final_target",
+    )]
+    tests += ["artifacts::world_value_selection_tests::" + name for name in (
+        "real_world_package_item_keeps_exact_roots_for_a_later_cell",
+        "real_cached_home_world_item_admits_its_package_roots",
+    )]
+    env, resources, worker = compiler_service_test_inputs(
+        "tidepool-toolchain", "toolchain_package_occurrence_linkage_tests"
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "toolchain_package_occurrence_linkage_tests",',
+        f"    binary = {json.dumps(binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    ignored = True,", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def actor_observation_test_cases(binary):
     groups = [
         ("actor_inference_journal_tests", "recovery::tests::", (
@@ -2148,6 +2182,7 @@ tidepool_buildscript_run(
                 "runtime_targets_complete_through_physical_output_with_native_products",
                 "admitted_turn_uses_inline_sites_and_keeps_declarations_without_programs",
             )]
+            finite_tests.append("artifacts::module_product_tests::real_worker_ordinary_package_interface_relocation_reuses_retained_token")
             finite_env, finite_resources, finite_worker = compiler_service_test_inputs(
                 package_name, "toolchain_finite_output_tests"
             )
@@ -2156,8 +2191,9 @@ tidepool_buildscript_run(
                 '    name = "toolchain_finite_output_tests",',
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [", render_strings(finite_tests, 8), "    ],",
-                "    expected_count = 5,", "    ignored = True,",
-                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 3060000,",
+                f"    expected_count = {len(finite_tests)},", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,",
+                f"    test_rule_timeout_ms = {(len(finite_tests) * 600 + 60) * 1000},",
                 "    case_compiler_modes = {" + ", ".join(
                     json.dumps(test) + ': "owned-resident"' for test in finite_tests
                 ) + "},",
@@ -2286,6 +2322,7 @@ tidepool_buildscript_run(
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
             rules.append(toolchain_compiler_free_test_cases(":" + unit_target["name"] + "_binary"))
+            rules.append(toolchain_package_occurrence_test_cases(":" + unit_target["name"] + "_binary"))
             rules.append('''runtime_executable(
     name = "candidate_fixture_issuer",
     executable = ":tidepool_toolchain_unit_tests_binary",
