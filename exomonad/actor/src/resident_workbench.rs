@@ -11091,31 +11091,57 @@ where
                     .await?
             }
         };
+        if self
+            .private_execution
+            .as_ref()
+            .is_some_and(|execution| execution.private_scope != context.placement.lexical_scope)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "a private host carrier requires its original execution scope".into(),
+            ));
+        }
         let reuse_binding = binding.clone();
         let authority_digest = authority.authority_digest();
-        let reused = self
+        let private_execution = self
+            .private_execution
+            .as_ref()
+            .map(|execution| execution.admission.clone());
+        let (reused, private_carrier) = self
             .access
             .with_compiler_machine(context.clone(), move |session, context, _, _| {
+                let private_carrier = private_execution
+                    .map(|execution| session.prepare_private_host_carrier(execution))
+                    .transpose()
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
                 let Some(prototype) =
                     session.host_binding_prototype(kind.host_binding_type(), authority_digest)
                 else {
-                    return Ok(None);
+                    return Ok((None, private_carrier));
                 };
-                let admission = session
-                    .admit_host_binding_interface(
+                let admission = match private_carrier.as_ref() {
+                    Some(preparation) => session.admit_private_host_binding_interface(
+                        preparation.clone(),
+                        reuse_binding,
+                        prototype,
+                    ),
+                    None => session.admit_host_binding_interface(
                         context.placement.lexical_scope,
                         reuse_binding,
                         prototype,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                    ),
+                }
+                .map_err(ResidentActorWorkbenchError::Resident)?;
                 let lease = session.lease_bindings(&[]);
-                Ok(Some((
-                    admission,
-                    CellPreparationLease {
-                        _bindings: lease,
-                        _input: None,
-                    },
-                )))
+                Ok((
+                    Some((
+                        admission,
+                        CellPreparationLease {
+                            _bindings: lease,
+                            _input: None,
+                        },
+                    )),
+                    private_carrier,
+                ))
             })
             .await?;
         if let Some((admission, dependencies)) = reused {
@@ -11166,6 +11192,7 @@ where
             CellPreparationPurpose::HostCarrier {
                 binding: binding.clone(),
                 expected: kind.host_binding_type(),
+                private: private_carrier,
             },
             None,
         ))
@@ -11350,9 +11377,16 @@ where
                 ))
             }
         };
-        let world = match &preparation {
-            Some(preparation) => preparation.world().clone(),
-            None => {
+        let world = match (&preparation, &purpose) {
+            (Some(preparation), _) => preparation.world().clone(),
+            (
+                None,
+                CellPreparationPurpose::HostCarrier {
+                    private: Some(preparation),
+                    ..
+                },
+            ) => preparation.world().clone(),
+            (None, _) => {
                 self.access
                     .with_compiler_world(context.clone(), None, |_, _, world| Ok(world))
                     .await?
@@ -11399,14 +11433,26 @@ where
             .access
             .with_compiler_machine(context.clone(), move |session, context, _, _| {
                 let admitted = match purpose {
-                    CellPreparationPurpose::HostCarrier { binding, expected } => session
-                        .admit_world_planned_host_carrier_cell_in(
+                    CellPreparationPurpose::HostCarrier {
+                        binding,
+                        expected,
+                        private,
+                    } => match private {
+                        Some(preparation) => session.admit_world_planned_private_host_carrier(
+                            preparation,
+                            plan,
+                            binding,
+                            expected,
+                            authority_digest,
+                        ),
+                        None => session.admit_world_planned_host_carrier_cell_in(
                             context.placement.lexical_scope,
                             plan,
                             binding,
                             expected,
                             authority_digest,
                         ),
+                    },
                     CellPreparationPurpose::PrivateExecution(execution) => {
                         let admit = |write| {
                             session.admit_world_planned_cell_with_snapshot(
@@ -16659,6 +16705,7 @@ enum CellPreparationPurpose {
     HostCarrier {
         binding: String,
         expected: HostBindingType,
+        private: Option<Arc<tidepool_runtime::session::PrivateHostCarrierPreparation>>,
     },
 }
 
