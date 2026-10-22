@@ -579,7 +579,7 @@ retainPreparedPackageTargets provenance targets captures context = do
           [ ((packageTargetName target, unit, name, ordinal), identities)
           | target <- targets
           , (unit,name,ordinal, identities) <- packageTargetHomeImports target ]
-          ++ [ ((target,T.pack unit,T.pack name,ordinal),identities)
+          ++ [ ((target,unit,name,ordinal),identities)
              | (target,reached) <- Map.toAscList priorHomeGroups
              , ((unit,name,_,ordinal),identities) <- Map.toAscList reached ]
     homeRoots <- foldM (insertHomeRoot ownersByTarget) Map.empty homeRows

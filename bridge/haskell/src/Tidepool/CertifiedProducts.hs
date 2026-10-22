@@ -155,7 +155,7 @@ issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected prio
       Left "fresh HOME package roots are incomplete or crossed"
   | not (Map.keysSet priorHomeGroups `Set.isSubsetOf` Map.keysSet owners)
       || not (Set.fromList
-        [(target,T.pack unit,T.pack name,ordinal)
+        [(target,unit,name,ordinal)
         | (target,groups) <- Map.toAscList priorHomeGroups
         , ((unit,name,_,ordinal),_) <- Map.toAscList groups] `Set.isSubsetOf` expected) =
       Left "prior HOME package roots name an unissued target or group"
@@ -368,7 +368,7 @@ certifiedOriginalExternalDemand context identity = case Map.lookup identity (tar
   Just coordinate -> Just <$> visit Set.empty Set.empty Map.empty [coordinate]
   where
     visit _ packages groups [] = Right (PriorOriginalExternalDemand packages groups)
-    visit seen packages groups (coordinate@(unit,name,version,ordinal):pending)
+    visit seen packages groups (coordinate:pending)
       | coordinate `Set.member` seen = visit seen packages groups pending
       | otherwise = do
           witnesses <- maybe (Left "prior native package demand lacks its certified group") Right
@@ -378,10 +378,9 @@ certifiedOriginalExternalDemand context identity = case Map.lookup identity (tar
               leaves = Set.fromList [symbol
                 | (symbol,_,_,_,owner) <- witnesses
                 , case owner of PackageOwner _ _ _ -> True; OriginalBindingOwner _ -> True; _ -> False]
-              group = (T.unpack unit,T.unpack name,T.unpack <$> version,fromIntegral ordinal)
               direct = directPackageIdentities witnesses
           visit (Set.insert coordinate seen) (Set.union packages leaves)
-            (Map.insert group direct groups) (next ++ pending)
+            (Map.insert coordinate direct groups) (next ++ pending)
 
 -- Reached prior HOME coordinates stay bound to the immediate predecessor's
 -- exact witnesses, including the order of each group's direct package globals.
@@ -389,7 +388,7 @@ validatePriorHomeGroups :: TargetCertificationContext
   -> Map.Map PriorHomeGroup [SymbolIdentity] -> Either String ()
 validatePriorHomeGroups context groups = forM_ (Map.toAscList groups) $ \((unit,name,version,ordinal),identities) -> do
   witnesses <- maybe (Left "prior HOME package root lacks its exact certified group") Right
-    (Map.lookup (T.pack unit,T.pack name,T.pack <$> version,fromIntegral ordinal)
+    (Map.lookup (unit,name,version,ordinal)
       (targetGroupWitnesses context))
   unless (identities == directPackageIdentities witnesses)
     (Left "prior HOME package identities differ from its certified group")
@@ -418,7 +417,7 @@ data Product = Product
   , productGroups :: [CandidateGroup]
   }
 
-type BinderOwner = (T.Text, T.Text, Maybe T.Text, Word)
+type BinderOwner = PriorHomeGroup
 type PackageWitness = (T.Text, T.Text, FilePath, T.Text)
 
 -- Keep one counterexample, rather than retaining or rendering whole inventories.
@@ -990,7 +989,7 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 Nothing -> Left "prior HOME package root lacks its immediate predecessor"
                 Just previous -> validatePriorHomeGroups previous groups
             let priorHomeKeys = Set.fromList
-                  [(T.pack unit,T.pack name,fromIntegral ordinal)
+                  [(unit,name,ordinal)
                   | groups <- Map.elems (packageLinkIndexPriorHomeGroups packageLinks)
                   , ((unit,name,_,ordinal),_) <- Map.toAscList groups]
             if Map.size groupWitnesses /= length moduleRows

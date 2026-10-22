@@ -105,7 +105,7 @@ requiredOriginalExternalGlobalsWithPrior fresh cached exact retained prior =
 -- The demand owner reports both package leaves and the HOME groups reached to
 -- obtain them. Consumers project only these groups; direct target membership
 -- is not a complete HOME closure.
-type PriorHomeGroup = (String, String, Maybe String, Word)
+type PriorHomeGroup = (T.Text, T.Text, Maybe T.Text, Word)
 
 -- These coordinates and ordered direct package imports come only from the
 -- reached groups in the prior certification, retaining its exact version.
