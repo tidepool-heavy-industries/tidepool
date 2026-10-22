@@ -319,8 +319,8 @@ pub enum PreparedRuntimeError {
     Install(ExecutionError),
     #[error("prepared installation refused: {primary}; cleanup unconfirmed: {cleanup}")]
     InstallCleanup {
-        primary: Box<PreparedRuntimeError>,
         #[source]
+        primary: Box<PreparedRuntimeError>,
         cleanup: Box<PreparedRuntimeError>,
     },
     #[error(transparent)]
