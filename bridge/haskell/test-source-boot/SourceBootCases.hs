@@ -3194,6 +3194,12 @@ verifyCertifiedGroupingOrder work original = do
   writeBinIface (targetProfile (hsc_dflags env)) QuietBinIFace NormalCompression path iface
   interfaceBytes <- BS.readFile path
   sourceBytes <- BS.readFile source
+  -- The synthetic empty-global groups exercise DATA framing only. Give their
+  -- empty package inventory real byte custody without claiming source admission.
+  let packageBytes = encodePackageImports
+        (ExactIfaceArtifact (unitString (moduleUnit (mi_module iface))) name path (digest interfaceBytes) [])
+        emptyPackageImports
+  BS.writeFile (path ++ ".packages") packageBytes
   base <- structuralCandidate work
   let candidate = base
         { candidateUnit = unitString (moduleUnit (mi_module iface))
@@ -3208,7 +3214,7 @@ verifyCertifiedGroupingOrder work original = do
         , candidateImports = []
         , candidateGroups = [CandidateGroup 91 [] [], CandidateGroup 3 [] []]
         , candidatePackageImports = path ++ ".packages"
-        , candidatePackageImportsSha256 = replicate 64 '4'
+        , candidatePackageImportsSha256 = digest packageBytes
         , candidateProductPath = path ++ ".product.cbor"
         , candidateExecutionSource = Nothing
         }
