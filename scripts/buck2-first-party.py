@@ -1225,6 +1225,38 @@ def actor_observation_test_cases(binary):
     return "\n".join(rules)
 
 
+def actor_private_publication_test_cases(binary):
+    """Private histories retain both finite fixture and owned World resources."""
+    tests = ["resident_workbench::request_tests::" + name for name in (
+        "abandoned_visible_host_mount_repairs_private_world_and_allows_publication",
+        "hidden_private_input_retires_then_allows_publication",
+        "host_only_private_execution_publishes_its_exact_retained_text",
+        "successful_private_cell_publishes_declarations_and_accepted_host_writes_only",
+        "tool_result_mounts_retain_original_checked_interfaces",
+        "two_abandoned_visible_host_mounts_retire_before_publication",
+        "two_abandoned_visible_host_mounts_retire_in_reverse_order",
+        "declaration_only_history_publishes_real_progress_for_a_fresh_cell",
+        "empty_import_only_history_has_an_explicit_terminal_transition",
+        "failed_later_item_keeps_its_private_progress_unpublished",
+    )]
+    env, resources, worker = compiler_service_test_inputs(
+        "exomonad-actor", "actor_n2_publication_tests", mixed=True
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "actor_n2_publication_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def actor_notebook_contract_test_cases(binary):
     """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
     tests = ["resident_local_actor::" + name for name in (
@@ -1232,6 +1264,7 @@ def actor_notebook_contract_test_cases(binary):
         "reload_progress::invalid_authored_reload_arguments_release_the_invocation",
         "reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
         "reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
+        "resident_captured_source_retains_the_parked_job_for_a_later_cell",
     )]
     env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
     return "\n".join([
@@ -2267,6 +2300,7 @@ tidepool_buildscript_run(
             rules.append(runtime_test_cases(unit_target["name"]))
         if package_name == "exomonad-actor":
             rules.append(actor_observation_test_cases(unit_target["name"]))
+            rules.append(actor_private_publication_test_cases(unit_target["name"]))
     selected_tests = [target for target in tests if not (
         package_name == "tidepool-runtime" and target["name"] == "compile_fail"
     )]

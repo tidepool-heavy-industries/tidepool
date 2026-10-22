@@ -1070,7 +1070,9 @@ scenario = do
       "closure did not retain the newly prepared defining module for fst"
     liftIO $ assertProjectionEquivalent context closure
     liftIO $ do
-      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context Map.empty []
+      -- All HOME bodies are fresh in this recovery fixture; no issued HOME
+      -- product or cached candidate contributes an external HOME coordinate.
+      paired <- either (fail . show) pure (projectPreparedPackageTarget hsc [] "" context Map.empty [] Set.empty
         (closureHomeModules closure) (closureComponentSelections closure) (closureReachability closure))
       let exports = Set.fromList [identity | product <- packageTargetGroups paired
             , identity <- projectedBinders (projectedGroupEncodingInput (projectedPackageEncoding product))]

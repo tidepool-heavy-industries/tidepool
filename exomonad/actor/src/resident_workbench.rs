@@ -19460,8 +19460,14 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn two_abandoned_visible_host_mounts_retire_before_publication() {
         with_test_compiler_owner(|preparation_client| async move {
-            two_abandoned_visible_host_mounts_retire_in_order(preparation_client.clone(), false)
-                .await;
+            two_abandoned_visible_host_mounts_retire_in_order(preparation_client, false).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn two_abandoned_visible_host_mounts_retire_in_reverse_order() {
+        with_test_compiler_owner(|preparation_client| async move {
             two_abandoned_visible_host_mounts_retire_in_order(preparation_client, true).await;
         })
         .await;
@@ -19646,72 +19652,133 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn failed_later_item_keeps_its_private_progress_unpublished() {
         with_test_compiler_owner(|preparation_client| async move {
-            let (machines, mut public, source, _root) = actor_registry_fixture();
-            let (captured, source_owner) =
-                world_query_test_source_files_with_support(&[], &source.base_include);
-            public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
-            let (workbench, private) = ResidentActorWorkbench::new(
-                machines,
-                (source).bind_preparation(preparation_client),
-                None,
-            )
-            .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
-            .await;
-            let before = workbench
-                .access
-                .with_machine(public.clone(), |session, context, _| {
-                    Ok(session
-                        .public_visibility_snapshot_in(context.placement.lexical_scope)
-                        .unwrap())
-                })
-                .await
-                .unwrap();
-            let failure = workbench
-                .execute_cell_for_test(
-                    private.clone(),
-                    "keptPrivate <- pure (41 :: Int)\nerror \"later item failed\"",
+                let (machines, mut public, source, _root) = actor_registry_fixture();
+                let (captured, source_owner) =
+                    world_query_test_source_files_with_support(&[], &source.base_include);
+                public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+                let (workbench, private) = ResidentActorWorkbench::new(
+                    machines,
+                    (source).bind_preparation(preparation_client),
+                    None,
                 )
-                .await
-                .expect_err("the later item fails after genuine private progress");
-            assert!(
-                failure.to_string().contains("later item failed"),
-                "{failure:?}"
-            );
-            assert!(
-                workbench
+                .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
+                .await;
+                let before = workbench
                     .access
                     .with_machine(public.clone(), |session, context, _| {
                         Ok(session
-                            .current_binding_in(context.placement.lexical_scope, "keptPrivate")
-                            .is_none())
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap())
                     })
                     .await
-                    .unwrap(),
-                "failed progress cannot become public"
-            );
-            let execution = workbench.private_execution.as_ref().unwrap().clone();
-            assert!(
-                workbench_runner_for_test(&workbench)
-                    .publish_private_execution(private, execution)
+                    .unwrap();
+                let source = format!(
+                    "keptPrivate <- (sleep (minutes 0) >> pure (41 :: Int)) :: Eff {} Int\n(error \"later item failed\") :: Int",
+                    private.haskell_effects_alias,
+                );
+                let (checked, prepared) = workbench
+                    .prepare_cell(private.clone(), source)
                     .await
-                    .is_err(),
-                "an incomplete failed program cannot be frozen as successful publication"
-            );
-            let after = workbench
-                .access
-                .with_machine(public, |session, context, _| {
-                    Ok(session
-                        .public_visibility_snapshot_in(context.placement.lexical_scope)
-                        .unwrap())
-                })
-                .await
-                .unwrap();
-            assert_eq!(
-                after, before,
-                "failed publication leaves the public World unchanged"
-            );
-        })
-        .await;
+                    .expect("both items typecheck before the first effect executes");
+                let PreparedCell { items, dependencies } = prepared;
+                assert_eq!(checked.items.len(), 2, "the history has two executable items");
+                assert_eq!(items.len(), 2);
+                let mut items = checked.items.iter().zip(items).enumerate();
+                let (index, (observed, item)) = items.next().unwrap();
+                let first = workbench
+                    .begin_prepared_cell_item(
+                        private.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: checked.items.len(),
+                            source: observed.source.clone(),
+                        },
+                        item,
+                    )
+                    .await
+                    .expect("the first item reaches its actual Sleep effect");
+                let ResidentWorkbenchStep::Running { fragment, outcome } = first else {
+                    panic!("first item did not execute: {}", describe_step(&first));
+                };
+                let runner = workbench_runner_for_test(&workbench);
+                let ResidentActorBoundary::Sleep { continuation, duration } = runner
+                    .capture_boundary(
+                        private.clone(),
+                        (*outcome).into(),
+                        private.placement.resource_scope,
+                    )
+                    .await
+                    .expect("capture the first item's exact effect continuation")
+                else {
+                    panic!("first item must reach Sleep before any later failure");
+                };
+                assert_eq!(duration, Duration::ZERO);
+                let outcome = runner
+                    .resume_unit(private.clone(), continuation)
+                    .await
+                    .expect("the first item's effect resumes once");
+                let first = workbench
+                    .settle_item(private.clone(), *fragment, outcome)
+                    .await
+                    .expect("the first item installs its private binding");
+                assert!(matches!(first, ResidentWorkbenchStep::Committed { .. }));
+                assert!(workbench.access.with_machine(private.clone(), |session, context, _| {
+                    Ok(session.current_binding_in(context.placement.lexical_scope, "keptPrivate").is_some())
+                }).await.unwrap(), "first-item runtime progress is present before starting item two");
+                let (index, (observed, item)) = items.next().unwrap();
+                let failure = workbench
+                    .begin_prepared_cell_item(
+                        private.clone(),
+                        ParsedBlock {
+                            ordinal: index + 1,
+                            total: checked.items.len(),
+                            source: observed.source.clone(),
+                        },
+                        item,
+                    )
+                    .await;
+                let failure = match failure {
+                    Err(failure) => failure,
+                    Ok(step) => panic!("second item did not fail at runtime: {}", describe_step(&step)),
+                };
+                assert!(matches!(failure, ResidentActorWorkbenchError::Delivered(_)), "{failure:?}");
+                assert!(failure.to_string().contains("later item failed"), "{failure:?}");
+                drop(dependencies);
+                assert!(
+                    workbench
+                        .access
+                        .with_machine(public.clone(), |session, context, _| {
+                            Ok(session
+                                .current_binding_in(context.placement.lexical_scope, "keptPrivate")
+                                .is_none())
+                        })
+                        .await
+                        .unwrap(),
+                    "failed progress cannot become public"
+                );
+                let execution = workbench.private_execution.as_ref().unwrap().clone();
+                assert!(
+                    workbench_runner_for_test(&workbench)
+                        .publish_private_execution(private, execution)
+                        .await
+                        .is_err(),
+                    "an incomplete failed program cannot be frozen as successful publication"
+                );
+                let after = workbench
+                    .access
+                    .with_machine(public, |session, context, _| {
+                        Ok(session
+                            .public_visibility_snapshot_in(context.placement.lexical_scope)
+                            .unwrap())
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    after, before,
+                    "failed publication leaves the public World unchanged"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
