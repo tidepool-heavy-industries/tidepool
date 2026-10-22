@@ -1305,6 +1305,7 @@ def actor_notebook_contract_test_cases(binary):
         "resident_captured_source_retains_the_parked_job_for_a_later_cell",
     )]
     env, resources, worker = compiler_service_test_inputs("exomonad-actor", "actor_notebook_contract_tests")
+    env["TIDEPOOL_ACTOR_TEST_TRACE"] = "1"
     rules = []
     for target, selected in [
         ("actor_notebook_contract_tests", tests),

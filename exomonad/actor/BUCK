@@ -1765,6 +1765,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 3060000,
     case_compiler_modes = {"resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control": "owned-resident", "resident_local_actor::reload_progress::invalid_authored_reload_arguments_release_the_invocation": "owned-resident", "resident_local_actor::reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent": "owned-resident", "resident_local_actor::reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings": "owned-resident", "resident_local_actor::resident_captured_source_retains_the_parked_job_for_a_later_cell": "owned-resident"},
     env = {
+        "TIDEPOOL_ACTOR_TEST_TRACE": "1",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
@@ -1808,6 +1809,7 @@ tidepool_rust_test_cases(
     test_rule_timeout_ms = 660000,
     case_compiler_modes = {"resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control": "owned-resident"},
     env = {
+        "TIDEPOOL_ACTOR_TEST_TRACE": "1",
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
