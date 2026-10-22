@@ -49,8 +49,9 @@ changed reference paths through existing HAMTs/store transactions. No new durabl
 prefix facility: existing prefixes/heads borrow references; persist only the
 already-durable context state.
 
-ContextDescriptor 7 -> 8. Delete the old native-completion codec/domain; introduce
-versioned linked-component encoding and a distinct hash domain. Keep unrelated
+ContextDescriptor 7 -> 8 replaced the native-completion codec/domain with
+versioned linked-component encoding and a distinct hash domain. Context9 adds
+the independent source-scope root. Keep unrelated
 SelectionDescriptor, PublicationNativeDescriptor and Surface versions unless their
 actual layouts change. No blanket compiler-wire bump without a changed contract.
 Old compiler contexts refuse explicitly; no compatibility path. Preserve files,
@@ -74,7 +75,15 @@ No storage-engine rewrite or generic caching framework.
 
 ### Persistence progress
 
-The D source candidate uses ContextDescriptor 8 with two persistent indexes:
+The D source candidate uses ContextDescriptor 9 with a separate `source_scope`
+root encoded through the existing lexical fact codec and HAMT. Context8 refuses
+before child hydration; its broad lexical graph cannot supply source permission.
+Hydration validates each scope key against its fact owner and shares immutable
+lexical records within one demanded context batch. N's declaration-context owner
+authenticates the committed scope against exact selected support before issuing
+usable source proof. Surface3 and the store/transaction formats stay unchanged.
+
+The two linked-code persistent indexes remain:
 component identity to the SAME repr component record, and acquired-closure
 identity to B's exact occurrence/receipt projection. Scalar record CIDs reference
 cached issuer bytes; metadata changes use existing HAMT diffs. Decoding shares

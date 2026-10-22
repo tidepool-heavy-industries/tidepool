@@ -1041,6 +1041,7 @@ pub struct SnapshotHydrator<'a, BS> {
     store: &'a BS,
     selections: RefCell<std::collections::BTreeMap<SelectionRoot, MaterializedSelection>>,
     scopes: RefCell<std::collections::BTreeMap<Cid, ImmutableScopeProofRef>>,
+    lexical_facts: RefCell<std::collections::BTreeMap<Cid, ImmutableLexicalFactRef>>,
     native_components: RefCell<std::collections::BTreeMap<Cid, ImmutableNativeComponentRecordRef>>,
     native_closures:
         RefCell<std::collections::BTreeMap<Cid, ImmutableNativeAcquiredClosureRecordRef>>,
@@ -1052,6 +1053,7 @@ impl<'a, BS: Blockstore> SnapshotHydrator<'a, BS> {
             store,
             selections: RefCell::new(Default::default()),
             scopes: RefCell::new(Default::default()),
+            lexical_facts: RefCell::new(Default::default()),
             native_components: RefCell::new(Default::default()),
             native_closures: RefCell::new(Default::default()),
         }
@@ -1675,6 +1677,9 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
         store: &SnapshotHydrator<'_, BS>,
         cid: Cid,
     ) -> Result<ImmutableLexicalFactRef, SnapshotError> {
+        if let Some(fact) = store.lexical_facts.borrow().get(&cid) {
+            return Ok(fact.clone());
+        }
         let bytes = store
             .get(&cid)
             .map_err(storage_error)?
@@ -1684,11 +1689,13 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
         if node.imports.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(malformed("noncanonical lexical adjacency"));
         }
-        Ok(ImmutableLexicalFactRef {
+        let fact = ImmutableLexicalFactRef {
             cid,
             node: Arc::new(node),
             bytes: bytes.into(),
-        })
+        };
+        store.lexical_facts.borrow_mut().insert(cid, fact.clone());
+        Ok(fact)
     }
 }
 
@@ -2362,6 +2369,7 @@ pub struct ExactContextSnapshot {
     pub(crate) selection: Arc<ExactSelectionSnapshot>,
     pub(crate) roles: OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
     pub(crate) lexical: ExactLexicalSnapshot,
+    pub(crate) source_scope: ExactLexicalSnapshot,
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
     pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
     pub(crate) input_decisions:
@@ -2760,7 +2768,7 @@ fn hydrate_publication_native<BS: Blockstore>(
     Ok(facts)
 }
 
-const CONTEXT_ENCODING_VERSION: u32 = 8;
+const CONTEXT_ENCODING_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2770,6 +2778,7 @@ struct ContextDescriptor {
     selection: SelectionRoot,
     roles: SnapshotMapRoot,
     lexical: SnapshotMapRoot,
+    source_scope: SnapshotMapRoot,
     offers: SnapshotMapRoot,
     native_availability: SnapshotMapRoot,
     input_decisions: SnapshotMapRoot,
@@ -2787,6 +2796,7 @@ pub struct MaterializedContext {
         CompilerRoleCodec,
     >,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
+    source_scope: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
     native_availability:
         MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
@@ -2831,6 +2841,10 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.lexical),
             &next.lexical.facts,
         )?;
+        let source_scope = self.materialize_map_with::<_, _, LexicalFactCodec>(
+            base.map(|base| &base.source_scope),
+            &next.source_scope.facts,
+        )?;
         let offers = self.materialize_map_with::<_, _, NativeOfferCodec>(
             base.map(|base| &base.offers),
             &next.offers,
@@ -2857,6 +2871,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             selection: selection.root.clone(),
             roles: roles.root.clone(),
             lexical: lexical.root.clone(),
+            source_scope: source_scope.root.clone(),
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
             input_decisions: input_decisions.root.clone(),
@@ -2868,6 +2883,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 && base.selection.root == selection.root
                 && base.roles.root == roles.root
                 && base.lexical.root == lexical.root
+                && base.source_scope.root == source_scope.root
                 && base.offers.root == offers.root
                 && base.native_availability.root == native_availability.root
                 && base.input_decisions.root == input_decisions.root
@@ -2884,6 +2900,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             selection,
             roles,
             lexical,
+            source_scope,
             offers,
             native_availability,
             input_decisions,
@@ -2942,6 +2959,18 @@ fn hydrate_context_with<BS: Blockstore>(
     {
         return Err(malformed("lexical key differs from fact owner"));
     }
+    let source_scope: MaterializedMap<
+        ExactModuleIdentity,
+        ImmutableLexicalFactRef,
+        LexicalFactCodec,
+    > = hydrate_map_owned::<_, _, LexicalFactCodec, _>(store, &descriptor.source_scope)?;
+    if source_scope
+        .facts
+        .iter()
+        .any(|(owner, fact)| owner != &fact.node.owner)
+    {
+        return Err(malformed("source scope key differs from fact owner"));
+    }
     let offers = hydrate_map_owned::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
     for (identity, fact) in offers.facts.iter() {
         if *identity != fact.identity().map_err(malformed)? {
@@ -2995,6 +3024,10 @@ fn hydrate_context_with<BS: Blockstore>(
             facts: lexical.facts.clone(),
             rows: Arc::new(OnceLock::new()),
         },
+        source_scope: ExactLexicalSnapshot {
+            facts: source_scope.facts.clone(),
+            rows: Arc::new(OnceLock::new()),
+        },
     };
     Ok(MaterializedContext {
         root: root.clone(),
@@ -3002,6 +3035,7 @@ fn hydrate_context_with<BS: Blockstore>(
         selection,
         roles,
         lexical,
+        source_scope,
         offers,
         native_availability,
         input_decisions,

@@ -62,6 +62,106 @@ fn lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency() {
     }
 }
 
+#[test]
+fn context_source_scope_preserves_distinct_roots_shared_facts_and_incremental_growth() {
+    // DATA-only storage controls; these rows do not issue source permission.
+    for width in [128, 512] {
+        let owner = |index| ExactModuleIdentity {
+            unit: "main".into(),
+            module: format!("SourceScopeOwner{index}"),
+        };
+        let rows = (0..=width)
+            .map(|index| ExactLexicalNode {
+                owner: owner(index),
+                imports: vec![],
+            })
+            .collect::<Vec<_>>();
+        let mut first = ExactContextSnapshot::empty();
+        first.lexical = ExactLexicalSnapshot::default()
+            .replace(rows.clone())
+            .unwrap();
+        first.source_scope = first.lexical.replace(rows[..width].to_vec()).unwrap();
+        let mut second = first.clone();
+        second.source_scope = first
+            .source_scope
+            .append_issued([rows[width].clone()])
+            .unwrap();
+        assert_eq!(first.lexical, second.lexical);
+        assert_ne!(first.source_scope, second.source_scope);
+
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let base = writer.materialize_context(None, &first).unwrap();
+        let cold = writer.finish().unwrap();
+        let cold_bytes = cold.metrics().offered_bytes;
+        install(&store, cold);
+        let mut writer = Materializer::new(&store);
+        let next = writer.materialize_context(Some(&base), &second).unwrap();
+        let delta = writer.finish().unwrap();
+        assert_eq!(delta.metrics().changed_entries, 1);
+        assert!(delta.metrics().offered_bytes < cold_bytes / 2);
+        assert_eq!(base.lexical.root(), next.lexical.root());
+        assert_ne!(base.source_scope.root(), next.source_scope.root());
+        assert_ne!(base.root(), next.root());
+        install(&store, delta);
+
+        let observed = CountingStore {
+            inner: &store,
+            reads: RefCell::new(BTreeMap::new()),
+        };
+        let restored =
+            hydrate_contexts(&observed, &[base.root().clone(), next.root().clone()]).unwrap();
+        assert_eq!(restored[0].snapshot().source_scope, first.source_scope);
+        assert_eq!(restored[1].snapshot().source_scope, second.source_scope);
+        let shared_owner = owner(0);
+        let shared = &restored[0].snapshot().source_scope.facts[&shared_owner];
+        assert!(Arc::ptr_eq(
+            &shared.node,
+            &restored[1].snapshot().source_scope.facts[&shared_owner].node
+        ));
+        assert!(Arc::ptr_eq(
+            &shared.node,
+            &restored[1].snapshot().lexical.facts[&shared_owner].node
+        ));
+        assert_eq!(observed.reads.borrow()[&shared.cid].0, 1);
+        let mut writer = Materializer::new(&store);
+        let unchanged = writer
+            .materialize_context(Some(&restored[1]), restored[1].snapshot())
+            .unwrap();
+        assert_eq!(unchanged.root(), next.root());
+        assert_eq!(
+            writer.finish().unwrap().metrics(),
+            MaterializationMetrics::default()
+        );
+    }
+}
+
+#[test]
+fn context_source_scope_refuses_mismatched_fact_owner() {
+    let owner = ExactModuleIdentity {
+        unit: "main".into(),
+        module: "Actual".into(),
+    };
+    let mut snapshot = ExactContextSnapshot::empty();
+    snapshot.source_scope.facts.insert(
+        ExactModuleIdentity {
+            unit: "main".into(),
+            module: "WrongKey".into(),
+        },
+        ImmutableLexicalFactRef::new(ExactLexicalNode {
+            owner,
+            imports: vec![],
+        })
+        .unwrap(),
+    );
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let invalid = writer.materialize_context(None, &snapshot).unwrap();
+    install(&store, writer.finish().unwrap());
+    assert!(matches!(hydrate_context(&store, invalid.root()),
+        Err(SnapshotError::Malformed(message)) if message == "source scope key differs from fact owner"));
+}
+
 fn install(store: &MemoryBlockstore, packet: StagedBlocks) {
     for (cid, bytes) in packet.into_blocks() {
         verify_block(&cid, &bytes).unwrap();
@@ -808,7 +908,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3, 4, 5, 6, 7] {
+    for version in [2, 3, 4, 5, 6, 7, 8] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -816,6 +916,7 @@ fn old_selection_and_context_versions_are_rejected() {
             selection: selection.root().clone(),
             roles: roles.root().clone(),
             lexical: lexical.root().clone(),
+            source_scope: lexical.root().clone(),
             offers: lexical.root().clone(),
             native_availability: lexical.root().clone(),
             input_decisions: lexical.root().clone(),
@@ -1266,7 +1367,7 @@ fn normalized_availability_hydration_refuses_broken_structural_references() {
 }
 
 #[test]
-fn context_v8_requires_normalized_availability_root() {
+fn context_v9_requires_normalized_availability_root() {
     #[derive(Serialize)]
     struct MissingAvailability {
         version: u32,
@@ -1274,6 +1375,7 @@ fn context_v8_requires_normalized_availability_root() {
         selection: SelectionRoot,
         roles: SnapshotMapRoot,
         lexical: SnapshotMapRoot,
+        source_scope: SnapshotMapRoot,
         offers: SnapshotMapRoot,
         input_decisions: Option<SnapshotMapRoot>,
         native_components: SnapshotMapRoot,
@@ -1292,6 +1394,7 @@ fn context_v8_requires_normalized_availability_root() {
                 selection: valid.selection.root.clone(),
                 roles: valid.roles.root.clone(),
                 lexical: valid.lexical.root.clone(),
+                source_scope: valid.source_scope.root.clone(),
                 offers: valid.offers.root.clone(),
                 input_decisions: Some(valid.input_decisions.root.clone()),
                 native_components: valid.native_components.root.clone(),
@@ -1689,7 +1792,7 @@ proptest! {
 }
 
 #[test]
-fn context_v8_requires_linked_roots_and_distinguishes_missing_storage() {
+fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage() {
     let store = MemoryBlockstore::new();
     let mut writer = Materializer::new(&store);
     let valid = writer
@@ -1697,9 +1800,9 @@ fn context_v8_requires_linked_roots_and_distinguishes_missing_storage() {
         .unwrap();
     install(&store, writer.finish().unwrap());
     let descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
-    assert_eq!(descriptor.version, 8);
+    assert_eq!(descriptor.version, 9);
     // Remove each required root from the actual current descriptor encoding.
-    for field in ["native_components", "native_closures"] {
+    for field in ["native_components", "native_closures", "source_scope"] {
         let bytes = store.get(valid.root().cid()).unwrap().unwrap();
         let mut value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         let ciborium::Value::Map(fields) = &mut value else {
@@ -1720,6 +1823,7 @@ fn context_v8_requires_linked_roots_and_distinguishes_missing_storage() {
         match field {
             "native_components" => descriptor.native_components = SnapshotMapRoot(absent),
             "native_closures" => descriptor.native_closures = SnapshotMapRoot(absent),
+            "source_scope" => descriptor.source_scope = SnapshotMapRoot(absent),
             _ => unreachable!(),
         }
         let mut writer = Materializer::new(&store);
