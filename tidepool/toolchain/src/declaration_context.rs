@@ -2021,7 +2021,7 @@ impl RequestNativeAvailability {
         for row in self.rows() {
             let id = row.original_artifact_id();
             for contribution in row.contributions.iter() {
-                if seen.insert(Arc::as_ptr(contribution) as usize) {
+                if seen.insert((Arc::as_ptr(contribution) as usize, id)) {
                     contributions.push((id, Arc::clone(contribution)));
                 }
             }
