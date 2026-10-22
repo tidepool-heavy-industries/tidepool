@@ -903,7 +903,7 @@ fn certify_admitted_planned_declaration(
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),
         }),
-        &source_admission.consumed_home_adjacency()?,
+        source_admission.consumed_home_adjacency(),
     )?;
     let artifact_context = Arc::new(
         artifact_context
@@ -923,7 +923,7 @@ fn certify_admitted_planned_declaration(
         toolchain_identity_sha256,
         evidence,
         Some(source_admission),
-        &source_admission.consumed_home_adjacency()?,
+        source_admission.consumed_home_adjacency(),
         Some(&artifact_context),
         admission.program_source_lexical(),
         includes,

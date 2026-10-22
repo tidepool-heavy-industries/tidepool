@@ -49,6 +49,14 @@ Program-source rows retain the shared admission owner independently of physical
 native availability. The old missing-Target receipt fixture is being migrated;
 the arbitrary-mask source-history property is T-owned pure-reader migration.
 
-Verification is pending. P's phase API and B's linked-code API have not yet been
-joined; V owns warm compilation and actual selected test execution. Formatting
-and source inspection do not qualify source classification or Text/Display.
+Source checkpoints: `54cd989452` introduces the owner and common adapters;
+`e1b1072b6d` binds the existing current-source validator to actual authored
+reachability before issuing claims. It includes same-inventory protected versus
+authored-edge controls and an unrelated consumed-module refusal. Selected rows
+never seed roots themselves. Issued source roots and consumed adjacency now have
+infallible borrowed/owned accessors; old missing-root filters are removed.
+
+Verification is pending. P owns the coherent phase/source integration and T the
+pure-reader property migration. B's linked-code API is not yet joined. V owns warm
+compilation and actual selected test execution. Formatting and source inspection
+do not qualify source classification or Text/Display.

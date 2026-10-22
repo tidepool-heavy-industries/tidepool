@@ -4955,7 +4955,7 @@ impl CompilerSourceSupport {
                 "program source fragment belongs to another World stage",
             ));
         }
-        let generated = source.generated_source_owner()?;
+        let generated = source.generated_source_owner();
         let mut owners = source.compiler_dependencies().owners();
         let executable = matches!(
             stage.identity(),

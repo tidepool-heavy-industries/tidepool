@@ -9440,7 +9440,7 @@ impl ExactSourceAdmission {
                     .matches_source(admission.witness.source_path(), source)
             })
             .map(Self::generated_source_owner)
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<BTreeSet<_>>();
         let mut owners = owners.into_iter();
         match (owners.next(), owners.next()) {
             (Some(owner), None) => Ok(owner),
@@ -9452,14 +9452,14 @@ impl ExactSourceAdmission {
 
     /// Completed-source validation binds GENERATED_SOURCE to this receipt's
     /// hash-verified witness. Resolve its owner without parsing source text.
-    pub(crate) fn generated_source_owner(&self) -> Result<ExactModuleIdentity, CompileError> {
-        Ok(self.claims.compilation_root().clone())
+    pub(crate) fn generated_source_owner(&self) -> ExactModuleIdentity {
+        self.claims.compilation_root().clone()
     }
 
     pub(crate) fn consumed_home_adjacency(
         &self,
-    ) -> Result<BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>, CompileError> {
-        Ok(self.claims.dependencies().adjacency().clone())
+    ) -> &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> {
+        self.claims.dependencies().adjacency()
     }
 
     pub(crate) fn compiler_dependencies(&self) -> &CompilerDependencies {
@@ -9616,7 +9616,7 @@ impl<'a> ExactProductAdmission<'a> {
         &self,
         artifacts: &ArtifactView,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        let generated = self.source.generated_source_owner()?;
+        let generated = self.source.generated_source_owner();
         let entries = artifacts
             .entries()
             .into_iter()
@@ -9651,7 +9651,7 @@ impl<'a> ExactProductAdmission<'a> {
         )?;
         let artifacts = support.artifacts();
         let projection = support.projection();
-        let imports = self.source.consumed_home_adjacency()?;
+        let imports = self.source.consumed_home_adjacency();
         let inherited = self.context().as_ref();
         for (owner, original) in &self.source.selected_originals {
             if self
@@ -9825,7 +9825,7 @@ impl<'a> ExactProductAdmission<'a> {
             self.facts.producer,
             support,
             lexical,
-            self.source.generated_source_owner()?,
+            self.source.generated_source_owner(),
             &required.into_iter().collect::<Vec<_>>(),
         )?;
         Ok(Arc::new(context))
@@ -11565,7 +11565,7 @@ impl WorldProgramSegment {
         )?;
         let fragment = admission.compiler();
         let imports = admission.dependencies().adjacency();
-        let generated = self.source.generated_source_owner()?;
+        let generated = self.source.generated_source_owner();
         let executable = self.stage.identity().original_owner().is_none();
         let kind = |owner: &ExactModuleIdentity| {
             fragment
@@ -11623,14 +11623,7 @@ impl WorldProgramSegment {
             fragment,
             imports
                 .iter()
-                .filter(|(owner, _)| {
-                    !executable
-                        || *owner
-                            != &self
-                                .source
-                                .generated_source_owner()
-                                .expect("validated generated owner")
-                })
+                .filter(|(owner, _)| !executable || *owner != &self.source.generated_source_owner())
                 .map(|(owner, edges)| (owner.clone(), edges.clone())),
             &physical,
             Arc::clone(&admission),
@@ -19088,7 +19081,7 @@ mod tests {
         write_receipt(&receipt, &value);
         let admission = request.validate_receipt(&receipt, None, &empty).unwrap();
         assert_eq!(
-            admission.generated_source_owner().unwrap(),
+            admission.generated_source_owner(),
             identity("fixture", "Consumer")
         );
         let source = std::fs::read(directory.path().join("Consumer.hs")).unwrap();
@@ -19132,7 +19125,7 @@ mod tests {
             .artifacts
             .entries()
             .iter()
-            .all(|entry| entry.descriptor.owner != admission.generated_source_owner().unwrap()));
+            .all(|entry| entry.descriptor.owner != admission.generated_source_owner()));
         assert_eq!(
             continued.artifacts.capture_graph_selection().roots,
             support.capture_graph_selection().roots
@@ -28284,8 +28277,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &expected
             );
             assert_eq!(
-                program_admitted.consumed_home_adjacency().unwrap(),
-                admitted.consumed_home_adjacency().unwrap()
+                program_admitted.consumed_home_adjacency(),
+                admitted.consumed_home_adjacency()
             );
             assert_eq!(local.compiler_inputs().projection(), &roles);
             assert_eq!(
@@ -28595,11 +28588,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             assert_eq!(prefix.source_selected_support, before);
         }
         assert_eq!(
-            admission.consumed_home_adjacency().unwrap()[&identity("main", "Consumer")],
+            admission.consumed_home_adjacency()[&identity("main", "Consumer")],
             vec![identity("main", "A")]
         );
         assert_eq!(
-            admission.consumed_home_adjacency().unwrap()[&identity("main", "A")],
+            admission.consumed_home_adjacency()[&identity("main", "A")],
             vec![identity("main", "B")]
         );
         let originals = context
@@ -28800,7 +28793,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let (request, context, receipt) = source_selected_receipt(directory.path(), true, None);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         assert_eq!(
-            admission.consumed_home_adjacency().unwrap()[&identity("main", "A")],
+            admission.consumed_home_adjacency()[&identity("main", "A")],
             vec![identity("main", "B")]
         );
         assert_eq!(admission.selected_originals.len(), 2);
@@ -33121,8 +33114,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         });
         let local_admission = local.validate_receipt(receipt, None, &empty).unwrap();
         assert_eq!(
-            local_admission.consumed_home_adjacency().unwrap(),
-            persisted_admissions[0].consumed_home_adjacency().unwrap()
+            local_admission.consumed_home_adjacency(),
+            persisted_admissions[0].consumed_home_adjacency()
         );
         assert_eq!(
             local_admission.selected_originals.len(),

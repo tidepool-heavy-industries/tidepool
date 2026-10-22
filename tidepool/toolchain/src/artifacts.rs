@@ -994,7 +994,7 @@ fn prepare_world_cell_program_inner(
                         &mut validation,
                     )
                     .map_err(compiler_evidence_failure)?;
-                let generated = segment.source().generated_source_owner()?;
+                let generated = segment.source().generated_source_owner();
                 let entry = checked_cell::CheckedTypedEntry::issue_world_item(
                     &program,
                     index,
@@ -2955,7 +2955,6 @@ impl SelectedModuleCandidateOffer {
         let source_paths = segment
             .admissions()
             .iter()
-            .filter(|source| source.generated_source_owner().is_ok())
             .map(|source| source.witness().source_path())
             .collect::<BTreeSet<_>>();
         let source_paths = source_paths.into_iter().collect::<Vec<_>>();
@@ -3025,8 +3024,7 @@ impl SelectedModuleCandidateOffer {
         let originals = segment.original_products(request, &validation.inventory)?;
         let source = segment
             .admissions()
-            .iter()
-            .find(|source| source.generated_source_owner().is_ok())
+            .first()
             .ok_or_else(|| {
                 CompileError::ExtractFailed("segment publication lacks generated source".into())
             })?;
@@ -3284,7 +3282,7 @@ impl SelectedModuleCandidateOffer {
             validation,
         )?
         .ok_or_else(fail)?;
-        let original_owner = admission.generated_source_owner()?;
+        let original_owner = admission.generated_source_owner();
         if original_owner.module != module_name {
             return Err(fail());
         }
@@ -4333,7 +4331,7 @@ fn seal_turn_outputs_with_validation(
                 index,
                 source,
                 prepared,
-                &admission.source().generated_source_owner()?,
+                &admission.source().generated_source_owner(),
                 &certified.recovery_products,
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &offer.producer,
@@ -4721,7 +4719,7 @@ fn validate_activation_preview_output_context(
     let exact = offer.exact.as_ref().ok_or_else(|| {
         CompileError::ExtractFailed("checked output lacks current exact context".into())
     })?;
-    let generated = source_admission.generated_source_owner()?;
+    let generated = source_admission.generated_source_owner();
     let support = program_support_artifacts(artifacts, &generated)?;
     let mut request = exact.program_admission();
     request.admit_program_support_with_selection(
@@ -11598,7 +11596,7 @@ mod module_product_tests {
                 .unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
-                    &admission.consumed_home_adjacency().unwrap(),
+                    admission.consumed_home_adjacency(),
                     &[],
                     &compiled.artifact_view.retained_source_implementations(),
                 )

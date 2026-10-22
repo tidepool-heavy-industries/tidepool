@@ -7012,9 +7012,7 @@ impl CertifiedSourceSelection {
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         let omitted_generated = admissions
             .iter()
-            // An admission need not contain a generated scaffold. Only a
-            // successfully authenticated owner can authorize its omission.
-            .filter_map(|admission| admission.generated_source_owner().ok())
+            .map(crate::declaration_context::ExactSourceAdmission::generated_source_owner)
             .filter(|owner| !view.has_observed_owner(owner))
             .collect();
         self.compiler_projection_from_observations(

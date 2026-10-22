@@ -231,7 +231,7 @@ impl NativeAuthoredDeclarationAdmission {
         };
         let ordinal = usize::try_from(ordinal)
             .map_err(|_| contract("authored World ordinal is not representable"))?;
-        if source.generated_source_owner()? != *owner {
+        if source.generated_source_owner() != *owner {
             return Err(contract(
                 "authored World original differs from its admitted generated source",
             ));
@@ -828,7 +828,7 @@ fn certify_authored_declaration_inner(
         module: selected.owner().module.clone(),
     };
     let source_imports = match compiled.exact_source_admission.as_ref() {
-        Some(admission) => admission.consumed_home_adjacency()?,
+        Some(admission) => admission.consumed_home_adjacency().clone(),
         None => crate::declaration_context::consumed_source_home_imports(
             compiled
                 .completed_source_evidence
