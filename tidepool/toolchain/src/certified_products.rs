@@ -26515,8 +26515,8 @@ pub(crate) mod tests {
                     matches!(error, crate::CompileError::ArtifactInventory(ref error)
                     if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
                         artifact: key.artifact, original_ordinal: key.original_ordinal,
-                    } && error.native_refusal == Some(NativeAdmissionRefusal::CurrentProductNotCompleted {
-                        original: key.artifact, original_ordinal: key.original_ordinal,
+                    } && error.native_refusal == Some(NativeAdmissionRefusal::RootChoiceMissing {
+                        owner: original.descriptor.owner.clone(),
                     })),
                     "actual Input refusal must preserve its native admission cause: {error:?}"
                 );

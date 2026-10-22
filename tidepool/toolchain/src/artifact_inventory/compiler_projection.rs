@@ -1391,7 +1391,6 @@ fn trace_completion_package_correspondence(
         "completed HOME joint package graph diagnostic (not authority)");
 }
 
-
 fn append_native_completion_rows(
     retained: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
     incoming: &imbl::OrdMap<NativeGroupBinding, Arc<NativeCompletionRowSnapshotFacts>>,
