@@ -854,6 +854,7 @@ pub(crate) fn link_native_target(
             .ok_or_else(|| failure("selected package occurrence is out of range"))
     };
     let home_rows = sources.groups().collect::<Vec<_>>();
+    let home_grants = sources.acquired_homes()?;
     let homes = home_rows
         .iter()
         .enumerate()
@@ -872,7 +873,7 @@ pub(crate) fn link_native_target(
     let mut home_drafts = Vec::new();
     let mut prior_owners = Vec::new();
     let mut held_nodes = BTreeMap::<NativeOccurrenceId, NativeAcquiredOccurrence>::new();
-    let mut artifacts = sources.acquired_artifacts().clone();
+    let mut artifacts = sources.acquired_artifacts().inventory().empty_view();
     for row in &home_rows {
         crate::host_work::checkpoint()?;
         let prior = inherited.group_owner(row.binding(), operation)?;
@@ -1224,7 +1225,10 @@ pub(crate) fn link_native_target(
                     occurrence: NativeOccurrenceId::Home(row.binding()),
                     code: linked[index].clone(),
                     acquisition: NativeAcquisition::Home {
-                        grant: sources.acquired_home(row.binding())?,
+                        grant: home_grants
+                            .get(&row.binding())
+                            .cloned()
+                            .ok_or_else(|| failure("selected HOME grant is absent"))?,
                     },
                     imports: selectors[index].clone().into(),
                 },

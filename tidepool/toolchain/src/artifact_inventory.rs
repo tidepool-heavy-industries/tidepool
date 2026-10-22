@@ -682,9 +682,17 @@ impl<'a> std::ops::Deref for ResolvedNativeSourceTarget<'a> {
 }
 
 impl<'a> ResolvedNativeSourceTarget<'a> {
-    pub(crate) fn acquired_home(&self, binding: NativeGroupBinding) -> Result<crate::certified_products::AcquiredHomeCodeGrant, CompileError> {
-        if !self.target.groups().contains(&binding) { return Err(failure("HOME acquisition is outside its exact target")); }
-        crate::certified_products::AcquiredHomeCodeGrant::from_certified(self.groups,self.target.artifacts(),binding)
+    pub(crate) fn acquired_homes(
+        &self,
+    ) -> Result<
+        BTreeMap<NativeGroupBinding, crate::certified_products::AcquiredHomeCodeGrant>,
+        CompileError,
+    > {
+        crate::certified_products::AcquiredHomeCodeGrant::from_certified(
+            self.groups,
+            self.target.artifacts(),
+            self.target.groups(),
+        )
     }
     pub(crate) fn shared_group_imports(
         &self,
@@ -6765,6 +6773,33 @@ impl std::fmt::Debug for ArtifactView {
     }
 }
 impl ArtifactView {
+    /// Narrow byte/proof lifetime to exact acquired HOME rows. This creates no
+    /// compiler namespace, lexical role or executable root selection.
+    pub(crate) fn retain_linked_home_custody(
+        &self,
+        groups: &BTreeSet<NativeGroupBinding>,
+    ) -> Result<Self, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        if groups
+            .iter()
+            .any(|group| !owned.contains(&InventoryNodeKey::Group(*group)))
+        {
+            return Err(failure("linked HOME custody is outside its acquired scope"));
+        }
+        drop(state);
+        let narrowed = self.lease.inventory.retain(
+            Vec::new(),
+            groups
+                .iter()
+                .copied()
+                .map(InventoryNodeKey::Group)
+                .collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        self.retain_projected_materializations(narrowed)
+    }
     #[cfg(test)]
     pub(crate) fn retained_payload_handles(&self) -> usize {
         self.lease.payloads.len()

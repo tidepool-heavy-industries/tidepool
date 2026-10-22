@@ -11611,13 +11611,33 @@ impl AcquiredHomeCodeGrant {
     pub(crate) fn from_certified(
         groups: &crate::declaration_context::CertifiedArtifactGroupBindings,
         artifacts: &crate::artifact_inventory::ArtifactView,
-        binding: crate::artifact_inventory::NativeGroupBinding,
-    ) -> Result<Self, crate::CompileError> {
+        bindings: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+    ) -> Result<BTreeMap<crate::artifact_inventory::NativeGroupBinding, Self>, crate::CompileError>
+    {
         if !groups.matches_view(artifacts) {
-            return Err(crate::CompileError::ExtractFailed("HOME acquisition belongs to another selected view".into()));
+            return Err(crate::CompileError::ExtractFailed(
+                "HOME acquisition belongs to another selected view".into(),
+            ));
         }
-        let row = groups.issued_row(binding).ok_or_else(|| crate::CompileError::ExtractFailed("HOME acquisition lacks its exact scoped row".into()))?;
-        Ok(Self { binding, row:Arc::clone(row), artifacts:artifacts.clone() })
+        let custody = artifacts.retain_linked_home_custody(bindings)?;
+        bindings
+            .iter()
+            .map(|binding| {
+                let row = groups.issued_row(*binding).ok_or_else(|| {
+                    crate::CompileError::ExtractFailed(
+                        "HOME acquisition lacks its exact scoped row".into(),
+                    )
+                })?;
+                Ok((
+                    *binding,
+                    Self {
+                        binding: *binding,
+                        row: Arc::clone(row),
+                        artifacts: custody.clone(),
+                    },
+                ))
+            })
+            .collect()
     }
     pub(crate) fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding { self.binding }
     pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> { self.row.product() }
@@ -11802,7 +11822,8 @@ pub(crate) fn acquire_linked_home_grants(
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<crate::artifact_inventory::NativeGroupBinding, AcquiredHomeCodeGrant>, crate::CompileError> {
     let rows = certify_acquired_original_group_rows(view, bindings, validation)?.rows;
-    Ok(rows.into_iter().map(|(binding,row)| (binding,AcquiredHomeCodeGrant {binding,row,artifacts:view.clone()})).collect())
+    let custody=view.retain_linked_home_custody(bindings)?;
+    Ok(rows.into_iter().map(|(binding,row)| (binding,AcquiredHomeCodeGrant {binding,row,artifacts:custody.clone()})).collect())
 }
 pub(crate) struct OriginalValidationInventory<'a> {
     available: &'a BTreeMap<

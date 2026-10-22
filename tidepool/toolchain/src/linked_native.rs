@@ -9,6 +9,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+mod restore;
+pub(crate) use restore::restore_acquired_native_closures;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tidepool_repr::{
@@ -48,8 +51,48 @@ pub struct NativePackageReceiptFacts {
 pub(crate) struct NativePackageReceipt {
     pub(crate) manifest: Option<Arc<PackageLinks>>,
     pub(crate) facts: Arc<NativePackageReceiptFacts>,
+    rows: BTreeMap<u32, usize>,
 }
 impl NativePackageReceipt {
+    fn from_facts(
+        facts: Arc<NativePackageReceiptFacts>,
+        manifest: Option<Arc<PackageLinks>>,
+        operation: &InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
+        operation
+            .reserve::<(u32, usize)>(facts.occurrences.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        if facts
+            .occurrences
+            .windows(2)
+            .any(|pair| pair[0].occurrence >= pair[1].occurrence)
+        {
+            return Err(refusal("noncanonical package receipt occurrence order"));
+        }
+        let rows = facts
+            .occurrences
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.occurrence, index))
+            .collect::<BTreeMap<_, _>>();
+        if facts
+            .occurrences
+            .iter()
+            .any(|row| row.children.iter().any(|child| !rows.contains_key(child)))
+        {
+            return Err(refusal("package receipt omits a selected child occurrence"));
+        }
+        Ok(Arc::new(Self {
+            manifest,
+            facts,
+            rows,
+        }))
+    }
+    fn row(&self, occurrence: u32) -> Option<&NativePackageOccurrenceFacts> {
+        self.rows
+            .get(&occurrence)
+            .map(|index| &self.facts.occurrences[*index])
+    }
     pub(crate) fn issue(
         manifest: Arc<PackageLinks>,
         products: &BTreeMap<u32, Arc<CertifiedPackageCodeProduct>>,
@@ -89,13 +132,14 @@ impl NativePackageReceipt {
                 children: row.imports().iter().map(|link| link.occurrence()).collect(),
             });
         }
-        Ok(Arc::new(Self {
-            facts: Arc::new(NativePackageReceiptFacts {
+        Self::from_facts(
+            Arc::new(NativePackageReceiptFacts {
                 stage_id: *manifest.stage_id(),
                 occurrences,
             }),
-            manifest: Some(manifest),
-        }))
+            Some(manifest),
+            operation,
+        )
     }
 }
 #[derive(Clone, Debug)]
@@ -192,13 +236,15 @@ impl AcquiredNativeClosure {
                         return Err(refusal("package code differs from its acquired occurrence"));
                     }
                     let row = receipt
-                        .facts
-                        .occurrences
-                        .iter()
-                        .find(|row| row.occurrence == *occurrence)
+                        .row(*occurrence)
                         .ok_or_else(|| refusal("selected package receipt row is absent"))?;
                     if row.product != product.artifact_id() {
                         return Err(refusal("package receipt changed its exact product"));
+                    }
+                    if row.children.len() != product.code().globals().len() {
+                        return Err(refusal(
+                            "package receipt changed its exact ordered slot count",
+                        ));
                     }
                     receipts
                         .entry(*stage_id)
@@ -303,10 +349,7 @@ impl AcquiredNativeClosure {
                         } = &node.acquisition
                         {
                             let row = receipt
-                                .facts
-                                .occurrences
-                                .iter()
-                                .find(|row| row.occurrence == *occurrence)
+                                .row(*occurrence)
                                 .ok_or_else(|| refusal("selected package receipt row is absent"))?;
                             if row.children.len() != product.code().globals().len()
                                 || row.children.len() != imports.len()

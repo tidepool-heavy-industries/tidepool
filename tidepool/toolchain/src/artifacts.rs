@@ -3630,8 +3630,16 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
-    pub(crate) fn acquired_home(&self, binding: crate::artifact_inventory::NativeGroupBinding) -> Result<crate::certified_products::AcquiredHomeCodeGrant, CompileError> {
-        self._resolved.acquired_home(binding)
+    pub(crate) fn acquired_homes(
+        &self,
+    ) -> Result<
+        BTreeMap<
+            crate::artifact_inventory::NativeGroupBinding,
+            crate::certified_products::AcquiredHomeCodeGrant,
+        >,
+        CompileError,
+    > {
+        self._resolved.acquired_homes()
     }
 
     pub fn validate_source_target(
