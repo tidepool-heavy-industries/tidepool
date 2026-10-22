@@ -271,7 +271,7 @@ mod program_source_support_history {
                 .receipt_admission()
                 .validate_receipt_with_validation(&receipt, None, &public, &mut validation)
                 .unwrap();
-            let generated_owner = admission.generated_source_owner().unwrap();
+            let generated_owner = admission.generated_source_owner();
             assert_eq!(generated_owner, identity("fixture", "Consumer"));
             let source = "module Consumer where\n";
             let effective = request.compiler_inputs();

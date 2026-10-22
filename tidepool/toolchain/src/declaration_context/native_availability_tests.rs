@@ -2137,20 +2137,11 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             "a real demand without an exact choice must still refuse"
         );
         for chosen in [&left, &right] {
-            let private = OriginalCompilerInputs {
-                    native_fact_base: None,
-                native_completions: Default::default(),
-                native_availability: RequestNativeAvailability::issue_checked(
-                    &projection,
-                    &retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
-                    std::slice::from_ref(chosen),
-                )
-                .unwrap(),
-                demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
-                projection: projection.clone(),
-                artifacts: retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap(),
-                native_offers: vec![chosen.clone()],
-            };
+            let artifacts = retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap();
+            let support =
+                fixture_support_with_issued_offers(projection.clone(), artifacts, [chosen.clone()])
+                    .unwrap();
+            let private = OriginalCompilerInputs::from_issued_support(&support);
             let root = tempfile::tempdir().unwrap();
             let request = ExactCompileContext::new(context.clone())
                 .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private))
@@ -2292,21 +2283,13 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
-    let private = OriginalCompilerInputs {
-        physical: None,
-        native_fact_base: None,
-        native_completions: Default::default(),
-        native_availability: RequestNativeAvailability::issue_checked(
-            &projection,
-            &retain_native_offers(&b, &offers).unwrap(),
-            &offers,
-        )
-        .unwrap(),
-        demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
-        projection: projection.clone(),
-        artifacts: retain_native_offers(&b, &offers).unwrap(),
-        native_offers: offers,
-    };
+    let support = fixture_support_with_issued_offers(
+        projection.clone(),
+        retain_native_offers(&b, &offers).unwrap(),
+        offers,
+    )
+    .unwrap();
+    let private = OriginalCompilerInputs::from_issued_support(&support);
     let context = |view, projection| {
         ExactDeclarationContext::from_facts(DeclarationContextFacts {
             producer: producer.sha256(),
@@ -7152,20 +7135,10 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             requirements.first().cloned(),
         )
         .unwrap();
-        let private = OriginalCompilerInputs {
-            native_fact_base: None,
-            native_completions: Default::default(),
-            native_availability: RequestNativeAvailability::issue_checked(
-                &projection,
-                &custody,
-                std::slice::from_ref(&offer),
-            )
-            .unwrap(),
-            demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
-            projection: projection.clone(),
-            artifacts: custody.clone(),
-            native_offers: vec![offer],
-        };
+        let support =
+            fixture_support_with_issued_offers(projection.clone(), custody.clone(), [offer])
+                .unwrap();
+        let private = OriginalCompilerInputs::from_issued_support(&support);
         let issued = recover_fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[entry.clone(), unrelated_entry.clone()])
                 .unwrap(),

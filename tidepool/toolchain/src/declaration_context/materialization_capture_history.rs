@@ -1239,23 +1239,14 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             &requirements,
         )
         .unwrap();
-        let private = OriginalCompilerInputs {
-            native_fact_base:None,
-            native_completions: Default::default(),
-            native_availability: RequestNativeAvailability::issue_checked(
-                &projection,
-                &artifacts,
-                &native_offers,
-            )
-            .unwrap(),
-            demand: crate::declaration_context::OriginalInputDemand::RolePolicy,
+        let support = native_availability_tests::fixture_support_with_issued_offers(
             projection,
             artifacts,
             native_offers,
-        };
-        let support =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(&private)
-                .unwrap();
+        )
+        .unwrap();
+        let private = OriginalCompilerInputs::from_issued_support(&support);
+
         let inputs = ProtectedScaffoldRequirements::default()
             .compiler_inputs(context, Some(&private))
             .unwrap();
