@@ -460,7 +460,10 @@ impl BoundPackageSelection {
     }
 
     #[cfg(test)]
-    fn assert_prior_home_contract_controls(&self, operation: &InventoryOperation) {
+    pub(crate) fn assert_prior_home_contract_controls(
+        &self,
+        operation: &InventoryOperation,
+    ) -> usize {
         let BoundPackageSelectionState::Item {
             prior_program_products,
             selection,
@@ -468,7 +471,7 @@ impl BoundPackageSelection {
             ..
         } = &self.mode
         else {
-            return;
+            return 0;
         };
         for key in selection.home_roots.keys() {
             let Some(product) = prior_program_products.iter().find(|product| {
@@ -553,8 +556,9 @@ impl BoundPackageSelection {
                     .is_err()
             );
             eprintln!("actual prior HOME contract controls: accepted 1, same-product NoContract 1, crossed item 1, wrong owner 1, wrong issuer 1, absent ordinal 1, wrong stage 1");
-            break;
+            return 1;
         }
+        0
     }
 
     pub(crate) fn ordinary(
@@ -1725,8 +1729,6 @@ impl CertifiedSegmentOriginals {
                 ),
             },
         };
-        #[cfg(test)]
-        package_selection.assert_prior_home_contract_controls(&validation.inventory);
         let original_inputs = cursor
             .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
