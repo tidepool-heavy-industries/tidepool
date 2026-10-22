@@ -577,11 +577,11 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
     let mut unused_prior = 0;
     let mut ordered_refusals = 0;
     let mut count_refusals = 0;
-    for (ordinal, controls) in ingress {
+    for (item_ordinal, controls) in ingress {
         ordered_refusals += controls.ordered_refusals;
         count_refusals += controls.count_refusals;
-        for (artifact, ordinal, prior) in controls.unused {
-            let completion = program.items()[ordinal]
+        for (group, prior) in controls.unused {
+            let completion = program.items()[item_ordinal]
                 .native_products()
                 .expect("unused annotation control belongs to an executable stage")
                 .completed_native_selection()
@@ -590,8 +590,8 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
                 !completion
                     .completion()
                     .rows()
-                    .any(|row| row.binding().binding.artifact() == artifact
-                        && row.binding().original_ordinal == ordinal),
+                    .any(|row| row.binding().binding.artifact() == group.artifact
+                        && row.binding().original_ordinal == group.original_ordinal),
                 "the actual selected closure contains no binding for the unused physical group"
             );
             if prior {

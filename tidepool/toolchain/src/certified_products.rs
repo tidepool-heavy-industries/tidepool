@@ -1261,7 +1261,7 @@ enum SegmentOriginalAdmission {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct HomeContractIngressControls {
-    pub(crate) unused: Vec<(crate::artifact_inventory::ArtifactId, u32, bool)>,
+    pub(crate) unused: Vec<(crate::artifact_inventory::NativeGroupKey, bool)>,
     pub(crate) ordered_refusals: usize,
     pub(crate) count_refusals: usize,
 }
@@ -1350,6 +1350,8 @@ impl CertifiedSegmentOriginals {
                 self.operation(),
             )
         };
+        issue(&self.receipt)
+            .expect("the actual decoded manifest authenticates before mutation controls");
         let refuses = |receipt: &CertifiedReceipt, expected| {
             assert!(
                 matches!(issue(receipt), Err(CertificationError::Mismatch(actual)) if actual == expected),
@@ -1367,7 +1369,13 @@ impl CertifiedSegmentOriginals {
             Arc::make_mut(&mut receipt.package_links.home_roots).insert(key.clone(), Vec::new());
             issue(&receipt)
                 .expect("actual unused empty HOME annotation authenticates without native demand");
-            observed.unused.push((artifact, ordinal, prior));
+            observed.unused.push((
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact,
+                    original_ordinal: ordinal,
+                },
+                prior,
+            ));
             if !receipt.package_links.occurrences.is_empty() {
                 let mut wrong_count = receipt.clone();
                 Arc::make_mut(&mut wrong_count.package_links.home_roots)
