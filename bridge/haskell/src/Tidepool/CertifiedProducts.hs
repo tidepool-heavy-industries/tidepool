@@ -24,7 +24,7 @@ import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
 import Data.Foldable (fold)
 import Data.Bits (shiftR)
-import Data.List (find, mapAccumL)
+import Data.List (find, intercalate, mapAccumL)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import qualified Data.Set as Set
@@ -367,35 +367,74 @@ data OriginalInventoryRefusal
   | PriorNativeOwnerConflict (T.Text,T.Text) (Maybe BinderOwner) (Maybe BinderOwner)
 
 renderOriginalInventoryRefusal :: OriginalInventoryRefusal -> String
-renderOriginalInventoryRefusal refusal = case refusal of
+renderOriginalInventoryRefusal refusal = limitInventoryDiagnostic inventoryDiagnosticCharacters $ case refusal of
   ConflictingInterfaceSeals owner count seals ->
-    "conflicting original interface owner seals: owner=" ++ show owner
+    "conflicting original interface owner seals: owner=" ++ renderOwner owner
       ++ "; expected count=1; observed count=" ++ show count
-      ++ "; first seals=" ++ show seals
+      ++ "; first seals=[" ++ intercalate "," (map component (take 2 seals)) ++ "]"
   PriorInterfaceSealConflict owner expected observed ->
-    "prior original interface owner seal changed: owner=" ++ show owner
-      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+    "prior original interface owner seal changed: owner=" ++ renderOwner owner
+      ++ "; expected=" ++ component expected ++ "; observed=" ++ component observed
   MissingFreshSourceEvidence owner ->
-    "fresh original lacks ready source evidence: owner=" ++ show owner
+    "fresh original lacks ready source evidence: owner=" ++ renderOwner owner
   MissingFreshSignature owner ordinal binder index count ->
-    "fresh original signature is out of range: owner=" ++ show owner
-      ++ "; group=" ++ show ordinal ++ "; binder=" ++ show binder
+    "fresh original signature is out of range: owner=" ++ renderOwner owner
+      ++ "; group=" ++ show ordinal ++ "; binder=" ++ renderBinder binder
       ++ "; signature=" ++ show index ++ "; signature count=" ++ show count
   DuplicateOriginalBinder binder first second ->
-    "duplicate current original binder: binder=" ++ show binder
-      ++ "; first=" ++ show first ++ "; second=" ++ show second
+    "duplicate current original binder: binder=" ++ renderBinder binder
+      ++ "; first=" ++ renderCoordinate first ++ "; second=" ++ renderCoordinate second
   PriorBinderOwnerConflict binder expected observed ->
-    "prior original binder owner changed: binder=" ++ show binder
-      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+    "prior original binder owner changed: binder=" ++ renderBinder binder
+      ++ "; expected=" ++ renderCoordinate expected ++ "; observed=" ++ renderCoordinate observed
   PriorOriginalReferenceConflict binder expected observed ->
-    "prior original reference changed: binder=" ++ show binder
-      ++ "; expected=" ++ show expected ++ "; observed=" ++ show observed
+    "prior original reference changed: binder=" ++ renderBinder binder
+      ++ "; expected=" ++ renderReference expected ++ "; observed=" ++ renderReference observed
   OriginalBinderReferenceConflict binder owner reference ->
-    "current original binder collides with an original reference: binder=" ++ show binder
-      ++ "; owner=" ++ show owner ++ "; reference=" ++ show reference
+    "current original binder collides with an original reference: binder=" ++ renderBinder binder
+      ++ "; owner=" ++ renderCoordinate owner ++ "; reference=" ++ renderReference reference
   PriorNativeOwnerConflict owner expected observed ->
-    "native original owner was already certified by a prior stage: owner=" ++ show owner
-      ++ "; prior group=" ++ show expected ++ "; current group=" ++ show observed
+    "native original owner was already certified by a prior stage: owner=" ++ renderOwner owner
+      ++ "; prior group=" ++ maybe "Nothing" renderCoordinate expected
+      ++ "; current group=" ++ maybe "Nothing" renderCoordinate observed
+  where
+    component :: Show a => a -> String
+    component = limitInventoryDiagnostic inventoryDiagnosticComponentCharacters . show
+    renderOwner :: (T.Text,T.Text) -> String
+    renderOwner (unit,name) = "(" ++ component unit ++ "," ++ component name ++ ")"
+    renderCoordinate :: BinderOwner -> String
+    renderCoordinate (unit,name,version,ordinal) =
+      "(" ++ component unit ++ "," ++ component name
+        ++ "," ++ maybe "Nothing" component version ++ "," ++ show ordinal ++ ")"
+    renderBinder :: SymbolIdentity -> String
+    renderBinder identity = "(" ++ component (symbolUnit identity)
+      ++ "," ++ component (symbolModule identity)
+      ++ "," ++ component (symbolNamespace identity)
+      ++ "," ++ component (symbolOccurrence identity)
+      ++ "," ++ maybe "Nothing" component (symbolRecordParent identity) ++ ")"
+    renderReference :: WorldOriginalReference -> String
+    renderReference reference =
+      let ((interface,interfaceScope),(original,originalScope)) = worldOriginalReferenceBindings reference
+      in "(" ++ renderOwner (worldOriginalReferenceOwner reference)
+        ++ ",interface=" ++ renderBytes interface ++ ",interface scope=" ++ renderBytes interfaceScope
+        ++ ",original=" ++ renderBytes original ++ ",original scope=" ++ renderBytes originalScope ++ ")"
+    renderBytes :: BS.ByteString -> String
+    renderBytes = limitInventoryDiagnostic inventoryDiagnosticComponentCharacters
+      . concatMap (\byte -> (if byte < 16 then "0" else "") ++ showHex byte "") . BS.unpack
+
+-- These are presentation budgets, never limits on valid owners or binders.
+-- Per-component limits retain both sides of a comparison, including version and
+-- ordinal after long authored names; the total bounds future renderer changes.
+-- At most four UTF-8 bytes are emitted per retained character.
+inventoryDiagnosticCharacters, inventoryDiagnosticComponentCharacters :: Int
+inventoryDiagnosticCharacters = 4096
+inventoryDiagnosticComponentCharacters = 128
+
+limitInventoryDiagnostic :: Int -> String -> String
+limitInventoryDiagnostic limit value = case splitAt limit value of
+  (prefix,[]) -> prefix
+  (prefix,_) -> take (limit - length marker) prefix ++ marker
+  where marker = "..."
 
 duplicateOriginalBinder :: [(SymbolIdentity,BinderOwner)] -> Maybe OriginalInventoryRefusal
 duplicateOriginalBinder = visit Map.empty
