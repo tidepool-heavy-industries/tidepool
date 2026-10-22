@@ -279,7 +279,12 @@ impl NativeExportRequest {
         };
         match &self.evidence {
             LeaseRequestEvidence::Home { key, owner, binder } => {
-                image.certified_source.as_ref() == Some(&(owner.clone(), key.original_ordinal))
+                image
+                    .certified_source
+                    .as_ref()
+                    .is_some_and(|(actual, ordinal)| {
+                        actual == owner && *ordinal == key.original_ordinal
+                    })
                     && binder.version == owner.module_version
                     && binder.binder == export.identity
             }

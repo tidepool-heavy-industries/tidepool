@@ -342,22 +342,24 @@ mod tests {
     use super::*;
     use crate::binding_table::BindingTable;
     use crate::prepared_program::{
-        BatchImport, BatchLeaseRequest, BatchProgram, DemandedPackageImage, ImageRegistry,
-        NativeArtifactBinding, NativeExportRequest, PreparedCallOptions, PreparedResult,
+        BatchImport, BatchLeaseRequest, BatchProgram, DemandedHomeImage, DemandedPackageImage,
+        ImageRegistry, NativeArtifactBinding, NativeExportRequest, NativeHomeBinding,
+        PreparedCallOptions, PreparedResult,
     };
     use crate::scope::{ScopeId, ScopeTree};
     use crate::suspension::RealmId;
     use tidepool_repr::execution_schema::{
-        testing, Atom, ExprFrame, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs,
-        PackageCodeOwner, PackageGroupCode, ResultContract, RuntimeRep, SignatureId, TopBinding,
-        UpdatePolicy, ValueId, ValueRef,
+        testing, Atom, CachedHomeOwner, CertifiedGroup, ExprFrame, GlobalDecl, GlobalId, Group,
+        HeapBinding, HeapRhs, ImportOwner, ModuleVersion, PackageCodeOwner, PackageGroupCode,
+        ResultContract, RuntimeRep, SignatureId, TopBinding, UpdatePolicy, ValueId, ValueRef,
+        WireProgram,
     };
 
     fn fixture() -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
         fixture_bytes(b"package-slot")
     }
 
-    fn fixture_bytes(bytes: &[u8]) -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
+    fn fixture_wire(bytes: &[u8]) -> WireProgram {
         let mut package = testing::wire_program();
         package.signatures.push(package.signatures[0].clone());
         package.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
@@ -395,6 +397,39 @@ mod tests {
                 rhs: HeapRhs::Bytes(bytes.to_vec()),
             },
         }));
+        package
+    }
+
+    fn home_owner(version: u8) -> CachedHomeOwner {
+        CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([version; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        }
+    }
+
+    fn home_image(wire: WireProgram, owner: CachedHomeOwner, ordinal: u32) -> DemandedHomeImage {
+        let code = CertifiedGroup::admit(
+            owner,
+            testing::projected_group(wire, ordinal).unwrap(),
+            vec![],
+        )
+        .unwrap()
+        .code_identity();
+        DemandedHomeImage::prepare(
+            code,
+            &[],
+            &Default::default(),
+            &Default::default(),
+            &ImageRegistry::new(),
+        )
+        .unwrap()
+    }
+
+    fn fixture_bytes(bytes: &[u8]) -> (Arc<DemandedPackageImage>, Arc<CompiledProgram>) {
+        let package = fixture_wire(bytes);
         let code = PackageGroupCode::admit(
             PackageCodeOwner {
                 unit: "fixture".into(),
@@ -417,6 +452,10 @@ mod tests {
             )
             .unwrap(),
         );
+        (package, consumer_fixture())
+    }
+
+    fn consumer_fixture() -> Arc<CompiledProgram> {
         let mut consumer = testing::wire_program();
         consumer.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         consumer.signatures.push(consumer.signatures[0].clone());
@@ -435,7 +474,7 @@ mod tests {
             CompiledProgram::compile_prepared_definitions(&testing::prepare(consumer).unwrap())
                 .unwrap(),
         );
-        (package, consumer)
+        consumer
     }
 
     fn literal_consumer(package: &DemandedPackageImage) -> Arc<CompiledProgram> {
@@ -482,6 +521,59 @@ mod tests {
         .unwrap()
     }
 
+    fn home_literal(bytes: &[u8], owner: CachedHomeOwner, ordinal: u32) -> DemandedHomeImage {
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("Fixture", "bytes");
+        top.binding.rhs = HeapRhs::Bytes(bytes.to_vec());
+        home_image(wire, owner, ordinal)
+    }
+
+    fn home_literal_consumer(source: &DemandedHomeImage) -> Arc<CompiledProgram> {
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("LiteralConsumer", "entry");
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::Address]);
+        wire.expressions.nodes[0] =
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Global(GlobalId(0)))]);
+        let binder = testing::identity("Fixture", "bytes");
+        wire.globals.push(GlobalDecl {
+            identity: binder.clone(),
+            rep: RuntimeRep::Address,
+            entry_signature: None,
+            required_evaluated: true,
+            required_generation: None,
+        });
+        let mut owner = home_owner(9);
+        owner.module = "LiteralConsumer".into();
+        let version = source.code().owner().module_version.clone();
+        let code = CertifiedGroup::admit(
+            owner,
+            testing::projected_group(wire, 8).unwrap(),
+            vec![ImportOwner::Source {
+                version: version.clone(),
+                binder: binder.clone(),
+            }],
+        )
+        .unwrap()
+        .code_identity();
+        CompiledProgram::prepare_source_group_code(
+            &code,
+            &[Some(crate::prepared_program::LiteralOwner::Source {
+                version,
+                binder,
+            })],
+            &Default::default(),
+            &source.image().source_literals(),
+            &ImageRegistry::new(),
+        )
+        .unwrap()
+    }
+
     fn key(byte: u8) -> NativeArtifactBinding {
         NativeArtifactBinding {
             artifact: [byte; 32],
@@ -507,6 +599,85 @@ mod tests {
         table.native_slot_permit_in(tree, scope, &request).unwrap()
     }
 
+    enum TestNativeProduct {
+        Package(Arc<DemandedPackageImage>),
+        Home(DemandedHomeImage),
+    }
+    impl TestNativeProduct {
+        fn image(&self) -> &Arc<CompiledProgram> {
+            match self {
+                Self::Package(image) => image.image(),
+                Self::Home(image) => image.image(),
+            }
+        }
+        fn request(
+            &self,
+            binding: NativeArtifactBinding,
+            domain: SourceInstanceDomain,
+            value: ValueId,
+        ) -> NativeExportRequest {
+            match self {
+                Self::Package(image) => {
+                    NativeExportRequest::for_package(image.clone(), binding, domain, value)
+                }
+                Self::Home(image) => NativeExportRequest::for_home_code(
+                    image,
+                    NativeHomeBinding {
+                        issuer: binding,
+                        original_ordinal: image.code().original_ordinal(),
+                    },
+                    domain,
+                    value,
+                ),
+            }
+            .unwrap()
+        }
+        fn lease_request(
+            &self,
+            group: usize,
+            binding: NativeArtifactBinding,
+            domain: SourceInstanceDomain,
+            value: ValueId,
+        ) -> BatchLeaseRequest {
+            match self {
+                Self::Package(image) => {
+                    BatchLeaseRequest::for_package(group, image.clone(), binding, domain, value)
+                }
+                Self::Home(image) => BatchLeaseRequest::for_home_code(
+                    group,
+                    image,
+                    NativeHomeBinding {
+                        issuer: binding,
+                        original_ordinal: image.code().original_ordinal(),
+                    },
+                    domain,
+                    value,
+                ),
+            }
+            .unwrap()
+        }
+    }
+    fn native_permit(
+        table: &mut BindingTable,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        product: &TestNativeProduct,
+        binding: NativeArtifactBinding,
+        value: u32,
+    ) -> WorldNativeSlotPermit {
+        let domain = table
+            .native_domain_selection_in(tree, scope)
+            .unwrap()
+            .current();
+        table
+            .native_slot_permit_in(
+                tree,
+                scope,
+                &product.request(binding, domain, ValueId(value)),
+            )
+            .unwrap()
+    }
+
     fn release_scope(
         table: &mut BindingTable,
         machine: &mut PreparedMachine<'_>,
@@ -526,6 +697,16 @@ mod tests {
     #[test]
     fn empty_world_parent_retains_package_choice_through_child_abort_and_live_closure() {
         let (package, consumer) = fixture();
+        native_caf_history(TestNativeProduct::Package(package), consumer);
+    }
+
+    #[test]
+    fn home_caf_choice_survives_child_retirement_without_crossing_fork_domains() {
+        let image = home_image(fixture_wire(b"home-caf"), home_owner(1), 3);
+        native_caf_history(TestNativeProduct::Home(image), consumer_fixture());
+    }
+
+    fn native_caf_history(product: TestNativeProduct, consumer: Arc<CompiledProgram>) {
         let mut machine = PreparedMachine::empty(PreparedMachineOptions {
             nursery_bytes: 4096,
         })
@@ -543,7 +724,7 @@ mod tests {
             empty,
             "materializing the implicit parent's lifetime changes no semantic snapshot"
         );
-        let first = permit(&mut table, &tree, a, &package, key(1), 0);
+        let first = native_permit(&mut table, &tree, a, &product, key(1), 0);
         assert!(machine
             .lookup_world_native_slot(&first, None)
             .unwrap()
@@ -559,18 +740,11 @@ mod tests {
                         }],
                     },
                     BatchProgram {
-                        image: package.image().clone(),
+                        image: product.image().clone(),
                         imports: vec![],
                     },
                 ],
-                vec![BatchLeaseRequest::for_package(
-                    1,
-                    package.clone(),
-                    key(1),
-                    first.domain(),
-                    ValueId(0),
-                )
-                .unwrap()],
+                vec![product.lease_request(1, key(1), first.domain(), ValueId(0))],
             )
             .unwrap();
         let group = receipt.leases[0].instance();
@@ -595,7 +769,7 @@ mod tests {
             )
             .unwrap();
         let [PreparedResult::Managed(closure)] = result.values.as_slice() else {
-            panic!("real PACKAGE CAF returns its own closure")
+            panic!("real native CAF returns its own closure")
         };
         let closure = *closure;
         assert!(machine
@@ -615,7 +789,7 @@ mod tests {
         table
             .seed_world_execution_scope(&tree, parent, b, &empty)
             .unwrap();
-        let sibling = permit(&mut table, &tree, b, &package, key(1), 1);
+        let sibling = native_permit(&mut table, &tree, b, &product, key(1), 1);
         let witness = machine
             .lookup_world_native_slot(&sibling, None)
             .unwrap()
@@ -625,6 +799,22 @@ mod tests {
             group,
             "implicit live parent preserves domain identity"
         );
+        let other = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: product.image().clone(),
+                    imports: vec![],
+                }],
+                vec![product.lease_request(0, key(1), sibling.domain(), ValueId(1))],
+            )
+            .unwrap();
+        assert!(
+            machine
+                .lookup_world_native_slot(&sibling, Some(&other.leases[0]))
+                .is_err(),
+            "actual different physical instance cannot replace canonical same-domain choice"
+        );
+        assert!(machine.release(other.leases[0].handle()));
         let attachment = machine
             .retain_world_native_export(&witness, &sibling)
             .unwrap();
@@ -640,7 +830,7 @@ mod tests {
             .ok()
             .unwrap();
         machine.commit_world_native_slots(staged);
-        let caf = permit(&mut table, &tree, b, &package, key(1), 0);
+        let caf = native_permit(&mut table, &tree, b, &product, key(1), 0);
         let caf_witness = machine
             .lookup_world_native_slot(&caf, None)
             .unwrap()
@@ -657,7 +847,7 @@ mod tests {
         assert!(machine.release(caf_root.lease().handle()));
         let fork = tree.mint_isolated();
         table.seed_scope(&tree, b, fork);
-        let fork_permit = permit(&mut table, &tree, fork, &package, key(1), 0);
+        let fork_permit = native_permit(&mut table, &tree, fork, &product, key(1), 0);
         let selected = table
             .native_domain_selection_in(&tree, fork)
             .unwrap()
@@ -687,7 +877,7 @@ mod tests {
             .unwrap();
         machine.commit_world_native_slots(fork_publication);
         let independent = tree.mint_isolated();
-        let independent_permit = permit(&mut table, &tree, independent, &package, key(1), 0);
+        let independent_permit = native_permit(&mut table, &tree, independent, &product, key(1), 0);
         assert!(
             machine
                 .lookup_world_native_slot(&independent_permit, None)
@@ -695,7 +885,39 @@ mod tests {
                 .is_none(),
             "independent vacant domain does not share another CAF"
         );
-        let different = permit(&mut table, &tree, b, &package, key(3), 0);
+        let fresh = machine
+            .install_shared_batch_with_leases(
+                vec![BatchProgram {
+                    image: product.image().clone(),
+                    imports: vec![],
+                }],
+                vec![product.lease_request(0, key(1), independent_permit.domain(), ValueId(0))],
+            )
+            .unwrap();
+        assert_ne!(fresh.leases[0].instance(), group);
+        assert!(
+            !machine
+                .handle_is_evaluated(fresh.leases[0].handle())
+                .unwrap(),
+            "independent domain receives its own unevaluated memoizing CAF"
+        );
+        let fresh_slots = machine
+            .prepare_world_native_slot_publication(vec![(
+                independent_permit.clone(),
+                fresh.leases[0].instance(),
+            )])
+            .unwrap();
+        table
+            .register_source_instances_in_domains(
+                &tree,
+                independent,
+                fresh.source_attachments,
+                &machine,
+            )
+            .ok()
+            .unwrap();
+        machine.commit_world_native_slots(fresh_slots);
+        let different = native_permit(&mut table, &tree, b, &product, key(3), 0);
         assert!(
             machine
                 .lookup_world_native_slot(&different, None)
@@ -716,13 +938,13 @@ mod tests {
             machine.lookup_world_native_slot(&first, None).is_err(),
             "retained snapshot or stale permit cannot revive dead parent domain"
         );
+        release_scope(&mut table, &mut machine, &mut tree, independent);
         assert_eq!(
             machine.native_domains.len(),
             1,
             "only the actual fork's alias remains"
         );
         release_scope(&mut table, &mut machine, &mut tree, fork);
-        release_scope(&mut table, &mut machine, &mut tree, independent);
         assert!(
             machine.native_domains.is_empty(),
             "dead fork metadata disappears despite surviving closure"
@@ -903,6 +1125,113 @@ mod tests {
         machine.unpin(group.program());
         release_scope(&mut table, &mut machine, &mut tree, scope);
         release_scope(&mut table, &mut machine, &mut tree, foreign_scope);
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().programs, 0);
+    }
+
+    #[test]
+    fn home_literal_reuse_checks_original_producer_owner_ordinal_and_bytes() {
+        let image = home_literal(b"home-literal", home_owner(1), 3);
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut tree = ScopeTree::new();
+        let scope = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let domain = table
+            .native_domain_selection_in(&tree, scope)
+            .unwrap()
+            .current();
+        let binding = NativeHomeBinding {
+            issuer: key(1),
+            original_ordinal: 3,
+        };
+        let request =
+            NativeExportRequest::for_home_code(&image, binding, domain, ValueId(0)).unwrap();
+        let permit = table.native_slot_permit_in(&tree, scope, &request).unwrap();
+        let group = GroupInstanceId::from(
+            machine
+                .install_shared_batch(vec![BatchProgram {
+                    image: image.image().clone(),
+                    imports: vec![],
+                }])
+                .unwrap()[0],
+        );
+        machine.pin(group.program()).unwrap();
+        let staged = machine
+            .prepare_world_native_slot_publication(vec![(permit.clone(), group)])
+            .unwrap();
+        table
+            .register_source_instances_in_domains(&tree, scope, vec![], &machine)
+            .ok()
+            .unwrap();
+        machine.commit_world_native_slots(staged);
+        let witness = machine
+            .lookup_world_native_slot(&permit, None)
+            .unwrap()
+            .unwrap();
+        let consumer = home_literal_consumer(&image);
+        let installed = machine
+            .install_shared_batch(vec![BatchProgram {
+                image: consumer.clone(),
+                imports: vec![machine
+                    .world_native_literal_import(&witness, &permit)
+                    .unwrap()],
+            }])
+            .unwrap()[0];
+        let slot = &consumer.import_slots[0];
+        assert!(slot.literal_source.is_some());
+        assert_eq!(
+            machine.programs[&installed].roots.read(slot.slot).unwrap(),
+            slot.literal.as_ref().unwrap().as_ptr() as u64
+        );
+        let before = machine.residency().programs;
+        for other in [
+            home_literal(b"home-literal", home_owner(2), 3),
+            home_literal(b"home-literal", home_owner(1), 4),
+            home_literal(b"changed", home_owner(1), 3),
+        ] {
+            assert!(machine.install_shared_batch(vec![BatchProgram { image:home_literal_consumer(&other), imports:vec![machine.world_native_literal_import(&witness,&permit).unwrap()] }]).is_err(),"equal bytes cannot replace original HOME producer owner or ordinal; equal owner cannot replace bytes");
+            assert_eq!(machine.residency().programs, before);
+            let other_request = NativeExportRequest::for_home_code(
+                &other,
+                NativeHomeBinding {
+                    issuer: key(1),
+                    original_ordinal: other.code().original_ordinal(),
+                },
+                domain,
+                ValueId(0),
+            )
+            .unwrap();
+            let other_permit = table
+                .native_slot_permit_in(&tree, scope, &other_request)
+                .unwrap();
+            assert!(
+                machine
+                    .lookup_world_native_slot(&other_permit, None)
+                    .is_err(),
+                "occupied exact binding never accepts another image"
+            );
+        }
+        assert!(NativeExportRequest::for_home_code(
+            &image,
+            NativeHomeBinding {
+                issuer: key(1),
+                original_ordinal: 4
+            },
+            domain,
+            ValueId(0)
+        )
+        .is_err());
+        let held = witness.marker.upgrade().unwrap();
+        machine.detach_roots(group.program()).unwrap();
+        assert!(machine
+            .world_native_literal_import(&witness, &permit)
+            .is_err());
+        drop(held);
+        machine.unpin(group.program());
+        release_scope(&mut table, &mut machine, &mut tree, scope);
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(machine.residency().programs, 0);
     }
