@@ -73,12 +73,12 @@ import System.Mem.StableName (makeStableName)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactDigestBytes)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Tidepool.CertifiedProducts
-  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
+  ( CertifiedProductKind(..), TargetCertificationContext, encodeCertifiedOriginalProductsWithPrior, certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference, validatePriorHomeGroups
   , selectItemPackage, encodeCertifiedItemProductsWithInputs, readyNativeProductSourceSha256
   , issuePackageLinkIndex
   , PackageLinkIndex, emptyPackageLinkIndex )
 import Tidepool.OriginalProductRoots
-  ( ReconciledOriginalProducts, reconcileOriginalProducts )
+  ( ReconciledOriginalProducts, reconcileOriginalProducts, PriorOriginalExternalDemand )
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
@@ -109,7 +109,7 @@ import Tidepool.ExecutionProjection
   , settleOriginalHomeModuleProducts, settleOriginalHomeModuleProductsWithoutOwners
   , RawModuleProducts, preparedTopIdentityBindings, preparedRootIdentity
   , PreparedPackageTarget
-  , packageTargetName, packageTargetGroups, packageTargetImports, packageTargetHomeImports, packageTargetOriginalImports
+  , packageTargetName, packageTargetGroups, packageTargetImports, packageTargetHomeImports, packageTargetPriorHomeImports, packageTargetOriginalImports
   , projectedPackageModule
   , projectedPackageInterfaceSha256, projectedPackageDefiningVersion, projectedPackageEncoding )
 import Tidepool.PlannedDeclaration
@@ -441,7 +441,7 @@ stagedOriginalReference prior identity = do
   certifiedOriginalReference context identity
 
 stagedOriginalExternalDemand :: Maybe StagedOriginalProducts -> SymbolIdentity
-  -> Either String (Maybe (Set.Set SymbolIdentity))
+  -> Either String (Maybe PriorOriginalExternalDemand)
 stagedOriginalExternalDemand Nothing _ = Right Nothing
 stagedOriginalExternalDemand (Just (StagedOriginalProducts certified _ _ _ _)) identity = do
   context <- maybe (Left "prior staged originals lack their certified native context") Right
@@ -560,14 +560,25 @@ retainPreparedPackageTargets provenance targets captures context = do
       roots <- mapM (resolveOwner ownersByTarget (packageTargetName target))
         (packageTargetImports target)
       pure (packageTargetName target, roots))
-    homeRoots <- foldM (insertHomeRoot ownersByTarget) Map.empty
-      [ ((packageTargetName target, unit, name, ordinal), identities)
-      | target <- targets
-      , (unit,name,ordinal, identities) <- packageTargetHomeImports target ]
-    let expectedHomeRoots = Set.fromList
-          [ (packageTargetName target, unit, name, ordinal)
+    priorHomeGroups <- Map.fromList <$> forM targets (\target -> do
+      let reached = packageTargetPriorHomeImports target
+      unless (Map.null reached) $ do
+        StagedOriginalProducts previous _ _ _ _ <- maybe
+          (fail "prior HOME package roots lack their completed predecessor") pure
+          (preparedPriorOriginalProducts context)
+        previousContext <- maybe (fail "prior HOME package roots lack their certification context") pure
+          (certifiedTargetContext previous)
+        either fail pure (validatePriorHomeGroups previousContext reached)
+      pure (packageTargetName target,reached))
+    let homeRows =
+          [ ((packageTargetName target, unit, name, ordinal), identities)
           | target <- targets
-          , (unit,name,ordinal, _) <- packageTargetHomeImports target ]
+          , (unit,name,ordinal, identities) <- packageTargetHomeImports target ]
+          ++ [ ((target,T.pack unit,T.pack name,ordinal),identities)
+             | (target,reached) <- Map.toAscList priorHomeGroups
+             , ((unit,name,_,ordinal),identities) <- Map.toAscList reached ]
+    homeRoots <- foldM (insertHomeRoot ownersByTarget) Map.empty homeRows
+    let expectedHomeRoots = Set.fromList (map fst homeRows)
     unless (Map.keysSet homeRoots == expectedHomeRoots)
       (fail "fresh HOME package roots are incomplete or crossed")
     originalRoots <- Map.fromList . concat <$> forM targets (\target ->
@@ -589,7 +600,7 @@ retainPreparedPackageTargets provenance targets captures context = do
         writes = packageWrites
     links <- either fail pure
       (issuePackageLinkIndex occurrenceFacts ownersByTarget targetRoots
-        homeRoots expectedHomeRoots originalRoots products)
+        homeRoots expectedHomeRoots priorHomeGroups originalRoots products)
     pure context {preparedPackageOutputs=PreparedPackageOutputs writes interfaces links}
   where
     insertOwner owners (binder,occurrence)

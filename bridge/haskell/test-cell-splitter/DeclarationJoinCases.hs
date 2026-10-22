@@ -16,7 +16,7 @@ import Data.String (fromString)
 import Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
   , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalDemandWithPrior
-  , OriginalExternalDemand(..)
+  , originalExternalHomeGroups, originalExternalPackageGlobals
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates

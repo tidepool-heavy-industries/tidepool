@@ -7,7 +7,7 @@ module Tidepool.CertifiedProducts
   , encodeCertifiedOriginalProducts, encodeCertifiedOriginalProductsWithPrior
   , ItemPackageSelection, selectItemPackage, encodeCertifiedItemProductsWithInputs
   , issuePackageLinkIndex
-  , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference
+  , certifiedContextBinders, certifiedBinderInputClosure, certifiedOriginalExternalDemand, certifiedOriginalReference, validatePriorHomeGroups
   , resolvePackageGlobal, captureSelectedPackageWitnesses, homeInterfaceUsageOwners, readyNativeProductSourceSha256
   , PackageOccurrence, PackageLinks, PackageLinkIndex
   , emptyPackageLinks, emptyPackageLinkIndex, encodePackageLinks
@@ -62,14 +62,15 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
   ( PreparedPackageTarget, packageTargetName, packageTargetProgram, packageTargetImports
-  , packageTargetOriginalImports )
+  , packageTargetOriginalImports, packageTargetPriorHomeImports )
 import Tidepool.ExactScope
   ( ExactScope , scopeProducts, scopeInterfaces, ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , WorldOriginalReference, worldOriginalReferenceOwner, worldOriginalReferenceBindings
   , CanonicalInterfaceProof, canonicalCertificateSha256, canonicalSourceSha256, originalGroupFromProjected
   , canonicalInterfaceInput, canonicalProofOriginalBody )
 import Tidepool.OriginalProductRoots
-  ( ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts )
+  ( ReconciledOriginalProducts, reconcileOriginalProducts, unrecoveredExactProducts
+  , PriorHomeGroup, PriorOriginalExternalDemand(..) )
 import Tidepool.ModuleCandidates
   ( CandidateGlobal(..), CandidateGroup(..), ModuleCandidate(..) )
 import Tidepool.PackageWitness
@@ -127,6 +128,7 @@ data PackageLinkIndex = PackageLinkIndex
   , packageLinkIndexTargetRoots :: Map.Map T.Text [Word32]
   , packageLinkIndexHomeRoots :: Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
   , packageLinkIndexExpectedHomeRoots :: Set.Set (T.Text,T.Text,T.Text,Word)
+  , packageLinkIndexPriorHomeGroups :: Map.Map T.Text (Map.Map PriorHomeGroup [SymbolIdentity])
   , packageLinkIndexOriginalRoots :: Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   , packageLinkIndexProducts :: [(FilePath, BS.ByteString)]
   } deriving (Eq, Show)
@@ -134,7 +136,7 @@ data PackageLinkIndex = PackageLinkIndex
 -- Original-only captures still seal their empty stage through the package issuer.
 emptyPackageLinkIndex :: PackageLinkIndex
 emptyPackageLinkIndex = case issuePackageLinkIndex [] Map.empty Map.empty Map.empty
-    Set.empty Map.empty [] of
+    Set.empty Map.empty Map.empty [] of
   Right issued -> issued
   Left reason -> error ("empty package stage issuance failed: " ++ reason)
 
@@ -144,12 +146,19 @@ issuePackageLinkIndex
   -> Map.Map T.Text [Word32]
   -> Map.Map (T.Text,T.Text,T.Text,Word) [Word32]
   -> Set.Set (T.Text,T.Text,T.Text,Word)
+  -> Map.Map T.Text (Map.Map PriorHomeGroup [SymbolIdentity])
   -> Map.Map (T.Text,WorldOriginalReference,SymbolIdentity) [(SymbolIdentity,Word32)]
   -> [(FilePath, BS.ByteString)]
   -> Either String PackageLinkIndex
-issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected originalRoots products
+issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected priorHomeGroups originalRoots products
   | Map.keysSet homeRoots /= expected =
       Left "fresh HOME package roots are incomplete or crossed"
+  | not (Map.keysSet priorHomeGroups `Set.isSubsetOf` Map.keysSet owners)
+      || not (Set.fromList
+        [(target,T.pack unit,T.pack name,ordinal)
+        | (target,groups) <- Map.toAscList priorHomeGroups
+        , ((unit,name,_,ordinal),_) <- Map.toAscList groups] `Set.isSubsetOf` expected) =
+      Left "prior HOME package roots name an unissued target or group"
   | any (\(envelope,unit,name,interface,version,_) ->
       BS.length envelope /= 32
         || BS.length interface /= 32
@@ -181,7 +190,7 @@ issuePackageLinkIndex occurrenceFacts owners targetRoots homeRoots expected orig
       let occurrences = [PackageOccurrence envelope unit name interface version imports
                         | (envelope,unit,name,interface,version,imports) <- occurrenceFacts]
           stageId = packageStageIdentity occurrences targetRoots homeRoots originalRoots products
-      in Right (PackageLinkIndex stageId occurrences owners targetRoots homeRoots expected originalRoots products)
+      in Right (PackageLinkIndex stageId occurrences owners targetRoots homeRoots expected priorHomeGroups originalRoots products)
 
 encodePackageLinks :: PackageLinks -> Encoding
 encodePackageLinks links = array
@@ -312,6 +321,9 @@ selectItemPackage context target = do
         | ((_,reference,binder),roots) <- Map.toAscList originalRoots ]
   unless (originalIdentities == packageTargetOriginalImports target)
     (Left "item Original use package roots differ from its issued target")
+  unless (Map.findWithDefault Map.empty name (packageLinkIndexPriorHomeGroups index)
+      == packageTargetPriorHomeImports target)
+    (Left "item prior HOME package roots differ from its issued target")
   pure ItemPackageSelection
     { itemSelectionProgram = packageTargetProgram target
     , itemSelectionStageSha256 = packageLinkIndexStageId index
@@ -347,28 +359,44 @@ certifiedBinderInputClosure context roots = do
 -- or discarding the source owner's version. Unknown native binders fail closed;
 -- unrelated owners can still be handled by the current package selection.
 certifiedOriginalExternalDemand :: TargetCertificationContext -> SymbolIdentity
-  -> Either String (Maybe (Set.Set SymbolIdentity))
+  -> Either String (Maybe PriorOriginalExternalDemand)
 certifiedOriginalExternalDemand context identity = case Map.lookup identity (targetBinderOwners context) of
   Nothing
     | (symbolUnit identity,symbolModule identity) `Set.member` targetNativeOwners context ->
         Left "prior native package demand lacks its certified binder"
     | otherwise -> Right Nothing
-  Just coordinate -> Just <$> visit Set.empty Set.empty [coordinate]
+  Just coordinate -> Just <$> visit Set.empty Set.empty Map.empty [coordinate]
   where
-    visit _ packages [] = Right packages
-    visit seen packages (coordinate:pending)
-      | coordinate `Set.member` seen = visit seen packages pending
+    visit _ packages groups [] = Right (PriorOriginalExternalDemand packages groups)
+    visit seen packages groups (coordinate@(unit,name,version,ordinal):pending)
+      | coordinate `Set.member` seen = visit seen packages groups pending
       | otherwise = do
           witnesses <- maybe (Left "prior native package demand lacks its certified group") Right
             (Map.lookup coordinate (targetGroupWitnesses context))
-          let next = [(unit,name,version,ordinal)
-                | (_,_,_,_,SourceOwner unit name version ordinal) <- witnesses]
+          let next = [(childUnit,childName,childVersion,childOrdinal)
+                | (_,_,_,_,SourceOwner childUnit childName childVersion childOrdinal) <- witnesses]
               leaves = Set.fromList [symbol
                 | (symbol,_,_,_,owner) <- witnesses
                 , case owner of PackageOwner _ _ _ -> True; OriginalBindingOwner _ -> True; _ -> False]
-          -- Retained values (including retained package values) are complete
-          -- runtime boundaries, not requests to recover their implementation.
-          visit (Set.insert coordinate seen) (Set.union packages leaves) (next ++ pending)
+              group = (T.unpack unit,T.unpack name,T.unpack <$> version,fromIntegral ordinal)
+              direct = directPackageIdentities witnesses
+          visit (Set.insert coordinate seen) (Set.union packages leaves)
+            (Map.insert group direct groups) (next ++ pending)
+
+-- Reached prior HOME coordinates stay bound to the immediate predecessor's
+-- exact witnesses, including the order of each group's direct package globals.
+validatePriorHomeGroups :: TargetCertificationContext
+  -> Map.Map PriorHomeGroup [SymbolIdentity] -> Either String ()
+validatePriorHomeGroups context groups = forM_ (Map.toAscList groups) $ \((unit,name,version,ordinal),identities) -> do
+  witnesses <- maybe (Left "prior HOME package root lacks its exact certified group") Right
+    (Map.lookup (T.pack unit,T.pack name,T.pack <$> version,fromIntegral ordinal)
+      (targetGroupWitnesses context))
+  unless (identities == directPackageIdentities witnesses)
+    (Left "prior HOME package identities differ from its certified group")
+
+directPackageIdentities :: [GlobalWitness] -> [SymbolIdentity]
+directPackageIdentities witnesses =
+  [symbol | (symbol,_,_,_,PackageOwner _ _ _) <- witnesses]
 
 data ProductOrigin = FreshProduct | CachedProduct | RetainedCoreProduct deriving (Eq)
 
@@ -587,7 +615,7 @@ encodeCertifiedOriginalProducts kind retained emittedSeals reconciled env source
         | otherwise = issuePackageLinkIndex []
             (Map.fromList [(target,Map.empty) | target <- targetNames])
             (Map.fromList [(target,[]) | target <- targetNames])
-            Map.empty Set.empty Map.empty []
+            Map.empty Set.empty Map.empty Map.empty []
   in case packageIndex of
     Left reason -> pure (Left reason)
     Right issued -> fmap (fmap (\(bytes,versions,context,_) -> (bytes,versions,context))) $
@@ -957,13 +985,21 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
                 (Map.union groupWitnesses (maybe Map.empty targetGroupWitnesses prior))
                 packageLinks
           pure $ do
+            forM_ (Map.elems (packageLinkIndexPriorHomeGroups packageLinks)) $ \groups ->
+              if Map.null groups then Right () else case prior of
+                Nothing -> Left "prior HOME package root lacks its immediate predecessor"
+                Just previous -> validatePriorHomeGroups previous groups
+            let priorHomeKeys = Set.fromList
+                  [(T.pack unit,T.pack name,fromIntegral ordinal)
+                  | groups <- Map.elems (packageLinkIndexPriorHomeGroups packageLinks)
+                  , ((unit,name,_,ordinal),_) <- Map.toAscList groups]
             if Map.size groupWitnesses /= length moduleRows
               then Left "duplicate certified native group coordinate"
               else Right ()
             if or (Map.elems packageConflicts)
               then Left "prior native package owner changed its captured interface"
               else Right ()
-            if not (expectedProductCoordinates `Set.isSubsetOf` homeProductKeys)
+            if not (expectedProductCoordinates `Set.isSubsetOf` Set.union homeProductKeys priorHomeKeys)
               then Left ("HOME package root has no issued native product: products="
                   ++ show homeProductKeys
                   ++ " expected=" ++ show expectedHomeRoots)

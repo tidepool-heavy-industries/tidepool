@@ -213,7 +213,10 @@ import Tidepool.GhcPipeline
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
-import Tidepool.OriginalProductRoots (requiredOriginalExternalGlobalsWithPrior, reconcileOriginalProducts, unrecoveredExactProducts)
+import Tidepool.OriginalProductRoots
+  ( requiredOriginalExternalGlobalsWithPrior, requiredOriginalExternalDemandForSeeds
+  , PriorOriginalExternalDemand(..), originalExternalPriorHomeGroups, originalExternalPackageGlobals
+  , reconcileOriginalProducts, unrecoveredExactProducts )
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, emptyPackageImports, readPackageImports, revalidatePackageImports
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin)
@@ -3797,8 +3800,19 @@ originalProjectionProductsWithRequest work request = do
   let segmentDirectory = captureDirectory </> "segment-originals"
   sharedCertificate <- writeCertifiedSegmentProducts [work] currentInterfaces segmentDirectory paired issuedContext
   let priorPackages = stagedOriginalExternalDemand (Just sharedCertificate)
-  packages <- either fail (maybe (fail "actual native binder was not in its issued context") pure)
+  priorDemand <- either fail (maybe (fail "actual native binder was not in its issued context") pure)
     (priorPackages known)
+  let packages = priorOriginalPackageGlobals priorDemand
+  unless (not (Map.null (priorOriginalHomeGroups priorDemand))) $
+    fail "prior native package demand lost its reached exact HOME witnesses"
+  reachedPrior <- either fail pure (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [known])
+  unless (originalExternalPriorHomeGroups reachedPrior == priorOriginalHomeGroups priorDemand
+      && originalExternalPackageGlobals reachedPrior == Set.toAscList packages) $
+    fail "final demand lost or widened its reached prior HOME witnesses"
+  unusedPrior <- either fail pure (requiredOriginalExternalDemandForSeeds [] [] [] Set.empty priorPackages [])
+  unless (Map.null (originalExternalPriorHomeGroups unusedPrior)
+      && null (originalExternalPackageGlobals unusedPrior)) $
+    fail "empty final demand scanned or selected prior HOME availability"
   let direct = [global | global <- currentGlobals,globalIdentity global == known]
   unless (not (null direct) && requiredOriginalExternalGlobalsWithPrior [] [] [] Set.empty priorPackages direct
       == Right (Set.toAscList packages)) $

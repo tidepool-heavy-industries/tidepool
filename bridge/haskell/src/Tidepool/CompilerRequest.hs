@@ -76,7 +76,8 @@ import Tidepool.CertifiedProducts (resolvePackageGlobal, encodeReceiptIdentity)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..))
 import Tidepool.OriginalProductRoots
-  ( OriginalExternalDemand(..), requiredOriginalExternalDemandForSeeds
+  ( PriorOriginalExternalDemand(..), originalExternalPackageGlobals
+  , emptyOriginalExternalDemand, requiredOriginalExternalDemandForSeeds
   , unrecoveredExactProducts )
 import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver
   , preparedComponentVersion, preparedComponentModules, capturePreparedPackageInterfaces)
@@ -763,7 +764,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
             && null hostBindings) $
           fail "portable output cannot consume retained native or host-binding inputs"
         pure (modules,Nothing,Map.empty,Set.empty,[],[]
-          ,const (const (Right (OriginalExternalDemand Set.empty []))),Map.empty)
+          ,const (const (Right emptyOriginalExternalDemand)),Map.empty)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
@@ -795,7 +796,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
               requiredOriginalExternalDemandForSeeds
                 originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
                 (\identity -> case Map.lookup identity (pprOriginalReferences prepared) of
-                  Just _ -> Right (Just (Set.singleton identity))
+                  Just _ -> Right (Just (PriorOriginalExternalDemand (Set.singleton identity) Map.empty))
                   Nothing -> stagedOriginalExternalDemand priorNative identity)
                 (map globalIdentity globals ++ bindings)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
@@ -826,7 +827,6 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
             (originalPackageGlobals
               (candidateGlobals candidate) (candidateBindingIdentities candidate))
           let required = originalExternalPackageGlobals demand
-              reachedHome = originalExternalHomeGroups demand
           let uses = Set.fromList [(identity,reference) | identity <- required
                 , reference <- maybe [] pure (originalReference identity)]
               packages = Set.fromList [identity | identity <- required,isNothing (originalReference identity)]
@@ -863,7 +863,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
                 let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts candidates reachedHome originalImports
+                  finalContext homeProducts candidates demand originalImports
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired

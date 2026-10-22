@@ -10,7 +10,7 @@ module Tidepool.ExecutionProjection
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
-  , packageTargetImports, packageTargetHomeImports, packageTargetOriginalImports
+  , packageTargetImports, packageTargetHomeImports, packageTargetPriorHomeImports, packageTargetOriginalImports
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -76,6 +76,8 @@ import Tidepool.PreparedBuiltins
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..) )
 import Tidepool.ExactScope (WorldOriginalReference)
+import Tidepool.OriginalProductRoots
+  ( PriorHomeGroup, OriginalExternalDemand, originalExternalHomeGroups, originalExternalPriorHomeGroups )
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -955,6 +957,7 @@ data PreparedPackageTarget = PreparedPackageTarget
   , packageTargetGroups :: [ProjectedPackageGroup]
   , packageTargetImports :: [SymbolIdentity]
   , packageTargetHomeImports :: [(Text, Text, Word, [SymbolIdentity])]
+  , packageTargetPriorHomeImports :: Map PriorHomeGroup [SymbolIdentity]
   -- These are this target's reached uses, including uses with no package leaves.
   -- The stage-wide acquisition is not an executable root for every target.
   , packageTargetOriginalImports :: Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
@@ -962,13 +965,15 @@ data PreparedPackageTarget = PreparedPackageTarget
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
-  -> Set (String, String, Word)
+  -> OriginalExternalDemand
   -> Map (WorldOriginalReference, SymbolIdentity) [SymbolIdentity]
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts cached reachedHome originalImports
+projectPreparedPackageTarget env hostBindings targetName context homeProducts cached externalDemand originalImports
     home components reach = do
-  let packageModules = concatMap preparedComponentModules components
+  let reachedHome = originalExternalHomeGroups externalDemand
+      priorHomeImports = originalExternalPriorHomeGroups externalDemand
+      packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
       packageOwners = Set.fromList (map pmModule packageModules)
@@ -1071,7 +1076,7 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
         [ globalIdentity global
         | global <- programGlobals program
         , isPackageImport global ]
-  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports originalImports)
+  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports priorHomeImports originalImports)
   where
     insertHomeImport known row@(unit,name,ordinal,identities) =
       case Map.lookup (unit,name,ordinal) known of
