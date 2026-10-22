@@ -2229,10 +2229,12 @@ captureExactCompilationReceipt
 captureExactCompilationReceipt compilation evidence = do
   let scope = compilationScope compilation
       transaction = compilationTransaction compilation
-      source = compilationSource compilation
+      (source,sourceSha) = sourceImportsSnapshot (compilationSourceImports compilation)
       imports = compilationExactImports compilation
   path <- makeAbsolute source
   bytes <- BS.readFile path
+  unless (SHA.hash bytes == sourceSha)
+    (fail "exact compile source differs from its issued import origins")
   unless (any (\item -> dependencySourcePath item == path
       && dependencySourceSha256 item == digest bytes) (dependencySources evidence))
     (fail "exact compile source differs from consumed source")
