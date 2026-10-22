@@ -5457,10 +5457,11 @@ impl HostInputRetirement {
     fn keep_binding(mut self) -> Result<(), ResidentActorWorkbenchError> {
         if let Some(private) = &self.private {
             self.write
-                .take()
+                .as_mut()
                 .expect("original host mount write")
                 .accept(private)
                 .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))?;
+            self.write.take();
         }
         self.retire_private = None;
         self.background_retire = Box::new(|| {});
@@ -10508,8 +10509,10 @@ where
                 original_source,
                 move |session, context, _, settlement| {
                     let _private_owner = private_owner;
-                    session
-                        .compile_view_for_execution(&_private_owner.admission)
+                    let snapshot = session
+                        .prepare_private_execution_snapshot(
+                            _private_owner.admission.clone(),
+                        )
                         .map_err(ResidentError::Session)?;
                     reject_activation_declaration(session, context.placement.lexical_scope)?;
                     let owner = session
@@ -10531,7 +10534,13 @@ where
                         }
                     })?;
                     let mounted = session
-                        .mount_activation_input(owner, interface, settlement)
+                        .mount_activation_input_for_execution(
+                            owner,
+                            interface,
+                            settlement,
+                            &_private_owner.admission,
+                            &snapshot,
+                        )
                         .map_err(ResidentActorWorkbenchError::Resident)?;
                     let binding = mounted.binding();
                     let committed =
@@ -11317,14 +11326,31 @@ where
                 "checked cell preparation requires its admitted context and source revision".into(),
             ));
         }
-        let world = match purpose.execution() {
-            Some(execution) => execution
-                .admission
-                .compiler_world()
-                .map_err(|error| {
-                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                })?
-                .clone(),
+        let preparation: Option<
+            Arc<tidepool_runtime::session::PrivatePreparationSnapshot>,
+        > = match purpose.execution() {
+            Some(execution) => Some(
+                self.access
+                    .with_compiler_machine(context.clone(), {
+                        let execution = execution.admission.clone();
+                        move |session, _, _, _| {
+                            session
+                                .prepare_private_execution_snapshot(execution)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::Resident(
+                                        ResidentError::Session(error),
+                                    )
+                                })
+                        }
+                    })
+                    .await?,
+            ),
+            // Internal HostCarrier preparation deliberately uses its narrow
+            // current-or-pinned precursor path and never owns authored progress.
+            None => None,
+        };
+        let world = match &preparation {
+            Some(preparation) => preparation.world().clone(),
             None => {
                 self.access
                     .with_compiler_world(context.clone(), None, |_, _, world| Ok(world))
@@ -11347,6 +11373,10 @@ where
                 })?
                 .admission
                 .clone();
+            let operand_preparation = preparation
+                .as_ref()
+                .expect("authored input has a snapshot")
+                .clone();
             self.access
                 .with_compiler_machine(context.clone(), move |session, _, _, _| {
                     let write = input.write.as_ref().ok_or_else(|| {
@@ -11355,7 +11385,11 @@ where
                         )
                     })?;
                     let operand = session
-                        .world_cell_operand_for_input(execution, write)
+                        .world_cell_operand_for_input(
+                            execution,
+                            &operand_preparation,
+                            write,
+                        )
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                         })?;
@@ -11409,8 +11443,11 @@ where
                             authority_digest,
                         ),
                     CellPreparationPurpose::PrivateExecution(execution) => session
-                        .admit_world_planned_cell_with_input(
+                        .admit_world_planned_cell_with_snapshot(
                             execution.admission.clone(),
+                            preparation
+                                .clone()
+                                .expect("authored preparation has a snapshot"),
                             plan,
                             leased_input.as_ref().and_then(|input| input.write.as_ref()),
                         ),
@@ -19329,13 +19366,9 @@ pub(crate) mod request_tests {
                 .await
                 .expect("mount the hidden private input");
             let hidden_name = hidden.mounted_input().name.clone();
-            workbench
-                .execute_cell_for_test(private.clone(), "hiddenLive <- pure (43 :: Int)")
-                .await
-                .expect("valid work precedes hidden input retirement");
-            let live_execution = workbench.private_execution.as_ref().unwrap().clone();
+            let execution = workbench.private_execution.as_ref().unwrap().clone();
             let error = match workbench_runner_for_test(&workbench)
-                .publish_private_execution(private.clone(), live_execution)
+                .publish_private_execution(private.clone(), execution.clone())
                 .await
             {
                 Ok(_) => panic!("a live hidden input keeps the execution incomplete"),
@@ -19379,7 +19412,36 @@ pub(crate) mod request_tests {
                 .execute_cell_for_test(private.clone(), "afterHidden <- pure (44 :: Int)")
                 .await
                 .expect("valid work follows hidden input retirement");
-            let execution = workbench.private_execution.as_ref().unwrap().clone();
+            assert_eq!(
+                execution.admission.checked_progress(),
+                tidepool_toolchain::compiler_world::PrivateCheckedItemProgress::Completed
+            );
+            assert_eq!(execution.admission.pending_host_count(), 0);
+            let diagnostic = workbench
+                .access
+                .with_machine(private.clone(), {
+                    let admission = execution.admission.clone();
+                    move |session, _, _| {
+                        session
+                            .private_publication_diagnostic(&admission)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(error.into())
+                            })
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                diagnostic,
+                tidepool_toolchain::compiler_world::PrivatePublicationDiagnostic {
+                    same_product: false,
+                    position_present: true,
+                    fences_match: true,
+                    original_base_matches: true,
+                    position_complete: true,
+                    host_matches: true,
+                }
+            );
             assert!(matches!(
                 workbench_runner_for_test(&workbench)
                     .publish_private_execution(private, execution)
@@ -19517,9 +19579,16 @@ pub(crate) mod request_tests {
             })
             .await
             .unwrap();
-        let proof = pending.mounted.as_mut().unwrap().write.take().unwrap();
         assert!(
-            proof.accept(&wrong).is_err(),
+            pending
+                .mounted
+                .as_mut()
+                .unwrap()
+                .write
+                .as_mut()
+                .unwrap()
+                .accept(&wrong)
+                .is_err(),
             "a mount cannot transfer to a different private owner"
         );
 
@@ -20522,7 +20591,19 @@ pub(crate) mod request_tests {
                 tidepool_runtime::CompilerTransactionClose::NotStarted
             }
         };
-        let mut world = execution.admission.compiler_world().unwrap().clone();
+        let preparation = frontend
+            .access
+            .with_machine(context.clone(), {
+                let execution = execution.admission.clone();
+                move |session, _, _| {
+                    session
+                        .prepare_private_execution_snapshot(execution)
+                        .map_err(|error| ResidentActorWorkbenchError::Resident(error.into()))
+                }
+            })
+            .await
+            .unwrap();
+        let mut world = preparation.world().clone();
         let mut dependency = context.source_dependency().clone();
         match boundary {
             WorldInputPlanBoundary::Actual => {}
@@ -20532,9 +20613,11 @@ pub(crate) mod request_tests {
         let (operand, input) = frontend
             .access
             .with_compiler_machine(context.clone(), move |session, _, _, _| {
+                let operand_preparation = preparation.clone();
                 let operand = session
                     .world_cell_operand_for_input(
                         execution.admission.clone(),
+                        &operand_preparation,
                         input.write.as_ref().unwrap(),
                     )
                     .map_err(|error| {

@@ -101,7 +101,8 @@ pub use persistent::{
 
 pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
-    PrivateExecutionAdmission, ReservedNotebookScope, RuntimeBindingInterfaceReservation,
+    PrivateExecutionAdmission, PrivatePreparationSnapshot, ReservedNotebookScope,
+    RuntimeBindingInterfaceReservation,
     RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
     RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
     RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
