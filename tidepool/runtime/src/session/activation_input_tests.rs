@@ -6374,6 +6374,10 @@ fn checked_declaration_cancellation_after_reservation_preserves_prefix() {
         Some(private_before)
     );
     assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
+    let retired = resident.retire_scope(execution.private_scope());
+    assert_eq!(retired.scopes_retired, 1);
+    assert_eq!(retired.bindings_retired, 0);
+    assert_eq!(retired.roots_released, 0);
     assert_eq!(
         resident.retire_scope(execution.private_scope()),
         ScopeRetirement::default()
