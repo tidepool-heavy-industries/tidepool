@@ -8060,65 +8060,6 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn checked_declaration_cancellation_after_reservation_preserves_prefix() {
-        let mut fixture = CheckedHomeFixture::new();
-        let admission = CheckedHomeFixture::admit_in(
-            &mut fixture.resident,
-            &fixture.execution,
-            &fixture.effects,
-            fixture.root.path(),
-            "declaredNumber = (42 :: Int)",
-            &[],
-            None,
-        )
-        .unwrap();
-        let cancellation = crate::CompilerTransactionCancellation::new();
-        let outcome = admission
-            .source_lease()
-            .with_source_compiler_transaction(
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                cancellation.clone(),
-                None,
-                |_| {},
-                |source_owner, _| {
-                    prepare_cell_program_admitted(source_owner, admission, &mut |_| {})
-                },
-            )
-            .unwrap();
-        assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
-        let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
-        let prefix = fixture
-            .resident
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
-        let item = checked.checked_item(0).unwrap();
-        assert_eq!(
-            item.kind(),
-            tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
-        );
-        let reservation = fixture
-            .resident
-            .admit_checked_item(prefix.clone(), item)
-            .unwrap();
-        let before = prefix.snapshot();
-        let requests = tidepool_extract_cmd::extract_spawn_count();
-        cancellation.cancel();
-        let failure = fixture
-            .resident
-            .adopt_checked_declaration(reservation)
-            .unwrap_err();
-        assert!(matches!(failure,
-            crate::session::SessionError::Compile(CompileError::Io(error))
-            if error.kind() == std::io::ErrorKind::Interrupted
-        ));
-        assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
-        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
-        assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
-    }
-
-    #[test]
-    #[serial_test::serial]
     fn checked_host_carrier_cancellation_after_reservation_preserves_prefix() {
         use crate::session::{HostBindingType, HostCarrier, HostPayload, SourceImports};
         tidepool_testing::eval_harness::require_extract();

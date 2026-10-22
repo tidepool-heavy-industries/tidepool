@@ -6331,6 +6331,103 @@ fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retiremen
 }
 
 #[test]
+fn checked_declaration_cancellation_after_reservation_preserves_prefix() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1799),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let admission = plan_fixture_cell(
+        &mut resident,
+        &recipe,
+        "declaredNumber = (42 :: Int)",
+        execution.clone(),
+    );
+    let cancellation = crate::CompilerTransactionCancellation::new();
+    let original = resident.public_source.original_source().clone();
+    let outcome = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            cancellation.clone(),
+            None,
+            |_| {},
+            |owner, settlement| turn::prepare_cell_program_admitted(owner, admission, settlement),
+        )
+        .unwrap();
+    assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
+    let (checked, program) = turn::finish_cell_program_admitted(outcome).unwrap();
+    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+    let item = checked.checked_item(0).unwrap();
+    assert_eq!(
+        item.kind(),
+        tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
+    );
+    let reservation = source_action(&mut resident, |resident, _| {
+        resident.admit_checked_item(prefix.clone(), item)
+    })
+    .unwrap();
+    let before = prefix.snapshot();
+    let public_before = resident
+        .public_visibility_snapshot_in(execution.public_scope())
+        .unwrap();
+    let private_before = resident
+        .public_visibility_snapshot_in(execution.private_scope())
+        .unwrap();
+    let requests = tidepool_extract_cmd::extract_spawn_count();
+    cancellation.cancel();
+    let failure = source_action(&mut resident, |resident, _| {
+        resident.adopt_checked_declaration(reservation)
+    })
+    .unwrap_err();
+    assert!(matches!(failure,
+        SessionError::Compile(tidepool_toolchain::CompileError::Io(error))
+        if error.kind() == std::io::ErrorKind::Interrupted
+    ));
+    assert!(Arc::ptr_eq(&before, &prefix.snapshot()));
+    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.public_scope()),
+        Some(public_before)
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.private_scope()),
+        Some(private_before)
+    );
+    assert_eq!(requests, tidepool_extract_cmd::extract_spawn_count());
+    assert_eq!(
+        resident.retire_scope(execution.private_scope()),
+        ScopeRetirement::default()
+    );
+    resident.set_run_context(resident.public_context()).unwrap();
+    publish_fixture_declaration(&mut resident, &recipe, "declaredNumber = (42 :: Int)", 0);
+    original_value_probe(&mut resident, &recipe, "declaredNumber", 42);
+}
+
+#[test]
 fn active_world_item_freeze_refusal_preserves_completion_and_publication() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
