@@ -6537,6 +6537,65 @@ fn frozen_private_execution_refuses_a_later_checked_start() {
 
 #[test]
 fn checked_binding_survives_export_and_executes_in_later_cell() {
+    use tidepool_codegen::prepared_program::{GroupInstanceId, ScopedNativeExport};
+    use tidepool_toolchain::certified_products::PendingImportOwner;
+
+    fn run_binding(
+        resident: &mut TestSession,
+        recipe: &InputRecipe,
+        execution: Arc<crate::session::PrivateExecutionAdmission>,
+        source: &str,
+        expected: Option<serde_json::Value>,
+    ) -> (BoundBinder, CompiledTurn) {
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..resident.public_context()
+            })
+            .unwrap();
+        let (bound, compiled, reservation) =
+            compile_checked_binding(resident, recipe, source, execution);
+        let [binder] = bound.as_slice() else {
+            panic!("one actual checked binding");
+        };
+        let ResidentOutcome::Completed { result, .. } =
+            source_action(resident, |resident, settlement| {
+                resident.run_bind_with_sites(
+                    &binder.name,
+                    compiled.code(),
+                    binder,
+                    reservation.generation(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("checked capture history completes");
+        };
+        if let Some(expected) = expected {
+            assert_eq!(result.to_json(), expected);
+        }
+        (binder.clone(), compiled)
+    }
+
+    fn selected_home(
+        resident: &TestSession,
+        scope: ScopeId,
+        binder: &tidepool_repr::execution_schema::SymbolIdentity,
+    ) -> (ScopedNativeExport, GroupInstanceId) {
+        resident
+            .state
+            .bindings()
+            .native_domain_selection_in(resident.state.scope_tree(), scope)
+            .unwrap()
+            .roots()
+            .iter()
+            .find_map(|(key, lease)| {
+                (lease.export() == binder).then_some((key.clone(), lease.instance()))
+            })
+            .expect("the actual checked HOME export is selected physically")
+    }
+
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
     let recipe = InputRecipe::capture(
@@ -6636,6 +6695,169 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
             .unwrap(),
         &interface
     ));
+    let held_identity = resident
+        .state
+        .bindings()
+        .get(original.0)
+        .unwrap()
+        .value
+        .identity
+        .clone();
+    let held_generation = interface.owner().gen.0;
+    let f_owner = publish_fixture_declaration(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/world-native-captured-home.hs"),
+        0,
+    );
+    let a = begin_fixture_execution(&mut resident);
+    let (_, a_compiled) = run_binding(
+        &mut resident,
+        &recipe,
+        a.clone(),
+        "fa <- pure capturedHome",
+        None,
+    );
+    let a_certification = a_compiled.certification.as_ref().unwrap();
+    let f_binder = a_certification
+        .target_owners
+        .iter()
+        .find_map(|owner| match owner {
+            PendingImportOwner::Source { owner, binder, .. } if owner.module == f_owner => {
+                Some(binder.clone())
+            }
+            _ => None,
+        })
+        .expect("taking the function selects its actual non-inline HOME body");
+    let a_selection = a_certification.native_selection.as_ref().unwrap();
+    assert!(
+        a_selection
+            .completion()
+            .rows()
+            .filter(|row| row.product().owner().module == f_owner)
+            .flat_map(|row| row.product().imports())
+            .any(|owner| matches!(owner,
+            PendingImportOwner::Retained { identity, generation }
+                if identity == &held_identity && *generation == held_generation)),
+        "the original HOME body really captures the old exact value generation"
+    );
+    let (f_key, f_instance) = selected_home(&resident, a.private_scope(), &f_binder);
+    drop(a_compiled);
+    resident.set_run_context(resident.public_context()).unwrap();
+
+    let shadow = begin_fixture_execution(&mut resident);
+    let (shadow_binder, shadow_compiled) = run_binding(
+        &mut resident,
+        &recipe,
+        shadow.clone(),
+        "held <- pure (41 :: Int)",
+        Some(serde_json::json!(41)),
+    );
+    assert_ne!(
+        SessionVarId::from_extract(shadow_binder.var_id),
+        original.0,
+        "same-spelling shadowing burns a fresh checked value identity"
+    );
+    drop(shadow_compiled);
+    publish_checked_fixture(&mut resident, &shadow, 1);
+    resident.set_run_context(resident.public_context()).unwrap();
+    resident.retire_scope(shadow.private_scope());
+    let g_owner = publish_fixture_declaration(
+        &mut resident,
+        &recipe,
+        "freshHome :: Int -> Int\nfreshHome n = held + n",
+        0,
+    );
+    assert_ne!(
+        f_owner, g_owner,
+        "later authored meaning has its own reserved Lib owner"
+    );
+
+    let b = begin_fixture_execution(&mut resident);
+    let before_b = resident
+        .state
+        .bindings()
+        .native_domain_selection_in(resident.state.scope_tree(), b.private_scope())
+        .unwrap();
+    assert!(
+        !before_b
+            .roots()
+            .keys()
+            .any(|key| key.domain == f_key.domain && key.binding == f_key.binding),
+        "B has no selected f anchor: the next install must use weak occupancy"
+    );
+    let (fb, b_compiled) = run_binding(
+        &mut resident,
+        &recipe,
+        b.clone(),
+        "fb <- pure capturedHome",
+        None,
+    );
+    assert!(b_compiled.certification.as_ref().unwrap().target_owners.iter().any(|owner|
+        matches!(owner, PendingImportOwner::Source { binder, .. } if binder == &f_binder)),
+        "B demands the same actual Source body rather than A's private fa value");
+    assert_eq!(
+        selected_home(&resident, b.private_scope(), &f_binder),
+        (f_key, f_instance),
+        "same-domain first demand reuses the exact issuer, domain, export and physical group"
+    );
+    let fb_identity = resident
+        .state
+        .bindings()
+        .get(SessionVarId::from_extract(fb.var_id))
+        .unwrap()
+        .value
+        .identity
+        .clone();
+    drop(b_compiled);
+    let a_scope = a.private_scope();
+    drop(a);
+    resident.retire_scope(a_scope);
+    resident
+        .state
+        .prepared_mut()
+        .unwrap()
+        .quiesce_and_collect_now()
+        .unwrap();
+    assert_eq!(
+        selected_home(&resident, b.private_scope(), &f_binder),
+        (f_key, f_instance),
+        "B's actual custody outlives the original private installer"
+    );
+
+    let (_, after) = run_binding(
+        &mut resident,
+        &recipe,
+        b.clone(),
+        "captureHistory <- pure (fb 1, freshHome 1, held + 1)",
+        Some(serde_json::json!([1_000_000, 42, 42])),
+    );
+    let later_selection = after
+        .certification
+        .as_ref()
+        .unwrap()
+        .native_selection
+        .as_ref()
+        .unwrap();
+    assert!(later_selection.target_imports().iter().any(|import| matches!(import,
+        tidepool_toolchain::artifact_inventory::CompletedNativeTargetImport::RetainedCapture { identity, .. }
+            if identity == &fb_identity)),
+        "later Val use crosses the exact retained callable boundary");
+    assert!(
+        !later_selection
+            .completion()
+            .rows()
+            .any(|row| row.product().owner().module == fb_identity.module),
+        "a later cell must not reinterpret the generated Val body as Source"
+    );
+    drop(after);
+    publish_checked_fixture(&mut resident, &b, 2);
+    resident.set_run_context(resident.public_context()).unwrap();
+    resident.retire_scope(b.private_scope());
+    original_value_probe(&mut resident, &recipe, "fb 1", 1_000_000);
+    original_value_probe(&mut resident, &recipe, "held + 1", 42);
+    assert!(Arc::ptr_eq(resident.state.retained_checked_value_artifact(interface.owner()).unwrap(), &interface),
+        "the old exact value artifact survives lawful source shadowing and original scope retirement");
     drop(parcel);
     drop(interface);
     drop(resident);
