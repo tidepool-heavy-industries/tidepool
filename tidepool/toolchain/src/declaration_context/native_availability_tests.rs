@@ -10232,6 +10232,158 @@ fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationCon
 }
 
 #[test]
+fn source_support_retains_every_original_in_a_shared_native_contribution() {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let native = |module: &str, ordinal: u32, seed: u8| {
+        fixture_finalized_product(
+            original_groups_fixture_with_interface(
+                module,
+                vec![(ordinal, vec![])],
+                seed,
+                &BTreeMap::new(),
+                module.as_bytes().to_vec(),
+            ),
+            producer,
+        )
+    };
+    let left = native("SharedContributionLeft", 7, 61);
+    let right = native("SharedContributionRight", 11, 62);
+    let sibling = native("SharedContributionSibling", 13, 63);
+    let root = fixture_finalized_product(
+        original_groups_fixture_with_interface(
+            "SharedContributionRoot",
+            vec![(17, vec![source_import(&left, 7), source_import(&right, 11)])],
+            64,
+            &BTreeMap::new(),
+            b"shared contribution root".to_vec(),
+        ),
+        producer,
+    );
+    let products = recovered_witness_fixtures(&[left, right, sibling, root])
+        .into_iter()
+        .map(|witness| witness.product)
+        .collect::<Vec<_>>();
+    let entries = products
+        .iter()
+        .map(|product| Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap()))
+        .collect::<Vec<_>>();
+    let ids = entries
+        .iter()
+        .map(|entry| entry.descriptor.id)
+        .collect::<Vec<_>>();
+    let [left_id, right_id, sibling_id, root_id] = ids.as_slice() else {
+        unreachable!()
+    };
+
+    let inventory = ArtifactInventory::default();
+    let artifacts = inventory
+        .admit_shared(&inventory.empty_view(), entries.clone())
+        .unwrap();
+    let root_view = artifacts.select_roots(vec![*root_id]).unwrap();
+    let proof = crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
+        *root_id, &root_view,
+    )
+    .unwrap()
+    .unwrap();
+    let offer =
+        crate::artifact_inventory::IssuedNativeOffer::issue(*root_id, &root_view, Some(proof))
+            .unwrap();
+    let shared = Arc::new(
+        offer
+            .contribution_for(&BTreeSet::from([*left_id, *right_id]))
+            .unwrap()
+            .expect("the root offer carries both child closures"),
+    );
+    assert_eq!(
+        shared.originals(),
+        &BTreeSet::from([*left_id, *right_id]),
+        "the fixture must share exactly the two disjoint row closures"
+    );
+    assert_eq!(shared.original_groups(*left_id).count(), 1);
+    assert_eq!(shared.original_groups(*right_id).count(), 1);
+
+    let row = |entry: &Arc<ArtifactEntry>| {
+        Arc::new(NativeTransportAvailability {
+            canonical: NativeTransportAvailability::canonical_for(entry).unwrap(),
+            original: Arc::clone(entry),
+            mode: NativeTransportMode::IssuedGroups,
+            classification: NativeInputClassification::CompilerRole,
+            contributions: Arc::from([Arc::clone(&shared)]),
+        })
+    };
+    let rows =
+        RequestNativeAvailability::from_issued_rows([row(&entries[0]), row(&entries[1])]).unwrap();
+    assert_eq!(rows.custody_contributions().len(), 2);
+
+    let projection = CompilerInputProjection::from_issued_entries(&[
+        Arc::clone(&entries[3]),
+        Arc::clone(&entries[0]),
+        Arc::clone(&entries[1]),
+    ])
+    .unwrap();
+    let support = recover_fixture_compiler_support(projection, root_view, [offer])
+        .unwrap()
+        .retain_normalized_availability(&rows)
+        .unwrap();
+    let narrowed = support
+        .source_support(&BTreeSet::from([entries[3].descriptor.owner.clone()]))
+        .unwrap();
+    let retained = narrowed.artifacts();
+    let captured = retained.capture_graph_selection();
+    for (id, owner) in [
+        (*left_id, &entries[0].descriptor.owner),
+        (*right_id, &entries[1].descriptor.owner),
+    ] {
+        assert!(
+            retained.artifact_ids().contains(&id),
+            "both shared-contribution rows retain their exact Original"
+        );
+        let group = shared.original_groups(id).next().unwrap();
+        assert!(
+            captured.native_groups.contains(&group),
+            "both shared-contribution rows retain their exact Group closure"
+        );
+        assert!(
+            !narrowed.projection().snapshot_roles().contains_key(owner),
+            "private native custody does not promote its row owner to a compiler role"
+        );
+    }
+    assert!(
+        !retained.artifact_ids().contains(sibling_id),
+        "the root's whole inventory does not retain an unrelated sibling body"
+    );
+    assert!(
+        captured
+            .native_groups
+            .iter()
+            .all(|group| group.binding.artifact() != *sibling_id),
+        "the unrelated sibling remains non-executable"
+    );
+    assert!(
+        !narrowed
+            .projection()
+            .snapshot_roles()
+            .contains_key(&entries[2].descriptor.owner),
+        "the unrelated sibling also gains no compiler role"
+    );
+
+    let left_only = inventory
+        .admit_shared(&inventory.empty_view(), vec![Arc::clone(&entries[0])])
+        .unwrap();
+    assert!(!left_only.artifact_ids().contains(right_id));
+    assert!(matches!(
+        rows.retain_acquisitions(&left_only),
+        Err(CompileError::ArtifactInventory(error))
+            if matches!(
+                error.failure,
+                crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact
+                } if artifact == *right_id
+            )
+    ));
+}
+
+#[test]
 fn recovery_interface_projection_preserves_native_availability_modes() {
     let baseline = product("InspectBaseline", 31);
     let required = product("InspectRequired", 32);
