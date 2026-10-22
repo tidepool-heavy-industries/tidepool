@@ -1795,6 +1795,22 @@ impl PersistentSession {
         )
     }
 
+    pub(super) fn consume_inspection_world_if_current<A>(
+        &mut self,
+        completed: &super::inspection::CompletedInspectionWorld<A>,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeOriginalSource>,
+    ) -> bool {
+        self.admit_compiler_world_association_if_current(
+            &completed.prepared.association,
+            &completed.prepared.custody,
+            &completed.cancellation,
+            source,
+            original_source,
+            super::admission::CompilerWorldAdmission::Observe,
+        )
+    }
+
     pub(super) fn install_compiler_world_association_if_current(
         &mut self,
         association: &Arc<super::inspection::InspectionWorldAssociation>,
@@ -1802,6 +1818,25 @@ impl PersistentSession {
         cancellation: &crate::HostAdmissionCancellation,
         source: &super::GenerationArtifactReference,
         original_source: &Arc<super::RuntimeOriginalSource>,
+    ) -> bool {
+        self.admit_compiler_world_association_if_current(
+            association,
+            custody,
+            cancellation,
+            source,
+            original_source,
+            super::admission::CompilerWorldAdmission::Install,
+        )
+    }
+
+    fn admit_compiler_world_association_if_current(
+        &mut self,
+        association: &Arc<super::inspection::InspectionWorldAssociation>,
+        custody: &super::inspection::InspectionWorldCustody,
+        cancellation: &crate::HostAdmissionCancellation,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeOriginalSource>,
+        admission: super::admission::CompilerWorldAdmission,
     ) -> bool {
         super::RuntimeOriginalSource::with_sources_and_targets(
             [custody.original_source.clone()],
@@ -1825,20 +1860,32 @@ impl PersistentSession {
                         {
                             return false;
                         }
-                        tracing::debug!(
-                            target: "exomonad_harness::timing",
-                            logical_world = ?association.world.logical_id(),
-                            source_sha256 = ?source.sha256(),
-                            scope = ?association.base.scope,
-                            "compiler world association installed"
-                        );
-                        let state = self
-                            .lib_mut()
-                            .tips
-                            .entry(association.base.scope)
-                            .or_default();
-                        state.inspection_world = Some(association.clone());
-                        true
+                        custody
+                            .target
+                            .with_compiler_world_admission(
+                                &association.world,
+                                admission,
+                                |install| {
+                                    if !install {
+                                        return true;
+                                    }
+                                    tracing::debug!(
+                                        target: "exomonad_harness::timing",
+                                        logical_world = ?association.world.logical_id(),
+                                        source_sha256 = ?source.sha256(),
+                                        scope = ?association.base.scope,
+                                        "compiler world association installed"
+                                    );
+                                    let state = self
+                                        .lib_mut()
+                                        .tips
+                                        .entry(association.base.scope)
+                                        .or_default();
+                                    state.inspection_world = Some(association.clone());
+                                    true
+                                },
+                            )
+                            .unwrap_or(false)
                     },
                 )
             },
@@ -1876,7 +1923,11 @@ impl PersistentSession {
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
-            Ok(action())
+            completed.custody.target.with_compiler_world_admission(
+                &association.world,
+                super::admission::CompilerWorldAdmission::Install,
+                |_| action(),
+            )
         })?
     }
 

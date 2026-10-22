@@ -5315,6 +5315,17 @@ where
             .install_inspection_world_if_current(completed, source, original_source)
     }
 
+    /// Consume an observation at its exact current source/base. Private
+    /// observations retain their temporary World without replacing execution.
+    pub fn consume_inspection_world_if_current<A>(
+        &mut self,
+        completed: &super::CompletedInspectionWorld<A>,
+        source: &super::GenerationArtifactReference,
+        original_source: &Arc<super::RuntimeOriginalSource>,
+    ) -> bool {
+        self.state.consume_inspection_world_if_current(completed, source, original_source)
+    }
+
     /// Install an acquired world only while its exact source/base is current.
     pub fn install_compiler_world_if_current(
         &mut self,

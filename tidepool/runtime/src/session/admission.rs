@@ -184,7 +184,7 @@ pub struct PrivateExecutionAdmission {
     pub(super) completed_values: parking_lot::Mutex<
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
-    state: parking_lot::Mutex<PrivateExecutionState>,
+    state: Arc<parking_lot::Mutex<PrivateExecutionState>>,
     pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
 }
 
@@ -211,6 +211,7 @@ enum PrivateAuthoredProgram {
     Active {
         admission_digest: [u8; 32],
         settled: Arc<PrivateSettledFrontier>,
+        predecessor: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     },
     Failed,
 }
@@ -1138,6 +1139,7 @@ impl PrivateExecutionAdmission {
         state.authored = PrivateAuthoredProgram::Active {
             admission_digest,
             settled: snapshot.frontier.clone(),
+            predecessor: snapshot.world().clone(),
         };
         Ok(())
     }
@@ -1150,6 +1152,7 @@ impl PrivateExecutionAdmission {
             PrivateAuthoredProgram::Active {
                 admission_digest: active,
                 settled,
+                ..
             } if state.phase == PrivateExecutionPhase::Open && *active == admission_digest => {
                 Ok(settled)
             }
@@ -1713,8 +1716,51 @@ pub struct RuntimeLexicalScopeLease {
     original_source: Arc<RuntimeOriginalSource>,
     source_admission: super::RuntimeSourceAdmission,
     prerequisites: Vec<Arc<RuntimeLexicalScopeLease>>,
+    private_lifecycle: OnceLock<std::sync::Weak<parking_lot::Mutex<PrivateExecutionState>>>,
 }
+
+#[derive(Clone, Copy)]
+pub(super) enum CompilerWorldAdmission {
+    Install,
+    Observe,
+}
+
 impl RuntimeLexicalScopeLease {
+    pub(super) fn with_compiler_world_admission<T>(
+        &self,
+        world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+        admission: CompilerWorldAdmission,
+        action: impl FnOnce(bool) -> T,
+    ) -> Result<T, SessionError> {
+        let Some(private) = self.private_lifecycle.get() else {
+            return Ok(action(true));
+        };
+        let private = private
+            .upgrade()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let state = private.lock();
+        if state.phase != PrivateExecutionPhase::Open {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let install = match admission {
+            CompilerWorldAdmission::Observe => false,
+            CompilerWorldAdmission::Install => {
+                let same_predecessor = match &state.authored {
+                    PrivateAuthoredProgram::Ready(frontier) => frontier.matches_world(world),
+                    PrivateAuthoredProgram::Active { predecessor, .. } => {
+                        Arc::ptr_eq(predecessor, world)
+                    }
+                    PrivateAuthoredProgram::Failed => false,
+                };
+                if !same_predecessor {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                true
+            }
+        };
+        Ok(action(install))
+    }
+
     pub fn original_source(&self) -> &Arc<RuntimeOriginalSource> {
         &self.original_source
     }
@@ -2923,8 +2969,23 @@ impl CheckedTurnCompletion {
             Some(native),
             successor,
         )?;
-        if let (Some(lifecycle), Some(Some(frontier))) = (lifecycle.as_mut(), terminal) {
-            lifecycle.authored = PrivateAuthoredProgram::Ready(frontier);
+        if let Some(lifecycle) = lifecycle.as_mut() {
+            match terminal {
+                Some(Some(frontier)) => {
+                    lifecycle.authored = PrivateAuthoredProgram::Ready(frontier)
+                }
+                _ => {
+                    if let PrivateAuthoredProgram::Active { predecessor, .. } =
+                        &mut lifecycle.authored
+                    {
+                        *predecessor = state
+                            .snapshot
+                            .world()
+                            .expect("World active successor")
+                            .clone();
+                    }
+                }
+            }
         }
         if let Some((private, values)) = completed_values {
             private.completed_values.lock().extend(values);
@@ -4054,8 +4115,12 @@ impl PersistentSession {
                         tip.inspection_world = Some(association);
                         state.snapshot = next;
                         state.reservation = None;
-                        if let (Some(lifecycle), Some(frontier)) = (lifecycle.as_mut(), terminal) {
-                            lifecycle.authored = PrivateAuthoredProgram::Ready(frontier);
+                        if let Some(lifecycle) = lifecycle.as_mut() {
+                            if let Some(frontier) = terminal {
+                                lifecycle.authored = PrivateAuthoredProgram::Ready(frontier);
+                            } else if let PrivateAuthoredProgram::Active { predecessor, .. } = &mut lifecycle.authored {
+                                *predecessor = state.snapshot.world().expect("World declaration successor").clone();
+                            }
                         }
                     })
                 },
@@ -4223,6 +4288,7 @@ impl PersistentSession {
             original_source,
             source_admission: source_admission.clone(),
             prerequisites,
+            private_lifecycle: OnceLock::new(),
         });
         leases.insert(
             scope,
@@ -5238,7 +5304,7 @@ impl PersistentSession {
             compiler_basis,
             binding_tip,
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            state: parking_lot::Mutex::new(PrivateExecutionState {
+            state: Arc::new(parking_lot::Mutex::new(PrivateExecutionState {
                 phase: PrivateExecutionPhase::Open,
                 authored: PrivateAuthoredProgram::Ready(frontier),
                 accepted_visible_revision: 0,
@@ -5246,9 +5312,14 @@ impl PersistentSession {
                 unapplied_visible_hosts: std::collections::HashSet::new(),
                 accepted_host_progress: None,
                 pending_hosts: std::collections::HashMap::new(),
-            }),
+            })),
             final_intent: OnceLock::new(),
         };
+        prepared
+            .scope_lease
+            .private_lifecycle
+            .set(Arc::downgrade(&prepared.state))
+            .map_err(|_| SessionError::StaleStagedDeclaration)?;
         let admission = store
             .as_ref()
             .map(|store| store.begin_native_transition())
