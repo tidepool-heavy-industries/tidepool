@@ -803,7 +803,7 @@ fn same_direct_package_ignores_unrelated_dictionary_cohort() {
 //
 // The two package pairs below are decoded from immutable compiler envelopes
 // retained in the P3 fixture tree and listed in `historical/manifest.json`.
-// Authority comes only from those authenticated bytes through the production
+// Authenticated product DATA comes from those bytes through the production
 // reader (`CertifiedPackageCodeProduct::restore` -> `parse_code` ->
 // `PackageGroupCode::admit`). Pure code identities grant no acquisition; no
 // test constructs a package owner, product or manifest occurrence.
