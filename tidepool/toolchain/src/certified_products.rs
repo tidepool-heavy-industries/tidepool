@@ -391,8 +391,7 @@ enum BoundPackageSelectionState {
         imports: AuthenticatedTargetImports,
         links: Arc<PackageLinks>,
         selection: PackageSelection,
-        original_demand:
-            Option<Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>>,
+        original_packages: Arc<CheckedOriginalPackageAssociations>,
     },
     HomeOrFixture {
         links: Arc<PackageLinks>,
@@ -407,6 +406,15 @@ impl BoundPackageSelection {
         if links.target_roots(&target).is_none() {
             return Err(CertificationError::Receipt(
                 "ordinary package selection lacks its exact target",
+            ));
+        }
+        if links
+            .original_use_roots
+            .keys()
+            .any(|key| key.target == target)
+        {
+            return Err(CertificationError::Mismatch(
+                "ordinary Original package association lacks an issued World stage",
             ));
         }
         Ok(Self {
@@ -1562,18 +1570,6 @@ impl CertifiedSegmentOriginals {
                 ));
             }
         }
-        let original_inputs = cursor
-            .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
-            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        let products = CertifiedProducts {
-            original_inputs: Some(original_inputs),
-            groups: self.products.groups.clone(),
-            recovery_products: self.products.recovery_products.clone(),
-            module_interfaces: self.products.module_interfaces.clone(),
-            value_interfaces: value_interfaces.into(),
-            retained_core_products: self.products.retained_core_products.clone(),
-            source_selection,
-        };
         // This owner has authenticated both the stage manifest and its input
         // selection. Bind them once; downstream package completion cannot
         // substitute an arbitrary source selection or another emitted stage.
@@ -1590,13 +1586,32 @@ impl CertifiedSegmentOriginals {
             )
             | None => None,
         };
+        let original_packages = CheckedOriginalPackageAssociations::issue_item(
+            &item.selection,
+            &self.receipt.package_links,
+            original_demand,
+            &validation.inventory,
+        )
+        .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let package_selection = BoundPackageSelection {
             mode: BoundPackageSelectionState::Item {
                 imports,
                 links: Arc::new(self.receipt.package_links.clone()),
                 selection: item.selection,
-                original_demand,
+                original_packages,
             },
+        };
+        let original_inputs = cursor
+            .advance_compiler_prefix(self.physical_inputs(), produced, &validation.inventory)
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        let products = CertifiedProducts {
+            original_inputs: Some(original_inputs),
+            groups: self.products.groups.clone(),
+            recovery_products: self.products.recovery_products.clone(),
+            module_interfaces: self.products.module_interfaces.clone(),
+            value_interfaces: value_interfaces.into(),
+            retained_core_products: self.products.retained_core_products.clone(),
+            source_selection,
         };
         Ok((products, item.globals, additions, package_selection))
     }

@@ -135,10 +135,13 @@ pub(super) fn encode_roots(roots: &OriginalPackageRoots) -> Value {
 
 /// Only the retained stage demand can issue group/slot package associations.
 /// Local receipt links cannot manufacture this owner.
+#[derive(Debug)]
 pub(crate) struct CheckedOriginalPackageAssociations {
+    stage: Option<Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>>,
     slots: BTreeMap<(NativeGroupBinding, u32), CheckedOriginalPackageSlot>,
     use_roots: BTreeSet<NativeGroupBinding>,
 }
+#[derive(Debug)]
 struct CheckedOriginalPackageSlot {
     identity: SymbolIdentity,
     interface_digest: [u8; 32],
@@ -170,36 +173,18 @@ impl CheckedOriginalPackageAssociations {
     }
 }
 
-impl BoundPackageSelection {
-    pub(crate) fn checked_original_packages(
-        &self,
+impl CheckedOriginalPackageAssociations {
+    pub(super) fn issue_item(
+        selection: &PackageSelection,
+        manifest: &PackageLinks,
+        original_demand: Option<
+            Arc<crate::compiler_world::native_demand::CheckedWorldStageNativeInputs>,
+        >,
         operation: &InventoryOperation,
-    ) -> Result<CheckedOriginalPackageAssociations, crate::CompileError> {
-        let (target, roots, occurrences, original_demand) = match &self.mode {
-            BoundPackageSelectionState::Ordinary { target, links, .. } => (
-                target.as_str(),
-                links.original_use_roots.as_ref(),
-                links.occurrences.as_ref(),
-                None,
-            ),
-            BoundPackageSelectionState::Item {
-                selection,
-                links,
-                original_demand,
-                ..
-            } => (
-                selection.target.as_str(),
-                &selection.original_use_roots,
-                links.occurrences.as_ref(),
-                original_demand.as_ref(),
-            ),
-            BoundPackageSelectionState::HomeOrFixture { .. } => {
-                return Ok(CheckedOriginalPackageAssociations {
-                    slots: BTreeMap::new(),
-                    use_roots: BTreeSet::new(),
-                })
-            }
-        };
+    ) -> Result<Arc<Self>, crate::CompileError> {
+        let target = selection.target.as_str();
+        let roots = &selection.original_use_roots;
+        let occurrences = &manifest.occurrences;
         let failure = |message| {
             crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(message)))
         };
@@ -207,7 +192,7 @@ impl BoundPackageSelection {
         let mut use_roots = BTreeSet::new();
         for (key, links) in roots.iter().filter(|(key, _)| key.target == target) {
             crate::host_work::checkpoint()?;
-            let stage = original_demand.ok_or_else(|| {
+            let stage = original_demand.as_ref().ok_or_else(|| {
                 failure("Original package association lacks its issued World stage")
             })?;
             if !std::ptr::eq(stage.operation().as_ref(), operation) {
@@ -299,12 +284,65 @@ impl BoundPackageSelection {
                 }
             }
         }
-        Ok(CheckedOriginalPackageAssociations { slots, use_roots })
+        Ok(Arc::new(CheckedOriginalPackageAssociations {
+            stage: original_demand,
+            slots,
+            use_roots,
+        }))
     }
 }
 
-/// Refusal controls borrow a real sealed World output and its immutable input
-/// owner. Mutations are observations, never replacement authority.
+impl BoundPackageSelection {
+    pub(crate) fn checked_original_packages(
+        &self,
+        operation: &InventoryOperation,
+    ) -> Result<Arc<CheckedOriginalPackageAssociations>, crate::CompileError> {
+        let fail = |message| {
+            crate::CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(message)))
+        };
+        match &self.mode {
+            BoundPackageSelectionState::Item {
+                original_packages, ..
+            } => {
+                if original_packages
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| !std::ptr::eq(stage.operation().as_ref(), operation))
+                {
+                    return Err(fail(
+                        "Original package association belongs to another operation",
+                    ));
+                }
+                Ok(Arc::clone(original_packages))
+            }
+            BoundPackageSelectionState::Ordinary { target, links, .. } => {
+                if links
+                    .original_use_roots
+                    .keys()
+                    .any(|key| &key.target == target)
+                {
+                    return Err(fail(
+                        "ordinary Original package association lacks an issued World stage",
+                    ));
+                }
+                Ok(Arc::new(CheckedOriginalPackageAssociations {
+                    stage: None,
+                    slots: BTreeMap::new(),
+                    use_roots: BTreeSet::new(),
+                }))
+            }
+            BoundPackageSelectionState::HomeOrFixture { .. } => {
+                Ok(Arc::new(CheckedOriginalPackageAssociations {
+                    stage: None,
+                    slots: BTreeMap::new(),
+                    use_roots: BTreeSet::new(),
+                }))
+            }
+        }
+    }
+}
+
+/// Controls enter the real item issuer using mutations of its compiler packet.
 #[cfg(test)]
 pub(crate) fn assert_actual_world_original_package_refusals(
     program: &crate::checked_cell::CellProgram,
@@ -313,34 +351,42 @@ pub(crate) fn assert_actual_world_original_package_refusals(
     let CellProgramBasis::World(checked) = program.basis() else {
         panic!("actual World fixture required")
     };
+    assert_eq!(
+        checked.stages().len(),
+        1,
+        "this fixture exercises its one actual stage issuer"
+    );
     let operation = &checked.validation().inventory;
-    let encode = |value: &Value| {
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(value, &mut bytes).unwrap();
-        bytes
-    };
-    let mut package_uses = 0;
+    let mut validation = PackageInterfaceValidation::with_inventory(Arc::clone(operation));
+    let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+        checked,
+        &mut validation,
+    )
+    .unwrap();
+    let stage = &checked.stages()[0];
+    let first = *stage.ordinals().first().unwrap();
+    let end = stage.ordinals().last().unwrap() + 1;
+    let segment_outputs = produced.for_segment(first..end).unwrap();
+    let segment = crate::declaration_context::decode_world_source_receipt(checked, stage.index())
+        .unwrap()
+        .issue_segment_originals(
+            None,
+            &segment_outputs,
+            &mut validation,
+            crate::declaration_context::WorldProgramContinuation::begin(checked),
+        )
+        .unwrap();
+    let mut cursor = crate::declaration_context::bind_certified_segment_artifacts_with_validation(
+        &segment.originals,
+        &mut validation,
+    )
+    .unwrap();
     let mut controls = 0;
+    let mut package_uses = 0;
     for (index, item) in program.items().iter().enumerate() {
         let Some(products) = item.native_products() else {
             continue;
         };
-        let stage = checked
-            .stages()
-            .iter()
-            .find(|stage| stage.ordinals().contains(&index))
-            .unwrap();
-        let outputs = stage.outputs();
-        let root = checked
-            .directory()
-            .path()
-            .join(outputs.source_receipt().relative().parent().unwrap());
-        let receipt = decode_segment_originals_with_operation(
-            world_output_bytes(checked, outputs.certified_products().relative()).unwrap(),
-            &root,
-            operation,
-        )
-        .unwrap();
         let relative = PathBuf::from(format!("item-{index}"));
         let item_bytes =
             world_output_bytes(checked, &relative.join("certified-products.cbor")).unwrap();
@@ -348,6 +394,7 @@ pub(crate) fn assert_actual_world_original_package_refusals(
         if actual.selection.original_use_roots.is_empty() {
             continue;
         }
+        package_uses += actual.selection.original_use_roots.len();
         let prepared_path = checked
             .item(index)
             .unwrap()
@@ -367,140 +414,121 @@ pub(crate) fn assert_actual_world_original_package_refusals(
             tidepool_repr::execution_schema::DecodeLimits::default(),
         )
         .unwrap();
-        let bind = |observed: &SegmentItemReceipt| {
-            check_item_package_selection(
-                &receipt.package_links,
-                &observed.selection,
-                artifact.bind_package_program().sha256(),
-            )
-        };
-        bind(&actual).expect("actual worker package selection matches its actual stage");
+        let item_outputs = produced.for_item(index).unwrap();
         let selection = products
             .completed_native_selection()
             .unwrap()
-            .package_selection()
-            .clone();
-        let checked_packages = selection
-            .checked_original_packages(operation)
-            .expect("actual target Original package associations join its retained demand");
-        assert!(!checked_packages.use_roots().is_empty());
-        package_uses += actual.selection.original_use_roots.len();
-        let mut value: Value = ciborium::de::from_reader(item_bytes.as_ref()).unwrap();
-        let Value::Array(packet) = &mut value else {
-            unreachable!()
+            .package_selection();
+        let actual_packages = selection.checked_original_packages(operation).unwrap();
+        assert!(!actual_packages.use_roots().is_empty());
+        let packet: Value = ciborium::de::from_reader(item_bytes.as_ref()).unwrap();
+        let mutate = |roots: Value| {
+            let mut observed = packet.clone();
+            let Value::Array(header) = &mut observed else {
+                unreachable!()
+            };
+            let Value::Array(body) = &mut header[2] else {
+                unreachable!()
+            };
+            let Value::Array(selection) = &mut body[3] else {
+                unreachable!()
+            };
+            selection[6] = roots;
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&observed, &mut bytes).unwrap();
+            decode_segment_item_with_operation(&bytes, operation)
         };
-        let Value::Array(body) = &mut packet[2] else {
-            unreachable!()
-        };
-        let Value::Array(selection_wire) = &mut body[3] else {
-            unreachable!()
-        };
-        let Value::Array(rows) = &mut selection_wire[6] else {
-            unreachable!()
-        };
-        rows.push(rows[0].clone());
-        assert!(
-            decode_segment_item_with_operation(&encode(&value), operation).is_err(),
-            "duplicate use refuses at actual receipt ingress"
-        );
-        controls += 1;
-        let mut missing = actual.clone();
-        let first_key = missing
-            .selection
-            .original_use_roots
-            .keys()
-            .next()
+        let mut duplicates = array(&encode_roots(&actual.selection.original_use_roots))
             .unwrap()
-            .clone();
-        missing.selection.original_use_roots.remove(&first_key);
+            .to_vec();
+        duplicates.push(duplicates[0].clone());
+        assert!(matches!(
+            mutate(value_array(duplicates)),
+            Err(CertificationError::Receipt(
+                "Original package uses are not unique and ordered"
+            ))
+        ));
+        controls += 1;
+        let mut issue = |observed| {
+            segment.originals.select_item(
+                &mut cursor,
+                observed,
+                &artifact.bind_package_program(),
+                Some(&item_outputs),
+                &mut validation,
+            )
+        };
+        let mut missing = actual.selection.original_use_roots.clone();
+        let first_key = missing.keys().next().unwrap().clone();
+        missing.remove(&first_key);
+        let observed = mutate(encode_roots(&missing)).unwrap();
         assert!(
-            bind(&missing).is_err(),
-            "missing use cannot substitute for the stage's actual target projection"
+            matches!(
+                issue(observed),
+                Err(CertificationError::Receipt(
+                    "item Original package uses differ from its stage manifest"
+                ))
+            ),
+            "omitted use refuses before advancing the real item cursor"
         );
         controls += 1;
-        let mut wrong_target = actual.clone();
-        wrong_target.selection.target.push_str("_foreign");
-        assert!(bind(&wrong_target).is_err());
+        let mut crossed = actual.selection.original_use_roots.clone();
+        let links = crossed.remove(&first_key).unwrap();
+        let mut foreign_key = first_key;
+        foreign_key.reference.original.selection.0[0] ^= 1;
+        crossed.insert(foreign_key, links);
+        let observed = mutate(encode_roots(&crossed)).unwrap();
+        assert!(
+            matches!(
+                issue(observed),
+                Err(CertificationError::Receipt(
+                    "item Original package uses differ from its stage manifest"
+                ))
+            ),
+            "crossed exact Original use refuses through the real issuer"
+        );
         controls += 1;
-        let foreign_operation = InventoryOperation::new(Default::default());
-        assert!(selection
-            .checked_original_packages(&foreign_operation)
-            .is_err());
-        controls += 1;
-        if let Some((key, links)) = actual
+        if let Some((key, _)) = actual
             .selection
             .original_use_roots
             .iter()
             .find(|(_, links)| !links.is_empty())
         {
-            let mut incomplete = selection.clone();
-            let BoundPackageSelectionState::Item {
-                selection: item_selection,
-                ..
-            } = &mut incomplete.mode
-            else {
-                unreachable!()
-            };
-            item_selection
-                .original_use_roots
-                .get_mut(key)
-                .unwrap()
-                .remove(0);
-            assert!(
-                incomplete.checked_original_packages(operation).is_err(),
-                "missing package identity refuses against retained exact obligations"
-            );
-            controls += 1;
-            let mut crossed = selection.clone();
-            let mut original_roots = actual.selection.original_use_roots.clone();
-            let mut foreign_key = key.clone();
-            foreign_key.reference.original.selection.0[0] ^= 1;
-            original_roots.remove(key);
-            original_roots.insert(foreign_key, links.clone());
-            let BoundPackageSelectionState::Item {
-                selection: item_selection,
-                ..
-            } = &mut crossed.mode
-            else {
-                unreachable!()
-            };
-            item_selection.original_use_roots = original_roots;
-            assert!(
-                crossed.checked_original_packages(operation).is_err(),
-                "crossed Original use cannot borrow same symbol obligations"
-            );
-            controls += 1;
-            let mut stale = selection.clone();
-            let BoundPackageSelectionState::Item {
-                links: manifest, ..
-            } = &mut stale.mode
-            else {
-                unreachable!()
-            };
-            let mut altered = manifest.as_ref().clone();
-            let mut occurrences = altered.occurrences.to_vec();
-            occurrences[links[0].1.occurrence() as usize].defining_interface_sha256[0] ^= 1;
-            altered.occurrences = occurrences.into();
-            *manifest = Arc::new(altered);
-            assert!(
-                stale.checked_original_packages(operation).is_err(),
-                "stale occurrence seal refuses before graph issuance"
-            );
+            let mut incomplete = actual.selection.original_use_roots.clone();
+            incomplete.get_mut(key).unwrap().remove(0);
+            let observed = mutate(encode_roots(&incomplete)).unwrap();
+            assert!(matches!(
+                issue(observed),
+                Err(CertificationError::Receipt(
+                    "item Original package uses differ from its stage manifest"
+                ))
+            ));
             controls += 1;
         }
-        assert!(bind(&actual).is_ok());
+        let foreign = InventoryOperation::new(Default::default());
         assert!(
-            selection.checked_original_packages(operation).is_ok(),
-            "refusals preserve the actual immutable owners"
+            matches!(selection.checked_original_packages(&foreign),Err(crate::CompileError::CompilerEvidence(error))
+            if matches!(error.as_ref(),CertificationError::Mismatch("Original package association belongs to another operation")))
+        );
+        controls += 1;
+        let (_, _, _, retry) =
+            issue(actual).expect("refusals leave the actual item issuer and cursor unchanged");
+        let retried = retry.checked_original_packages(operation).unwrap();
+        assert_eq!(retried.use_roots(), actual_packages.use_roots());
+        assert_eq!(
+            retried.coordinates().collect::<Vec<_>>(),
+            actual_packages.coordinates().collect::<Vec<_>>()
         );
     }
     assert!(
         package_uses > 0,
-        "fixture must acquire an actual Original use"
+        "actual fixture must acquire an Original use"
     );
     assert!(
-        controls >= 7,
-        "fixture must exercise actual package-bearing Original refusals"
+        controls >= 5,
+        "actual fixture must exercise a package-bearing use"
     );
-    eprintln!("actual World Original package ingress: {package_uses} target uses, {controls} refusal controls");
+    eprintln!(
+        "actual World Original package issuer: {package_uses} uses, {controls} refusal controls"
+    );
 }

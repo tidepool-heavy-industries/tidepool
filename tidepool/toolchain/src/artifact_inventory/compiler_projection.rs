@@ -1174,7 +1174,7 @@ pub(crate) fn complete_native_selection(
             .ok_or_else(|| failure("native completion lacks its source target"))?,
     );
     let mut source_associations = BTreeMap::new();
-    let original_packages: crate::certified_products::CheckedOriginalPackageAssociations =
+    let original_packages: Arc<crate::certified_products::CheckedOriginalPackageAssociations> =
         selection.checked_original_packages(operation)?;
     let selected_groups = sources
         .groups()
