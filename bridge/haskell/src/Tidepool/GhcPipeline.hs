@@ -5405,9 +5405,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             Just proof -> do
               let artifact = worldTypeEntryArtifact entry
                   owner = (exactUnit artifact,exactModule artifact)
-              forM_ (Map.lookup owner admitted) $ \previous -> unless (previous == proof)
+              forM_ (Map.lookup owner admitted) $ \previous -> unless (sameOrigin previous proof)
                 (fail "selected host origin has competing canonical admissions")
               pure (Map.insert owner proof admitted)
+        sameOrigin (ModuleInterfaceAdmission previous) (ModuleInterfaceAdmission current) =
+          normalizeInterfaceEvidence (ModuleInterfaceEvidence previous)
+            == normalizeInterfaceEvidence (ModuleInterfaceEvidence current)
+        sameOrigin previous current = previous == current
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
     -- substitute for this cycle's accepted candidate proof.
