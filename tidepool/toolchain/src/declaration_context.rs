@@ -2807,20 +2807,18 @@ pub(crate) struct NativePackageObligation {
 #[derive(Clone)]
 pub(crate) struct SelectedNativeGroupRow {
     issued: Arc<IssuedSelectedNativeGroup>,
-    product: PendingCertifiedGroup,
     dependencies: Vec<crate::artifact_inventory::NativeGroupBinding>,
-    imports: Arc<[crate::certified_products::SelectedNativeImport]>,
 }
 
 impl SelectedNativeGroupRow {
     pub(crate) fn product(&self) -> &PendingCertifiedGroup {
-        &self.product
+        self.issued.product()
     }
     pub(crate) fn dependencies(&self) -> &[crate::artifact_inventory::NativeGroupBinding] {
         &self.dependencies
     }
     pub(crate) fn imports(&self) -> &[crate::certified_products::SelectedNativeImport] {
-        &self.imports
+        self.issued.imports()
     }
 }
 
@@ -2994,7 +2992,7 @@ impl DemandCertifiedGroups {
         let mut retained_bindings = BTreeSet::new();
         let mut package_obligations = BTreeSet::new();
         for (binding, row) in &rows {
-            for (index, import) in row.imports.iter().enumerate() {
+            for (index, import) in row.imports().iter().enumerate() {
                 budget.checkpoint()?;
                 let identity = match import {
                     crate::certified_products::SelectedNativeImport::Retained {
@@ -3061,7 +3059,7 @@ impl DemandCertifiedGroups {
             }
         }
         budget.reserve::<PendingCertifiedGroup>(rows.len())?;
-        let products = rows.values().map(|row| row.product.clone()).collect();
+        let products = rows.values().map(|row| row.product().clone()).collect();
         budget.reserve::<crate::artifact_inventory::NativeBindingRequirement>(
             retained_bindings.len(),
         )?;
@@ -3140,9 +3138,9 @@ impl DemandCertifiedGroups {
         for (binding, row) in self.rows.iter().chain(&other.rows) {
             budget.checkpoint()?;
             if let Some(prior) = rows.get(binding) {
-                if !prior.product.same_issuance(&row.product)
+                if !prior.product().same_issuance(row.product())
                     || prior.dependencies != row.dependencies
-                    || prior.imports != row.imports
+                    || prior.imports() != row.imports()
                 {
                     return Err(failure("native demand changed an issued occurrence"));
                 }
@@ -3154,7 +3152,7 @@ impl DemandCertifiedGroups {
             }
         }
         budget.reserve::<PendingCertifiedGroup>(rows.len())?;
-        let products = rows.values().map(|row| row.product.clone()).collect();
+        let products = rows.values().map(|row| row.product().clone()).collect();
         let mut retained_bindings = BTreeSet::new();
         for requirement in self
             .retained_bindings
@@ -3240,7 +3238,7 @@ impl DemandCertifiedGroups {
     > {
         self.rows
             .iter()
-            .map(|(binding, row)| (*binding, &row.product))
+            .map(|(binding, row)| (*binding, row.product()))
     }
 
     pub(crate) fn selected_rows(
@@ -3524,7 +3522,7 @@ impl DemandNativeInputs {
                         .source_support
                         .native_completions()
                         .group_product(binding, &operation)?;
-                    let local = certified.get(&binding).map(|row| &row.product);
+                    let local = certified.get(&binding).map(|row| row.product());
                     if let (Some(held), Some(local)) = (held, local) {
                         if !held.same_issuance(local) {
                             return Err(failure(
@@ -3554,8 +3552,8 @@ impl DemandNativeInputs {
                 .map_err(compiler_evidence_failure)?;
             for (binding, row) in certification.rows {
                 if let Some(previous) = certified.get(&binding) {
-                    if !previous.product.same_issuance(row.product())
-                        || previous.imports.as_ref() != row.imports()
+                    if !previous.product().same_issuance(row.product())
+                        || previous.imports() != row.imports()
                     {
                         return Err(failure(
                             "selected native binding changed its product or ordered imports",
@@ -3573,9 +3571,7 @@ impl DemandNativeInputs {
                     binding,
                     SelectedNativeGroupRow {
                         issued: Arc::clone(&row),
-                        product: row.product().as_ref().clone(),
                         dependencies,
-                        imports: Arc::clone(row.shared_imports()),
                     },
                 );
             }
@@ -3588,12 +3584,12 @@ impl DemandNativeInputs {
             let group = certified
                 .remove(binding)
                 .ok_or_else(|| failure("certified receipt group lost its exact binding"))?;
-            if group.product.group().original_ordinal() != binding.original_ordinal {
+            if group.product().group().original_ordinal() != binding.original_ordinal {
                 return Err(failure(
                     "certified receipt row differs from its exact group binding",
                 ));
             }
-            for (index, import) in group.product.imports().iter().enumerate() {
+            for (index, import) in group.product().imports().iter().enumerate() {
                 if let crate::certified_products::PendingImportOwner::Package {
                     binder,
                     interface_digest,
@@ -3623,7 +3619,7 @@ impl DemandNativeInputs {
                 PendingCertifiedGroup,
                 [usize; 4],
             )>(1)?;
-            products.push(group.product.clone());
+            products.push(group.product().clone());
             rows.insert(*binding, group);
         }
         if !certified.is_empty() {
