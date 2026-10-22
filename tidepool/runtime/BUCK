@@ -1252,6 +1252,46 @@ tidepool_rust_test_cases(
     jobs = 1,
     timeout = 1200,
     test_rule_timeout_ms = 21660000,
+    case_compiler_modes = {"session::turn::scaling_tests::typed_segment_tests::signed_template_helpers_execute_recursion_and_polymorphism_once": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::genuine_let_generalization_and_unused_inner_bottom_match_ghc": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::scalar_publication_forces_after_effect_without_publishing_then_recovers": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::retained_action_closure_demand_does_not_repeat_completed_effect": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::bare_observation_retains_lazy_thunk_before_later_demand": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::effectful_observation_runs_once_and_retains_its_lazy_result": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::late_type_error_prevents_all_effects_and_publication_before_new_retry": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::cancellation_after_real_effect_preserves_receipt_and_allows_new_intent": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::generated_capture_histories_match_ghc_cold_warm_and_recovery": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::deterministic_capture_history_matches_ghc_cold_warm_and_recovery": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::authentic_native_entries_refuse_root_and_order_substitution_before_effects": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::warm_target_selects_previously_unselected_original_native_groups": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::one_four_eight_actions_use_one_completed_inference_segment": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::produced_capture_types_cross_a_declaration_barrier_without_replaying_effects": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::zero_capture_let_executes_without_publishing_a_dummy_binding": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::zero_capture_bang_let_preserves_forcing_and_prior_effects": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::zero_capture_action_runs_once_before_the_next_item": "owned-resident", "session::turn::scaling_tests::typed_segment_tests::strict_let_group_forces_before_retaining_its_closure_capture": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "runtime_finite_segment_component_tests",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = [
+        "session::turn::scaling_tests::typed_segment_tests::finite_component_controls::finite_receipts_refuse_cross_item_mutations_before_effects",
+        "session::turn::scaling_tests::typed_segment_tests::finite_component_controls::finite_inference_ledgers_record_single_pass_segments",
+        "session::turn::scaling_tests::typed_segment_tests::finite_component_controls::finite_warm_emission_excludes_previously_issued_owners",
+    ],
+    expected_count = 3,
+    jobs = 1,
+    timeout = 1200,
+    test_rule_timeout_ms = 3660000,
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },

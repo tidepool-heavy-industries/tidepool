@@ -1399,7 +1399,9 @@ def runtime_test_cases(binary):
         "zero_capture_action_runs_once_before_the_next_item",
         "strict_let_group_forces_before_retaining_its_closure_capture",
     )]
-    semantic_env, semantic_resources, semantic_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
+    semantic_env, semantic_resources, semantic_worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_typed_segment_semantic_tests"
+    )
     rules.append("\n".join([
         "tidepool_rust_test_cases(",
         '    name = "runtime_typed_segment_semantic_tests",',
@@ -1407,7 +1409,26 @@ def runtime_test_cases(binary):
         "    exact_tests = [", render_strings(semantic_tests, 8), "    ],",
         f"    expected_count = {len(semantic_tests)},", "    jobs = 1,", "    timeout = 1200,",
         f"    test_rule_timeout_ms = {(len(semantic_tests) * 1200 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in semantic_tests
+        ) + "},",
         runtime_arguments(semantic_env, semantic_resources, semantic_worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
+    finite_tests = ["session::turn::scaling_tests::typed_segment_tests::finite_component_controls::" + name for name in (
+        "finite_receipts_refuse_cross_item_mutations_before_effects",
+        "finite_inference_ledgers_record_single_pass_segments",
+        "finite_warm_emission_excludes_previously_issued_owners",
+    )]
+    finite_env, finite_resources, finite_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_finite_segment_component_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(finite_tests, 8), "    ],",
+        f"    expected_count = {len(finite_tests)},", "    jobs = 1,", "    timeout = 1200,",
+        f"    test_rule_timeout_ms = {(len(finite_tests) * 1200 + 60) * 1000},",
+        runtime_arguments(finite_env, finite_resources, finite_worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
     for name, test in (
