@@ -397,11 +397,13 @@ enum BoundPackageSelectionState {
     },
 }
 
-/// HOME contracts distinguish current output from the retained same-program
-/// producer. Empty links are permitted only for the latter's reached groups.
+/// Only an explicit target HOME contract is classified here. A retained product
+/// can also be reached through an Original use or held completion without HOME.
+/// Empty contracts carry prior membership; native demand still needs its own offer.
 pub(crate) enum PackageHomeSourceOrigin {
-    Current,
-    PriorProgram,
+    NoContract,
+    CurrentContract,
+    PriorProgramContract,
 }
 
 impl BoundPackageSelection {
@@ -411,18 +413,24 @@ impl BoundPackageSelection {
         owner: &CachedHomeOwner,
         operation: &InventoryOperation,
     ) -> CertResult<PackageHomeSourceOrigin> {
+        if self
+            .home_roots(&owner.unit, &owner.module, binding.original_ordinal)
+            .is_none()
+        {
+            return Ok(PackageHomeSourceOrigin::NoContract);
+        }
         let BoundPackageSelectionState::Item {
             prior_program_products,
             ..
         } = &self.mode
         else {
-            return Ok(PackageHomeSourceOrigin::Current);
+            return Ok(PackageHomeSourceOrigin::CurrentContract);
         };
         let Some(product) = prior_program_products.iter().find(|product| {
             let produced = product.row().original_owner();
             produced.unit == owner.unit && produced.module == owner.module
         }) else {
-            return Ok(PackageHomeSourceOrigin::Current);
+            return Ok(PackageHomeSourceOrigin::CurrentContract);
         };
         if product.row().original_owner() != owner
             || product.row().original_artifact_id() != binding.artifact()
@@ -448,7 +456,7 @@ impl BoundPackageSelection {
                 "prior HOME source has another exact group issuer",
             ));
         }
-        Ok(PackageHomeSourceOrigin::PriorProgram)
+        Ok(PackageHomeSourceOrigin::PriorProgramContract)
     }
 
     pub(crate) fn ordinary(

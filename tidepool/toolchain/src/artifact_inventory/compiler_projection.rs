@@ -1421,19 +1421,11 @@ pub(crate) fn complete_native_selection(
                 .is_some();
             let prior_program = matches!(
                 home_origin,
-                crate::certified_products::PackageHomeSourceOrigin::PriorProgram
+                crate::certified_products::PackageHomeSourceOrigin::PriorProgramContract
             );
             (key, package_slots, manifest_root, prior_program)
         })
         .collect::<Vec<_>>();
-    if source_home_rows
-        .iter()
-        .any(|(_, _, manifest_root, prior_program)| *prior_program && !*manifest_root)
-    {
-        return Err(failure(
-            "selected prior Source group lacks its target HOME contract",
-        ));
-    }
     let package_free_fresh = source_home_rows
         .iter()
         .filter(|(_, slots, manifest_root, prior_program)| {
@@ -1483,7 +1475,7 @@ pub(crate) fn complete_native_selection(
         let fresh_links = if package_slots > 0
             || matches!(
                 home_origin,
-                crate::certified_products::PackageHomeSourceOrigin::PriorProgram
+                crate::certified_products::PackageHomeSourceOrigin::PriorProgramContract
             ) {
             manifest_links
         } else {
