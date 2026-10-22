@@ -3555,30 +3555,38 @@ pub struct ResolvedNativeSourceProducts<'a> {
 
 /// Compiler-only source membership, coissued with the exact chosen binding.
 pub struct ResolvedNativeSourceProduct<'a> {
-    group: &'a certified_products::PendingCertifiedGroup,
+    group: &'a Arc<certified_products::PendingCertifiedGroup>,
     binding: crate::artifact_inventory::NativeGroupBinding,
-    physical_current: bool,
+    source_association: crate::artifact_inventory::ResolvedSourceAssociation,
     imports: &'a Arc<[certified_products::SelectedNativeImport]>,
 }
 
 impl<'a> ResolvedNativeSourceProduct<'a> {
-    pub fn matches_group(&self, group: &certified_products::PendingCertifiedGroup) -> bool {
-        self.group.same_issuance(group)
-    }
-
     pub fn group(&self) -> &'a certified_products::PendingCertifiedGroup {
+        self.group
+    }
+    pub(crate) fn shared_group(&self) -> &'a Arc<certified_products::PendingCertifiedGroup> {
         self.group
     }
     pub fn imports(&self) -> &'a [certified_products::SelectedNativeImport] {
         self.imports
     }
 
+    pub(crate) fn source_association(
+        &self,
+    ) -> crate::artifact_inventory::ResolvedSourceAssociation {
+        self.source_association
+    }
+
     pub fn binding(&self) -> crate::artifact_inventory::NativeGroupBinding {
         self.binding
     }
     pub fn physical_current(&self) -> Option<PhysicalCurrentNativeGroup<'a>> {
-        self.physical_current
-            .then_some(PhysicalCurrentNativeGroup { group: self.group })
+        matches!(
+            self.source_association,
+            crate::artifact_inventory::ResolvedSourceAssociation::Current
+        )
+        .then_some(PhysicalCurrentNativeGroup { group: self.group })
     }
 }
 
@@ -3608,20 +3616,39 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
         self.rows.iter()
     }
 
-    /// Borrow physical membership only for this exact selected row and issuance.
-    pub fn physical_current_for(
+    /// Consume this target's source receipt without reconstructing membership
+    /// from code custody or another target's equal linkage completion.
+    pub fn physical_current_for<'s>(
         &self,
+        selection: &'s Arc<crate::artifact_inventory::CompletedNativeSelection>,
         selected: &crate::artifact_inventory::CompletedNativeSourceRow,
-    ) -> Option<PhysicalCurrentNativeGroup<'a>> {
-        let current_source = selected.current_source()?;
-        let mut matching = self.rows.iter().filter(|row| {
-            row.binding() == selected.binding() && row.matches_group(current_source)
-        });
-        let row = matching.next()?;
-        if matching.next().is_some() {
-            return None;
+    ) -> Result<Option<PhysicalCurrentNativeGroup<'s>>, CompileError> {
+        let own = self.completed_selection().ok_or_else(|| {
+            CompileError::ExtractFailed("native target lacks its completed source selection".into())
+        })?;
+        if !Arc::ptr_eq(own, selection)
+            || !std::ptr::eq(self.prepared, selection.source_target().as_ref())
+        {
+            return Err(CompileError::ExtractFailed(
+                "native source receipt belongs to another prepared target".into(),
+            ));
         }
-        row.physical_current()
+        match selection.source_association(selected.binding()) {
+            Some(crate::artifact_inventory::SelectedNativeSourceAssociation::Current(group)) => {
+                if !group.same_issuance(selected.product()) {
+                    return Err(CompileError::ExtractFailed(
+                        "native source receipt names another physical row".into(),
+                    ));
+                }
+                Ok(Some(PhysicalCurrentNativeGroup { group }))
+            }
+            Some(crate::artifact_inventory::SelectedNativeSourceAssociation::Historical) => {
+                Ok(None)
+            }
+            None => Err(CompileError::ExtractFailed(
+                "selected HOME row lacks its target source association".into(),
+            )),
+        }
     }
 
     pub(crate) fn issue(
@@ -3630,13 +3657,13 @@ impl<'a> ResolvedNativeSourceProducts<'a> {
     ) -> Result<Self, CompileError> {
         let mut rows = Vec::with_capacity(resolved.groups().len());
         for binding in resolved.groups().iter().copied() {
-            let group = resolved.group(binding)?;
+            let group = resolved.shared_group(binding)?;
             let imports = resolved.shared_group_imports(binding)?;
-            let physical_current = resolved.has_only_current_source(binding);
+            let source_association = resolved.source_association(binding)?;
             rows.push(ResolvedNativeSourceProduct {
                 group,
                 binding,
-                physical_current,
+                source_association,
                 imports,
             });
         }
@@ -4556,9 +4583,19 @@ fn admit_native_target_products(
     mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
-    let prepared = package_selection
-        .prepared_program()
-        .ok_or_else(|| CompileError::ExtractFailed("native target lacks its prepared program".into()))?;
+    let prepared = package_selection.prepared_program().ok_or_else(|| {
+        CompileError::ExtractFailed("native target lacks its prepared program".into())
+    })?;
+    let physical = match segment_originals {
+        Some(originals) => originals.physical_inputs().physical_cohort()?,
+        None => certified
+            .original_inputs
+            .as_ref()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("ordinary target lacks physical cohort issuance".into())
+            })?
+            .physical_cohort()?,
+    };
     let target_admission_start = Instant::now();
     let observed = certified_products::AuthenticatedTargetImports::issue(
         prepared,
@@ -4611,22 +4648,18 @@ fn admit_native_target_products(
         }
     };
     let artifact_view = selected_target.artifacts();
-    let selected_groups = Arc::new(match segment_cursor.as_ref() {
-        Some(cursor) => {
-            crate::declaration_context::certify_bound_artifact_view_groups_with_validation(
-                &artifact_view,
-                &certified.groups,
-                cursor.groups,
-                validation,
-            )?
-        }
-        None => crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
-            &artifact_view,
-            &certified.groups,
-            inherited_groups,
-            validation,
-        )?,
-    });
+    let baseline = segment_cursor
+        .as_ref()
+        .map(|cursor| cursor.groups)
+        .or_else(|| {
+            inherited_groups.map(crate::declaration_context::CertifiedNativeGroupBaseline::Target)
+        });
+    let selected_groups = Arc::new(physical.certify_groups(
+        &artifact_view,
+        &certified.groups,
+        baseline,
+        validation,
+    )?);
     let package_closure = package_catalog.select(
         selected_groups.groups(),
         selected_target.imports(),
@@ -6413,7 +6446,6 @@ fn compile_invocation_inner(
             package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
         let physical = physical_inputs.issued_artifacts();
         artifacts.artifact_view = physical.clone();
-        let mut selected_products = BTreeMap::new();
         let mut inherited_completion_support = compiler_inputs
             .as_ref()
             .map(|inputs| inputs.compiler_source_support().clone())
@@ -6439,35 +6471,16 @@ fn compile_invocation_inner(
                     &package_catalog,
                     &mut validation,
                 )?;
-                let selected_groups = Arc::new(
-                    crate::declaration_context::certify_issued_artifact_view_groups_with_validation(
-                        selected_target.artifacts(), &certified.groups,
-                        exact_request
-                            .as_ref()
-                            .map(|request| request.groups.as_ref()),
-                        &mut validation,
-                    )?,
-                );
-                for group in selected_groups.groups().iter() {
-                    let key = (group.owner().clone(), group.group().original_ordinal());
-                    match selected_products.entry(key) {
-                        std::collections::btree_map::Entry::Vacant(slot) => {
-                            slot.insert(group.clone());
-                        }
-                        std::collections::btree_map::Entry::Occupied(previous) => {
-                            let previous = previous.get();
-                            let same_exact_rows = previous.owner() == group.owner()
-                                && previous.origin() == group.origin()
-                                && previous.group() == group.group()
-                                && previous.imports() == group.imports();
-                            if !previous.same_issuance(group) && !same_exact_rows {
-                                return Err(CompileError::ExtractFailed(
-                                    "finite targets disagree on a physical native product".into(),
-                                ));
-                            }
-                        }
-                    }
-                }
+                let selected_groups = Arc::new(physical_inputs.physical_cohort()?.certify_groups(
+                    selected_target.artifacts(),
+                    &certified.groups,
+                    exact_request.as_ref().map(|request| {
+                        crate::declaration_context::CertifiedNativeGroupBaseline::Target(
+                            request.groups.as_ref(),
+                        )
+                    }),
+                    &mut validation,
+                )?);
                 let package_closure = package_catalog.select(
                     selected_groups.groups(),
                     selected_target.imports(),

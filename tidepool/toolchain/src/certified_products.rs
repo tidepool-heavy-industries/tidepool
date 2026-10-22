@@ -750,9 +750,7 @@ impl PackageInterfaceDecision {
     pub(crate) fn kind(&self) -> PackageInterfaceSelectionKind {
         match self.action {
             PackageInterfaceDecisionAction::Reuse { .. } => PackageInterfaceSelectionKind::Reuse,
-            PackageInterfaceDecisionAction::New => {
-                PackageInterfaceSelectionKind::NewSelection
-            }
+            PackageInterfaceDecisionAction::New => PackageInterfaceSelectionKind::NewSelection,
         }
     }
 
@@ -1646,11 +1644,9 @@ fn classify_segment_package_addition(
         ));
     }
     match available_packages.get(owner) {
-        Some(previous) if previous.witness.sha256 != witness.sha256 => {
-            Err(CertificationError::Mismatch(
-                "item replaces an inherited package selection",
-            ))
-        }
+        Some(previous) if previous.witness.sha256 != witness.sha256 => Err(
+            CertificationError::Mismatch("item replaces an inherited package selection"),
+        ),
         Some(_) => Ok(SegmentPackageAddition::Reuse),
         None => Ok(SegmentPackageAddition::NewSelection),
     }
@@ -10663,10 +10659,7 @@ impl IssuedSelectedNativeGroup {
         groups: &crate::declaration_context::CertifiedArtifactGroupBindings,
         binding: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<Arc<Self>> {
-        Some(Arc::new(Self {
-            product: Arc::new(groups.get(binding)?.clone()),
-            imports: Arc::clone(groups.shared_imports(binding)?),
-        }))
+        groups.issued_row(binding).map(Arc::clone)
     }
 
     pub(crate) fn product(&self) -> &Arc<PendingCertifiedGroup> {
@@ -10827,6 +10820,7 @@ pub(crate) fn certify_acquired_original_group_rows(
             SelectedOriginalGroupScope::Acquired { view, bindings },
             &BTreeMap::new(),
             validation,
+            None,
         )
         .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))
 }
@@ -10909,12 +10903,19 @@ impl<'a> OriginalValidationInventory<'a> {
         scope: SelectedOriginalGroupScope<'_>,
         current: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &PendingCertifiedGroup>,
         validation: &mut PackageInterfaceValidation,
+        issued: Option<
+            &BTreeMap<
+                crate::artifact_inventory::NativeGroupBinding,
+                Arc<IssuedSelectedNativeGroup>,
+            >,
+        >,
     ) -> CertResult<SelectedScopeCertification> {
         self.selected_scope(
             scope,
             current,
             OriginalNativeUse::SelectedGroups,
             validation,
+            issued,
         )
     }
 
@@ -10928,6 +10929,7 @@ impl<'a> OriginalValidationInventory<'a> {
             &BTreeMap::new(),
             OriginalNativeUse::Availability,
             validation,
+            None,
         )
         .map(|_| ())
     }
@@ -10938,6 +10940,12 @@ impl<'a> OriginalValidationInventory<'a> {
         current: &BTreeMap<crate::artifact_inventory::NativeGroupBinding, &PendingCertifiedGroup>,
         native_use: OriginalNativeUse,
         validation: &mut PackageInterfaceValidation,
+        issued: Option<
+            &BTreeMap<
+                crate::artifact_inventory::NativeGroupBinding,
+                Arc<IssuedSelectedNativeGroup>,
+            >,
+        >,
     ) -> CertResult<SelectedScopeCertification> {
         let operation = Arc::clone(&validation.inventory);
         let bindings = scope
@@ -11002,6 +11010,19 @@ impl<'a> OriginalValidationInventory<'a> {
                 }
             }
             if native_use == OriginalNativeUse::SelectedGroups {
+                if let Some(row) = issued.and_then(|rows| rows.get(&binding)) {
+                    if current
+                        .get(&binding)
+                        .is_none_or(|product| !product.same_issuance(row.product()))
+                        || row.imports() != imports.selected.as_ref()
+                    {
+                        return Err(CertificationError::Mismatch(
+                            "physical cohort changed its issued native row",
+                        ));
+                    }
+                    rows.insert(binding, Arc::clone(row));
+                    continue;
+                }
                 operation.reserve::<(
                     crate::artifact_inventory::NativeGroupBinding,
                     IssuedSelectedNativeGroup,
@@ -16993,6 +17014,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&broad),
                 &BTreeMap::new(),
                 &mut validation,
+                None,
             )
             .unwrap()
             .rows;
@@ -17007,6 +17029,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&broad),
                 &current,
                 &mut validation,
+                None,
             )
             .unwrap()
             .rows;
@@ -17021,7 +17044,8 @@ pub(crate) mod tests {
             checked.certify_selected_scope(
                 SelectedOriginalGroupScope::View(&foreign),
                 &current,
-                &mut validation
+                &mut validation,
+                None
             ),
             Err(CertificationError::Mismatch(
                 "current group outside selected binding closure"
@@ -17033,7 +17057,8 @@ pub(crate) mod tests {
             checked.certify_selected_scope(
                 SelectedOriginalGroupScope::View(&broad),
                 &BTreeMap::from([(*binding, &wrong_owner)]),
-                &mut validation
+                &mut validation,
+                None
             ),
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
@@ -17047,7 +17072,8 @@ pub(crate) mod tests {
             checked.certify_selected_scope(
                 SelectedOriginalGroupScope::View(&broad),
                 &BTreeMap::from([(*binding, &changed)]),
-                &mut validation
+                &mut validation,
+                None
             ),
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
@@ -17108,6 +17134,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&broad),
                 &BTreeMap::new(),
                 &mut validation,
+                None,
             )
             .unwrap()
             .rows;
@@ -17140,6 +17167,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&broad),
                 &baseline,
                 &mut validation,
+                None,
             )
             .unwrap()
             .rows;
@@ -17160,7 +17188,8 @@ pub(crate) mod tests {
             checker.certify_selected_scope(
                 SelectedOriginalGroupScope::View(&broad),
                 &substituted,
-                &mut validation
+                &mut validation,
+                None
             ),
             Err(CertificationError::Mismatch(
                 "current group outside selected binding closure"
@@ -28139,6 +28168,7 @@ pub(crate) mod tests {
                     SelectedOriginalGroupScope::View(&view),
                     &BTreeMap::new(),
                     &mut validation,
+                    None,
                 )
                 .unwrap()
                 .rows;
@@ -28328,6 +28358,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&with_package),
                 &BTreeMap::new(),
                 &mut validation,
+                None,
             )
             .unwrap()
             .rows;
@@ -28357,6 +28388,7 @@ pub(crate) mod tests {
                 SelectedOriginalGroupScope::View(&with_home),
                 &BTreeMap::new(),
                 &mut validation,
+                None
             ),
             Err(CertificationError::Mismatch(
                 "home owner downgraded to package"

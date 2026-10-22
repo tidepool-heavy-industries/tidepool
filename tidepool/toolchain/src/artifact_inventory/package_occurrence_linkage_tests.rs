@@ -467,12 +467,20 @@ fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
             .expect("issued target has native source products");
         for row in selection.completion().rows() {
             assert!(
-                sources.physical_current_for(row).is_some(),
+                sources
+                    .physical_current_for(selection, row)
+                    .expect("exact target source receipt")
+                    .is_some(),
                 "{target} preserves current-source custody for ordinal {}",
                 row.binding().original_ordinal
             );
         }
     }
+
+    let left_sources = forward.targets["result"].native_source_products().unwrap().unwrap();
+    let shared_row = result.completion().rows().next().expect("shared current HOME row");
+    assert!(left_sources.physical_current_for(&result2, shared_row).is_err(),
+        "equal linkage in another target cannot authenticate this target's source receipt");
 
     let package_bindings =
         |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>, ordinal: u32| {

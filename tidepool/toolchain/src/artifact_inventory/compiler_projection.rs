@@ -366,7 +366,6 @@ pub enum CompletedNativeImport {
 pub struct CompletedNativeSourceRow {
     binding: NativeGroupBinding,
     product: Arc<crate::certified_products::PendingCertifiedGroup>,
-    current_source: Option<Arc<crate::certified_products::PendingCertifiedGroup>>,
     imports: Arc<[CompletedNativeImport]>,
 }
 impl CompletedNativeSourceRow {
@@ -375,11 +374,6 @@ impl CompletedNativeSourceRow {
     }
     pub fn product(&self) -> &Arc<crate::certified_products::PendingCertifiedGroup> {
         &self.product
-    }
-    pub(crate) fn current_source(
-        &self,
-    ) -> Option<&Arc<crate::certified_products::PendingCertifiedGroup>> {
-        self.current_source.as_ref()
     }
     pub fn imports(&self) -> &[CompletedNativeImport] {
         &self.imports
@@ -843,7 +837,6 @@ fn restore_native_completion(
             Arc::new(CompletedNativeSourceRow {
                 binding: *binding,
                 product: Arc::clone(product),
-                current_source: None,
                 imports: imports.into(),
             }),
         );
@@ -888,10 +881,27 @@ pub enum CompletedNativeTargetImport {
 /// the dependency completion without granting another target these slots.
 #[derive(Debug)]
 pub struct CompletedNativeSelection {
+    source_target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    source_associations: BTreeMap<NativeGroupBinding, SelectedNativeSourceAssociation>,
     completion: Arc<IssuedNativeSelectionCompletion>,
     target_imports: Arc<[CompletedNativeTargetImport]>,
 }
+#[derive(Debug)]
+pub(crate) enum SelectedNativeSourceAssociation {
+    Current(Arc<crate::certified_products::PendingCertifiedGroup>),
+    Historical,
+}
+
 impl CompletedNativeSelection {
+    pub(crate) fn source_target(&self) -> &Arc<tidepool_repr::execution_schema::PreparedProgram> {
+        &self.source_target
+    }
+    pub(crate) fn source_association(
+        &self,
+        binding: NativeGroupBinding,
+    ) -> Option<&SelectedNativeSourceAssociation> {
+        self.source_associations.get(&binding)
+    }
     pub fn completion(&self) -> &Arc<IssuedNativeSelectionCompletion> {
         &self.completion
     }
@@ -1152,6 +1162,12 @@ pub(crate) fn complete_native_selection(
         Occurrence(u32),
         Held(super::PackageCodeBinding),
     }
+    let source_target = Arc::clone(
+        selection
+            .prepared_program()
+            .ok_or_else(|| failure("native completion lacks its source target"))?,
+    );
+    let mut source_associations = BTreeMap::new();
     let mut selected_package_roots = Vec::new();
     operation
         .reserve::<CompletedNativeSourceRow>(sources.groups().count())
@@ -1189,14 +1205,19 @@ pub(crate) fn complete_native_selection(
             }
         }
         let product = prior.map_or_else(
-            || Arc::new(row.group().clone()),
+            || Arc::clone(row.shared_group()),
             |old| Arc::clone(&old.product),
         );
-        let current_source = row
-            .physical_current()
-            .is_some()
-            .then(|| Arc::new(row.group().clone()));
-        row_inputs.push((row, prior, product, current_source));
+        let association = match row.source_association() {
+            super::ResolvedSourceAssociation::Current => {
+                SelectedNativeSourceAssociation::Current(Arc::clone(row.shared_group()))
+            }
+            super::ResolvedSourceAssociation::Historical => {
+                SelectedNativeSourceAssociation::Historical
+            }
+        };
+        source_associations.insert(row.binding(), association);
+        row_inputs.push((row, prior, product));
     }
     // Package-bearing rows consume their target-qualified HOME links. A prior
     // completion is authoritative, but the current occurrence must match its
@@ -1207,7 +1228,7 @@ pub(crate) fn complete_native_selection(
         .collect::<BTreeSet<_>>();
     let source_home_rows = row_inputs
         .iter()
-        .map(|(row, _, _, _)| {
+        .map(|(row, _, _)| {
             let owner = row.group().owner();
             let package_slots = row
                 .imports()
@@ -1245,7 +1266,7 @@ pub(crate) fn complete_native_selection(
         .map(|(key, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let mut consumed_home_keys = BTreeSet::new();
-    for (row, prior, _, _) in &row_inputs {
+    for (row, prior, _) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
         if imports.len() != definitions.globals().len()
@@ -1515,7 +1536,7 @@ pub(crate) fn complete_native_selection(
             .map(Into::into)
     };
     let mut rows = imbl::OrdMap::new();
-    for (row, prior, product, current_source) in row_inputs {
+    for (row, prior, product) in row_inputs {
         let imports = close(row.imports(), row.group().group().definitions())?;
         if prior.is_some_and(|prior| prior.imports != imports) {
             return Err(failure(
@@ -1527,7 +1548,6 @@ pub(crate) fn complete_native_selection(
             Arc::new(CompletedNativeSourceRow {
                 binding: row.binding(),
                 product,
-                current_source,
                 imports,
             }),
         );
@@ -1583,6 +1603,8 @@ pub(crate) fn complete_native_selection(
         .acquired_artifacts()
         .retain_custody(packages.artifacts())?;
     Ok(Arc::new(CompletedNativeSelection {
+        source_target,
+        source_associations,
         completion: IssuedNativeSelectionCompletion::issue_parts(
             *output.producer_sha256(),
             *output.profile_sha256(),

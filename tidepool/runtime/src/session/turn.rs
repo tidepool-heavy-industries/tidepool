@@ -1692,23 +1692,16 @@ impl<'a> CurrentNativeSources<'a> {
 
     pub(super) fn group(
         &self,
+        selection: &Arc<tidepool_toolchain::artifact_inventory::CompletedNativeSelection>,
         selected: &tidepool_toolchain::artifact_inventory::CompletedNativeSourceRow,
-    ) -> super::resident::NativeSourceCustody {
-        let pending = selected.product();
-        let unknown = || {
-            super::resident::NativeSourceCustody::unknown(
-                pending
-                    .group()
-                    .definitions()
-                    .sites()
-                    .iter()
-                    .map(|site| site.site),
-            )
-        };
-        match self.products.physical_current_for(selected) {
-            Some(current) => self.source.for_current_group(current),
-            None => unknown(),
-        }
+    ) -> Result<Option<super::resident::NativeSourceCustody>, super::prepared::PreparedRuntimeError>
+    {
+        self.products
+            .physical_current_for(selection, selected)
+            .map(|current| current.map(|group| self.source.for_current_group(group)))
+            .map_err(|error| {
+                super::prepared::PreparedRuntimeError::NativeSourceEvidence(Box::new(error))
+            })
     }
 }
 

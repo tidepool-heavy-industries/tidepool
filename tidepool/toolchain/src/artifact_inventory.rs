@@ -26,7 +26,7 @@ pub use compiler_projection::{
 pub(crate) use compiler_projection::{
     CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection, InputNativeDecision,
     IssuedInputNativeDecisions, NativeCompletionSnapshotFacts, NativeSelectionCompletions,
-    RecordedCompilerRole, RecordedInputNativeDecision,
+    RecordedCompilerRole, RecordedInputNativeDecision, SelectedNativeSourceAssociation,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -730,17 +730,23 @@ impl<'a> ResolvedNativeSourceTarget<'a> {
             .ok_or_else(|| failure("selected native binding lacks its ordered import links"))
     }
 
-    pub(crate) fn group(
+    pub(crate) fn shared_group(
         &self,
         binding: NativeGroupBinding,
-    ) -> Result<&'a crate::certified_products::PendingCertifiedGroup, CompileError> {
+    ) -> Result<&'a Arc<crate::certified_products::PendingCertifiedGroup>, CompileError> {
         if !self.target.groups().contains(&binding) {
             return Err(failure("native source row is outside its resolved target"));
         }
-        self.groups
-            .get(binding)
+        self.groups.issued_row(binding).map(|row| row.product())
             .ok_or_else(|| failure("selected native binding lacks its exact certified product"))
     }
+
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResolvedSourceAssociation {
+    Current,
+    Historical,
 }
 
 /// Operation-local resolution borrows the one final target owner.
@@ -758,16 +764,31 @@ impl<'a> ResolvedNativeTarget<'a> {
 }
 
 impl ResolvedNativeTarget<'_> {
-    pub(crate) fn has_only_current_source(&self, group: NativeGroupBinding) -> bool {
-        self.sources
+    pub(crate) fn source_association(
+        &self,
+        group: NativeGroupBinding,
+    ) -> Result<ResolvedSourceAssociation, CompileError> {
+        let causes = self
+            .sources
             .0
             .get(&NativeSourceUse::Root(group))
-            .is_some_and(|causes| {
-                !causes.is_empty()
-                    && causes
-                        .iter()
-                        .all(|cause| matches!(cause, NativeSourceCause::Current))
-            })
+            .filter(|causes| !causes.is_empty())
+            .ok_or_else(|| failure("selected HOME group lacks its source receipt"))?;
+        if causes
+            .iter()
+            .any(|cause| matches!(cause, NativeSourceCause::Current))
+        {
+            Ok(ResolvedSourceAssociation::Current)
+        } else if causes
+            .iter()
+            .all(|cause| matches!(cause, NativeSourceCause::Historical { .. }))
+        {
+            Ok(ResolvedSourceAssociation::Historical)
+        } else {
+            Err(failure(
+                "selected HOME group has unwitnessed source membership",
+            ))
+        }
     }
     pub(crate) fn groups(&self) -> &BTreeSet<NativeGroupBinding> {
         &self.groups

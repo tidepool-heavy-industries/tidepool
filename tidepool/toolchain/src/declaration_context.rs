@@ -538,6 +538,11 @@ pub(crate) struct OriginalCompilerInputs {
 #[derive(Debug)]
 struct PhysicalValueCaptures {
     facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
+    // Admission issues only demanded rows. Their owner survives every target
+    // projection of this physical cohort; retained availability is not demand.
+    groups: std::sync::Mutex<
+        BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+    >,
 }
 
 /// A live borrow of an actual once-issued output cohort, including its original
@@ -552,6 +557,44 @@ pub(crate) struct PhysicalCohortInputs<'a> {
 impl<'a> PhysicalCohortInputs<'a> {
     pub(crate) fn artifacts(&self) -> &'a ArtifactView {
         self.inputs.issued_artifacts()
+    }
+
+    pub(crate) fn certify_groups(
+        &self,
+        view: &ArtifactView,
+        candidates: &crate::certified_products::IssuedGroupCandidates,
+        baseline: Option<CertifiedNativeGroupBaseline<'_>>,
+        validation: &mut PackageInterfaceValidation,
+    ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
+        let mut issued = self
+            .captures
+            .groups
+            .lock()
+            .expect("physical group issuance lock");
+        let groups = certify_artifact_view_groups(
+            view,
+            Some(candidates),
+            baseline,
+            validation,
+            Some(&issued),
+        )?;
+        for (binding, row) in &groups.rows {
+            if let Some(prior) = issued.get(binding) {
+                if !Arc::ptr_eq(prior, row) {
+                    return Err(failure("physical cohort reissued a demanded native row"));
+                }
+            } else {
+                validation
+                    .inventory
+                    .reserve::<(
+                        crate::artifact_inventory::NativeGroupBinding,
+                        Arc<IssuedSelectedNativeGroup>,
+                    )>(1)
+                    .map_err(|error| compiler_evidence_failure(error.into()))?;
+                issued.insert(*binding, Arc::clone(row));
+            }
+        }
+        Ok(groups)
     }
 
     pub(crate) fn permits_visible_value(&self, entry: &ArtifactEntry) -> bool {
@@ -875,6 +918,7 @@ impl OriginalCompilerInputs {
         );
         let mut captures = PhysicalValueCaptures {
             facts: BTreeMap::new(),
+            groups: Default::default(),
         };
         for entry in &entries {
             if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
@@ -3499,6 +3543,7 @@ impl DemandNativeInputs {
                     ),
                     &previous,
                     validation,
+                    None,
                 )
                 .map_err(compiler_evidence_failure)?;
             for (binding, row) in certification.rows {
@@ -11626,14 +11671,16 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 stage: &segment.inputs.groups,
                 prior: prior.certified_groups(),
             };
-            certify_artifact_view_groups(&combined, None, Some(baseline), &mut validation)
+            certify_artifact_view_groups(&combined, None, Some(baseline), &mut validation, None)
                 .expect("both actual issued baselines retain their exact links");
             assert!(
-                certify_artifact_view_groups(stage, None, Some(baseline), &mut validation).is_err(),
+                certify_artifact_view_groups(stage, None, Some(baseline), &mut validation, None)
+                    .is_err(),
                 "a stage cannot drop its actual previous target"
             );
             let groups = prior.certified_groups();
             let mut changed = CertifiedArtifactGroupBindings {
+                rows: groups.rows.clone(),
                 view: groups.view.clone(),
                 groups: Arc::clone(&groups.groups),
                 bindings: groups.bindings.clone(),
@@ -11655,6 +11702,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
                     prior: &changed,
                 }),
                 &mut validation,
+                None,
             )
             .unwrap_err();
             assert!(error
@@ -11662,7 +11710,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
                 .contains("changed an issued native import destination"));
             let mut foreign = PackageInterfaceValidation::default();
             assert!(
-                certify_artifact_view_groups(&combined, None, Some(baseline), &mut foreign)
+                certify_artifact_view_groups(&combined, None, Some(baseline), &mut foreign, None)
                     .is_err(),
                 "another accounting owner cannot consume the World baseline"
             );
@@ -15198,6 +15246,7 @@ impl ExactDeclarationContext {
             None,
             Some(CertifiedNativeGroupBaseline::Rows(&keyed)),
             &mut validation,
+            None,
         )?;
         crate::timing::record_stage(
             crate::timing::NO_NODE,
@@ -15799,6 +15848,7 @@ pub(crate) fn validate_artifact_view_groups_with_validation(
 /// the same view. Independent scoped edges may share one physical group row.
 pub(crate) struct CertifiedArtifactGroupBindings {
     view: crate::artifact_inventory::NativeGroupViewStamp,
+    rows: BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     groups: Arc<[PendingCertifiedGroup]>,
     bindings: BTreeMap<crate::artifact_inventory::NativeGroupBinding, usize>,
     imports: BTreeMap<
@@ -15871,6 +15921,10 @@ impl CertifiedArtifactGroupBindings {
         }
         Ok(Self {
             view: stamp,
+            rows: rows
+                .iter()
+                .map(|(binding, row)| (*binding, Arc::clone(row)))
+                .collect(),
             groups: groups.into(),
             bindings,
             imports,
@@ -15881,16 +15935,17 @@ impl CertifiedArtifactGroupBindings {
         &self,
     ) -> imbl::OrdMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>
     {
-        self.bindings
-            .keys()
-            .map(|binding| {
-                (
-                    *binding,
-                    IssuedSelectedNativeGroup::from_certified(self, *binding)
-                        .expect("certified binding retains its product and ordered imports"),
-                )
-            })
+        self.rows
+            .iter()
+            .map(|(binding, row)| (*binding, Arc::clone(row)))
             .collect()
+    }
+
+    pub(crate) fn issued_row(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+    ) -> Option<&Arc<IssuedSelectedNativeGroup>> {
+        self.rows.get(&binding)
     }
 
     pub(crate) fn groups(&self) -> &Arc<[PendingCertifiedGroup]> {
@@ -15939,15 +15994,6 @@ pub(crate) enum CertifiedNativeGroupBaseline<'a> {
     Rows(&'a BTreeMap<crate::artifact_inventory::NativeGroupBinding, &'a PendingCertifiedGroup>),
 }
 
-pub(crate) fn certify_bound_artifact_view_groups_with_validation(
-    view: &ArtifactView,
-    candidates: &crate::certified_products::IssuedGroupCandidates,
-    baseline: CertifiedNativeGroupBaseline<'_>,
-    validation: &mut PackageInterfaceValidation,
-) -> Result<CertifiedArtifactGroupBindings, CompileError> {
-    certify_artifact_view_groups(view, Some(candidates), Some(baseline), validation)
-}
-
 pub(crate) fn certify_selected_artifact_view_groups_with_validation(
     view: &ArtifactView,
     baseline: Option<&CertifiedArtifactGroupBindings>,
@@ -15958,9 +16004,11 @@ pub(crate) fn certify_selected_artifact_view_groups_with_validation(
         None,
         baseline.map(CertifiedNativeGroupBaseline::Target),
         validation,
+        None,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn certify_issued_artifact_view_groups_with_validation(
     view: &ArtifactView,
     candidates: &crate::certified_products::IssuedGroupCandidates,
@@ -15972,6 +16020,7 @@ pub(crate) fn certify_issued_artifact_view_groups_with_validation(
         Some(candidates),
         baseline.map(CertifiedNativeGroupBaseline::Target),
         validation,
+        None,
     )
 }
 
@@ -15980,6 +16029,9 @@ fn certify_artifact_view_groups(
     candidates: Option<&crate::certified_products::IssuedGroupCandidates>,
     bound_baseline: Option<CertifiedNativeGroupBaseline<'_>>,
     validation: &mut PackageInterfaceValidation,
+    issued_rows: Option<
+        &BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
+    >,
 ) -> Result<CertifiedArtifactGroupBindings, CompileError> {
     if let Some(CertifiedNativeGroupBaseline::WorldPrefix { stage, .. }) = bound_baseline {
         if !Arc::ptr_eq(&stage.operation, &validation.inventory) {
@@ -16102,6 +16154,13 @@ fn certify_artifact_view_groups(
         }
         _ => {}
     }
+    if let Some(issued) = issued_rows {
+        for binding in &selected_bindings {
+            if let Some(row) = issued.get(binding) {
+                inherit_binding(*binding, row.product())?;
+            }
+        }
+    }
     let keyed_current = selected_bindings
         .iter()
         .filter_map(|binding| {
@@ -16124,6 +16183,7 @@ fn certify_artifact_view_groups(
             crate::certified_products::SelectedOriginalGroupScope::View(view),
             &keyed_current,
             validation,
+            issued_rows,
         )
         .map_err(compiler_evidence_failure)?;
     let rows = certification.rows;
@@ -16202,6 +16262,7 @@ fn certify_artifact_view_groups(
         .collect::<Result<_, CompileError>>()?;
     Ok(CertifiedArtifactGroupBindings {
         view: view_stamp,
+        rows,
         groups: current.into(),
         bindings,
         imports,

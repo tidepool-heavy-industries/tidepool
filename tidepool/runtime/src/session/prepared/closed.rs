@@ -640,27 +640,28 @@ pub(in crate::session) struct ResolvedNativeCapture {
 /// does not replace the source transaction's actual prerequisite admission.
 pub(in crate::session) struct NativeInstallationSources {
     target: NativeSourceCustody,
-    programs: Vec<NativeSourceCustody>,
+    // None is an explicitly historical definition, never current source.
+    programs: Vec<Option<NativeSourceCustody>>,
 }
 
 impl NativeInstallationSources {
     pub(in crate::session) fn current(
         plan: &NativeInstantiationPlan,
         current: &super::super::turn::CurrentNativeSources<'_>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PreparedRuntimeError> {
+        Ok(Self {
             target: current.target(),
             programs: plan
                 .programs
                 .iter()
                 .map(|program| match &program.native {
-                    NativeCompiledProduct::Home { row, .. } => current.group(row),
+                    NativeCompiledProduct::Home { row, .. } => current.group(&plan.selection, row),
                     NativeCompiledProduct::Package { binding, .. } => {
-                        current.package(ClosedPackageDefinition { binding })
+                        Ok(Some(current.package(ClosedPackageDefinition { binding })))
                     }
                 })
-                .collect(),
-        }
+                .collect::<Result<Vec<_>, PreparedRuntimeError>>()?,
+        })
     }
 
     pub(in crate::session) fn closed(
@@ -673,7 +674,7 @@ impl NativeInstallationSources {
                 .native
                 .programs
                 .iter()
-                .map(|program| origin.for_closed_definition(plan.definition(&program.native)))
+                .map(|program| Some(origin.for_closed_definition(plan.definition(&program.native))))
                 .collect(),
         }
     }
@@ -836,6 +837,39 @@ impl PreparedEngine {
                 ScopedNativeSlot::Retained(_) => None,
             })
             .collect::<BTreeSet<_>>();
+        // Resolve historical source custody before acquiring any mutable native
+        // resources. A retained code row cannot become current merely because
+        // this target installs equal code. Existing exact instances keep their
+        // own original ProgramFacts; closed installation supplies its own origin.
+        let program_sources = fresh
+            .iter()
+            .map(|occurrence| {
+                let program = &plan.programs[occurrence.program];
+                let sources = match &sources.programs[occurrence.program] {
+                    Some(current) => current.clone(),
+                    None => match instantiation.anchors.get(occurrence) {
+                        Some(anchor) => {
+                            let held = self
+                                .programs
+                                .get(&anchor.instance().program())
+                                .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
+                            if !Arc::ptr_eq(
+                                &held.definitions,
+                                program.native.image().definition_facts(),
+                            ) {
+                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                            }
+                            held.native_sources.clone()
+                        }
+                        None if program.native.definitions().sites().is_empty() => {
+                            NativeSourceCustody::default()
+                        }
+                        None => return Err(PreparedRuntimeError::CertifiedTargetOwners),
+                    },
+                };
+                Ok((*occurrence, sources))
+            })
+            .collect::<Result<BTreeMap<_, _>, PreparedRuntimeError>>()?;
         let mut late_roots = Vec::<NativeInstanceLease>::new();
         let result = (|| {
             let mut attachments = Vec::new();
@@ -956,7 +990,7 @@ impl PreparedEngine {
                     Some(occurrence) => {
                         let program = &plan.programs[occurrence.program];
                         let mut facts = ProgramFacts::from_image(program.native.image(), None);
-                        facts.native_sources = sources.programs[occurrence.program].clone();
+                        facts.native_sources = program_sources[&occurrence].clone();
                         facts.native_product = Some(match &program.native {
                             NativeCompiledProduct::Home { row, .. } => NativeProductProof::SelectedHome { _selection: Arc::clone(&plan.selection), _binding: row.binding() },
                             NativeCompiledProduct::Package { binding, .. } => NativeProductProof::Package { _binding: binding.clone() },
