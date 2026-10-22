@@ -3845,8 +3845,11 @@ originalProjectionProductsWithRequest work request = do
     (\(unit,name,_,ordinal) -> (unit,name,Just "unissued-prior-version",ordinal)) packagefulGroups)
   rejectPrior "an unissued prior ordinal" (Map.mapKeys
     (\(unit,name,version,_) -> (unit,name,version,maxBound)) packagefulGroups)
-  rejectPrior "changed ordered direct package imports" (Map.map
+  rejectPrior "changed direct package imports" (Map.map
     (\identities -> case identities of [] -> []; first : _ -> first : identities) packagefulGroups)
+  unless (any ((> 1) . length) (Map.elems packagefulGroups)) $
+    fail "later prior-body fixture lacks multiple ordered direct package imports"
+  rejectPrior "reordered direct package imports" (Map.map reverse packagefulGroups)
   let direct = [global | global <- currentGlobals,globalIdentity global == known]
   unless (not (null direct) && requiredOriginalExternalGlobalsWithPrior [] [] [] Set.empty priorPackages direct
       == Right (Set.toAscList packages)) $
