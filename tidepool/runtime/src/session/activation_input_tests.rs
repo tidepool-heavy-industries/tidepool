@@ -1088,15 +1088,31 @@ fn issued_captured_input(
     input: RuntimeActivationInput,
     recipe: Arc<InputRecipe>,
 ) -> (RuntimeActivationInputAdmission, InputInterface) {
+    issued_captured_input_with_private(resident, input, recipe, None)
+}
+
+fn issued_captured_input_with_private(
+    resident: &mut TestSession,
+    input: RuntimeActivationInput,
+    recipe: Arc<InputRecipe>,
+    private: Option<(
+        &Arc<crate::session::PrivateExecutionAdmission>,
+        &Arc<crate::session::PrivatePreparationSnapshot>,
+    )>,
+) -> (RuntimeActivationInputAdmission, InputInterface) {
     let scope = resident.run_context().lexical_scope;
     let witness = input.input_type_witness.clone();
     let before = resident.residency();
     let codegen = resident.codegen_totals();
     let visibility = resident.public_visibility_snapshot_in(scope).unwrap();
     let owner = source_action(resident, |resident, _| {
-        resident
-            .admit_activation_input_in(scope, input)
-            .expect("reserve one original live input without authored checking")
+        match private {
+            Some((execution, snapshot)) => {
+                resident.admit_activation_input_for_execution(execution, snapshot, input)
+            }
+            None => resident.admit_activation_input_in(scope, input),
+        }
+        .expect("reserve one original live input without authored checking")
     });
     let reservation = owner.reservation();
     let requests = tidepool_toolchain::artifacts::host_binding_interface_request_count();
@@ -5490,21 +5506,50 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
             ..public_context
         })
         .unwrap();
-    let (input, interface) = issued_captured_input(&mut resident, captured, recipe.clone());
-    let mounted = mount_original(&mut resident, input, interface);
+    let preparation = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_execution(activation_execution.clone(), None)
+    })
+    .unwrap();
+    let (snapshot, operand) = preparation.into_parts();
+    assert!(operand.is_none());
+    let (input, interface) = issued_captured_input_with_private(
+        &mut resident,
+        captured,
+        recipe.clone(),
+        Some((&activation_execution, &snapshot)),
+    );
+    let mounted = source_action(&mut resident, |resident, settlement| {
+        resident.mount_activation_input_for_execution(
+            input,
+            interface,
+            settlement,
+            &activation_execution,
+            &snapshot,
+        )
+    })
+    .unwrap();
     let published_binding = mounted.binding();
     assert!(!before_binding_ids.contains(&published_binding));
     let view = resident
-        .compile_view_for_execution(&activation_execution)
+        .compile_view_in(activation_scope)
         .unwrap()
         .with_scoped_injection();
     let preview = resident.admit_activation_preview(mounted, view).unwrap();
+    let recipient_sources = resident
+        .public_visibility_snapshot_in(activation_scope)
+        .unwrap()
+        .source_instances;
     let base = resident
-        .snapshot_host_binding_publication(&activation_execution, &preview)
+        .snapshot_activation_publication(&activation_execution, &preview)
         .unwrap();
-    assert!(
-        base.source_keys.is_empty(),
-        "binding reachability retains the private source without promoting its selection"
+    assert_eq!(
+        base.source_keys, recipient_sources,
+        "Final publication keeps the recipient's exact source selection"
+    );
+    let intent = activation_execution.final_intent.get().unwrap();
+    assert_eq!(
+        intent.binding_policy,
+        crate::session::BindingPublicationPolicy::ActivationInput
     );
     assert!(matches!(
         source_action(&mut resident, |resident, _| resident
