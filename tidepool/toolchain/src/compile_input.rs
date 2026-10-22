@@ -871,6 +871,22 @@ mod tests {
         let package_interfaces =
             crate::certified_products::certify_target_package_interfaces(&target, &BTreeMap::new())
                 .unwrap();
+        let artifacts = crate::artifact_inventory::ArtifactInventory::default().empty_view();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &crate::artifact_inventory::CompilerInputProjection::default(),
+                &artifacts.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let physical = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &artifacts,
+            Vec::new(),
+            &mut validation,
+        )
+        .unwrap();
         seal(
             producer,
             &[],
@@ -884,15 +900,7 @@ mod tests {
             &package_interfaces,
             DataConTable::new(),
             vec![],
-            &crate::artifact_inventory::ArtifactInventory::default().empty_view(),
-            &crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &crate::artifact_inventory::CompilerInputProjection::default(),
-                &crate::artifact_inventory::ArtifactInventory::default()
-                    .empty_view()
-                    .metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap(),
+            physical.output(),
             Default::default(),
         )
         .unwrap()
