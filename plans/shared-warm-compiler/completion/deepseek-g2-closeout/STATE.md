@@ -1,5 +1,18 @@
 # Current G2 campaign state
 
+**2026-10-22 ownership redesign supersedes the repair sequence below.**
+[Linked-code ownership](../linked-code-ownership/README.md) owns implementation,
+shared contracts, workers and verification, starting at `be716054b0` on
+`refactor/g2-linked-code-ownership-20261022`. The user accepted a fresh-run format
+reset with no backward-compatibility path. G2 remains unqualified. At the base,
+Text fails on hidden-owner source admission; acknowledgement fails at completion
+join with an inconclusive graph diagnostic; controls are 3 passed / 1 failed
+(the failed fixture confuses raw custody namespace with selected compiler roles).
+No validation source pin or active build remains from that checkpoint.
+
+The remainder records the prior repair approach and evidence; it is not a new
+implementation assignment. Its detailed current-status claims are superseded.
+
 **Implementation active; G2 unqualified.** Integration branch
 `root/g2-final-20261021`, checkout
 `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
