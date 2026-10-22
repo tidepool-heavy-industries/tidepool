@@ -1,104 +1,185 @@
 //! Canonical prepared-data encoding. Encoding never issues compiler evidence.
 //!
-//! Keep matches and struct destructuring exhaustive so adding a schema field or
-//! variant requires updating this codec. Semantic admission remains in the reader.
+//! The pinned CBOR encoder writes borrowed fields directly. Keep matches and
+//! struct destructuring exhaustive when changing the prepared schema.
 
 use super::*;
-use ciborium::value::Value;
+use ciborium_io::Write;
+use ciborium_ll::{Encoder as CborEncoder, Header};
+use sha2::{Digest, Sha256};
 
-fn n(value: impl Into<u64>) -> Value {
-    Value::Integer(value.into().into())
+// Flat arenas keep record nesting independent of program depth. Emit each
+// expression before visiting the next; never build an intermediate CBOR tree.
+macro_rules! array {
+    (@one $item:expr) => { () };
+    ($out:expr; $($item:expr),* $(,)?) => {{
+        let length = <[()]>::len(&[$(array!(@one $item)),*]);
+        $out.push(Header::Array(Some(length)))?;
+        $( $item?; )*
+        Ok::<(), ParseError>(())
+    }};
 }
-fn s(value: &str) -> Value {
-    Value::Text(value.into())
+
+enum Destination<'a> {
+    Bytes(&'a mut Vec<u8>),
+    Digest(&'a mut Sha256),
 }
-fn a(values: impl IntoIterator<Item = Value>) -> Value {
-    Value::Array(values.into_iter().collect())
+struct Sink<'a> {
+    destination: Destination<'a>,
+    budget: Option<&'a mut OperationBudget>,
 }
-fn list<T>(values: &[T], encode: impl Fn(&T) -> Value) -> Value {
-    a(values.iter().map(encode))
-}
-fn option<T>(value: &Option<T>, encode: impl Fn(&T) -> Value) -> Value {
-    match value {
-        None => a([n(0_u64)]),
-        Some(value) => a([n(1_u64), encode(value)]),
+impl Write for Sink<'_> {
+    type Error = ParseError;
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), ParseError> {
+        if let Some(budget) = &mut self.budget {
+            budget.charge(bytes.len())?;
+        }
+        match &mut self.destination {
+            Destination::Bytes(output) => output.extend_from_slice(bytes),
+            Destination::Digest(hash) => hash.update(bytes),
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), ParseError> {
+        Ok(())
     }
 }
-fn bytes(value: &Value) -> Vec<u8> {
+type Encoder<'a> = CborEncoder<Sink<'a>>;
+
+fn n(value: impl Into<u64>, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    out.push(Header::Positive(value.into()))
+}
+fn s(value: &str, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    out.text(value, None)
+}
+fn binary(value: &[u8], out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    out.bytes(value, None)
+}
+fn boolean(value: bool, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    out.push(Header::Simple(if value {
+        ciborium_ll::simple::TRUE
+    } else {
+        ciborium_ll::simple::FALSE
+    }))
+}
+fn null(out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    out.push(Header::Simple(ciborium_ll::simple::NULL))
+}
+fn list<T>(
+    values: &[T],
+    encode: impl Fn(&T, &mut Encoder<'_>) -> Result<(), ParseError>,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
+    out.push(Header::Array(Some(values.len())))?;
+    for value in values {
+        encode(value, out)?;
+    }
+    Ok(())
+}
+fn option<T>(
+    value: &Option<T>,
+    encode: impl Fn(&T, &mut Encoder<'_>) -> Result<(), ParseError>,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
+    match value {
+        None => array!(out; n(0_u64, out)),
+        Some(value) => array!(out; n(1_u64, out), encode(value, out)),
+    }
+}
+fn bytes(encode: impl FnOnce(&mut Encoder<'_>) -> Result<(), ParseError>) -> Vec<u8> {
     let mut output = Vec::new();
-    ciborium::ser::into_writer(value, &mut output).expect("in-memory CBOR encoding");
+    encode(&mut Encoder::from(Sink {
+        destination: Destination::Bytes(&mut output),
+        budget: None,
+    }))
+    .expect("unbounded in-memory prepared encoding");
     output
 }
 
 /// Encode current typed program data without validating or issuing authority.
-/// Callers may deliberately supply invalid values when testing reader refusal.
 pub fn encode_wire_program(wire: &WireProgram) -> Vec<u8> {
-    let WireProgram {
-        envelope,
-        signatures,
-        globals,
-        constructors,
-        operations,
-        expressions,
-        bindings,
-        entry,
-        types,
-        sites,
-        constructor_replies,
-        json_layout,
-    } = wire;
-    let mut fields = definitions(
-        envelope,
-        signatures,
-        globals,
-        constructors,
-        operations,
-        expressions,
-        bindings,
-        types,
-        sites,
-        constructor_replies,
-        json_layout,
-    );
-    fields.insert(11, n(entry.0));
-    fields.insert(0, s("TPSTG"));
-    bytes(&a(fields))
+    bytes(|out| {
+        let WireProgram {
+            envelope,
+            signatures,
+            globals,
+            constructors,
+            operations,
+            expressions,
+            bindings,
+            entry,
+            types,
+            sites,
+            constructor_replies,
+            json_layout,
+        } = wire;
+        out.push(Header::Array(Some(17)))?;
+        s("TPSTG", out)?;
+        definitions(
+            envelope,
+            signatures,
+            globals,
+            constructors,
+            operations,
+            expressions,
+            bindings,
+            Some(*entry),
+            types,
+            sites,
+            constructor_replies,
+            json_layout,
+            out,
+        )
+    })
 }
 
 /// Encode current typed module products without issuing compiler evidence.
-/// Group payloads use the same current prepared codec as standalone fixtures.
 pub fn encode_module_products(products: &[RawModuleProduct]) -> Vec<u8> {
-    bytes(&a([
-        s("TPMOD"),
-        n(MODULE_PRODUCTS_VERSION),
-        list(products, |product| {
-            let RawModuleProduct {
-                unit,
-                module,
-                interface,
-                groups,
-            } = product;
-            a([
-                s(unit),
-                s(module),
-                Value::Bytes(interface.clone()),
-                list(groups, |group| Value::Bytes(encode_projected_group(group))),
-            ])
-        }),
-    ]))
+    bytes(|out| {
+        array!(out;
+            s("TPMOD", out), n(MODULE_PRODUCTS_VERSION, out),
+            list(products, |product, out| {
+                let RawModuleProduct { unit, module, interface, groups } = product;
+                array!(out; s(unit, out), s(module, out), binary(interface, out),
+                    list(groups, |group, out| binary(&encode_projected_group(group), out), out))
+            }, out)
+        )
+    })
 }
 
-/// Encode an entry-free group; its existing typed validation is independent of
-/// compiler provenance, which only the production toolchain can supply.
+/// Encode an entry-free group without issuing compiler provenance.
 pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
+    bytes(|out| projected_group(group, out))
+}
+
+/// Hash exact prepared-group bytes without copying definitions or materializing
+/// encoded data. Charge before each digest write; refusal stops traversal and
+/// never yields a partial commitment.
+pub fn hash_projected_group(
+    group: &ProjectedGroup,
+    operation: &InventoryOperation,
+) -> Result<[u8; 32], ParseError> {
+    let mut hash = Sha256::new();
+    operation.with_budget(|budget| {
+        projected_group(
+            group,
+            &mut Encoder::from(Sink {
+                destination: Destination::Digest(&mut hash),
+                budget: Some(budget),
+            }),
+        )
+    })?;
+    Ok(hash.finalize().into())
+}
+
+fn projected_group(group: &ProjectedGroup, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let content = group.definitions();
-    let mut fields = vec![
-        s("TPGRP"),
-        n(2_u64),
-        n(group.original_ordinal()),
-        list(group.binders(), symbol),
-    ];
-    fields.extend(definitions(
+    out.push(Header::Array(Some(19)))?;
+    s("TPGRP", out)?;
+    n(2_u64, out)?;
+    n(group.original_ordinal(), out)?;
+    list(group.binders(), symbol, out)?;
+    definitions(
         content.envelope(),
         content.signatures(),
         content.globals(),
@@ -106,12 +187,13 @@ pub fn encode_projected_group(group: &ProjectedGroup) -> Vec<u8> {
         content.operations(),
         content.expressions(),
         content.bindings(),
+        None,
         content.types(),
         content.sites(),
         content.constructor_replies(),
         &content.json_layout().copied(),
-    ));
-    bytes(&a(fields))
+        out,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,11 +205,13 @@ fn definitions(
     operations: &[OperationDecl],
     expressions: &Expr,
     bindings: &[Group<TopBinding>],
+    entry: Option<ValueId>,
     types: &crate::type_graph::TypeGraph,
     sites: &[SiteRow],
     constructor_replies: &[(ConstructorId, ConstructorReply)],
     json_layout: &Option<JsonLayout>,
-) -> Vec<Value> {
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
     let ProgramEnvelope {
         schema_version,
         projection_profile,
@@ -136,45 +220,40 @@ fn definitions(
         target,
     } = envelope;
     let Expr { nodes } = expressions;
-    vec![
-        n(*schema_version),
-        s(projection_profile),
-        s(toolchain),
-        n(*execution_abi_version),
-        target_value(target),
-        list(signatures, signature),
-        list(globals, global),
-        list(constructors, constructor),
-        list(operations, operation),
-        list(nodes, expression),
-        list(bindings, |value| group(value, top)),
-        encode_type_graph_value(types),
-        list(sites, site),
-        list(constructor_replies, |(id, reply)| {
-            a([
-                n(id.0),
-                match reply {
-                    ConstructorReply::Static(node) => a([n(0_u64), n(node.0)]),
-                    ConstructorReply::AtSite => a([n(1_u64)]),
-                    ConstructorReply::StaticWithSite {
-                        reply,
-                        field,
-                        payload_field,
-                        capture_input,
-                    } => a([
-                        n(2_u64),
-                        n(reply.0),
-                        n(*field),
-                        n(*payload_field),
-                        capture_input.map_or(Value::Null, n),
-                    ]),
-                },
-            ])
-        }),
-        option(json_layout, json),
-    ]
+    n(*schema_version, out)?;
+    s(projection_profile, out)?;
+    s(toolchain, out)?;
+    n(*execution_abi_version, out)?;
+    target_value(target, out)?;
+    list(signatures, signature, out)?;
+    list(globals, global, out)?;
+    list(constructors, constructor, out)?;
+    list(operations, operation, out)?;
+    list(nodes, expression, out)?;
+    list(bindings, |value, out| group(value, top, out), out)?;
+    if let Some(entry) = entry {
+        n(entry.0, out)?;
+    }
+    type_graph(types, out)?;
+    list(sites, site, out)?;
+    list(
+        constructor_replies,
+        |(id, reply), out| {
+            array!(out; n(id.0, out), match reply {
+                ConstructorReply::Static(node) => array!(out; n(0_u64, out), n(node.0, out)),
+                ConstructorReply::AtSite => array!(out; n(1_u64, out)),
+                ConstructorReply::StaticWithSite { reply, field, payload_field, capture_input } => {
+                    array!(out; n(2_u64, out), n(reply.0, out), n(*field, out), n(*payload_field, out),
+                        match capture_input { Some(input) => n(*input, out), None => null(out) })
+                }
+            })
+        },
+        out,
+    )?;
+    option(json_layout, json, out)
 }
-fn target_value(value: &TargetDescriptor) -> Value {
+
+fn target_value(value: &TargetDescriptor, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let TargetDescriptor {
         architecture,
         endianness,
@@ -183,22 +262,22 @@ fn target_value(value: &TargetDescriptor) -> Value {
         abi,
         features,
     } = value;
-    a([
+    array!(out;
         n(match architecture {
             Architecture::X86_64 => 0_u64,
             Architecture::Aarch64 => 1,
-        }),
+        }, out),
         n(match endianness {
             Endianness::Little => 0_u64,
             Endianness::Big => 1,
-        }),
-        n(*pointer_width),
-        n(*word_width),
-        s(abi),
-        list(features, |value| s(value)),
-    ])
+        }, out),
+        n(*pointer_width, out),
+        n(*word_width, out),
+        s(abi, out),
+        list(features, |value, out| s(value, out), out),
+    )
 }
-fn symbol(value: &SymbolIdentity) -> Value {
+fn symbol(value: &SymbolIdentity, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let SymbolIdentity {
         unit,
         module,
@@ -206,70 +285,73 @@ fn symbol(value: &SymbolIdentity) -> Value {
         occurrence,
         record_parent,
     } = value;
-    a([
-        s(unit),
-        s(module),
-        s(namespace),
-        s(occurrence),
-        option(record_parent, |value| s(value)),
-    ])
+    array!(out;
+        s(unit, out),
+        s(module, out),
+        s(namespace, out),
+        s(occurrence, out),
+        option(record_parent, |value, out| s(value, out), out),
+    )
 }
-fn type_identity_value(value: &TypeIdentity) -> Value {
-    a([
-        symbol(&value.symbol),
+fn type_identity_value(value: &TypeIdentity, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    array!(out;
+        symbol(&value.symbol, out),
         match &value.version {
-            TypeVersion::WiredIn => a([n(0_u64)]),
-            TypeVersion::GhcAbi(bytes) => a([n(1_u64), Value::Bytes(bytes.to_vec())]),
+            TypeVersion::WiredIn => array!(out;n(0_u64, out)),
+            TypeVersion::GhcAbi(bytes) => array!(out;n(1_u64, out), binary(bytes, out)),
         },
-    ])
+    )
 }
-fn constructor_identity_value(value: &ConstructorIdentity) -> Value {
-    a([symbol(&value.symbol), type_identity_value(&value.family)])
+fn constructor_identity_value(
+    value: &ConstructorIdentity,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
+    array!(out;symbol(&value.symbol, out), type_identity_value(&value.family, out))
 }
 
-fn rep(value: &RuntimeRep) -> Value {
+fn rep(value: &RuntimeRep, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        RuntimeRep::Void => a([n(0_u64)]),
-        RuntimeRep::LiftedRef => a([n(1_u64)]),
-        RuntimeRep::UnliftedRef => a([n(2_u64)]),
-        RuntimeRep::Address => a([n(3_u64)]),
-        RuntimeRep::Int(bits) => a([n(4_u64), n(*bits)]),
-        RuntimeRep::Word(bits) => a([n(5_u64), n(*bits)]),
-        RuntimeRep::Float(bits) => a([n(6_u64), n(*bits)]),
+        RuntimeRep::Void => array!(out;n(0_u64, out)),
+        RuntimeRep::LiftedRef => array!(out;n(1_u64, out)),
+        RuntimeRep::UnliftedRef => array!(out;n(2_u64, out)),
+        RuntimeRep::Address => array!(out;n(3_u64, out)),
+        RuntimeRep::Int(bits) => array!(out;n(4_u64, out), n(*bits, out)),
+        RuntimeRep::Word(bits) => array!(out;n(5_u64, out), n(*bits, out)),
+        RuntimeRep::Float(bits) => array!(out;n(6_u64, out), n(*bits, out)),
     }
 }
-fn result(value: &ResultContract) -> Value {
+fn result(value: &ResultContract, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        ResultContract::Returns(reps) => a([n(0_u64), list(reps, rep)]),
-        ResultContract::NoSuccess => a([n(1_u64)]),
-        ResultContract::CallerResult => a([n(2_u64)]),
+        ResultContract::Returns(reps) => array!(out;n(0_u64, out), list(reps, rep, out)),
+        ResultContract::NoSuccess => array!(out;n(1_u64, out)),
+        ResultContract::CallerResult => array!(out;n(2_u64, out)),
     }
 }
-fn signature(value: &Signature) -> Value {
+fn signature(value: &Signature, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let Signature { arguments, results } = value;
-    a([list(arguments, rep), result(results)])
+    array!(out;list(arguments, rep, out), result(results, out))
 }
-fn layout(value: &CheckedLayout) -> Value {
+fn layout(value: &CheckedLayout, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let CheckedLayout {
         fields,
         alignment,
         payload_size,
         root_mask,
     } = value;
-    a([
-        list(fields, |value| {
+    array!(out;
+        list(fields, |value, out| {
             let FieldLayout {
                 rep: representation,
                 offset,
             } = value;
-            a([rep(representation), n(*offset)])
-        }),
-        n(*alignment),
-        n(*payload_size),
-        list(root_mask, |value| Value::Bool(*value)),
-    ])
+            array!(out;rep(representation, out), n(*offset, out))
+        }, out),
+        n(*alignment, out),
+        n(*payload_size, out),
+        list(root_mask, |value, out| boolean(*value, out), out),
+    )
 }
-fn constructor(value: &ConstructorDecl) -> Value {
+fn constructor(value: &ConstructorDecl, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let ConstructorDecl {
         identity,
         host_id,
@@ -280,18 +362,18 @@ fn constructor(value: &ConstructorDecl) -> Value {
         tag,
         family_size,
     } = value;
-    a([
-        constructor_identity_value(identity),
-        list(field_reps, rep),
-        list(strict_fields, |value| Value::Bool(*value)),
-        layout(storage),
-        rep(result_rep),
-        n(*tag),
-        n(*family_size),
-        n(host_id.0),
-    ])
+    array!(out;
+        constructor_identity_value(identity, out),
+        list(field_reps, rep, out),
+        list(strict_fields, |value, out| boolean(*value, out), out),
+        layout(storage, out),
+        rep(result_rep, out),
+        n(*tag, out),
+        n(*family_size, out),
+        n(host_id.0, out),
+    )
 }
-fn site(value: &SiteRow) -> Value {
+fn site(value: &SiteRow, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let SiteRow {
         site,
         origin,
@@ -300,21 +382,21 @@ fn site(value: &SiteRow) -> Value {
         wire,
         inputs,
     } = value;
-    a([
-        n(*site),
-        s(origin),
-        n(*ordinal),
+    array!(out;
+        n(*site, out),
+        s(origin, out),
+        n(*ordinal, out),
         n(match delivery {
             SiteDelivery::HostAnswer => 0_u64,
             SiteDelivery::LiveReentry => 1,
             SiteDelivery::ExitCellFill => 2,
             SiteDelivery::TerminalCapture => 3,
-        }),
-        n(wire.0),
-        list(inputs, |id| n(id.0)),
-    ])
+        }, out),
+        n(wire.0, out),
+        list(inputs, |id, out| n(id.0, out), out),
+    )
 }
-fn global(value: &GlobalDecl) -> Value {
+fn global(value: &GlobalDecl, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let GlobalDecl {
         identity,
         rep: representation,
@@ -322,31 +404,32 @@ fn global(value: &GlobalDecl) -> Value {
         required_evaluated,
         required_generation,
     } = value;
-    a([
-        symbol(identity),
-        rep(representation),
-        option(entry_signature, |id| n(id.0)),
-        Value::Bool(*required_evaluated),
-        option(required_generation, |value| n(*value)),
-    ])
+    array!(out;
+        symbol(identity, out),
+        rep(representation, out),
+        option(entry_signature, |id, out| n(id.0, out), out),
+        boolean(*required_evaluated, out),
+        option(required_generation, |value, out| n(*value, out), out),
+    )
 }
-fn operation(value: &OperationDecl) -> Value {
+fn operation(value: &OperationDecl, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let OperationDecl {
         identity,
         signature,
     } = value;
-    let identity = match identity {
-        OperationIdentity::PrimOp(name) => a([n(0_u64), s(name)]),
-        OperationIdentity::Intrinsic { symbol, convention } => a([
-            n(1_u64),
-            s(symbol),
-            a([n(match convention {
+    out.push(Header::Array(Some(2)))?;
+    match identity {
+        OperationIdentity::PrimOp(name) => array!(out;n(0_u64, out), s(name, out)),
+        OperationIdentity::Intrinsic { symbol, convention } => array!(out;
+            n(1_u64, out),
+            s(symbol, out),
+            array!(out;n(match convention {
                 ForeignConvention::CCall => 0_u64,
-            })]),
-        ]),
-        OperationIdentity::Capability { name } => a([n(2_u64), s(name)]),
-        OperationIdentity::WiredInError { kind } => a([
-            n(3_u64),
+            }, out)),
+        ),
+        OperationIdentity::Capability { name } => array!(out;n(2_u64, out), s(name, out)),
+        OperationIdentity::WiredInError { kind } => array!(out;
+            n(3_u64, out),
             n(match kind {
                 WiredInErrorKind::PatternMatch => 0_u64,
                 WiredInErrorKind::NonExhaustiveGuards => 1,
@@ -359,14 +442,16 @@ fn operation(value: &OperationDecl) -> Value {
                 WiredInErrorKind::Absent => 8,
                 WiredInErrorKind::AbsentConstraint => 9,
                 WiredInErrorKind::AbsentSumField => 10,
-            }),
-        ]),
-        OperationIdentity::JsonDecode { left, right } => a([n(4_u64), n(left.0), n(right.0)]),
-        OperationIdentity::JsonEncode => a([n(5_u64)]),
-    };
-    a([identity, n(signature.0)])
+            }, out),
+        ),
+        OperationIdentity::JsonDecode { left, right } => {
+            array!(out;n(4_u64, out), n(left.0, out), n(right.0, out))
+        }
+        OperationIdentity::JsonEncode => array!(out;n(5_u64, out)),
+    }?;
+    n(signature.0, out)
 }
-fn json(value: &JsonLayout) -> Value {
+fn json(value: &JsonLayout, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let JsonLayout {
         object,
         array,
@@ -387,176 +472,304 @@ fn json(value: &JsonLayout) -> Value {
         text,
         int,
     } = value;
-    a([
-        object,
-        array,
-        string,
-        number,
-        bool_,
-        null,
-        map_bin,
-        map_tip,
-        true_,
-        false_,
-        cons,
-        nil,
-        scientific,
-        integer_small,
-        integer_positive,
-        integer_negative,
-        text,
-        int,
-    ]
-    .map(|id| n(id.0)))
+    list(
+        &[
+            object,
+            array,
+            string,
+            number,
+            bool_,
+            null,
+            map_bin,
+            map_tip,
+            true_,
+            false_,
+            cons,
+            nil,
+            scientific,
+            integer_small,
+            integer_positive,
+            integer_negative,
+            text,
+            int,
+        ],
+        |id, out| n(id.0, out),
+        out,
+    )
 }
-fn reference(value: &ValueRef) -> Value {
+fn reference(value: &ValueRef, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        ValueRef::Local(id) => a([n(0_u64), n(id.0)]),
-        ValueRef::Global(id) => a([n(1_u64), n(id.0)]),
+        ValueRef::Local(id) => array!(out;n(0_u64, out), n(id.0, out)),
+        ValueRef::Global(id) => array!(out;n(1_u64, out), n(id.0, out)),
     }
 }
-fn scalar(value: &ScalarLiteral) -> Value {
+fn scalar(value: &ScalarLiteral, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        ScalarLiteral::Int { bits, bytes } => a([n(0_u64), n(*bits), Value::Bytes(bytes.clone())]),
-        ScalarLiteral::Word { bits, bytes } => a([n(1_u64), n(*bits), Value::Bytes(bytes.clone())]),
-        ScalarLiteral::Float { bits, bytes } => {
-            a([n(2_u64), n(*bits), Value::Bytes(bytes.clone())])
+        ScalarLiteral::Int { bits, bytes } => {
+            array!(out;n(0_u64, out), n(*bits, out), binary(bytes, out))
         }
-        ScalarLiteral::Bytes(bytes) => a([n(4_u64), Value::Bytes(bytes.clone())]),
-        ScalarLiteral::NullAddress => a([n(5_u64)]),
+        ScalarLiteral::Word { bits, bytes } => {
+            array!(out;n(1_u64, out), n(*bits, out), binary(bytes, out))
+        }
+        ScalarLiteral::Float { bits, bytes } => {
+            array!(out;n(2_u64, out), n(*bits, out), binary(bytes, out))
+        }
+        ScalarLiteral::Bytes(bytes) => array!(out;n(4_u64, out), binary(bytes, out)),
+        ScalarLiteral::NullAddress => array!(out;n(5_u64, out)),
     }
 }
-fn atom(value: &Atom) -> Value {
+fn atom(value: &Atom, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        Atom::Ref(value) => a([n(0_u64), reference(value)]),
-        Atom::Scalar(value) => a([n(1_u64), scalar(value)]),
-        Atom::Void => a([n(2_u64)]),
-        Atom::Rubbish(value) => a([n(3_u64), rep(value)]),
+        Atom::Ref(value) => array!(out;n(0_u64, out), reference(value, out)),
+        Atom::Scalar(value) => array!(out;n(1_u64, out), scalar(value, out)),
+        Atom::Void => array!(out;n(2_u64, out)),
+        Atom::Rubbish(value) => array!(out;n(3_u64, out), rep(value, out)),
     }
 }
-fn group<T>(value: &Group<T>, encode: impl Fn(&T) -> Value) -> Value {
+fn group<T>(
+    value: &Group<T>,
+    encode: impl Fn(&T, &mut Encoder<'_>) -> Result<(), ParseError>,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
     match value {
-        Group::NonRecursive(value) => a([n(0_u64), encode(value)]),
-        Group::Recursive(values) => a([n(1_u64), list(values, encode)]),
+        Group::NonRecursive(value) => array!(out;n(0_u64, out), encode(value, out)),
+        Group::Recursive(values) => array!(out;n(1_u64, out), list(values, encode, out)),
     }
 }
-fn heap(value: &HeapBinding) -> Value {
+fn heap(value: &HeapBinding, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let HeapBinding { id, rhs } = value;
-    let rhs = match rhs {
+    out.push(Header::Array(Some(2)))?;
+    n(id.0, out)?;
+    match rhs {
         HeapRhs::Function {
             signature,
             parameters,
             captures,
             body,
-        } => a([
-            n(0_u64),
-            n(signature.0),
-            list(parameters, |id| n(id.0)),
-            list(captures, reference),
-            n(*body as u64),
-        ]),
+        } => array!(out;
+            n(0_u64, out),
+            n(signature.0, out),
+            list(parameters, |id, out| n(id.0, out), out),
+            list(captures, reference, out),
+            n(*body as u64, out),
+        ),
         HeapRhs::Thunk {
             signature,
             update,
             captures,
             body,
-        } => a([
-            n(1_u64),
-            n(signature.0),
+        } => array!(out;
+            n(1_u64, out),
+            n(signature.0, out),
             n(match update {
                 UpdatePolicy::Memoize => 0_u64,
                 UpdatePolicy::SingleEntry => 1,
-            }),
-            list(captures, reference),
-            n(*body as u64),
-        ]),
+            }, out),
+            list(captures, reference, out),
+            n(*body as u64, out),
+        ),
         HeapRhs::Constructor {
             constructor,
             fields,
-        } => a([n(2_u64), n(constructor.0), list(fields, atom)]),
-        HeapRhs::Bytes(bytes) => a([n(3_u64), Value::Bytes(bytes.clone())]),
-    };
-    a([n(id.0), rhs])
+        } => array!(out;n(2_u64, out), n(constructor.0, out), list(fields, atom, out)),
+        HeapRhs::Bytes(bytes) => array!(out;n(3_u64, out), binary(bytes, out)),
+    }
 }
-fn top(value: &TopBinding) -> Value {
+fn top(value: &TopBinding, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let TopBinding { identity, binding } = value;
-    a([symbol(identity), heap(binding)])
+    array!(out;symbol(identity, out), heap(binding, out))
 }
-fn join(value: &JoinBinding) -> Value {
+fn join(value: &JoinBinding, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let JoinBinding {
         id,
         signature,
         parameters,
         body,
     } = value;
-    a([
-        n(id.0),
-        n(signature.0),
-        list(parameters, |id| n(id.0)),
-        n(*body as u64),
-    ])
+    array!(out;
+        n(id.0, out),
+        n(signature.0, out),
+        list(parameters, |id, out| n(id.0, out), out),
+        n(*body as u64, out),
+    )
 }
-fn alternative(value: &Alternative) -> Value {
+fn alternative(value: &Alternative, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     let Alternative {
         pattern,
         binders,
         body,
     } = value;
-    let pattern = match pattern {
-        AlternativePattern::Default => a([n(0_u64)]),
-        AlternativePattern::Constructor(id) => a([n(1_u64), n(id.0)]),
-        AlternativePattern::Literal(value) => a([n(2_u64), scalar(value)]),
-    };
-    a([pattern, list(binders, |id| n(id.0)), n(*body as u64)])
+    out.push(Header::Array(Some(3)))?;
+    match pattern {
+        AlternativePattern::Default => array!(out;n(0_u64, out)),
+        AlternativePattern::Constructor(id) => array!(out;n(1_u64, out), n(id.0, out)),
+        AlternativePattern::Literal(value) => array!(out;n(2_u64, out), scalar(value, out)),
+    }?;
+    list(binders, |id, out| n(id.0, out), out)?;
+    n(*body as u64, out)
 }
-fn kind(value: &CaseKind) -> Value {
+fn kind(value: &CaseKind, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        CaseKind::Algebraic(value) => a([n(0_u64), type_identity_value(value)]),
-        CaseKind::Primitive(value) => a([n(1_u64), rep(value)]),
-        CaseKind::MultiValue => a([n(2_u64)]),
-        CaseKind::Polymorphic => a([n(3_u64)]),
+        CaseKind::Algebraic(value) => array!(out;n(0_u64, out), type_identity_value(value, out)),
+        CaseKind::Primitive(value) => array!(out;n(1_u64, out), rep(value, out)),
+        CaseKind::MultiValue => array!(out;n(2_u64, out)),
+        CaseKind::Polymorphic => array!(out;n(3_u64, out)),
     }
 }
-fn expression(value: &ExprFrame<usize>) -> Value {
+fn expression(value: &ExprFrame<usize>, out: &mut Encoder<'_>) -> Result<(), ParseError> {
     match value {
-        ExprFrame::Return(values) => a([n(0_u64), list(values, atom)]),
-        ExprFrame::Enter { callee, signature } => a([n(1_u64), atom(callee), n(signature.0)]),
+        ExprFrame::Return(values) => array!(out;n(0_u64, out), list(values, atom, out)),
+        ExprFrame::Enter { callee, signature } => {
+            array!(out;n(1_u64, out), atom(callee, out), n(signature.0, out))
+        }
         ExprFrame::Call {
             callee,
             signature,
             arguments,
-        } => a([
-            n(2_u64),
-            atom(callee),
-            n(signature.0),
-            list(arguments, atom),
-        ]),
+        } => array!(out;
+            n(2_u64, out),
+            atom(callee, out),
+            n(signature.0, out),
+            list(arguments, atom, out),
+        ),
         ExprFrame::Operation {
             operation,
             arguments,
-        } => a([n(3_u64), n(operation.0), list(arguments, atom)]),
+        } => array!(out;n(3_u64, out), n(operation.0, out), list(arguments, atom, out)),
         ExprFrame::Construct {
             constructor,
             fields,
-        } => a([n(4_u64), n(constructor.0), list(fields, atom)]),
+        } => array!(out;n(4_u64, out), n(constructor.0, out), list(fields, atom, out)),
         ExprFrame::Case {
             scrutinee,
             binder,
             scrutinee_results,
             kind: classification,
             alternatives,
-        } => a([
-            n(5_u64),
-            n(*scrutinee as u64),
-            n(binder.0),
-            result(scrutinee_results),
-            kind(classification),
-            list(alternatives, alternative),
-        ]),
-        ExprFrame::Let { bindings, body } => a([n(6_u64), group(bindings, heap), n(*body as u64)]),
-        ExprFrame::LetJoins { bindings, body } => {
-            a([n(7_u64), group(bindings, join), n(*body as u64)])
+        } => array!(out;
+            n(5_u64, out),
+            n(*scrutinee as u64, out),
+            n(binder.0, out),
+            result(scrutinee_results, out),
+            kind(classification, out),
+            list(alternatives, alternative, out),
+        ),
+        ExprFrame::Let { bindings, body } => {
+            array!(out;n(6_u64, out), group(bindings, heap, out), n(*body as u64, out))
         }
-        ExprFrame::Jump { join, arguments } => a([n(8_u64), n(join.0), list(arguments, atom)]),
+        ExprFrame::LetJoins { bindings, body } => {
+            array!(out;n(7_u64, out), group(bindings, join, out), n(*body as u64, out))
+        }
+        ExprFrame::Jump { join, arguments } => {
+            array!(out;n(8_u64, out), n(join.0, out), list(arguments, atom, out))
+        }
     }
 }
+
+fn type_graph(
+    graph: &crate::type_graph::TypeGraph,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
+    use petgraph::visit::EdgeRef;
+    out.push(Header::Array(Some(3)))?;
+    n(2_u64, out)?;
+    out.push(Header::Array(Some(graph.graph().node_count())))?;
+    for node in graph.graph().node_weights() {
+        type_node(node, out)?;
+    }
+    out.push(Header::Array(Some(graph.graph().edge_count())))?;
+    for source in graph.graph().node_indices() {
+        for edge in graph.ordered_edges(source) {
+            array!(out; n(source.index() as u64, out), n(edge.target().index() as u64, out), type_role(*edge.weight(), out))?;
+        }
+    }
+    Ok(())
+}
+
+fn type_node(value: &crate::type_graph::TypeNode, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    use crate::type_graph::{
+        ForAllFlag, FunctionFlag, ParameterFlag, RootDomain, SourceBinderFlag, SyntaxRestriction,
+        TypeLiteral, TypeNode,
+    };
+    match value {
+        TypeNode::Root {
+            domain,
+            binders,
+            rendered,
+        } => array!(out;
+            n(0_u64, out), n(match domain { RootDomain::Closed => 0_u64, RootDomain::ConstructorScheme => 1 }, out),
+            list(binders, |flag, out| n(match flag { SourceBinderFlag::Specified => 1_u64, SourceBinderFlag::Inferred => 2 }, out), out), s(rendered, out)),
+        TypeNode::Declaration {
+            identity,
+            parameters,
+            form,
+            restriction,
+        } => array!(out;
+            n(1_u64, out), type_identity_value(identity, out),
+            list(parameters, |flag, out| n(match flag { ParameterFlag::NamedRequired => 0_u64, ParameterFlag::NamedSpecified => 1, ParameterFlag::NamedInferred => 2, ParameterFlag::AnonymousVisible => 3 }, out), out),
+            type_form(form, out), n(match restriction { SyntaxRestriction::None => 0_u64, SyntaxRestriction::EffectHead => 1 }, out)),
+        TypeNode::ConstructorTemplate {
+            constructor,
+            identity: _,
+        } => array!(out; n(2_u64, out), n(constructor.0, out)),
+        TypeNode::Bound(index) => array!(out; n(3_u64, out), n(*index, out)),
+        TypeNode::NominalApplication => array!(out; n(4_u64, out)),
+        TypeNode::Application => array!(out; n(5_u64, out)),
+        TypeNode::Function(flag) => {
+            array!(out; n(6_u64, out), n(match flag { FunctionFlag::TypeToType => 0_u64, FunctionFlag::TypeToConstraint => 1, FunctionFlag::ConstraintToType => 2, FunctionFlag::ConstraintToConstraint => 3 }, out))
+        }
+        TypeNode::ForAll(flag) => {
+            array!(out; n(7_u64, out), n(match flag { ForAllFlag::Required => 0_u64, ForAllFlag::Specified => 1, ForAllFlag::Inferred => 2 }, out))
+        }
+        TypeNode::Literal(literal) => match literal {
+            TypeLiteral::Natural(value) => array!(out; n(8_u64, out), n(0_u64, out), s(value, out)),
+            TypeLiteral::Symbol(value) => array!(out; n(8_u64, out), n(1_u64, out), s(value, out)),
+            TypeLiteral::Character(value) => {
+                array!(out; n(8_u64, out), n(2_u64, out), n(*value as u32, out))
+            }
+        },
+    }
+}
+fn type_form(
+    value: &crate::type_graph::DeclarationForm,
+    out: &mut Encoder<'_>,
+) -> Result<(), ParseError> {
+    use crate::type_graph::{DeclarationForm, NominalHeadKind};
+    match value {
+        DeclarationForm::Data => array!(out; n(0_u64, out)),
+        DeclarationForm::Newtype { eta_arity } => array!(out; n(1_u64, out), n(*eta_arity, out)),
+        DeclarationForm::Text => array!(out; n(2_u64, out)),
+        DeclarationForm::Integer => array!(out; n(3_u64, out)),
+        DeclarationForm::Natural => array!(out; n(4_u64, out)),
+        DeclarationForm::Scalar(value) => array!(out; n(5_u64, out), rep(value, out)),
+        DeclarationForm::Opaque { head_kind, reason } => {
+            array!(out; n(6_u64, out), n(match head_kind { NominalHeadKind::Constructor => 0_u64, NominalHeadKind::Family => 1 }, out), s(reason, out))
+        }
+    }
+}
+fn type_role(value: crate::type_graph::TypeEdge, out: &mut Encoder<'_>) -> Result<(), ParseError> {
+    use crate::type_graph::TypeEdge;
+    match value {
+        TypeEdge::BinderKind(ordinal) => array!(out; n(0_u64, out), n(ordinal, out)),
+        TypeEdge::Body => array!(out; n(1_u64, out)),
+        TypeEdge::Head => array!(out; n(2_u64, out)),
+        TypeEdge::Argument(ordinal) => array!(out; n(3_u64, out), n(ordinal, out)),
+        TypeEdge::Function => array!(out; n(4_u64, out)),
+        TypeEdge::ApplyArgument => array!(out; n(5_u64, out)),
+        TypeEdge::Multiplicity => array!(out; n(6_u64, out)),
+        TypeEdge::Domain => array!(out; n(7_u64, out)),
+        TypeEdge::Codomain => array!(out; n(8_u64, out)),
+        TypeEdge::Kind => array!(out; n(9_u64, out)),
+        TypeEdge::Constructor(tag) => array!(out; n(10_u64, out), n(tag, out)),
+        TypeEdge::Field {
+            ordinal,
+            source_rep,
+        } => array!(out; n(11_u64, out), n(ordinal, out), rep(&source_rep, out)),
+        TypeEdge::AliasRhs => array!(out; n(12_u64, out)),
+    }
+}
+
+#[cfg(test)]
+mod legacy;
+#[cfg(test)]
+mod tests;

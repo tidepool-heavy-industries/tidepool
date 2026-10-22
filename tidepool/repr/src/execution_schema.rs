@@ -976,6 +976,40 @@ pub struct ExportContract<'a> {
 }
 
 impl<'a> DefinitionsView<'a> {
+    fn top_export_contract(self, top: &'a TopBinding) -> Result<ExportContract<'a>, ParseError> {
+        let (rep, entry_signature, evaluated) = match &top.binding.rhs {
+            HeapRhs::Bytes(_) => (RuntimeRep::Address, None, true),
+            HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
+                let signature = self.signatures.get(signature.0 as usize).ok_or_else(|| {
+                    ParseError::InvalidReference("export signature outside defining table".into())
+                })?;
+                (
+                    RuntimeRep::LiftedRef,
+                    Some(signature),
+                    !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
+                )
+            }
+            HeapRhs::Constructor { constructor, .. } => {
+                let constructor =
+                    self.constructors
+                        .get(constructor.0 as usize)
+                        .ok_or_else(|| {
+                            ParseError::InvalidReference(
+                                "export constructor outside defining table".into(),
+                            )
+                        })?;
+                (constructor.result_rep, None, true)
+            }
+        };
+        Ok(ExportContract {
+            identity: &top.identity,
+            value: top.binding.id,
+            rep,
+            entry_signature,
+            evaluated,
+        })
+    }
+
     pub fn export_contracts(self) -> impl Iterator<Item = Result<ExportContract<'a>, ParseError>> {
         self.bindings
             .iter()
@@ -983,42 +1017,7 @@ impl<'a> DefinitionsView<'a> {
                 Group::NonRecursive(top) => std::slice::from_ref(top),
                 Group::Recursive(tops) => tops.as_slice(),
             })
-            .map(move |top| {
-                let (rep, entry_signature, evaluated) = match &top.binding.rhs {
-                    HeapRhs::Bytes(_) => (RuntimeRep::Address, None, true),
-                    HeapRhs::Function { signature, .. } | HeapRhs::Thunk { signature, .. } => {
-                        let signature =
-                            self.signatures.get(signature.0 as usize).ok_or_else(|| {
-                                ParseError::InvalidReference(
-                                    "export signature outside defining table".into(),
-                                )
-                            })?;
-                        (
-                            RuntimeRep::LiftedRef,
-                            Some(signature),
-                            !matches!(top.binding.rhs, HeapRhs::Thunk { .. }),
-                        )
-                    }
-                    HeapRhs::Constructor { constructor, .. } => {
-                        let constructor = self
-                            .constructors
-                            .get(constructor.0 as usize)
-                            .ok_or_else(|| {
-                                ParseError::InvalidReference(
-                                    "export constructor outside defining table".into(),
-                                )
-                            })?;
-                        (constructor.result_rep, None, true)
-                    }
-                };
-                Ok(ExportContract {
-                    identity: &top.identity,
-                    value: top.binding.id,
-                    rep,
-                    entry_signature,
-                    evaluated,
-                })
-            })
+            .map(move |top| self.top_export_contract(top))
     }
 
     pub fn export_contract(self, value: ValueId) -> Result<Option<ExportContract<'a>>, ParseError> {
@@ -1223,48 +1222,6 @@ pub struct ProjectedGroup {
 }
 
 impl ProjectedGroup {
-    /// Reserve temporary canonical-encoding storage before allocating it. Hash
-    /// traversal is used only to visit fields for accounting, never as identity.
-    pub(crate) fn charge_canonical_encoding(
-        &self,
-        operation: &InventoryOperation,
-    ) -> Result<(), ParseError> {
-        use std::hash::{Hash, Hasher};
-        struct Account<'a> {
-            operation: &'a InventoryOperation,
-            refused: Option<ParseError>,
-        }
-        impl Hasher for Account<'_> {
-            fn finish(&self) -> u64 {
-                0
-            }
-            fn write(&mut self, bytes: &[u8]) {
-                if self.refused.is_none() {
-                    // Covers temporary Value nodes, Vec storage, encoded bytes
-                    // and string/byte copies for each visited scalar/container.
-                    self.refused = bytes
-                        .len()
-                        .checked_mul(8)
-                        .and_then(|n| n.checked_add(64))
-                        .ok_or(ParseError::LimitExceeded("native code encoding"))
-                        .and_then(|amount| self.operation.charge(amount))
-                        .err();
-                }
-            }
-        }
-        let mut account = Account {
-            operation,
-            refused: None,
-        };
-        self.original_ordinal.hash(&mut account);
-        self.binders.as_ref().hash(&mut account);
-        self.definitions.as_ref().hash(&mut account);
-        match account.refused {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
     pub fn definitions(&self) -> DefinitionsView<'_> {
         DefinitionsView::from(self.definitions.as_ref())
     }
@@ -1303,7 +1260,7 @@ impl ProjectedGroup {
 
     // Certified admission proves that exported binders form this exact suffix.
     // Locate its first slice from group lengths, then visit each export once.
-    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+    fn exported_tops(&self) -> impl Iterator<Item = &TopBinding> {
         let bindings = &self.definitions.bindings;
         let mut remaining = self.binders.len();
         let mut first = bindings.len();
@@ -1333,7 +1290,21 @@ impl ProjectedGroup {
                 };
                 &tops[if index == 0 { offset } else { 0 }..]
             })
+    }
+
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        self.exported_tops()
             .map(|top| (&top.identity, top.binding.id))
+    }
+
+    /// Contracts for the exact certified export suffix. Helper definitions are
+    /// private to this group even when their representation is compatible.
+    pub(crate) fn export_contracts(
+        &self,
+    ) -> impl Iterator<Item = Result<ExportContract<'_>, ParseError>> {
+        let definitions = self.definitions();
+        self.exported_tops()
+            .map(move |top| definitions.top_export_contract(top))
     }
 
     #[must_use]
@@ -1434,6 +1405,9 @@ impl PackageGroupCode {
     pub fn globals(&self) -> &[GlobalDecl] {
         self.group.globals()
     }
+    pub fn export_contracts(&self) -> impl Iterator<Item = Result<ExportContract<'_>, ParseError>> {
+        self.group.export_contracts()
+    }
     pub fn definitions(&self) -> DefinitionsView<'_> {
         self.group.definitions()
     }
@@ -1468,6 +1442,9 @@ impl CertifiedGroupCode {
     }
     pub fn binders(&self) -> &[SymbolIdentity] {
         self.group.binders()
+    }
+    pub fn export_contracts(&self) -> impl Iterator<Item = Result<ExportContract<'_>, ParseError>> {
+        self.group.export_contracts()
     }
     pub fn definitions(&self) -> DefinitionsView<'_> {
         self.group.definitions()
@@ -1675,6 +1652,19 @@ impl InventoryOperation {
             .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
         let remaining = budget.remaining();
         Ok((self.limits.max_work - remaining, remaining))
+    }
+
+    // Streaming encoding holds one accounting borrow throughout traversal.
+    // Its sink charges the same owner directly before each output write.
+    fn with_budget<T>(
+        &self,
+        run: impl FnOnce(&mut OperationBudget) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let mut budget = self
+            .budget
+            .lock()
+            .map_err(|_| ParseError::LimitExceeded("accounting owner"))?;
+        run(&mut budget)
     }
 
     pub fn charge(&self, amount: usize) -> Result<(), ParseError> {
@@ -1912,12 +1902,8 @@ fn parse_module_products_inner(
                 "module product requires an array".into(),
             ));
         };
-        let [
-            Value::Text(unit),
-            Value::Text(name),
-            Value::Bytes(interface),
-            Value::Array(groups),
-        ] = fields.as_slice()
+        let [Value::Text(unit), Value::Text(name), Value::Bytes(interface), Value::Array(groups)] =
+            fields.as_slice()
         else {
             return Err(ParseError::Malformed(
                 "invalid module product fields".into(),
@@ -2311,6 +2297,13 @@ mod certified_exports_tests {
                     .map(|(binder, _)| binder.clone())
                     .collect::<Vec<_>>()
             );
+            let contracts = code
+                .export_contracts()
+                .map(Result::unwrap)
+                .map(|contract| (contract.identity.clone(), contract.value))
+                .collect::<Vec<_>>();
+            assert_eq!(contracts, expected);
+
             assert_eq!(visits.get(), count);
             let definitions = certified.definitions();
             let old_visits = Cell::new(0);

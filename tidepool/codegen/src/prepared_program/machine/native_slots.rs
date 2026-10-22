@@ -970,9 +970,12 @@ mod tests {
             required_evaluated: false,
             required_generation: None,
         });
-        invocation.expressions.nodes[0] = ExprFrame::Enter {
+        // A zero-argument function is already in WHNF: Enter would return
+        // the function itself. Call executes its body and enters the provider CAF.
+        invocation.expressions.nodes[0] = ExprFrame::Call {
             callee: Atom::Ref(ValueRef::Global(GlobalId(0))),
             signature: SignatureId(0),
+            arguments: vec![],
         };
         let invocation = Arc::new(
             CompiledProgram::compile_prepared_definitions(&testing::prepare(invocation).unwrap())
