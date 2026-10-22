@@ -18,6 +18,7 @@ pub enum SourceLexicalClaim {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceAdmissionRefusal {
+    WrongRequest,
     ProducedTypeClaim,
     HiddenOriginalPromotion,
     ChangedCanonical,
@@ -298,6 +299,27 @@ impl std::fmt::Debug for SourceAdmissionBundle {
 }
 
 impl SourceAdmissionBundle {
+    pub(super) fn check_finite_request(
+        expected: &ExactRequestIdentity<'_>,
+        admissions: &[ExactSourceAdmission],
+    ) -> Result<(), CompileError> {
+        for admission in admissions {
+            if !matches!(&admission.compilation_binding, SourceCompilationBinding::Exact(actual) if actual == expected)
+            {
+                let error = SourceAdmissionFailure {
+                    owner: admission.claims.compilation_root().clone(),
+                    boundary: SourceAdmissionBoundary::FiniteRequest,
+                    claim: None,
+                    held: None,
+                    reason: SourceAdmissionRefusal::WrongRequest,
+                };
+                tracing::warn!(owner = ?error.owner, boundary = ?error.boundary, reason = ?error.reason, "source admission refused");
+                return Err(CompileError::SourceAdmission(Box::new(error)));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn issue<'a>(
         boundary: SourceAdmissionBoundary,
         compiler: Arc<crate::artifact_inventory::CompilerSourceSupport>,

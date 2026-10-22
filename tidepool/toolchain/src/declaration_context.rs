@@ -7514,7 +7514,7 @@ impl ProgramSourceSupportState {
 
     fn admit_program_support_inner(
         &mut self,
-        producer_sha256: [u8; 32],
+        request: ExactRequestIdentity<'_>,
         context: Arc<ExactDeclarationContext>,
         support: &ArtifactView,
         admissions: &[ExactSourceAdmission],
@@ -7522,6 +7522,9 @@ impl ProgramSourceSupportState {
         segment_input: Option<&ExactDeclarationContext>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        // Only newly supplied receipts are correlated here. Already admitted
+        // prefix rows retain their original owner and request independently.
+        SourceAdmissionBundle::check_finite_request(&request, admissions)?;
         let dependencies = CompilerDependencies::merge(admissions)?;
         let issued = selection
             .compiler_support_projection(support, admissions)
@@ -7558,7 +7561,7 @@ impl ProgramSourceSupportState {
         let imports = admission.dependencies().adjacency();
         let extend_start = std::time::Instant::now();
         let mut context = (*context).clone();
-        context = context.admit_producer(producer_sha256)?;
+        context = context.admit_producer(request.producer_sha256)?;
         for descriptor in support.descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
         }
@@ -10199,8 +10202,9 @@ impl ExactCompilationRequest {
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         segment.validate_request(self)?;
+        let request = ExactRequestIdentity::from_request(self).into_owned();
         self.program.admit_program_support_inner(
-            self.producer_sha256,
+            request,
             context,
             support,
             segment.admissions(),
@@ -10217,8 +10221,9 @@ impl ExactCompilationRequest {
         produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        let request = ExactRequestIdentity::from_request(self).into_owned();
         self.program.admit_program_support_inner(
-            self.producer_sha256,
+            request,
             context,
             support,
             admissions,
@@ -10355,7 +10360,7 @@ impl ProgramAdmissionContinuation {
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         self.program.admit_program_support_inner(
-            self.physical.producer_sha256,
+            ExactRequestIdentity::from_request(&self.physical),
             context,
             support,
             admissions,
@@ -10468,7 +10473,7 @@ impl ProgramAdmissionContinuation {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         segment.validate_request(&self.physical)?;
         self.program.admit_program_support_inner(
-            self.physical.producer_sha256,
+            ExactRequestIdentity::from_request(&self.physical),
             context,
             support,
             segment.admissions(),
@@ -29761,6 +29766,46 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     }
 
     #[test]
+    fn program_support_refuses_foreign_request_before_mutation_and_allows_honest_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let foreign = support_admission(directory.path());
+        let baseline = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_issued_compiler_support(&match support_offer(&[support_product(
+                    "Unrelated",
+                )]) {
+                    CompilerSupportFixture::Complete(inputs) => {
+                        inputs.compiler_source_support().clone()
+                    }
+                    CompilerSupportFixture::RecordedRoles { .. } => {
+                        unreachable!("closed output fixture")
+                    }
+                })
+                .unwrap(),
+        );
+        let mut request = program_request(directory.path(), Arc::clone(&baseline));
+        let receipt = support_receipt(directory.path(), &request);
+        let honest = request.validate_receipt(&receipt, None, &baseline).unwrap();
+        let before = baseline.semantic_sha256();
+        let output = support_offer(&[]);
+        let refusal = request
+            .admit_fixture_support(Arc::clone(&baseline), &output, &[foreign], None)
+            .unwrap_err();
+        assert!(matches!(refusal, CompileError::SourceAdmission(ref error)
+            if error.reason == SourceAdmissionRefusal::WrongRequest
+                && error.boundary == SourceAdmissionBoundary::FiniteRequest));
+        assert_eq!(request.context().semantic_sha256(), before);
+        assert!(request.program.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        let unchanged = request
+            .admit_fixture_support(baseline, &output, &[honest], None)
+            .unwrap();
+        assert_eq!(unchanged.semantic_sha256(), before);
+        assert!(request.program_source_lexical().is_empty());
+    }
+
+    #[test]
     fn program_support_refuses_retained_hidden_owner_and_forged_source() {
         let directory = tempfile::tempdir().unwrap();
         let products = [
@@ -29780,13 +29825,20 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 })
                 .unwrap(),
         );
-        let mut request = program_request(directory.path(), baseline.clone());
-        let before = baseline.semantic_sha256();
+        let mut request = program_request(
+            directory.path(),
+            Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
+        );
+        let receipt = support_receipt(directory.path(), &request);
+        let admitted = request
+            .validate_receipt(&receipt, None, request.context())
+            .unwrap();
+        let before = request.context().semantic_sha256();
         let refusal = request
             .admit_fixture_support(
                 baseline.clone(),
                 &support_offer(&products),
-                &[support_admission(directory.path())],
+                &[admitted],
                 None,
             )
             .unwrap_err();
@@ -29798,10 +29850,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(request.program.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
         // The same request can still carry these owners as dependencies.
+        let baseline_before = baseline.semantic_sha256();
         let unchanged = request
             .admit_fixture_support(baseline, &support_offer(&products), &[], None)
             .unwrap();
-        assert_eq!(unchanged.semantic_sha256(), before);
+        assert_eq!(unchanged.semantic_sha256(), baseline_before);
         assert!(request.program_source_lexical().is_empty());
         let original = support_admission(directory.path());
         let mut forged = Arc::unwrap_or_clone(original.evidence).into_evidence();
