@@ -11054,10 +11054,12 @@ impl ProductInputFacts<'_> {
             &edges,
             import_roles,
             |owner| {
-                self.program_support
-                    .and_then(|support| support.imports.get(owner))
-                    .and_then(|row| row.admission.as_ref())
-                    .is_some_and(|admission| admission.admits_lexical(owner))
+                context.source_scope().admits(owner)
+                    || self
+                        .program_support
+                        .and_then(|support| support.imports.get(owner))
+                        .and_then(|row| row.admission.as_ref())
+                        .is_some_and(|admission| admission.admits_lexical(owner))
             },
             &validation.inventory,
         )?;
