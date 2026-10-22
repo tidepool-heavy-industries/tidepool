@@ -19466,19 +19466,6 @@ pub(crate) mod request_tests {
         let (workbench, private) = workbench
             .admit_private_cell_with_source_for_test(public.clone(), captured, source_owner)
             .await;
-        let (carrier, hidden_dependencies) = workbench
-            .prepare_host_input(private.clone(), HostCarrierKind::Json, None)
-            .await
-            .expect("prepare the hidden operand carrier");
-        let hidden = workbench
-            .mount_prepared_json_input(
-                private.clone(),
-                carrier,
-                serde_json::json!({"hidden": reverse}),
-            )
-            .await
-            .expect("mount the hidden operand");
-        let hidden_name = hidden.mounted_input().name.clone();
         let first = workbench
             .bind_tool_result(private.clone(), "abandonOne".into(), "one".into())
             .await
@@ -19504,6 +19491,19 @@ pub(crate) mod request_tests {
             .execute_cell_for_test(private.clone(), "afterTwo <- pure (45 :: Int)")
             .await
             .unwrap();
+        let (carrier, hidden_dependencies) = workbench
+            .prepare_host_input(private.clone(), HostCarrierKind::Json, None)
+            .await
+            .expect("prepare the hidden operand carrier");
+        let hidden = workbench
+            .mount_prepared_json_input(
+                private.clone(),
+                carrier,
+                serde_json::json!({"hidden": reverse}),
+            )
+            .await
+            .expect("mount the hidden operand");
+        let hidden_name = hidden.mounted_input().name.clone();
         let execution = workbench.private_execution.as_ref().unwrap().clone();
         let refusal = match workbench_runner_for_test(&workbench)
             .publish_private_execution(private.clone(), execution.clone())
