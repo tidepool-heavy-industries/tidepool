@@ -713,3 +713,6 @@ pub(crate) fn resolve_package_import(
     }
     resolve_package_export(child, global, code.definitions(), witness.sha256())
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

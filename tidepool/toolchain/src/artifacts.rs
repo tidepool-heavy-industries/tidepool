@@ -9449,6 +9449,13 @@ mod module_product_tests {
                 .expect("same actual output after END");
             assert!(matches!(program.basis(), CellProgramBasis::World(_)));
             assert_eq!(program.items().len(), if mixed { 5 } else { 1 });
+            if !declaration_only {
+                let linked = program.items().iter().rev()
+                    .filter_map(|item| item.native_products())
+                    .find_map(|products| products.linked_native_target())
+                    .expect("actual native history has a linked target");
+                crate::linked_native::tests::assert_actual_target_authentication(linked);
+            }
             let mut completed = Vec::new();
             for item in program.items() {
                 if let Some(products) = item.native_products() {

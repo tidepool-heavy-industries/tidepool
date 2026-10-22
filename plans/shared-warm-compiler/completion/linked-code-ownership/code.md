@@ -80,13 +80,40 @@ Keep foreign-grant refusals even when code identities are equal. Restore validat
 canonical/maximal SCCs and rejects cycles between stored components. Do not use
 the old differing-scoped-bindings test as proof of different semantic children.
 
-## Implementation checkpoint
+## Implementation and remaining qualification
 
-B isolated source: `refactor/g2-linked-code-core-20261022`, based on contract
-`1e1e42072a`. The first pure repr component/ref/body/edge owner and same-linker
-restore constructor are implemented, with iterative SCC discovery and exact
-prepared-data encoding moved from test-data into repr. Toolchain demanded
-producer and replacement of executable completion/package consumers remain next.
-This intermediate slice is not release-ready; no old route is accepted as a
-permanent parallel path. Compilation and the three pure graph controls are
-pending the bounded warm joined lane.
+The pure repr component/ref/body/edge owner uses iterative SCC discovery and
+same-linker restoration. Its first three deterministic controls executed 3/3 at
+joined source `00a05f565a`; later encoder, allocation and independent-property
+parcels require their own warm joined qualification.
+
+The actual toolchain demand producer now links exact HOME bindings and selected
+PACKAGE occurrences before SCC issuance. An opaque HOME grant retains its
+certified ordered SOURCE/retained choices; PACKAGE grants retain the reached
+projection of their actual receipt and authenticated products. Acquired imports
+pair each pure edge with its issued occurrence selector. Receiving-target Current
+correlation remains outside persisted grants. Equal CodeId never supplies it.
+
+New demand may borrow an intact held HOME witness only for the exact binding,
+same product issuance and equal closed code. PACKAGE receipt stage/occurrence is
+local correlation rather than an extra live entitlement. An explicitly selected
+owner is preserved intact; it cannot be rebound through this lookup.
+
+Live and restored acquisitions use one mandatory issuer for exact ordered
+product/interface/export and SOURCE/retained checks. Restoration validates each
+context's own records and acquired member bodies before sharing canonical
+components through the existing operation-local recovery validation owner.
+Missing current facts/products cannot be filled from that cache. HOME custody is
+narrowed to demanded rows; empty/package-only targets retain no unrelated available
+HOME inventory.
+
+Core producer/restore and new actual-target authentication assertions are still
+source-only. Compile the joined toolchain production and cfg(test) consumers,
+then execute existing real World native and mixed-stage histories. These controls
+round-trip their actual target grants, check shared immutable restored owners and
+Historical-only restoration, and reject absent current facts/products and forged
+scope/selector/leaf-receipt data. Remaining independent acceptance includes actual
+different-cohort borrowing, changed dependency and retained/source-owner refusal,
+full snapshot writer/reader sharing, runtime installation histories, and final
+old-route deletion audit. No intermediate adapter or old graph is accepted as a
+permanent second executable path.
