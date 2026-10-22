@@ -392,10 +392,65 @@ enum BoundPackageSelectionState {
         links: Arc<PackageLinks>,
         selection: PackageSelection,
         original_packages: Arc<CheckedOriginalPackageAssociations>,
+        prior_program_products:
+            Arc<[Arc<crate::declaration_context::CompletedNativeProductAvailability>]>,
     },
 }
 
+/// HOME contracts distinguish current output from the retained same-program
+/// producer. Empty links are permitted only for the latter's reached groups.
+pub(crate) enum PackageHomeSourceOrigin {
+    Current,
+    PriorProgram,
+}
+
 impl BoundPackageSelection {
+    pub(crate) fn home_source_origin(
+        &self,
+        binding: crate::artifact_inventory::NativeGroupBinding,
+        owner: &CachedHomeOwner,
+        operation: &InventoryOperation,
+    ) -> CertResult<PackageHomeSourceOrigin> {
+        let BoundPackageSelectionState::Item {
+            prior_program_products,
+            ..
+        } = &self.mode
+        else {
+            return Ok(PackageHomeSourceOrigin::Current);
+        };
+        let Some(product) = prior_program_products.iter().find(|product| {
+            let produced = product.row().original_owner();
+            produced.unit == owner.unit && produced.module == owner.module
+        }) else {
+            return Ok(PackageHomeSourceOrigin::Current);
+        };
+        if product.row().original_owner() != owner
+            || product.row().original_artifact_id() != binding.artifact()
+        {
+            return Err(CertificationError::Mismatch(
+                "HOME source differs from its prior program issuer",
+            ));
+        }
+        let chosen = product
+            .choose_own_group(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: binding.artifact(),
+                    original_ordinal: binding.original_ordinal,
+                },
+                operation,
+            )
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?
+            .ok_or(CertificationError::Mismatch(
+                "prior HOME source lacks its own offered group",
+            ))?;
+        if chosen.binding() != binding {
+            return Err(CertificationError::Mismatch(
+                "prior HOME source has another exact group issuer",
+            ));
+        }
+        Ok(PackageHomeSourceOrigin::PriorProgram)
+    }
+
     pub(crate) fn ordinary(
         target: crate::artifacts::invocation_output::CapturedOrdinaryTarget,
     ) -> CertResult<Self> {
@@ -1559,6 +1614,9 @@ impl CertifiedSegmentOriginals {
                 links: Arc::new(self.receipt.package_links.clone()),
                 selection: item.selection,
                 original_packages,
+                prior_program_products: Arc::clone(
+                    &self.products.source_selection.prior_program_products,
+                ),
             },
         };
         let original_inputs = cursor
@@ -3309,8 +3367,21 @@ fn check_prior_home_package_links(
     links: &[PackageLink],
     occurrences: &[PackageOccurrenceRow],
 ) -> CertResult<()> {
-    let group = completed_nominal_group(completed, ordinal)?;
-    let imports = group.imports().iter().filter_map(|owner| match owner {
+    check_ordered_home_package_links(
+        completed_nominal_group(completed, ordinal)?
+            .imports()
+            .iter(),
+        links,
+        occurrences,
+    )
+}
+
+fn check_ordered_home_package_links<'a>(
+    imports: impl Iterator<Item = &'a ReceiptImportOwner> + Clone,
+    links: &[PackageLink],
+    occurrences: &[PackageOccurrenceRow],
+) -> CertResult<()> {
+    let imports = imports.filter_map(|owner| match owner {
         ReceiptImportOwner::Package {
             unit,
             module,
@@ -3321,7 +3392,7 @@ fn check_prior_home_package_links(
     });
     if links.len() != imports.clone().count() {
         return Err(CertificationError::Mismatch(
-            "prior HOME package link count differs from its globals",
+            "HOME package link count differs from its globals",
         ));
     }
     for (link, (unit, module, seal)) in links.iter().zip(imports) {
@@ -3329,9 +3400,7 @@ fn check_prior_home_package_links(
             .get(link.occurrence() as usize)
             .ok_or(CertificationError::Receipt("package link occurrence range"))?;
         if &row.unit != unit || &row.module != module || &row.defining_interface_sha256 != seal {
-            return Err(CertificationError::Mismatch(
-                "prior HOME ordered package import",
-            ));
+            return Err(CertificationError::Mismatch("HOME ordered package import"));
         }
     }
     Ok(())
@@ -5236,12 +5305,11 @@ impl CertifiedSourceSelection {
                     .ok_or(CertificationError::Mismatch(
                         "HOME root is not an issued current group",
                     ))?;
-                if roots.len() != package_slot_count(&group.globals) {
-                    return Err(CertificationError::Mismatch(
-                        "HOME package link count differs from its current globals",
-                    ));
-                }
-                check_package_link_range(roots, receipt.package_links.occurrences.len())?;
+                check_ordered_home_package_links(
+                    group.globals.iter().map(|global| &global.owner),
+                    roots,
+                    &receipt.package_links.occurrences,
+                )?;
                 continue;
             }
             operation.charge(key.unit.len().saturating_add(key.module.len()))?;

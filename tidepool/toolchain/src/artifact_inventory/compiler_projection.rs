@@ -1390,7 +1390,10 @@ pub(crate) fn complete_native_selection(
             }
         };
         source_associations.insert(row.binding(), association);
-        row_inputs.push((row, prior, product));
+        let home_origin = selection
+            .home_source_origin(row.binding(), row.group().owner(), operation)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        row_inputs.push((row, prior, product, home_origin));
     }
     // Package-bearing rows consume their target-qualified HOME links. A prior
     // completion is authoritative, but the current occurrence must match its
@@ -1401,7 +1404,7 @@ pub(crate) fn complete_native_selection(
         .collect::<BTreeSet<_>>();
     let source_home_rows = row_inputs
         .iter()
-        .map(|(row, _, _)| {
+        .map(|(row, _, _, home_origin)| {
             let owner = row.group().owner();
             let package_slots = row
                 .imports()
@@ -1416,13 +1419,27 @@ pub(crate) fn complete_native_selection(
             let manifest_root = selection
                 .home_roots(&owner.unit, &owner.module, row.binding().original_ordinal)
                 .is_some();
-            (key, package_slots, manifest_root)
+            let prior_program = matches!(
+                home_origin,
+                crate::certified_products::PackageHomeSourceOrigin::PriorProgram
+            );
+            (key, package_slots, manifest_root, prior_program)
         })
         .collect::<Vec<_>>();
+    if source_home_rows
+        .iter()
+        .any(|(_, _, manifest_root, prior_program)| *prior_program && !*manifest_root)
+    {
+        return Err(failure(
+            "selected prior Source group lacks its target HOME contract",
+        ));
+    }
     let package_free_fresh = source_home_rows
         .iter()
-        .filter(|(_, slots, manifest_root)| *manifest_root && *slots == 0)
-        .map(|(key, _, _)| key.clone())
+        .filter(|(_, slots, manifest_root, prior_program)| {
+            *manifest_root && *slots == 0 && !*prior_program
+        })
+        .map(|(key, _, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
     let forbidden_home_roots = selected_home_keys
         .intersection(&package_free_fresh)
@@ -1435,11 +1452,18 @@ pub(crate) fn complete_native_selection(
     }
     let expected_home_keys = source_home_rows
         .iter()
-        .filter(|(_, slots, manifest_root)| *manifest_root && *slots > 0)
-        .map(|(key, _, _)| key.clone())
+        .filter(|(_, slots, manifest_root, prior_program)| {
+            *manifest_root && (*slots > 0 || *prior_program)
+        })
+        .map(|(key, _, _, _)| key.clone())
         .collect::<BTreeSet<_>>();
+    if selected_home_keys != expected_home_keys {
+        return Err(failure(
+            "package HOME contracts exceed the target's selected source groups",
+        ));
+    }
     let mut consumed_home_keys = BTreeSet::new();
-    for (row, prior, _) in &row_inputs {
+    for (row, prior, _, home_origin) in &row_inputs {
         let imports = row.imports();
         let definitions = row.group().group().definitions();
         if imports.len() != definitions.globals().len()
@@ -1456,7 +1480,11 @@ pub(crate) fn complete_native_selection(
             .count();
         let manifest_links =
             selection.home_roots(&owner.unit, &owner.module, row.binding().original_ordinal);
-        let fresh_links = if package_slots > 0 {
+        let fresh_links = if package_slots > 0
+            || matches!(
+                home_origin,
+                crate::certified_products::PackageHomeSourceOrigin::PriorProgram
+            ) {
             manifest_links
         } else {
             None
@@ -1731,7 +1759,7 @@ pub(crate) fn complete_native_selection(
             .map(Into::into)
     };
     let mut rows = imbl::OrdMap::new();
-    for (row, prior, product) in row_inputs {
+    for (row, prior, product, _) in row_inputs {
         let imports = close(row.imports(), row.group().group().definitions())?;
         if prior.is_some_and(|prior| prior.imports != imports) {
             return Err(failure(
