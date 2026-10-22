@@ -98,6 +98,26 @@ The user-approved aesthetic/boundary review produced these bounded corrections:
 
 ## Resources and worker transitions
 
+## Peer++ review closeout
+
+Campaign merge `a7be854638b2338d7e03be3570b405bd627e501f` contains the bounded
+P review candidate. The six-case package-occurrence target passes on the joined
+campaign source, and the three-target compile gate passed with build
+`5a0fef0c-3a66-4a46-924a-e03b500775b7`. P1 `144f245d06` restricts emitted
+HOME roots to certified fresh keys; P1 `5fd3580d78` selects fresh HOME roots by
+producer product origin and refuses a non-fresh package slot without prior
+completion. Its focused source-boot control passed 1/1 with build
+`7f286f4c-4f85-4a26-b0b9-ba51b5940773`.
+
+The historical reader remains a review blocker, not a qualification pass. On
+the bounded candidate it advances past the former HOME-key mismatch and fails
+at the manifest-less segment-item target root (`target package slot lacks
+package links`), retained under `p1-producer-ordinal-fix/h-run5/` with build
+`ccb8eda5-ed80-4dfd-b7dd-a88a230ea4fe`. Later exploratory consumer fallbacks
+were reverted rather than added to the candidate. Peer++ should review the
+root ownership boundary and explicitly reject or approve that residual; do not
+describe this tip as qualified.
+
 Latest reclaim transition: a clean, already-pushed historical checkout
 `tidepool-llm-family-effects-20261018` had no WIP, checkout daemon, open output
 files, or CWD references. Supported scoped retirement of its 42 GiB disposable
@@ -114,14 +134,14 @@ assignments are made; do not prefill fictitious agent IDs or active status.
 
 | Role | Owner/session | Checkout, base, tip | State | Next dependency/action | Evidence / review |
 |---|---|---|---|---|---|
-| S | `/root` | Campaign checkout above; `827d4f9fc4` | implementing | Integrate P/W/N/H/Q, then qualify | Worker evidence index and current ledger below |
-| P | app-server threads `01a1603f-72ec-...` and `01a16066-4c36-7862-97be-bb4b35fe1b86`; team agent `deepseek_p` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p-20261021`; `g2-deepseek/p-20261021`; tip `c91e981743` (P1+P3 merged, historical oracle registered) | implementing | Rerun the six-case cohort after P1's HOME-link repair lands, then replay H's HOME-slot boundary on the joined source | Joined cohort: 6 selected, 1 pass (historical same-seal), 5 fail; receipt under `p-joined-cohort/` |
-| P1 | app-server threads `01a16048-2994-...` and `01a16066-5a7a-7082-942d-85c9678a43d6` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p1-20261021`; `g2-deepseek/p1-20261021`; tip `b15319a617` | implementing | Six-case cohort now 6/6 on the P branch. Second counterexample routed: `encodeCertifiedOriginalProductsWithCapture` (`CertifiedProducts.hs:734/776`) leaves `homeRoots` unrestricted, so the joined H reader-history refuses `HOME group package links do not match certified fresh HOME groups` (keys G/H 0-5 + Scaffold 0-12 vs fresh Scaffold only). Apply the same `restrictKeys freshHomeKeys` as the other encode path plus a non-fresh-HOME regression, then rerun the reader-history case | Cohort 6/6 at `b15319a617`; joined reader-history first failure log under `joined/gate-380d2766/h-reader-history/` |
+| S | `/root` | Campaign checkout above; `a7be854638` | implementing | Peer++ review the bounded P candidate and unresolved segment-item root ownership | Joined six-case target and compile gate pass; historical reader is still a blocker |
+| P | P integration checkout | `/srv/swarm/checkouts/tidepool-deepseek-g2-p-20261021`; `g2-deepseek/p-20261021`; tip `5fd3580d78` | review-ready | Review P1 producer-origin classification and joined campaign merge | Six-case cohort passes; historical segment-item target-root refusal retained |
+| P1 | `/srv/swarm/checkouts/tidepool-deepseek-g2-p1-20261021` | `g2-deepseek/p1-20261021`; tip `5fd3580d78` | review-ready | No further consumer paths; peer++ should review the root ownership boundary | Fresh-HOME restriction plus product-origin classification; focused test 1/1; residual in `p1-producer-ordinal-fix/h-run5/` |
 | P2 | app-server thread `01a1604b-8e26-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p2-20261021`; `g2-deepseek/p2-20261021`; tip `83ac54b3aa` | blocked-on-specific-contract | After P1 lands, replay H's boundary `completed HOME row changed its exact product` (`compiler_projection.rs:1103`, `CompletedNativeSourceRow` HOME completion); repair the consumer only if it still refuses | 10 focused executed checks pass; H reader history now advances to this P HOME-slot boundary |
 | P3 | app-server thread `01a1604b-a892-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-p3-20261021`; `g2-deepseek/p3-20261021`; tip `527e53cd04` | review-ready | Integrate into P and run the full occurrence/refusal/recovery cohort | Historical fixtures tracked and mapped; exact same-seal control 1/1 |
 | W | app-server thread `01a1603f-7dc4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-w-20261021`; `g2-deepseek/w-20261021`; tip `d2b6899f71` | integrated | Join notebook histories | R approved; 5 focused executed checks pass |
 | N | `/root/deepseek_n` | `/srv/swarm/checkouts/tidepool-deepseek-g2-n-20261021`; `g2-deepseek/n-20261021`; tip `9f77dd17ab` | blocked-on-specific-contract | Typed unchanged/checked/incomplete progress is implemented; joined P HOME-slot publication remains | N publication evidence plus W integration |
-| Q1 | app-server thread `01a1603f-862d-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021`; `g2-deepseek/q1-20261021`; tip `a5167d5115` | changes-requested | R review of campaign `827d4f9fc4` found the dedupe duplicate flag dead: `fields_truncated:true` never fires for duplicates inside the retained window; fix plus a duplicate-case regression, rerun structuredLogging | R review under `reviews/r-boundary-q1-p1-p3-20261021.md`; fix routed to Q1 |
+| Q1 | `/srv/swarm/checkouts/tidepool-deepseek-g2-q1-20261021` | `g2-deepseek/q1-20261021`; tip `00beb4c093` | review-ready | Duplicate-field truncation fix and regression are pushed; no further work | `structuredLogging` passed 1/1, build `b8761203-7fb8-4feb-9f65-95f7edc9defa`; exact ceiling 814604 bytes |
 | Q2 | `/root/deepseek_q2` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q2-20261021`; `g2-deepseek/q2-20261021`; tip `769ef0ed40` | integrated | Joined qualification remains | Owner/kind census property controls pass |
 | Q3 | app-server thread `01a1603f-8d20-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q3-20261021`; `g2-deepseek/q3-20261021`; tip `393d6e5d8c` | integrated | Joined qualification remains | Independent enumeration plus disabled-trace control |
 | Q4 | app-server thread `01a1603f-90b4-...` | `/srv/swarm/checkouts/tidepool-deepseek-g2-q4-20261021`; `g2-deepseek/q4-20261021`; tip `9809de64c4` | integrated | Joined defining-Name replay remains | 1 focused executed check |
