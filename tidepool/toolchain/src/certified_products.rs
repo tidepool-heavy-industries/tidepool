@@ -26164,7 +26164,7 @@ pub(crate) mod tests {
             let output =
                 crate::declaration_context::certified_product_artifact_view_with_validation(
                     producer.sha256(),
-                    &[dependency.clone(), current.clone()],
+                    std::slice::from_ref(current),
                     &[],
                     &[],
                     Some(request.compiler_inputs().artifacts()),
@@ -26173,6 +26173,18 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             assert!(output.selected_native_groups().is_empty());
+            assert!(output.artifact_ids().contains(&entry.descriptor.id));
+            if interface_only {
+                for view in [request.compiler_inputs().artifacts(), &output] {
+                    assert!(
+                        view.capture_graph_selection()
+                            .namespace
+                            .iter()
+                            .all(|binding| binding.artifact != entry.descriptor.id),
+                        "historical dependency bytes do not enter the compiler namespace"
+                    );
+                }
+            }
             assert!(selection.new_product_native_requirements().next().is_none());
             let current_entry = output.entries().into_iter().find(|entry| {
                 matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
@@ -26244,6 +26256,16 @@ pub(crate) mod tests {
                 {
                     let view = bound;
                     let graph = view.capture_graph_selection();
+                    assert!(view.artifact_ids().contains(&entry.descriptor.id));
+                    if interface_only {
+                        assert!(
+                            graph
+                                .namespace
+                                .iter()
+                                .all(|binding| binding.artifact != entry.descriptor.id),
+                            "exact acquired child survives without becoming a compiler role"
+                        );
+                    }
                     let parents = graph
                         .native_groups
                         .iter()
