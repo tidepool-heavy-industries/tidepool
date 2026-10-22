@@ -6525,7 +6525,7 @@ fn compile_invocation_inner(
         );
         invocation_timing.advance("candidate_publication");
         artifacts.source_selection = Some(certified.source_selection);
-        artifacts.certified_groups = selected_products.into_values().collect::<Vec<_>>().into();
+        artifacts.certified_groups = physical_inputs.physical_cohort()?.demanded_products()?;
         artifacts.recovery_products = certified.recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {

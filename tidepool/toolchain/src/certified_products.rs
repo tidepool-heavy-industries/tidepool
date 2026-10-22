@@ -25982,9 +25982,9 @@ pub(crate) mod tests {
         let target = admitted.with_certified_groups(Arc::clone(&owner)).unwrap();
         let first_rows = target.resolve_sources().unwrap();
         let second_rows = target.resolve_sources().unwrap();
-        assert!(std::ptr::eq(
-            first_rows.group(binding).unwrap(),
-            second_rows.group(binding).unwrap(),
+        assert!(Arc::ptr_eq(
+            first_rows.shared_group(binding).unwrap(),
+            second_rows.shared_group(binding).unwrap(),
         ));
 
         // Equal selected bindings do not establish the same acquisition owner.
@@ -26098,8 +26098,8 @@ pub(crate) mod tests {
             .with_certified_groups(Arc::new(narrowed_owner))
             .unwrap();
         let narrowed_rows = narrowed.resolve_sources().unwrap();
-        assert!(narrowed_rows.group(independent_binding).is_ok());
-        assert!(narrowed_rows.group(other_binding).is_err());
+        assert!(narrowed_rows.shared_group(independent_binding).is_ok());
+        assert!(narrowed_rows.shared_group(other_binding).is_err());
 
         assert_eq!(inventory.metrics().issued_scope_nodes, before);
         let joined = admitted_view

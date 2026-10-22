@@ -535,7 +535,6 @@ pub(crate) struct OriginalCompilerInputs {
     physical: Option<Arc<PhysicalValueCaptures>>,
 }
 
-#[derive(Debug)]
 struct PhysicalValueCaptures {
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
@@ -544,6 +543,15 @@ struct PhysicalValueCaptures {
     groups: std::sync::Mutex<
         BTreeMap<crate::artifact_inventory::NativeGroupBinding, Arc<IssuedSelectedNativeGroup>>,
     >,
+}
+
+impl std::fmt::Debug for PhysicalValueCaptures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PhysicalValueCaptures")
+            .field("facts", &self.facts)
+            .field("groups", &self.groups)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A live borrow of an actual once-issued output cohort, including its original
@@ -599,6 +607,14 @@ impl<'a> PhysicalCohortInputs<'a> {
             }
         }
         Ok(groups)
+    }
+
+    pub(crate) fn demanded_products(&self) -> Result<Arc<[PendingCertifiedGroup]>, CompileError> {
+        let issued = self.captures.groups.lock().expect("physical group issuance lock");
+        self.captures.operation.reserve::<PendingCertifiedGroup>(issued.len())
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        Ok(issued.values().map(|row| row.product().as_ref().clone())
+            .collect::<Vec<_>>().into())
     }
 
     pub(crate) fn permits_visible_value(&self, entry: &ArtifactEntry) -> bool {

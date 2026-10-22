@@ -949,7 +949,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         tidepool_repr::execution_schema::DecodeLimits::default(),
     )
     .unwrap();
-    let prepared = prepared_artifact.prepared().clone();
     let prepared_binding = prepared_artifact.bind_package_program();
     let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
         globals: vec![],
