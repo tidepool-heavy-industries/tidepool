@@ -3138,7 +3138,7 @@ fn package_stage_identity(
         ])
     };
     let value = value_array([
-        Value::Integer(1.into()),
+        Value::Integer(2.into()),
         value_array(links.occurrences.iter().map(|occurrence| {
             value_array([
                 Value::Bytes(occurrence.envelope_sha256.to_vec()),
@@ -3147,6 +3147,12 @@ fn package_stage_identity(
                 Value::Bytes(occurrence.defining_interface_sha256.to_vec()),
                 Value::Bytes(occurrence.defining_version_sha256.to_vec()),
                 value_array(occurrence.imports.iter().map(encode_link)),
+            ])
+        })),
+        value_array(links.target_roots.iter().map(|(target, roots)| {
+            value_array([
+                value_text(target),
+                value_array(roots.iter().map(encode_link)),
             ])
         })),
         value_array(links.home_roots.iter().map(|(key, roots)| {
@@ -34633,8 +34639,9 @@ None,
             })
             .collect::<Vec<_>>();
         let identity = value_array([
-            Value::Integer(1.into()),
+            Value::Integer(2.into()),
             value_array(identity_occurrences),
+            value_array(target_roots.clone()),
             value_array(home_roots.clone()),
             value_array(products.iter().map(|product| {
                 value_array([
@@ -34819,6 +34826,27 @@ None,
         wrong_stage.as_array_mut().unwrap()[1] = Value::Bytes(vec![8; 32]);
         assert!(matches!(
             decode(&wrong_stage),
+            Err(CertificationError::Receipt(
+                "package stage identity differs from its manifest"
+            ))
+        ));
+        let mut mutated_roots = package_links_manifest(
+            &products,
+            vec![package_links_occurrence(0, [1; 32], value_array([]))],
+            vec![value_array([
+                value_text("target"),
+                value_array([package_links_local(0)]),
+            ])],
+            vec![],
+        );
+        assert!(decode(&mutated_roots).is_ok());
+        mutated_roots.as_array_mut().unwrap()[3]
+            .as_array_mut()
+            .unwrap()[0]
+            .as_array_mut()
+            .unwrap()[1] = value_array([package_links_local(0), package_links_local(0)]);
+        assert!(matches!(
+            decode(&mutated_roots),
             Err(CertificationError::Receipt(
                 "package stage identity differs from its manifest"
             ))
