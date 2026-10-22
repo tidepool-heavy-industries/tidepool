@@ -129,10 +129,10 @@ fn hydrate_context_roots(
     let mut bindings = BTreeSet::new();
     let mut edges = BTreeSet::new();
     let mut package_products = BTreeSet::new();
-    for root in demanded {
-        let receipt = graph
-            .acquire_context(&root)
-            .map_err(|error| recovery::graph_error(&owner.path, error))?;
+    let acquired = graph
+        .acquire_contexts(&demanded)
+        .map_err(|error| recovery::graph_error(&owner.path, error))?;
+    for (root, receipt) in demanded.into_iter().zip(acquired) {
         let snapshot = receipt.snapshot();
         package_products.extend(snapshot.native_package_artifacts_introduced(None));
         let selection = snapshot
@@ -175,11 +175,12 @@ fn hydrate_context_roots(
             &edges.into_iter().collect::<Vec<_>>(),
         )
         .map_err(|error| SessionError::RecoveryArtifacts(Box::new(error)))?;
-    let mut restored = Vec::new();
-    for (root, receipt) in receipts {
-        let context = graph.recover_compiler_context(&inventory, &root, receipt)?;
-        restored.push((root, context));
-    }
+    let contexts = graph.recover_compiler_contexts(&inventory, &receipts)?;
+    let restored = receipts
+        .into_iter()
+        .zip(contexts)
+        .map(|((root, _), context)| (root, context))
+        .collect::<Vec<_>>();
     owner.validate_owner()?;
     graph
         .store()

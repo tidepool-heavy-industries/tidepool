@@ -79,7 +79,11 @@ fn restore_fixture_support_in_view(
             }),
         "authenticated recovery retains each exact issued offer scope before snapshot restore"
     );
-    recovered.restore_snapshot_evidence(&issued.snapshot(), &BTreeMap::new())
+    recovered.restore_snapshot_evidence(
+        &issued.snapshot(),
+        &BTreeMap::new(),
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
 }
 
 const PRODUCER: &[u8] = b"protected-native-availability-fixture";
@@ -10157,9 +10161,11 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
     let historical_context = context.clone().rebuild(|facts| {
         facts.compiler_support = historical_support;
     });
-    let mismatched_issuer = context
-        .compiler_source_support()
-        .restore_snapshot_evidence(&historical_context.snapshot(), &BTreeMap::new());
+    let mismatched_issuer = context.compiler_source_support().restore_snapshot_evidence(
+        &historical_context.snapshot(),
+        &BTreeMap::new(),
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    );
     assert!(matches!(&mismatched_issuer, Err(CompileError::ExtractFailed(detail))
         if detail == "artifact inventory: recovered native offer scope is outside acquisition custody"),
         "a different historical issuer cannot restore its authority into current custody: {mismatched_issuer:?}");

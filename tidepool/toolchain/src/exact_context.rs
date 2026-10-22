@@ -2897,7 +2897,26 @@ pub fn hydrate_context<BS: Blockstore>(
     root: &ContextRoot,
 ) -> Result<MaterializedContext, SnapshotError> {
     let hydrator = SnapshotHydrator::new(store);
-    let store = &hydrator;
+    hydrate_context_with(&hydrator, root)
+}
+
+/// Hydrate one demanded context set with a shared operation-local record owner.
+/// Distinct roots with overlapping contents retain the same decoded records.
+pub fn hydrate_contexts<BS: Blockstore>(
+    store: &BS,
+    roots: &[ContextRoot],
+) -> Result<Vec<MaterializedContext>, SnapshotError> {
+    let hydrator = SnapshotHydrator::new(store);
+    roots
+        .iter()
+        .map(|root| hydrate_context_with(&hydrator, root))
+        .collect()
+}
+
+fn hydrate_context_with<BS: Blockstore>(
+    store: &SnapshotHydrator<'_, BS>,
+    root: &ContextRoot,
+) -> Result<MaterializedContext, SnapshotError> {
     let bytes = read_checked_bytes(store, root.cid())?;
     // Refuse an old schema before decoding its layout or following any links.
     #[derive(Deserialize)]

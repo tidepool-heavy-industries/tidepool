@@ -271,7 +271,47 @@ mod tests {
             second.native_components.root()
         );
         install(&store, writer.finish().unwrap());
-        let restored = hydrate_context(&store, second.root()).unwrap();
+        assert_ne!(first.root(), second.root());
+        struct Observed<'a> {
+            store: &'a MemoryBlockstore,
+            watched: Cid,
+            reads: Cell<usize>,
+        }
+        impl Blockstore for Observed<'_> {
+            fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+                if cid == &self.watched {
+                    self.reads.set(self.reads.get() + 1);
+                }
+                self.store.get(cid)
+            }
+            fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+                unreachable!()
+            }
+        }
+        let observed = Observed {
+            store: &store,
+            watched: component.cid(),
+            reads: Cell::new(0),
+        };
+        let mut restored =
+            hydrate_contexts(&observed, &[first.root().clone(), second.root().clone()]).unwrap();
+        assert_eq!(restored.len(), 2);
+        let successor = restored.pop().unwrap();
+        let predecessor = restored.pop().unwrap();
+        assert!(Arc::ptr_eq(
+            &predecessor.snapshot().native_components[&[9; 32]].0,
+            &successor.snapshot().native_components[&[9; 32]].0
+        ));
+        assert!(Arc::ptr_eq(
+            &predecessor.snapshot().native_closures[&[1; 32]].0,
+            &successor.snapshot().native_closures[&[1; 32]].0
+        ));
+        assert_eq!(
+            observed.reads.get(),
+            1,
+            "overlapping context roots read the shared record once"
+        );
+        let restored = successor;
         assert_eq!(
             restored.snapshot().native_components,
             second.snapshot().native_components

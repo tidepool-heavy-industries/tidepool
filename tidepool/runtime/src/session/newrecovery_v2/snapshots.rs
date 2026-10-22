@@ -11,7 +11,7 @@ use imbl::OrdMap;
 use parking_lot::Mutex;
 use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::exact_context::{
-    hydrate_context, hydrate_map, lookup_map, read_value, MaterializedContext, MaterializedMap,
+    hydrate_contexts, hydrate_map, lookup_map, read_value, MaterializedContext, MaterializedMap,
     Materializer, SnapshotMapRoot, StagedBlocks,
 };
 
@@ -669,16 +669,39 @@ impl RecoveryGraph {
         &self,
         root: &ContextRoot,
     ) -> Result<Arc<MaterializedContext>, RecoveryError> {
+        Ok(self
+            .acquire_contexts(std::slice::from_ref(root))?
+            .pop()
+            .expect("one demanded root"))
+    }
+
+    pub(crate) fn acquire_contexts(
+        &self,
+        roots: &[ContextRoot],
+    ) -> Result<Vec<Arc<MaterializedContext>>, RecoveryError> {
         self.store.ensure_ready()?;
-        if let Some(context) = self.acquired.lock().contexts.get(root).cloned() {
-            return Ok(context);
+        let missing = {
+            let acquired = self.acquired.lock();
+            roots
+                .iter()
+                .filter(|root| !acquired.contexts.contains_key(*root))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let decoded = hydrate_contexts(self.store.as_ref(), &missing)?;
+        let mut acquired = self.acquired.lock();
+        for (root, context) in missing.into_iter().zip(decoded) {
+            acquired
+                .contexts
+                .entry(root)
+                .or_insert_with(|| Arc::new(context));
         }
-        let context = Arc::new(hydrate_context(self.store.as_ref(), root)?);
-        self.acquired
-            .lock()
-            .contexts
-            .insert(root.clone(), context.clone());
-        Ok(context)
+        Ok(roots
+            .iter()
+            .map(|root| Arc::clone(&acquired.contexts[root]))
+            .collect())
     }
 
     pub(crate) fn recover_compiler_context(
@@ -687,17 +710,34 @@ impl RecoveryGraph {
         root: &ContextRoot,
         receipt: Arc<MaterializedContext>,
     ) -> Result<ScopedCompilerContext, crate::session::SessionError> {
-        let exact = inventory.context_for_expected_snapshot(root, &receipt)?;
-        if exact.toolchain_identity_sha256() != receipt.snapshot().producer_sha256() {
-            return Err(crate::session::SessionError::WrongPublicManifestTicket);
-        }
-        Ok(ScopedCompilerContext::Stored(Arc::new(
-            StoredCompilerContext {
-                exact: Arc::new(exact),
-                materialized: receipt,
-                origin: self.context_origin(),
-            },
-        )))
+        Ok(self
+            .recover_compiler_contexts(inventory, &[(root.clone(), receipt)])?
+            .pop()
+            .expect("one demanded context"))
+    }
+
+    pub(crate) fn recover_compiler_contexts(
+        &self,
+        inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
+        receipts: &[(ContextRoot, Arc<MaterializedContext>)],
+    ) -> Result<Vec<ScopedCompilerContext>, crate::session::SessionError> {
+        let contexts = inventory.contexts_for_expected_snapshots(receipts)?;
+        contexts
+            .into_iter()
+            .zip(receipts)
+            .map(|(exact, (_, receipt))| {
+                if exact.toolchain_identity_sha256() != receipt.snapshot().producer_sha256() {
+                    return Err(crate::session::SessionError::WrongPublicManifestTicket);
+                }
+                Ok(ScopedCompilerContext::Stored(Arc::new(
+                    StoredCompilerContext {
+                        exact: Arc::new(exact),
+                        materialized: Arc::clone(receipt),
+                        origin: self.context_origin(),
+                    },
+                )))
+            })
+            .collect()
     }
     pub(crate) fn surface(
         &self,

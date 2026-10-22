@@ -666,6 +666,25 @@ impl AcquiredNativeClosures {
         &self.recorded
     }
 
+    fn bind_record_baseline(
+        &self,
+        snapshot: &crate::exact_context::ExactContextSnapshot,
+    ) -> Result<Self, CompileError> {
+        if self.components != snapshot.native_components
+            || self.recorded != snapshot.native_closures
+        {
+            return Err(failure(
+                "restored native records differ from exact snapshot",
+            ));
+        }
+        // Authentication already issued the live owners. Share their equal
+        // immutable map bases without transferring any acquisition authority.
+        let mut rebound = self.clone();
+        rebound.components = snapshot.native_components.clone();
+        rebound.recorded = snapshot.native_closures.clone();
+        Ok(rebound)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.owners.is_empty()
     }
@@ -4100,6 +4119,7 @@ impl CompilerSourceSupport {
             ArtifactId,
             Arc<crate::certified_products::CertifiedPackageCodeProduct>,
         >,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let restored = self.restore_native_maps(
             &snapshot.roles,
@@ -4107,11 +4127,7 @@ impl CompilerSourceSupport {
             &snapshot.native_availability,
             &snapshot.input_decisions,
         )?;
-        restored.restore_native_code_records(
-            snapshot,
-            acquired_packages,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-        )
+        restored.restore_native_code_records(snapshot, acquired_packages, validation)
     }
 
     fn restore_native_maps(
@@ -4580,7 +4596,10 @@ impl CompilerSourceSupport {
         projection.bind_snapshot_roles(&snapshot.roles)?;
         let mut artifacts = self.artifacts.clone();
         artifacts.bind_selection_snapshot_baseline(snapshot.selection().clone())?;
-        self.rebuild(projection, artifacts, self.native_offers.iter().cloned())
+        let mut rebound =
+            self.rebuild(projection, artifacts, self.native_offers.iter().cloned())?;
+        rebound.native_closures = rebound.native_closures.bind_record_baseline(snapshot)?;
+        Ok(rebound)
     }
 
     pub(crate) fn finalize_namespace(&self) -> Result<Self, CompileError> {

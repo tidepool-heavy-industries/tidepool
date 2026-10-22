@@ -1959,7 +1959,11 @@ mod tests {
                             .iter()
                             .cloned(),
                     )?
-                    .restore_snapshot_evidence(&published.snapshot(), &BTreeMap::new())?;
+                    .restore_snapshot_evidence(
+                        &published.snapshot(),
+                        &BTreeMap::new(),
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )?;
                     published
                         .as_ref()
                         .clone()
@@ -2221,7 +2225,11 @@ mod tests {
                 .unwrap();
             let support = recovered
                 .compiler_source_support()
-                .restore_snapshot_evidence(&published.snapshot(), &BTreeMap::new())
+                .restore_snapshot_evidence(
+                    &published.snapshot(),
+                    &BTreeMap::new(),
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                )
                 .unwrap();
             let recovered = recovered
                 .rebuild(|facts| facts.compiler_support = support)
@@ -2312,7 +2320,11 @@ mod tests {
                 .unwrap();
                 let support = durable
                     .compiler_source_support()
-                    .restore_snapshot_evidence(&snapshot.snapshot(), &BTreeMap::new())
+                    .restore_snapshot_evidence(
+                        &snapshot.snapshot(),
+                        &BTreeMap::new(),
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
                     .unwrap();
                 let durable = durable
                     .rebuild(|facts| facts.compiler_support = support)
