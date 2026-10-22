@@ -1,7 +1,8 @@
 # G2 ownership closeout
 
-Implementation base: `ac2440926ea64a4e2a99ee20f4ec3b98d48407f5` on
-`root/g2-final-20261021`. This is the accepted 2026-10-22 continuation.
+Implementation checkpoint: `2bbc30c9c8` on `root/g2-final-20261021`.
+This is the accepted bounded structural closeout; prior A/B and P/C work below
+is integrated and awaits joined qualification.
 [STATE](STATE.md) records evidence; [TEST-GATES](TEST-GATES.md) owns qualification.
 The semantic [G2 contract](../g2-completion.md) remains controlling.
 
@@ -27,6 +28,41 @@ Independent reviewers inspect exact candidates and joined failure paths. Workers
 use isolated source checkouts based on this checkpoint, exchange contracts early,
 and send coherent commits before the entire tranche is complete. Coordinate
 shared files, not unrelated work. Preserve historical dirty checkouts.
+
+## Immediate repair: authenticated conditional HOME contracts
+
+HOME annotations describe package obligations if an exact physical group is
+selected; they are not executable roots. Authenticate unused annotations too.
+Do not require equality between all manifest annotations and executable Source
+closure, for either CURRENT or PRIOR products. Inline current wrappers already
+provide a real counterexample. OriginalUse retains its stricter exact selected
+slot contract because it describes issued execution demand.
+
+P issues one private `ValidatedHomeContracts` owner after candidate binding and
+produced-Original binding. Reuse the existing manifest, operation owner and
+consulted prior-product slice. Store charged, sorted exact membership references;
+CURRENT means current receipt membership, including Cached and RetainedCore,
+not fresh execution authority. An authenticated zero-slot contract is valid for
+either CURRENT or PRIOR: exact empty consumption grants no execution permission. No extra program decode, registry or graph rebuild.
+
+World item selection preserves existing stage/program/manifest checks before
+sharing this owner. Ordinary captured-output selection receives the same proof
+through its private factory. Bind through actual operation ownership, authenticated
+manifest stage identity and existing captured-output ownership, never Arc table
+addresses. Applicability accepts the actual resolved Source product and checks
+physical artifact/ordinal; matching module names cannot choose a version.
+Unrelated authenticated annotations remain unused. Preserve independent
+OriginalUse and held-completion routes and exact selected-slot conflict/refusal.
+Existing native selection owners continue to enforce executable offers.
+
+Delete `home_source_origin` reconstruction and the full/prior-only equality
+proposals. Consume ordered applicable slots directly, without recreating parallel
+selection sets. Report bounded exact target/group/slot failures. No public API,
+wire change, new compiler path or Haskell producer redesign is required.
+
+T closes gaps using actual receipt ingress and full notebook histories. Owner-local
+representation tests remain labelled as such. D reviews authority/selection;
+C reviews producer semantics. Root reviews joined consumers and integrations.
 
 ## A/B: actual live PACKAGE instance ownership
 

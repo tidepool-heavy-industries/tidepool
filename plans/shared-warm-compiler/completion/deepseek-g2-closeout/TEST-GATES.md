@@ -1,6 +1,6 @@
 # G2 joined qualification gates
 
-Accepted implementation base `ac2440926e`; use current exact integration OID for
+Test-integration checkpoint `2bbc30c9c8`; use the current exact integration OID for
 each run. [NEXT-WAVE](NEXT-WAVE.md) defines the repairs. Existing evidence is in
 `/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
 Do not add counts from different checkpoints into one passing suite.
@@ -30,7 +30,8 @@ Do not add counts from different checkpoints into one passing suite.
    prepared corpus after affected translation/serialization changes.
 7. On one clean source/profile/compiler/assets contract, build production catalog
    and native_runtime_bundle, freeze through the central qualification owner,
-   execute frozen subset below, then bounded real DeepSeek smoke.
+   execute the catalog gate and prepared-child-smoke1, then the frozen subset
+   below and bounded real DeepSeek smoke.
 
 Named target declarations own their filters/counts. Do not narrow them by adding
 an exact filter. Direct libtest recipes must supply their owned-resident resources
@@ -47,7 +48,9 @@ Prior Source: expression -> declaration -> actual generated Display use;
 packageful and package-free target-only first later demand; later World use;
 nominal evidence without executable offer; wrong issuer/stage/binder/ordinal;
 exact prior HOME package order and item-stage equality. No role promotion merely
-because physical evidence remains available.
+because physical evidence remains available. Authenticate unused CURRENT and PRIOR
+HOME annotations without selecting them; reject malformed unused annotations and
+missing or conflicting contracts for actually selected slots.
 
 Source-conflict coverage must use expressible production World admission. If a
 proposed same-slot history cannot be constructed by production, retain evidence
