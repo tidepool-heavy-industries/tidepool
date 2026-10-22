@@ -32,7 +32,7 @@ mod source_admission;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;
-pub(crate) use source_admission::{CompilerDependencies, SourceAdmissionBundle};
+pub(crate) use source_admission::{CompilerDependencies, RootSourceImportRoles, SourceAdmissionBundle};
 pub use source_admission::{
     SourceAdmissionBoundary, SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
 };
@@ -8835,6 +8835,7 @@ impl ExactProgramSegmentAdmission {
                 || admission.exact_imports != first.exact_imports
                 || admission.exact_source_imports != first.exact_source_imports
                 || admission.scaffold_roots != first.scaffold_roots
+                || admission.claims.roles != first.claims.roles
                 || admission.selected_originals.len() != first.selected_originals.len()
                 || admission
                     .selected_originals
@@ -10788,6 +10789,7 @@ impl ProductInputFacts<'_> {
             edges,
             claims,
             selection_evidence,
+            import_roles,
         } = decoded;
         let evidence = crate::cache::CompletedSourceEvidence::from_worker_evidence(
             evidence,
@@ -10891,9 +10893,6 @@ impl ProductInputFacts<'_> {
         let mut exact_imports = BTreeMap::new();
         let mut exact_source_imports = BTreeMap::new();
         let mut scaffold_roots: BTreeMap<usize, BTreeSet<ExactModuleIdentity>> = BTreeMap::new();
-        let mut protected_edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>> =
-            BTreeMap::new();
-        let mut authored_edges = BTreeSet::new();
         for module in &edges {
             let owner = (
                 module.owner.unit.as_str(),
@@ -10959,19 +10958,12 @@ impl ProductInputFacts<'_> {
                                 )
                             })
                             .map_err(|error| compiler_evidence_failure(error.into()))?;
-                        protected_edges
-                            .entry(module.owner.clone())
-                            .or_default()
-                            .insert(identity(unit, name));
                         scaffold_roots
                             .entry(index)
                             .or_default()
                             .insert(identity(unit, name));
                         scaffold_import = true;
                     }
-                }
-                if !scaffold_import {
-                    authored_edges.insert((module.owner.clone(), identity(unit, name)));
                 }
                 let refusal = if boot {
                     Some(ExactImportWitnessRefusal::BootImport)
@@ -11032,22 +11024,19 @@ impl ProductInputFacts<'_> {
         if seen != source_owners {
             return Err(failure("exact import witness omits a fresh source module"));
         }
-        // An owner also imported by an authored edge keeps that independent
-        // role. Protected permission never erases an authored obligation.
-        authored_edges.retain(|(source, imported)| {
-            protected_edges
-                .get(source)
-                .is_some_and(|edges| edges.contains(imported))
-        });
-        let authored_edges = authored_edges.into_iter().fold(
-            BTreeMap::<_, BTreeSet<_>>::new(),
-            |mut rows, (source, imported)| {
-                rows.entry(source).or_default().insert(imported);
-                rows
-            },
-        );
-        let compilation_root =
-            source_admission::authenticated_compilation_root(&evidence, &source_path)?;
+        let roles = RootSourceImportRoles::issue(
+            &evidence,
+            &source_path,
+            &edges,
+            import_roles,
+            |owner| context.source_lexical_node(owner).is_some()
+                || self.program_support
+                    .and_then(|support| support.imports.get(owner))
+                    .and_then(|row| row.admission.as_ref())
+                    .is_some_and(|admission| admission.admits_lexical(owner)),
+            &validation.inventory,
+        )?;
+        let compilation_root = roles.root.clone();
         let source_selection_roots = edges
             .iter()
             .flat_map(|module| {
@@ -11154,8 +11143,7 @@ impl ProductInputFacts<'_> {
                 fresh: &evidence,
                 roots: &source_selection_roots,
                 compilation_root: &compilation_root,
-                protected_edges: &protected_edges,
-                authored_overlaps: &authored_edges,
+                import_roles: &roles,
                 independent: &independent,
                 source_less: &source_less,
             };
@@ -11195,8 +11183,7 @@ impl ProductInputFacts<'_> {
             compilation_root,
             &exact_imports,
             &selected_originals,
-            protected_edges,
-            authored_edges,
+            roles,
             |owner| {
                 self.program_support
                     .and_then(|support| support.imports.get(owner))
@@ -11244,6 +11231,7 @@ pub(crate) struct DecodedExactCompilationReceipt {
     edges: Vec<ExactReceiptModule>,
     pub(crate) claims: Vec<crate::execution_source::SourceSelectedOriginalClaim>,
     selection_evidence: Option<crate::cache::DependencyEvidence>,
+    import_roles: Vec<source_admission::RawSourceImportRole>,
 }
 struct ExactReceiptModule {
     owner: ExactModuleIdentity,
@@ -12591,6 +12579,7 @@ pub(crate) fn decode_world_source_receipt<'a>(
         &evidence_bytes,
         &header[8],
         &header[9],
+        &header[11],
         operation,
     )?;
     Ok(DecodedWorldSourceReceipt {
@@ -12604,8 +12593,8 @@ pub(crate) fn decode_world_source_receipt<'a>(
 }
 
 fn world_source_header(value: &Value) -> Result<&[Value], CompileError> {
-    let header = row(value, 11)?;
-    if string(&header[0])? != "TPCWSOURCE3" {
+    let header = row(value, 12)?;
+    if string(&header[0])? != "TPCWSOURCE4" {
         return Err(failure("unsupported world source receipt version"));
     }
     Ok(header)
@@ -12716,8 +12705,8 @@ fn decode_exact_compilation_receipt_with_operation(
     operation
         .charge_value_copies(&value, 3)
         .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let header = row(&value, 10)?;
-    if string(&header[0])? != "TPEXACTCOMPILE" || string(&header[1])? != "3" {
+    let header = row(&value, 11)?;
+    if string(&header[0])? != "TPEXACTCOMPILE" || string(&header[1])? != "4" {
         return Err(failure(
             "compile receipt belongs to another context or version",
         ));
@@ -12764,6 +12753,7 @@ fn decode_exact_compilation_receipt_with_operation(
         string(&header[7])?.as_bytes(),
         &header[8],
         &header[9],
+        &header[10],
         operation,
     )
 }
@@ -12777,6 +12767,7 @@ fn decode_compilation_source_payload(
     evidence_bytes: &[u8],
     import_rows: &Value,
     source_selection: &Value,
+    import_roles: &Value,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<DecodedExactCompilationReceipt, CompileError> {
     operation
@@ -12861,7 +12852,46 @@ fn decode_compilation_source_payload(
         edges,
         claims,
         selection_evidence,
+        import_roles: decode_source_import_roles(import_roles, operation)?,
     })
+}
+
+fn decode_source_import_roles(
+    value: &Value,
+    operation: &tidepool_repr::execution_schema::InventoryOperation,
+) -> Result<Vec<source_admission::RawSourceImportRole>, CompileError> {
+    let rows = list(value, 65536)?;
+    operation.reserve::<source_admission::RawSourceImportRole>(rows.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let mut decoded = Vec::with_capacity(rows.len());
+    for value in rows {
+        let fields = row(value, 5)?;
+        let qualifier = string(&fields[0])?;
+        crate::cache::ImportQualifier::try_from(qualifier.to_owned()).map_err(failure)?;
+        let module = string(&fields[1])?;
+        let boot = boolean(&fields[2])?;
+        let unit = string(&fields[3])?;
+        let mask = match &fields[4] {
+            Value::Integer(value) => u8::try_from(*value).map_err(failure)?,
+            _ => return Err(failure("source import role mask is not an integer")),
+        };
+        if !(1..=7).contains(&mask) || module.is_empty() || unit.is_empty() {
+            return Err(failure("source import role row has an invalid field"));
+        }
+        operation.charge(qualifier.len().saturating_add(module.len()).saturating_add(unit.len()))
+            .map_err(|error| compiler_evidence_failure(error.into()))?;
+        let decoded_row = source_admission::RawSourceImportRole {
+            qualifier: qualifier.to_owned(), module: module.to_owned(), boot, unit: unit.to_owned(), mask,
+        };
+        if decoded.last().is_some_and(|previous: &source_admission::RawSourceImportRole| {
+            (&previous.qualifier, &previous.module, previous.boot, &previous.unit)
+                >= (&decoded_row.qualifier, &decoded_row.module, decoded_row.boot, &decoded_row.unit)
+        }) {
+            return Err(failure("source import role rows are not sorted unique"));
+        }
+        decoded.push(decoded_row);
+    }
+    Ok(decoded)
 }
 
 fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, CompileError> {

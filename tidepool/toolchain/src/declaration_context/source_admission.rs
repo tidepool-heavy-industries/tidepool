@@ -88,27 +88,99 @@ impl CompilerDependencies {
     }
 }
 
-/// Exact template-authorized edges, not a capability to import their owners
-/// from authored code. The recipe itself remains with the receipt input owner.
-#[derive(Clone, Debug, Default)]
-struct ProtectedTemplateLinks {
-    edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
-    authored_overlaps: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+/// One resolved direct HOME edge from the authenticated root. Decoding this
+/// row checks syntax only; it grants no import or lexical authority.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct RawSourceImportRole {
+    pub(super) qualifier: String,
+    pub(super) module: String,
+    pub(super) boot: bool,
+    pub(super) unit: String,
+    pub(super) mask: u8,
 }
 
-impl ProtectedTemplateLinks {
-    fn excludes_lexical(
-        &self,
-        source: &ExactModuleIdentity,
-        imported: &ExactModuleIdentity,
-    ) -> bool {
-        self.edges
-            .get(source)
-            .is_some_and(|edges| edges.contains(imported))
-            && !self
-                .authored_overlaps
-                .get(source)
-                .is_some_and(|edges| edges.contains(imported))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootImportRole {
+    AuthoredCurrent,
+    InheritedLexical,
+    ProtectedCompiler,
+}
+
+/// Issued only after root authentication and exact direct HOME-edge coverage.
+/// The role census classifies source use; exact import permission is separate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RootSourceImportRoles {
+    pub(super) root: ExactModuleIdentity,
+    rows: Vec<RawSourceImportRole>,
+}
+
+impl RootSourceImportRoles {
+    pub(super) fn issue(
+        evidence: &crate::cache::CompletedSourceEvidence,
+        source_path: &Path,
+        exact: &[ExactReceiptModule],
+        rows: Vec<RawSourceImportRole>,
+        prior_lexical: impl Fn(&ExactModuleIdentity) -> bool,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
+        let root = authenticated_compilation_root(evidence, source_path)?;
+        let mut expected = BTreeSet::new();
+        let mut insert = |qualifier: String, module: String, boot: bool, unit: String| {
+            operation.reserve::<(String, String, bool, String)>(1)
+                .and_then(|_| operation.charge(qualifier.len().saturating_add(module.len()).saturating_add(unit.len())))
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            expected.insert((qualifier, module, boot, unit));
+            Ok::<_, CompileError>(())
+        };
+        let node = evidence.modules.iter().find(|node| {
+            !node.boot && node.unit == root.unit && node.module == root.module
+        }).ok_or_else(|| failure("source roles lack their authenticated root"))?;
+        for edge in &node.imports {
+            if edge.selected.is_some() {
+                insert(String::from(edge.qualifier.clone()), edge.module.clone(), edge.boot, root.unit.clone())?;
+            }
+        }
+        for module in exact.iter().filter(|module| !module.boot && module.owner == root) {
+            for edge in &module.imports {
+                insert(String::from(edge.qualifier.clone()), edge.module.clone(), edge.boot, edge.unit.clone())?;
+            }
+        }
+        if !expected.iter().map(|(q,m,b,u)| (q.as_str(),m.as_str(),*b,u.as_str()))
+            .eq(rows.iter().map(|row| (row.qualifier.as_str(),row.module.as_str(),row.boot,row.unit.as_str()))) {
+            return Err(failure("source import roles differ from authenticated root HOME edges"));
+        }
+        let owner = Self { root, rows };
+        for row in &owner.rows {
+            let imported = identity(&row.unit, &row.module);
+            if owner.role(&owner.root, &imported) == RootImportRole::InheritedLexical
+                && !prior_lexical(&imported) {
+                return Err(failure("inherited source import lacks an already-admitted lexical owner"));
+            }
+        }
+        Ok(Arc::new(owner))
+    }
+
+    fn role(&self, source: &ExactModuleIdentity, imported: &ExactModuleIdentity) -> RootImportRole {
+        if source != &self.root {
+            return RootImportRole::AuthoredCurrent;
+        }
+        let mask = self.rows.iter().filter(|row| row.unit == imported.unit && row.module == imported.module)
+            .fold(0, |mask, row| mask | row.mask);
+        if mask & 1 != 0 {
+            RootImportRole::AuthoredCurrent
+        } else if mask & 2 != 0 {
+            RootImportRole::InheritedLexical
+        } else {
+            RootImportRole::ProtectedCompiler
+        }
+    }
+
+    pub(crate) fn requires_current_source(&self, source: &ExactModuleIdentity, imported: &ExactModuleIdentity) -> bool {
+        self.role(source, imported) == RootImportRole::AuthoredCurrent
+    }
+
+    fn admits_lexical_edge(&self, source: &ExactModuleIdentity, imported: &ExactModuleIdentity) -> bool {
+        self.role(source, imported) != RootImportRole::ProtectedCompiler
     }
 }
 
@@ -120,7 +192,7 @@ pub(super) struct ReceiptSourceClaims {
     compilation_root: ExactModuleIdentity,
     dependencies: CompilerDependencies,
     lexical: BTreeMap<ExactModuleIdentity, SourceLexicalClaim>,
-    protected: ProtectedTemplateLinks,
+    pub(super) roles: Arc<RootSourceImportRoles>,
 }
 
 impl ReceiptSourceClaims {
@@ -129,8 +201,7 @@ impl ReceiptSourceClaims {
         compilation_root: ExactModuleIdentity,
         exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
         selected: &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
-        protected_edges: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
-        authored_overlaps: BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>,
+        roles: Arc<RootSourceImportRoles>,
         prior: impl Fn(&ExactModuleIdentity) -> bool,
         operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
     ) -> Result<Self, CompileError> {
@@ -187,10 +258,6 @@ impl ReceiptSourceClaims {
                 ));
             }
         }
-        let protected = ProtectedTemplateLinks {
-            edges: protected_edges,
-            authored_overlaps,
-        };
         let mut lexical = BTreeMap::new();
         let mut pending = vec![compilation_root.clone()];
         while let Some(owner) = pending.pop() {
@@ -201,7 +268,13 @@ impl ReceiptSourceClaims {
             let Some(imports) = adjacency.get(&owner) else {
                 continue;
             };
-            let kind = if selected.contains_key(&owner) {
+            let inherited = roles.role(&compilation_root, &owner) == RootImportRole::InheritedLexical;
+            let kind = if inherited {
+                if !prior(&owner) {
+                    return Err(failure("inherited source traversal lacks prior source admission"));
+                }
+                SourceLexicalClaim::PriorProgramSource
+            } else if selected.contains_key(&owner) {
                 SourceLexicalClaim::CurrentSelectedOriginal
             } else if prior(&owner) {
                 SourceLexicalClaim::PriorProgramSource
@@ -209,12 +282,10 @@ impl ReceiptSourceClaims {
                 SourceLexicalClaim::FreshSource
             };
             lexical.insert(owner.clone(), kind);
-            // Only an edge admitted by the exact protected recipe is excluded.
-            // The same owner reached by an authored edge still needs a claim.
             pending.extend(
                 imports
                     .iter()
-                    .filter(|child| !protected.excludes_lexical(&owner, child))
+                    .filter(|child| roles.admits_lexical_edge(&owner, child))
                     .cloned(),
             );
         }
@@ -223,7 +294,7 @@ impl ReceiptSourceClaims {
             compilation_root,
             dependencies: CompilerDependencies { adjacency },
             lexical,
-            protected,
+            roles,
         })
     }
 
@@ -284,7 +355,7 @@ pub(crate) struct SourceAdmissionBundle {
     compiler: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     dependencies: CompilerDependencies,
     lexical: LexicalAdmissions,
-    protected: ProtectedTemplateLinks,
+    roles: BTreeMap<ExactModuleIdentity, Arc<RootSourceImportRoles>>,
 }
 
 impl std::fmt::Debug for SourceAdmissionBundle {
@@ -293,7 +364,7 @@ impl std::fmt::Debug for SourceAdmissionBundle {
             .debug_struct("SourceAdmissionBundle")
             .field("dependencies", &self.dependencies.adjacency.len())
             .field("claims", &self.lexical.claims.len())
-            .field("protected_sources", &self.protected.edges.len())
+            .field("source_role_owners", &self.roles.len())
             .finish()
     }
 }
@@ -334,7 +405,7 @@ impl SourceAdmissionBundle {
             compiler,
             dependencies,
             lexical: Default::default(),
-            protected: Default::default(),
+            roles: Default::default(),
         };
         let mut selected = BTreeMap::new();
         for admission in admissions {
@@ -349,29 +420,11 @@ impl SourceAdmissionBundle {
                     return Err(failure("source admission changed its lexical claim"));
                 }
             }
-            for (owner, edges) in &admission.claims.protected.edges {
-                charge_owner(&admission.claims.operation, owner, 1)?;
-                for child in edges {
-                    charge_owner(&admission.claims.operation, child, 1)?;
-                }
-                bundle
-                    .protected
-                    .edges
-                    .entry(owner.clone())
-                    .or_default()
-                    .extend(edges.iter().cloned());
-            }
-            for (source, imports) in &admission.claims.protected.authored_overlaps {
-                charge_owner(&admission.claims.operation, source, 1)?;
-                for imported in imports {
-                    charge_owner(&admission.claims.operation, imported, 1)?;
-                }
-                bundle
-                    .protected
-                    .authored_overlaps
-                    .entry(source.clone())
-                    .or_default()
-                    .extend(imports.iter().cloned());
+            let roles = &admission.claims.roles;
+            charge_owner(&admission.claims.operation, &roles.root, 1)?;
+            if bundle.roles.insert(roles.root.clone(), Arc::clone(roles))
+                .is_some_and(|previous| previous != *roles) {
+                return Err(failure("source admission changed its root import roles"));
             }
             for (owner, original) in &admission.selected_originals {
                 if selected
@@ -457,7 +510,7 @@ impl SourceAdmissionBundle {
             ?boundary,
             dependencies = bundle.dependencies.adjacency.len(),
             claims = bundle.lexical.claims.len(),
-            protected_sources = bundle.protected.edges.len(),
+            source_role_owners = bundle.roles.len(),
             "source admission issued"
         );
         Ok(Arc::new(bundle))
@@ -492,7 +545,7 @@ impl SourceAdmissionBundle {
             .map(|imports| {
                 imports
                     .iter()
-                    .filter(|child| !self.protected.excludes_lexical(owner, child))
+                    .filter(|child| self.roles.get(owner).is_none_or(|roles| roles.admits_lexical_edge(owner, child)))
                     .cloned()
                     .collect()
             })
