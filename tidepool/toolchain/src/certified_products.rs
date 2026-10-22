@@ -31403,6 +31403,14 @@ pub(crate) mod tests {
             .prepare_compilation(&root.path().join("exact-inputs"), &producer)
             .unwrap();
         if exact_mode {
+            admitted.modules.push(crate::cache::ModuleEvidence {
+                unit: "main".into(),
+                module: "Target".into(),
+                boot: false,
+                source: crate::cache::GENERATED_SOURCE.into(),
+                imports: vec![],
+                product: crate::cache::ProductAvailability::Ready,
+            });
             worker.modules.push(crate::cache::ModuleEvidence {
                 unit: "main".into(),
                 module: "Target".into(),
@@ -33716,16 +33724,18 @@ None,
                     .map(|product| product.owner().clone())
                     .collect::<BTreeSet<_>>(),
             );
-            let mut worker = admitted.clone();
-            worker.sources[1].path = input.clone();
-            worker.modules.push(crate::cache::ModuleEvidence {
+            let mut admitted = admitted.clone();
+            admitted.modules.push(crate::cache::ModuleEvidence {
                 unit: "main".into(),
                 module: "Target".into(),
                 boot: false,
-                source: input.clone(),
+                source: crate::cache::GENERATED_SOURCE.into(),
                 imports: vec![],
                 product: crate::cache::ProductAvailability::Ready,
             });
+            let mut worker = admitted.clone();
+            worker.sources[1].path = input.clone();
+            worker.modules.last_mut().unwrap().source = input.clone();
             let complete_evidence = serde_json::to_vec(&worker).unwrap();
             let receipt_root = directory.join(".exact-compilations/current");
             std::fs::create_dir_all(&receipt_root).unwrap();

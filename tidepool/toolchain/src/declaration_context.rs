@@ -11039,7 +11039,6 @@ impl ProductInputFacts<'_> {
             },
             &validation.inventory,
         )?;
-        let compilation_root = roles.root.clone();
         let source_selection_roots = edges
             .iter()
             .flat_map(|module| {
@@ -11182,7 +11181,6 @@ impl ProductInputFacts<'_> {
         };
         let claims = Arc::new(ReceiptSourceClaims::issue(
             &evidence,
-            compilation_root,
             &exact_imports,
             &selected_originals,
             roles,
@@ -29111,6 +29109,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         unused.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[3] = Value::Array(vec![]);
+        unused.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &unused);
         assert!(
             request.validate_receipt(&receipt, None, &context).is_err(),

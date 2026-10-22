@@ -110,7 +110,7 @@ enum RootImportRole {
 /// The role census classifies source use; exact import permission is separate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RootSourceImportRoles {
-    pub(super) root: ExactModuleIdentity,
+    root: ExactModuleIdentity,
     rows: Vec<RawSourceImportRole>,
     masks: BTreeMap<ExactModuleIdentity, u8>,
 }
@@ -245,7 +245,6 @@ impl RootSourceImportRoles {
 #[derive(Clone)]
 pub(super) struct ReceiptSourceClaims {
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    compilation_root: ExactModuleIdentity,
     dependencies: CompilerDependencies,
     lexical: BTreeMap<ExactModuleIdentity, SourceLexicalClaim>,
     pub(super) roles: Arc<RootSourceImportRoles>,
@@ -254,7 +253,6 @@ pub(super) struct ReceiptSourceClaims {
 impl ReceiptSourceClaims {
     pub(super) fn issue(
         evidence: &crate::cache::CompletedSourceEvidence,
-        compilation_root: ExactModuleIdentity,
         exact_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
         selected: &BTreeMap<ExactModuleIdentity, crate::execution_source::SourceSelectedOriginal>,
         roles: Arc<RootSourceImportRoles>,
@@ -314,6 +312,7 @@ impl ReceiptSourceClaims {
                 ));
             }
         }
+        let compilation_root = roles.compilation_root();
         let mut lexical = BTreeMap::new();
         let mut pending = vec![compilation_root.clone()];
         while let Some(owner) = pending.pop() {
@@ -325,7 +324,7 @@ impl ReceiptSourceClaims {
                 continue;
             };
             let inherited =
-                roles.role(&compilation_root, &owner) == RootImportRole::InheritedLexical;
+                roles.role(compilation_root, &owner) == RootImportRole::InheritedLexical;
             let kind = if inherited {
                 if !prior(&owner) {
                     return Err(failure(
@@ -350,7 +349,6 @@ impl ReceiptSourceClaims {
         }
         Ok(Self {
             operation: Arc::clone(operation),
-            compilation_root,
             dependencies: CompilerDependencies { adjacency },
             lexical,
             roles,
@@ -358,7 +356,7 @@ impl ReceiptSourceClaims {
     }
 
     pub(super) fn compilation_root(&self) -> &ExactModuleIdentity {
-        &self.compilation_root
+        self.roles.compilation_root()
     }
 
     pub(super) fn dependencies(&self) -> &CompilerDependencies {
@@ -771,6 +769,29 @@ mod selection_tests {
             interface_sha256: interface.interface_sha256(),
         };
         assert!(validate_source_selected_originals(vec![claim()], &evidence, context()).is_ok());
+        for mask in [3, 5, 7] {
+            let overlapping = RootSourceImportRoles::issue(
+                &role_evidence,
+                &role_path,
+                &role_edges,
+                vec![RawSourceImportRole {
+                    mask,
+                    ..role_row.clone()
+                }],
+                |_| false,
+                &operation,
+            )
+            .unwrap();
+            assert!(validate_source_selected_originals(
+                vec![claim()],
+                &evidence,
+                SourceSelectionContext {
+                    import_roles: &overlapping,
+                    ..context()
+                }
+            )
+            .is_ok());
+        }
         // The same consumed inventory and canonical selection cannot promote a
         // protected template dependency into an authored current-source claim.
         let protected_roles = RootSourceImportRoles::issue(
