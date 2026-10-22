@@ -376,6 +376,7 @@ fn real_cached_home_world_item_admits_its_package_roots() {
     let output = prepared
         .seal(&admission)
         .expect("the cached HOME World item reaches native END");
+    crate::certified_products::assert_actual_world_original_package_refusals(&output);
     let products = output.items()[0]
         .native_products()
         .expect("cached HOME item owns native products");

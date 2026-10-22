@@ -18,6 +18,8 @@ use tidepool_repr::execution_schema::{
 
 mod original_packages;
 mod package_code;
+#[cfg(test)]
+pub(crate) use original_packages::assert_actual_world_original_package_refusals;
 pub(crate) use original_packages::CheckedOriginalPackageAssociations;
 pub(crate) use package_code::PackageInterfaceCustody;
 pub use package_code::{
@@ -3601,24 +3603,24 @@ fn decode_package_selection(
     })
 }
 
+fn decode_package_link(value: &Value) -> CertResult<PackageLink> {
+    let link = array(value)?;
+    match link {
+        [tag, occurrence] if string(tag)? == "local" => Ok(PackageLink::Local {
+            occurrence: u32::try_from(number(occurrence)?)
+                .map_err(|_| CertificationError::Receipt("package link occurrence"))?,
+        }),
+        _ => Err(CertificationError::Receipt("package link variant")),
+    }
+}
+
 fn decode_package_links_list(
     value: &Value,
     operation: &InventoryOperation,
 ) -> CertResult<Vec<PackageLink>> {
     let links = array(value)?;
     operation.reserve::<PackageLink>(links.len())?;
-    let mut decoded = Vec::with_capacity(links.len());
-    for value in links {
-        let link = array(value)?;
-        decoded.push(match link {
-            [tag, occurrence] if string(tag)? == "local" => PackageLink::Local {
-                occurrence: u32::try_from(number(occurrence)?)
-                    .map_err(|_| CertificationError::Receipt("package link occurrence"))?,
-            },
-            _ => return Err(CertificationError::Receipt("package link variant")),
-        });
-    }
-    Ok(decoded)
+    links.iter().map(decode_package_link).collect()
 }
 
 fn check_package_link_range(links: &[PackageLink], occurrences: usize) -> CertResult<()> {
