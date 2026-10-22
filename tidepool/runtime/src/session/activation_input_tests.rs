@@ -6334,6 +6334,143 @@ fn abandoned_private_mount_after_epoch_change_settles_only_after_scope_retiremen
 }
 
 #[test]
+fn crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1801),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let a = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: a.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let checked_a = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        "sameSourceName = (41 :: Int)",
+        a.clone(),
+        1,
+    );
+    let b = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: b.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let checked_b = check_fixture_cell(
+        &mut resident,
+        &recipe,
+        "sameSourceName = (42 :: Int)",
+        b.clone(),
+        1,
+    );
+    let item_a = checked_a.checked.checked_item(0).unwrap();
+    let item_b = checked_b.checked.checked_item(0).unwrap();
+    let owner_a = item_a
+        .planned_declaration()
+        .unwrap()
+        .product()
+        .owner()
+        .clone();
+    let owner_b = item_b
+        .planned_declaration()
+        .unwrap()
+        .product()
+        .owner()
+        .clone();
+    assert_ne!(
+        owner_a, owner_b,
+        "independent World cells issue distinct authored owners even for the same visible binder"
+    );
+    let public_before = resident
+        .public_visibility_snapshot_in(resident.public_scope())
+        .unwrap();
+    let a_before = resident
+        .public_visibility_snapshot_in(a.private_scope())
+        .unwrap();
+    let b_before = resident
+        .public_visibility_snapshot_in(b.private_scope())
+        .unwrap();
+    let prefix_a = checked_a.prefix.snapshot();
+    let prefix_b = checked_b.prefix.snapshot();
+    let high_water = resident.declaration_generation_high_water().unwrap();
+    let requests = tidepool_extract_cmd::extract_spawn_count();
+    for (scope, prefix, foreign) in [
+        (a.private_scope(), checked_a.prefix.clone(), item_b),
+        (b.private_scope(), checked_b.prefix.clone(), item_a),
+    ] {
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: scope,
+                ..resident.public_context()
+            })
+            .unwrap();
+        let refused = source_action(&mut resident, |resident, _| {
+            resident.admit_checked_item(prefix, foreign)
+        });
+        assert!(matches!(refused, Err(SessionError::StaleStagedDeclaration)));
+        assert!(Arc::ptr_eq(&prefix_a, &checked_a.prefix.snapshot()));
+        assert!(Arc::ptr_eq(&prefix_b, &checked_b.prefix.snapshot()));
+        assert_eq!(
+            resident.public_visibility_snapshot_in(resident.public_scope()),
+            Some(public_before.clone())
+        );
+        assert_eq!(
+            resident.public_visibility_snapshot_in(a.private_scope()),
+            Some(a_before.clone())
+        );
+        assert_eq!(
+            resident.public_visibility_snapshot_in(b.private_scope()),
+            Some(b_before.clone())
+        );
+        assert_eq!(
+            resident.declaration_generation_high_water().unwrap(),
+            high_water
+        );
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+    }
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: a.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    assert_eq!(checked_a.adopt_declaration(&mut resident), owner_a.module);
+    publish_checked_fixture(&mut resident, &a, 0);
+    original_value_probe(&mut resident, &recipe, "sameSourceName", 41);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: b.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    assert_eq!(checked_b.adopt_declaration(&mut resident), owner_b.module);
+    publish_checked_fixture(&mut resident, &b, 0);
+    original_value_probe(&mut resident, &recipe, "sameSourceName", 42);
+}
+
+#[test]
 fn checked_declaration_cancellation_after_reservation_preserves_prefix() {
     tidepool_testing::eval_harness::require_extract();
     let effects = TestEffectSurface::minimal(&[]).unwrap();
