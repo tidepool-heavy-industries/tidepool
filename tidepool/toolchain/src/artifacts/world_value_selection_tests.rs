@@ -482,6 +482,7 @@ fn real_world_reference_history_restores_same_owner_and_rejects_crossed_ready() 
 #[test]
 #[ignore = "requires the declared rooted compiler service"]
 fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
+    let mut ingress = Vec::new();
     let ((prepared, checked), admission) = settle(|| {
         let (endpoint, world, source) = open_world_with_primary_and_module(
             None,
@@ -550,13 +551,59 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
             CompileError::ExtractFailed(format!("prior Source World producer refused: {refusal:?}"))
         })?;
         assert_eq!(checked.stages().len(), 5);
-        let prepared = prepare_world_cell_program(Arc::clone(&checked))?;
+        let prepared = prepare_world_cell_program_observing_home_contracts(
+            Arc::clone(&checked),
+            &mut |stage, originals| {
+                ingress.push((stage, originals.assert_home_contract_ingress_controls()));
+            },
+        )?;
         Ok((prepared, checked))
     });
     let program = prepared
         .seal(&admission)
         .expect("actual prior Source program END");
     assert_eq!(program.items().len(), 5);
+    let mut unused_current = 0;
+    let mut unused_prior = 0;
+    let mut ordered_refusals = 0;
+    let mut count_refusals = 0;
+    for (stage, controls) in ingress {
+        ordered_refusals += controls.ordered_refusals;
+        count_refusals += controls.count_refusals;
+        for (artifact, ordinal, prior) in controls.unused {
+            let completion = program.items()[stage]
+                .native_products()
+                .expect("unused annotation control belongs to an executable stage")
+                .completed_native_selection()
+                .unwrap();
+            assert!(
+                !completion
+                    .completion()
+                    .rows()
+                    .any(|row| row.binding().binding.artifact() == artifact
+                        && row.binding().original_ordinal == ordinal),
+                "the actual selected closure contains no binding for the unused physical group"
+            );
+            if prior {
+                unused_prior += 1;
+            } else {
+                unused_current += 1;
+            }
+        }
+    }
+    assert!(unused_current > 0, "actual unused CURRENT group premise");
+    assert!(unused_prior > 0, "actual unused PRIOR group premise");
+    assert!(
+        count_refusals > 0,
+        "actual package occurrence for empty-contract count refusal"
+    );
+    assert!(
+        ordered_refusals > 0,
+        "actual distinct ordered package-owner premise"
+    );
+    // Raw unused annotations above enter the actual issuer, while this complete
+    // native history uses the producer's original transport. This is not a
+    // transport mutation or an injected-prior end-to-end metamorphic control.
     for (index, packageful) in [(2, false), (4, true)] {
         let products = program.items()[index].native_products().unwrap();
         let selection = products.completed_native_selection().unwrap();

@@ -1258,7 +1258,187 @@ enum SegmentOriginalAdmission {
     Executable(crate::artifact_inventory::BoundArtifactSelection),
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct HomeContractIngressControls {
+    pub(crate) unused: Vec<(crate::artifact_inventory::ArtifactId, u32, bool)>,
+    pub(crate) ordered_refusals: usize,
+    pub(crate) count_refusals: usize,
+}
+
 impl CertifiedSegmentOriginals {
+    #[cfg(test)]
+    pub(crate) fn assert_home_contract_ingress_controls(&self) -> HomeContractIngressControls {
+        use crate::artifact_inventory::ArtifactPayload;
+        let mut observed = HomeContractIngressControls::default();
+        let Some(target) = self.receipt.package_links.target_roots.keys().next() else {
+            return observed;
+        };
+        let mut unused = Vec::new();
+        for group in self.products.groups.iter() {
+            if group
+                .group()
+                .binders()
+                .iter()
+                .any(|binder| binder.occurrence == "unusedNumber")
+            {
+                assert!(!group
+                    .imports()
+                    .iter()
+                    .any(|import| matches!(import, ReceiptImportOwner::Package { .. })));
+                unused.push((
+                    group.owner().clone(),
+                    group.group().original_ordinal(),
+                    self.products.groups.artifact(group),
+                    false,
+                ));
+            }
+        }
+        for prior in self.products.source_selection.prior_program_products.iter() {
+            let owner = prior.row().original_owner();
+            let entry = prior
+                .row()
+                .target_original(owner)
+                .expect("actual prior physical entry");
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                panic!("actual prior physical Original payload")
+            };
+            for group in &product
+                .original_native()
+                .expect("actual prior native groups")
+                .groups
+            {
+                if group
+                    .group()
+                    .binders()
+                    .iter()
+                    .any(|binder| binder.occurrence == "unusedNumber")
+                {
+                    assert!(!group
+                        .imports()
+                        .iter()
+                        .any(|import| matches!(import, ReceiptImportOwner::Package { .. })));
+                    unused.push((
+                        owner.clone(),
+                        group.group().original_ordinal(),
+                        prior.row().original_artifact_id(),
+                        true,
+                    ));
+                }
+            }
+        }
+        // Change only decoded annotation DATA. Every candidate is checked by
+        // the production issuer against this real owner's physical group domain.
+        let issue = |receipt: &CertifiedReceipt| {
+            ValidatedHomeContracts::issue(
+                receipt,
+                &self.products.source_selection,
+                &self.products.groups,
+                self.operation(),
+            )
+        };
+        let refuses = |receipt: &CertifiedReceipt, expected| {
+            assert!(
+                matches!(issue(receipt), Err(CertificationError::Mismatch(actual)) if actual == expected),
+                "raw HOME annotation must refuse at its semantic ingress: {expected}"
+            );
+        };
+        for (owner, ordinal, artifact, prior) in unused {
+            let key = PackageHomeRootKey {
+                target: target.clone(),
+                unit: owner.unit,
+                module: owner.module,
+                original_ordinal: ordinal,
+            };
+            let mut receipt = self.receipt.clone();
+            Arc::make_mut(&mut receipt.package_links.home_roots).insert(key.clone(), Vec::new());
+            issue(&receipt)
+                .expect("actual unused empty HOME annotation authenticates without native demand");
+            observed.unused.push((artifact, ordinal, prior));
+            if !receipt.package_links.occurrences.is_empty() {
+                let mut wrong_count = receipt.clone();
+                Arc::make_mut(&mut wrong_count.package_links.home_roots)
+                    .insert(key.clone(), vec![PackageLink::Local { occurrence: 0 }]);
+                refuses(
+                    &wrong_count,
+                    "HOME package link count differs from its globals",
+                );
+                observed.count_refusals += 1;
+            }
+
+            let mut absent = receipt.clone();
+            let roots = Arc::make_mut(&mut absent.package_links.home_roots);
+            roots.remove(&key);
+            roots.insert(
+                PackageHomeRootKey {
+                    original_ordinal: u32::MAX,
+                    ..key.clone()
+                },
+                Vec::new(),
+            );
+            refuses(
+                &absent,
+                if prior {
+                    "prior Source original ordinal"
+                } else {
+                    "HOME current physical ordinal"
+                },
+            );
+            let mut wrong_owner = receipt.clone();
+            let roots = Arc::make_mut(&mut wrong_owner.package_links.home_roots);
+            roots.remove(&key);
+            roots.insert(
+                PackageHomeRootKey {
+                    module: "AbsentHomeIngressOwner".into(),
+                    ..key.clone()
+                },
+                Vec::new(),
+            );
+            refuses(&wrong_owner, "prior HOME lacks its exact program issuer");
+            let mut unknown_target = receipt;
+            let roots = Arc::make_mut(&mut unknown_target.package_links.home_roots);
+            roots.remove(&key);
+            roots.insert(
+                PackageHomeRootKey {
+                    target: "undeclared-home-ingress-target".into(),
+                    ..key
+                },
+                Vec::new(),
+            );
+            refuses(
+                &unknown_target,
+                "HOME annotation names an undeclared target",
+            );
+        }
+        for (key, links) in self.receipt.package_links.home_roots.iter() {
+            let pair = links.iter().enumerate().find_map(|(left, link)| {
+                let a = &self.receipt.package_links.occurrences[link.occurrence() as usize];
+                links
+                    .iter()
+                    .enumerate()
+                    .skip(left + 1)
+                    .find_map(|(right, other)| {
+                        let b =
+                            &self.receipt.package_links.occurrences[other.occurrence() as usize];
+                        (a.unit != b.unit
+                            || a.module != b.module
+                            || a.defining_interface_sha256 != b.defining_interface_sha256)
+                            .then_some((left, right))
+                    })
+            });
+            if let Some((left, right)) = pair {
+                let mut changed = self.receipt.clone();
+                Arc::make_mut(&mut changed.package_links.home_roots)
+                    .get_mut(key)
+                    .unwrap()
+                    .swap(left, right);
+                refuses(&changed, "HOME ordered package import");
+                observed.ordered_refusals += 1;
+                break;
+            }
+        }
+        observed
+    }
     pub(crate) fn source_selection(&self) -> &CertifiedSourceSelection {
         &self.products.source_selection
     }

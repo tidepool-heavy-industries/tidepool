@@ -847,6 +847,25 @@ impl PreparedCellProgram {
 pub fn prepare_world_cell_program(
     program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
 ) -> Result<PreparedCellProgram, CompileError> {
+    prepare_world_cell_program_inner(
+        program,
+        #[cfg(test)]
+        &mut |_, _| {},
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_world_cell_program_observing_home_contracts(
+    program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
+    observe: &mut dyn FnMut(usize, &certified_products::CertifiedSegmentOriginals),
+) -> Result<PreparedCellProgram, CompileError> {
+    prepare_world_cell_program_inner(program, observe)
+}
+
+fn prepare_world_cell_program_inner(
+    program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
+    #[cfg(test)] observe: &mut dyn FnMut(usize, &certified_products::CertifiedSegmentOriginals),
+) -> Result<PreparedCellProgram, CompileError> {
     use crate::checked_cell::{self, CheckedPlannedCellSlot};
     crate::host_work::checkpoint()?;
     let root = program.directory().path();
@@ -878,6 +897,9 @@ pub fn prepare_world_cell_program(
             &mut validation,
             continuation,
         )?;
+        // The observer sees an actual issued owner; it cannot issue or replace it.
+        #[cfg(test)]
+        observe(stage.index(), &segment.originals);
         if original {
             let planned = segment.planned_declaration(&program, stage)?;
             let output = crate::declaration_context::IssuedOriginalOutput::from_segment_originals(
