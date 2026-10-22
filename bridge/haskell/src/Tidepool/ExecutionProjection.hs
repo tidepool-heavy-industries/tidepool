@@ -9,7 +9,8 @@ module Tidepool.ExecutionProjection
   , ProjectedGroup(..), ProjectedGroupBody(..)
   , projectPreparedModuleGroups, projectPreparedModuleGroupsSelected
   , PreparedPackageTarget, projectPreparedPackageTarget
-  , packageTargetProgram, packageTargetConstructors, packageTargetGroups, packageTargetHomeImports
+  , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups
+  , packageTargetImports, packageTargetHomeImports
   , ProjectedPackageGroup, projectPreparedPackageGroups
   , projectedPackageModule, projectedPackageDefiningVersion, projectedPackageInterfaceSha256, projectedPackageInterfaceBody, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites
@@ -945,16 +946,19 @@ projectPreparedPackageGroupsWithIdentities context components reach identities =
 -- Target code and imported package definitions are one final projection.
 -- Only exports from these exact products may replace known local package tops.
 data PreparedPackageTarget = PreparedPackageTarget
-  { packageTargetProgram :: WireProgram
+  { packageTargetName :: Text
+  , packageTargetProgram :: WireProgram
   , packageTargetConstructors :: [IssuedConstructor]
   , packageTargetGroups :: [ProjectedPackageGroup]
-  , packageTargetHomeImports :: Map.Map (Text, Text, Word) [SymbolIdentity]
+  , packageTargetImports :: [SymbolIdentity]
+  , packageTargetHomeImports :: [(Text, Text, Word, [SymbolIdentity])]
   }
 
-projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> ProjectionContext -> ProjectionContext
+projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
+  -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup)
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings homeContext context home components reach = do
+projectPreparedPackageTarget env hostBindings targetName context homeProducts home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
@@ -978,21 +982,28 @@ projectPreparedPackageTarget env hostBindings homeContext context home component
           && toUnitId (moduleUnit (symbolOwner (globalIdentity global))) `Set.notMember` homeUnitIds
   unless (all ((`Set.notMember` packageOwners) . pmModule) home)
     (Left (InvalidPreparedRepresentation "package target repeats a defining owner as local code"))
-  homeRows <- forM home $ \prepared ->
-    forM (projectPreparedModuleGroupResultsFor
-          (OriginalHomeProduct isHomeUnit) homeContext prepared Nothing) $ \(ordinal, _, outcome) ->
-         case outcome of
-           Left failure -> Left failure
-           Right evidence ->
-             let group = projectedGroupWire evidence
-                 key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
-                       , Text.pack (moduleNameString (moduleName (pmModule prepared)))
-                       , fromIntegral ordinal )
-             in Right ( key
-                      , [ globalIdentity global
-                        | global <- projectedGlobals (projectedBody group)
-                        , isPackageImport global ] )
-  let homeImports = Map.fromList (concat homeRows)
+  homeImports <- concat <$> forM home (\prepared -> do
+    let selected = Set.fromList
+          [ ordinal
+          | (ordinal, one) <- preparedBindingGroups prepared
+          , item <- pmBindings one
+          , reachable item ]
+    groups <- maybe
+      (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
+      Right (Map.lookup (pmModule prepared) homeProducts)
+    forM (Set.toAscList selected) $ \ordinal -> do
+      group <- maybe
+        (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
+        Right (Map.lookup ordinal groups)
+      let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
+                , Text.pack (moduleNameString (moduleName (pmModule prepared)))
+                , fromIntegral ordinal )
+      let (unit,name,ordinalKey) = key
+      pure (unit, name, ordinalKey
+        , [ globalIdentity global
+          | global <- projectedGlobals (projectedBody group)
+          , isPackageImport global ])
+    )
   products <- projectPreparedPackageGroupsWithIdentities context components reach identities
   let exports = concatMap (projectedBinders . projectedGroupWire . projectedPackageEvidence) products
       imported = Set.fromList exports
@@ -1003,7 +1014,11 @@ projectPreparedPackageTarget env hostBindings homeContext context home component
   candidate <- projectPreparedCandidateWithImports imported hostBindings
     checkedContext selected checkedIdentities
   (program, constructors) <- finalizePreparedCandidate candidate
-  pure (PreparedPackageTarget program constructors products homeImports)
+  let targetImports =
+        [ globalIdentity global
+        | global <- programGlobals program
+        , isPackageImport global ]
+  pure (PreparedPackageTarget targetName program constructors products targetImports homeImports)
 
 -- The exact compiler Names travel with their stable full-owner identities.
 -- Filtering groups before assigning private spellings would change collisions.
