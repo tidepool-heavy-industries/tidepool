@@ -1,112 +1,112 @@
-# S: next-wave execution and review
+# S: finish the two joins, then qualify
 
-Implement the controlling contracts and qualify G2. Keep C research separate.
-Read critical diffs and actual callers; statuses and passing counts do not
-replace technical judgment. This is a repair of the integrated c910d1 candidate,
-not a restart of the old work pack.
+Read STATE, REVIEW-5c759554 and NEXT-WAVE first. The reviewed code is 5c759554,
+not the earlier c910d1 dispatch. CONTRACTS remains in force; PRIVATE-STATE and
+PACKAGE-CLOSEOUT specify the concrete refinements. Do not reopen already deleted
+fallbacks, repeat completed migrations or run another worker per red assertion.
 
-## Begin
+## Begin with actual ownership
 
-1. Read root/nested AGENTS, STATE, REVIEW-c910d1 and CONTRACTS. Verify current
-   HEAD/WIP/remotes and incorporate newer work without resetting anybody.
-   Preserve H/D WIP before reusing their checkouts.
-2. Reuse the context-loaded DeepSeek owners where possible, with the new
-   documentation tip and reviewed implementation OID. An old task file or idle
-   thread is not an active assignment. Obtain acknowledgement and first action.
-3. Start P, N, H, W, Q and V independently; R-P/R-N begin source tracing.
-   P/P3 must freeze the cross-language ordinary/item/HOME contract before
-   producer/reader code diverges. N freezes ownership/hunks for N1/N2.
-4. Run small discriminators early: a package-using World item, repeated Fresh
-   HOME across two targets, and unchanged native A after source-publishing B.
-   Do not wait for another whole-bundle attempt to test the joins.
-5. Record every actual worker, branch, base, source hunk, dependency, next gate
-   and evidence path. Keep implementation/review/qualification separate.
+1. Verify exact HEAD, dirty work, remotes and current source rules. Preserve H/D
+   WIP and the unrelated interactive checkout. Reuse safe warm checkouts.
+2. Resume context-loaded DeepSeek owners with the new pack; require acknowledgement
+   of base, owned functions, first discriminator and dependency. Old threads and
+   old handoff files do not establish an active assignment.
+3. N owns the private lifecycle; P owns exact selected native/package rows; H owns
+   support projection/closure in named functions coordinated with P. T authors
+   production histories; V prepares commands/resources and compiles joined callers.
+4. N freezes the small current-snapshot/accepted-delta interface before an actor
+   leaf changes callers. P freezes issuer-scoped returned HOME demand before a
+   producer leaf changes Haskell. Reviewers trace these same joins independently.
+5. Record branch/base/candidate, source hunks, dependent contract, actual evidence,
+   next gate and terminal state. A proposed worker tree is not running work.
 
-## How to use the parallelism
+## Editorial decisions already made
 
-P is a working contract/integration owner with P1/P2/P3. N is a working
-publication owner with N1/N2; N owns any shared persistent/admission hunks.
-H and W are independent except for named toolchain hunks; coordinate them with P.
-Q is small and can merge early. V prepares current commands/inputs/resources,
-then runs exact joined gates. Reviewers examine candidate tips and their tests.
+- Birth authority and current private preparation state are different facts.
+  New work uses the latter; publication compares original/private/latest.
+- Synchronous host acceptance stays after its cancellation fence. Apply accepted
+  deltas at the next authored readiness/freeze boundary after the active program
+  settles. Internal carrier preparation has its own pinned limited purpose.
+- An active authored program owns advancement across all its items, including
+  declarations and parked effects; multiple prepared offers are not active owners.
+- Input A's source and recipient B's source remain distinct at activation.
+- Exact selected HOME row/custody is propagated, not recovered from equal owners.
+  Current-source membership still needs its actual source receipt.
+- Prefix authority is validated before exact stage custody is composed. Close the
+  existing private support draft once complete; no relaxed permission validation.
 
-One source writer per checkout. For shared files, assign functions, not vague
-subsystems: P2 owns complete_native_selection and linkage decoding; H owns
-world_stage_fragment/support narrowing; W owns package catalog reuse; N owns
-the final paired publication call path. Cross-owner API changes require a
-recorded contract and direct notification. No published integration rebases.
+Ask workers to show the producer and next consumer of each fact. A cleaner enum
+that leaves independent inconsistent fields underneath is not the finished fix.
+A smaller function that asks its caller to reconstruct authority is not simpler.
 
-Children send proposal/contract-question/first-counterexample/review-ready/
-settled events with commit and evidence to parents. Verify the harness's
-notification/wake semantics. Use event waits when no work is ready; do not make
-every supervisor poll once a minute. Resume capacity-stopped owners from their
-handoffs. Do not spawn multiple implementations of the same unresolved question.
+## Gates in order
 
-## Editorial checkpoints
+1. **Fast integrated owner controls:** accepted Text -> next cell before publication;
+   parked command -> accepted Job -> original completion -> later use; cached World
+   package item -> actual runtime installation; unrelated equal-content history
+   leaves selection unchanged; missing/foreign evidence still refuses.
+2. **Lifecycle completion:** two independent abandonments in either order,
+   intervening cells, hidden input operand, declaration-only/multi-item progress,
+   failed settlement, freeze refusal recovery and ordinary request activation.
+3. **Joined ordinary histories:** existing publication cohort, four notebooks,
+   discovery/status, default reload, caller loss, uncertain END, required
+   eviction/reacquisition and public/private source-selection interleavings.
+4. **One matched bundle:** V follows the existing qualification owner, verifies
+   Persona spec/tools/initial memory and runs a bounded actual DeepSeek smoke.
+5. **G3:** full force/fork/callback/recovery matrices, full bundle gates, corrected
+   map and packaged timings, then reviewed integration/release/main convergence.
 
-At proposal review, ask:
-- Which issuer already knows the choice? Why is any downstream census necessary?
-- Does the type carry the program and its imports, or can callers mix them?
-- Does a proposed validation conflate selected state with bytes in custody?
-- Is a new enum recording a transition, or merely naming an inference from absence?
-- Does deletion preserve the precise old/current and cancellation distinctions?
+Compile affected production AND test consumers as each coherent cut lands.
+Linking, target analysis, zero selections and an error moving later are not passes.
+Preserve actual semantic assertions; remove fake authority/setup, not refusals.
 
-At code review trace construction, actual caller, freeze/commit, error/drop and
-reopen. Check old APIs are removed and no public alternate constructor bypasses
-the invariant. Inspect a consumer beyond the modified function. Require a test
-that asserts the adversarial premise and would reject the known old mechanism.
-Each reviewer also checks redundant work, obsolete surface and evidence quality.
+## Integration and review
 
-Examples of insufficient repairs:
-- Passing a different baseline while still replacing the latest selection.
-- Replacing target_name=None with a guessed scaffold/HOME key.
-- Picking a unique result from a broader inventory instead of carrying a choice.
-- Recomputing every HOME body to recover metadata already known earlier.
-- Classifying started work Unchanged because no successor exists yet.
-- Renaming nonempty smoke assertions as exact-history coverage.
+One source writer per checkout. Parents consolidate dependent code/tests on their
+area branch, then root merges reviewed exact candidates. H/P may edit one source
+file in different named functions, but agree on contract and merge ownership.
+Never leave a completed accepted leaf orphaned. Push checkpoints to explicit
+`github`; `origin` is local replication. Verify remote OIDs. No published branch
+rebases, forced pushes, or switching another active checkout.
 
-## Integrate continuously, qualify deliberately
+R-N traces mount/accept/park/settle/retire/freeze and activation cancellation.
+R-P traces physical producer, exact selection, support closure, current-source
+installation and next use. Both inspect obsolete routes, wasted work and test
+premises while in the area. Review actual diffs and failed paths, not only counts.
 
-P and N consolidate their own joined code/tests before returning candidates.
-Merge a versioned producer/reader cutover together. Merge reviewed independent
-H/W/Q parcels promptly. After each tranche R inspects the joined caller and V
-compiles affected consumers; no full bundle per leaf. Keep all accepted work
-reachable from the campaign branch and push checkpoints to the explicit github
-remote, verifying ls-remote OIDs. origin is local replication.
+Children send concrete proposal, first-counterexample, review-ready and settled
+messages with OIDs/evidence. Parents continue the ready frontier. Use the harness's
+actual event/wake mechanism; don't make every supervisor poll once per minute.
+A source-level hypothesis must not silently become an executed finding.
 
-Correct tests structurally where needed, preserving real failure cases.
-Don't weaken a test just because a more precise invariant exposed a stale
-fixture premise. Preserve failed inputs and receipt identity. A later failure
-is progress in diagnosis, not acceptance.
+## Build and evidence discipline
 
-Once joined gates pass, freeze one matched bundle and run V's qualification.
-Do not repeatedly restart it for optional C changes. A real ordinary-workflow
-defect still blocks G2; an exploratory user run and qualification are distinct.
+Use pinned admitted local-only just/Buck commands. Recheck aggregate memory,
+pressure, output mounts and scratch before extra lanes. The last review had about
+135 GiB scratch, so multiple cold trees could consume the available margin. Read
+installed launcher capabilities; staged reservation flags may not be available.
+Keep 100 GiB scratch free including expected growth. Do not bypass refusals.
 
-## Resource ownership
+No broad cache deletion, arbitrary Buck-file removal or shared daemon restart.
+Preserve evidence and independent required products before scoped retirement.
+A canceled wrapper is not proof its descendants or reservation settled.
 
-Use the pinned just/Buck path through swarm-build; local-only remains the
-admitted route. Measure aggregate RAM, cgroups, pressure, scratch and expected
-growth before each additional lane. Reuse safe warm outputs; don't allocate a
-cold build tree for each read-only reviewer. Provision genuine new checkouts
-through swarm-checkout-storage.
+V owns exact source/artifact/command/count/exit/evidence recording. It updates the
+map from actual source and execution; planned dataflow is not implemented dataflow.
+Once a bundle is frozen, unrelated quality/C work becomes a separate candidate.
+A demonstrated ordinary correctness defect still blocks G2.
 
-No arbitrary Buck-file deletion, broad cache clear or shared daemon restart.
-Preserve source/WIP/evidence/products and follow supported retirement with
-idle/retention verification. Historical free-space numbers are not reservations.
+## Escalation and handoff
 
-## Completion and escalation
+Most work is now specified. Escalate an actual authority/lifecycle contradiction
+with the smallest production history, two alternatives and a recommendation.
+Finish independent work while the supervisor resolves it. In particular, do not
+silently weaken same-stage identity, partial permissions, source A/B or exact
+checked predecessor semantics to clear an assertion.
 
-Report exact tip/diff, production constructors/callers changed, obsolete APIs
-removed, commands/counts/outcomes, first unqualified boundary, review disposition
-and cleanup certainty. Keep incidental findings confirmed/hypothesis/intentional
-exception distinct. Reuse completed investigators for bounded follow-ups.
-
-A genuinely unresolved single-projection identity or publication semantic
-conflict needs a minimized production counterexample, two alternatives and a
-recommendation. Complete the independent frontier and consolidate before
-returning it. Ordinary repairs within CONTRACTS do not require another planning
-round. Do not silently replace the chosen design with a fallback.
-
-At handoff update STATE, V's map/verification ledger, and handoff.tmp.md.
-Include outstanding dirty work and deferred C evidence; no orphaned branches.
+At each checkpoint update STATE and handoff.tmp.md with actual candidates,
+verification, WIP, next gate and active/settled owners. Run the existing strict
+integration-status check before promotion; cached-ref success is not remote
+freshness. Final release/main promotion requires the relevant accepted gates,
+not merely a clean worktree. G2 and G3 are distinct delivery claims.

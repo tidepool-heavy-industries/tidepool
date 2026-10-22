@@ -1,9 +1,12 @@
-# Controlling contracts after the c910d1 review
+# Cross-cutting G2 contracts
 
 These constraints replace the earlier v12 supplement. That supplement permitted
 a manifest-less segment item and a bare Inherited marker while requiring exact
 roots downstream. Do not preserve those contradictions for compatibility.
 Concrete names below describe obligations, not required public API spelling.
+The 5c759554 review keeps these distinctions and refines their implementation in
+[PRIVATE-STATE](PRIVATE-STATE.md) and [PACKAGE-CLOSEOUT](PACKAGE-CLOSEOUT.md).
+[NEXT-WAVE](NEXT-WAVE.md) owns current assignments and sequencing.
 
 ## 1. Program and selected imports travel together
 
@@ -147,11 +150,19 @@ latest state with the private snapshot, union arbitrary inventories, or bypass
 a conflict because the resulting names look correct.
 
 Record started/pending/completed/refused progress where that transition occurs.
-A freeze-time comparison cannot establish no work started. A visible retained
-host result carries its real binding/type evidence and updates the private
-association coherently; it is neither Unchanged nor a fabricated zero-cell
-checked successor. Multiple actual progress kinds may compose inside the same
-owner. No second publication path or caller-provided success boolean.
+A freeze-time comparison cannot establish no work started. Keep immutable birth
+authority separate from the current preparation snapshot. One authored program
+owns advancement across its items and parked effects; preparation alone grants
+no advancement ownership.
+
+A visible retained host result carries real binding/type evidence. Synchronous
+acceptance after the existing cancellation fence records its exact delta; at a
+quiescent boundary, before new authored preparation or freeze, the session owner
+applies that delta to the current compiler/runtime state. Do not mutate the
+predecessor beneath an already-running checked program or pretend accepted means
+already applied. Neither host progress nor declaration-only progress is a fabricated
+zero-cell execution. Hidden operands and activation inputs retain their distinct
+authority. No second publication path or caller-provided success boolean.
 
 Keep cancellation claim order, same prepared promotion witness, durable commit,
 original effect receipts, cleanup uncertainty, and recovery-required outcomes.

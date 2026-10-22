@@ -1,5 +1,7 @@
 # W: finish selected-interface reuse on both admission routes
 
+> Historical assignment, superseded at the 5c759554 review. Use [NEXT-WAVE.md](NEXT-WAVE.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 Primary outcome: authenticated retained copies preserve their selected witness.
 Adjacent questions: catalog precedence, immutable token lifetime and typed
 missing/inaccessible/corrupt failures.

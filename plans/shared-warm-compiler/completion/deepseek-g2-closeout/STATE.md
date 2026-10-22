@@ -1,142 +1,116 @@
-# Campaign state after joined review
+# Current G2 campaign state
 
-## Current peer++ review checkpoint
+## Start here
 
-The current branch is `g2-closeout/deepseek-20261021`. Code candidate
-`5c759554c6f9478bc2344ef17ee026c6ec23fed0` follows joined checkpoint
-`e77034bea0`, which merged exact P `7a685c7e99` and N `083ae94f12`.
+Read [REVIEW-5c759554](REVIEW-5c759554.md) and [NEXT-WAVE](NEXT-WAVE.md).
+They replace the previous assignment list. This state file describes source,
+evidence and open work; earlier checkpoint ledgers remain in Git and the retained
+handoffs. **G2 remains unqualified.**
 
-Read [REVIEW-WIP-5c759554](REVIEW-WIP-5c759554.md) first. It records what was
-tried, the package evidence that passes, the five remaining actor lifecycle
-failures and the architectural decision needed from peer++.
-
-The sections below describe the earlier c910d1 review and remain as history.
-They are not the current source identity or current failure frontier. This WIP
-does not qualify G2: no matched bundle or fresh Persona run exists.
-
-Updated 2026-10-21. This is the current ledger, not the original dispatch list.
-Implementation reviewed: **c910d1aae0e64c76449bef8170b53400133cbd23**.
-The new review/plan commit changes documentation only.
-
-## Source, publication and preserved work
-
-| Item | State |
+| Item | Observed state |
 |---|---|
-| Campaign checkout | /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020 |
-| Campaign branch | g2-closeout/deepseek-20261021 |
-| Reviewed tree | Clean at c910d1aae0 before the new documentation edits |
-| Prior staff plan | 1d239474e50368a97f038c2f3d75c721626ff1d4 |
-| Structural prerequisite | 402528b8322615ab635adb8fca1cfc719a684523, integrated by 0cfb964739 |
+| Checkout | /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020 |
+| Branch | g2-closeout/deepseek-20261021 |
+| Code candidate | 5c759554c6f9478bc2344ef17ee026c6ec23fed0 |
+| Incoming documentation tip | 3ed7a15c83998e93a31a768d2ae2bd42bcc5c59a |
+| New review revision | Documentation only; does not alter that code candidate |
 | Real remote | github — https://github.com/tidepool-heavy-industries/tidepool.git |
 | Local replication | origin — /srv/swarm/checkouts/tidepool-shared-warm-plan-20261019 |
-| Interactive checkout | /srv/swarm/checkouts/tidepool is unrelated/dirty; do not switch or edit it |
-| G2 / frozen bundle / fresh Persona | NOT qualified by this review |
+| Broader integration destination | integration/compiler-query-warm-final; reconcile refs before promotion |
+| Interactive checkout | /srv/swarm/checkouts/tidepool is unrelated; do not switch/edit it |
+| Matched G2 bundle / fresh Persona | Not produced or qualified by this review |
 
-H's checkout /srv/swarm/checkouts/tidepool-deepseek-g2-h-20261021 retains dirty,
-unqualified GhcPipeline.hs instrumentation (two recorded GHC errors) and a
-completion-custody hunk. Inspect/preserve before assigning that checkout.
-The committed H role closure is separately integrated; dirty WIP is not approval.
+## Integrated code and disposition
 
-D's earlier three-file WIP is preserved as
-/srv/swarm/evidence/inanna/g2-closeout-deepseek-20261021/d-wip-preservation/575fc4e485-three-files.patch
-(SHA-256 ebeaec93cc420142092bbc572d5cdcadf78f16a4e2a5d083136c45eaf9508a41)
-and diagnostic commit ecd8e6bbd3. Paths were GhcPipeline.hs, Timing.hs and
-runtime/session/activation_input_tests/historical_original_recovery.rs.
-Keep the logging revert/reapply history, including 0ea5b8e2a9 and d35fd2ac43.
-Do not stash/reset/discard other workers' source.
+The incoming worktree was clean. `e77034bea0` contains joined P `7a685c7e99`
+and N `083ae94f12`; `5c759554c6` adds the host lifecycle review candidate.
+Earlier P/N/H/W/Q and structural work remains in that ancestry. The exact merge
+history and previous attempts are in REVIEW-WIP-5c759554 and Git.
 
-## Integrated parcels and present review disposition
+| Area | Current judgment |
+|---|---|
+| Paired occurrence format/scoped package graph | Retain; finish cached-item, exact HOME issuer and downstream source membership |
+| Historical Original role repair | Retain removal of owner census; fix lost exact native custody during support projection |
+| Interface witness reuse | Segment and ordinary repair integrated; preserve selected witness and verify joined histories |
+| Private selection composition | Retain original/private/latest model; repair deletion-only domain edge and run real concurrent history |
+| Private host/progress/retirement | Changes requested: current-owner redesign in PRIVATE-STATE, not more local equality exceptions |
+| Logging/census/trace/facade deletions | Retain; no new blanket reimplementation assignment |
+| C producer-demand investigations | Retained research; not permission for unrelated G2 scope expansion |
 
-The 14 named component tips below, including C1/C2, were checked with
-git merge-base --is-ancestor against c910d1 in this review; all are ancestors.
-The explicitly preserved dirty H work is not part of that result. Verify ancestry
-again when moving the campaign. Integrated does not mean accepted behavior.
+## Execution evidence
 
-| Area | Tip / merge evidence | Current disposition and next owner |
-|---|---|---|
-| P producer/consumer | 5fd3580d78; merges 2c17120615 and a7be854638 | Integrated, changes requested: P-ITEM/HOME/REUSE/SCOPE/HELD |
-| P2 earlier consumer | 83ac54b3aa | Integrated lineage; old HOME-slot status is superseded by joined review |
-| P3 oracle | 527e53cd04, c91e981743 | Integrated; passing smoke claims narrower than names; P3 repairs oracles |
-| W segment witness | d2b6899f71 | Integrated; source review supports segment repair; W must finish ordinary route and real histories |
-| N publication | 9f77dd17ab; merge 380d2766aa | Integrated, changes requested: runtime selection, retained output, started progress |
-| H roles/history | 45c2c165a9, handoff b309f8bdb5; merge 74897f4eb3 | Integrated role repair rejected; preserve history oracle and replace owner census |
-| Q1 logging | 827d4f9fc4, 00beb4c093; merge f900654416 | Bounds/async behavior supported; Q repairs Rust JSON decoder |
-| Q2 census | 769ef0ed40 | Integrated; source review supports removal of full-payload comparison |
-| Q3 trace | 393d6e5d8c | Integrated; source review supports one enabled-request aggregation |
-| Q4 Original | 9809de64c4 | Integrated; obsolete facade authority fallback removed |
-| C1 schema | 6dd7eadfbd | Retain evidence; no new production redesign admitted |
-| C2 demand | 21d5403ec8 | Retain hypotheses; not a G2 dependency |
-| Resource audit | 0604fed601 | Integrated evidence; remeasure before new jobs |
-| Earlier R and V | Reports/preparation retained in this directory and evidence | Previous approval is not joined c910d1 acceptance; next roles defined in README |
+Retained incoming evidence under `/srv/swarm/evidence/inanna/g2-joined-e77034bea0/`:
 
-This review used four read-only Sol reviewers. All completed; no product repair
-worker, build or deployment was launched by this review. External DeepSeek
-worker liveness is **unobserved**. The next supervisor must record real launch,
-acknowledgement, parent, exact base, owned paths and terminal events.
+- Four-target check succeeded: build `d3f5dcd2-c8e6-4f30-a84e-a88f5154feda`;
+  compilation only, log `joined-check.log`.
+- Package cohort 9/9: build `3ac09b34-08d6-43c9-82c1-59e5279ae809`,
+  `package-cohort.log`. Does not cover the new cached/transitive/runtime findings.
+- Actor cohort: 1 passed, 5 failed, 24 ignored; build
+  `7f5d36a5-2f4a-4555-b96f-58e7242469fe`, `actor-n2-diagnostic-6.log`.
+- Full lint was not green; incoming handoff records 33 Clippy findings outside
+  its five WIP files. No broad current-suite or frozen-bundle acceptance.
 
-## Execution evidence that remains valid, and its limits
+New peer evidence under `/srv/swarm/evidence/inanna/g2-peer-review-5c759554-20261021/`:
 
-- Joined six-case ordinary package cohort passed before c910d1. It does not
-  exercise World segment-item roots; several adversarial assertions are weak.
-- Three-target compile gate passed: build
-  5a0fef0c-3a66-4a46-924a-e03b500775b7. Compilation is not history execution.
-- Fresh-HOME focused control passed 1/1: build
-  7f286f4c-4f85-4a26-b0b9-ba51b5940773.
-- Merged Q1 structuredLogging passed 1/1: build
-  800ea223-b196-4565-b952-d225e6d01a23. Recorded bound: 32 fields,
-  814604 bytes; this does not qualify Rust malformed-JSON routing.
-- Historical reader h-run5 failed 0/1 at
-  "target package slot lacks package links", build
-  ccb8eda5-ed80-4dfd-b7dd-a88a230ea4fe. Retained under
-  g2-closeout-deepseek-20261021/p1-producer-ordinal-fix/h-run5/.
-  Later fallback experiments were reverted.
-- Discovery/all four notebook cases, cold/eviction/producer-removal histories
-  and matched Persona qualification have no passing joined acceptance here.
-- The new review ran no product tests. It independently inspected retained CBOR
-  and source; its two finite counterexample models are not runtime executions.
+- Four source reviews plus design challenge, with root inspecting critical callers.
+- One Job-carrier case executed on clean incoming tip: 1 failed, 0 passed;
+  libtest exit 101, wrapper exit 1, case 22.085 s, wrapper about 23.23 s.
+- Exact refusal: `RequestNativeAvailability::retain_acquisitions`, missing
+  View.Types Original payload required by the prior Lib.G1 native group.
+  Haskell preparation succeeded. No product fix or second rerun in this review.
+- `command-carrier-rerun-summary.json` records binary hash, counts and confirmed
+  process/compiler cleanup. Actual test and Buck daemon cgroups were in build.slice;
+  fast compiler descendants were not independently sampled before settlement.
+- Full reports: host-visibility.md, publication-guards.md, package-join.md,
+  package-design.md, command-carrier.md. Source-derived and executed findings
+  are distinguished in REVIEW-5c759554.
+- Documentation link/whitespace checks covered all 16 changed Markdown files.
+  `integration-status.py --strict` reported `local_main_missing`; Harness pins
+  agree. This checkout therefore cannot establish clean main containment. Keep
+  that observation distinct from the documentation push; do not invent a local
+  main ref to make the report green. Exact JSON is in the new evidence directory.
 
-Earlier closed-acquisition, HOME-census, affine-initialization and hot-query
-results remain component evidence, not proof of current joined G2 behavior.
+## Remaining ordinary-path blockers
 
-## Current blockers
+1. Current private preparation World/key, accepted-delta application, exact
+   whole-program progress and cancellation-safe receipt ownership.
+2. Retirement and freeze using current owner facts; no old-association chain replay.
+3. Native support closure retaining exact issued dependency custody through narrowing.
+4. Exact HOME row identity shared by completion/source consumers; cached item and
+   transitive demand; real program/import pairing.
+5. Ordinary activation's input/source A versus recipient B and World publication;
+   delete its two guaranteed-refusing finite gates and migrate real callers.
+6. Production-source-admitted test continuations and joined qualification.
 
-1. Carry exact package roots through checked-item publication; repair projection
-   scoping, HOME ownership and repeated prior completion together.
-2. Remove historical implementation choice from owner inventory traversal.
-3. Preserve latest runtime selection and compiler World atomically; carry actual
-   host-write and started/completed evidence.
-4. Complete ordinary witness reuse and distinguishing production tests.
-5. Replace Q1's ad hoc decoder, resolve frozen-fixture ownership, then execute
-   joined G2 gates. See [V](V-qualification.md) for delivery sequencing.
+NEXT-WAVE assigns these to N/P/H/T/V and defines early execution controls. The
+number of red assertions does not measure the amount of remaining lifecycle work.
 
-Do not treat later failure frontiers as passes or assume these are the last
-possible defects. The first two small joined gates in README reduce uncertainty
-before another full history/bundle run.
+## Worker and resource state at review closeout
 
-## Evidence index
+Four Sol investigators delivered reports; package and publication reviewers
+completed. Command and host reviewers hit account capacity after delivering their
+reports and final plan corrections. Their work is retained; no implementation
+worker is still running from this review. External DeepSeek liveness is unobserved.
+The next supervisor must record actual launches/resumes and acknowledgements.
 
-Current controlling review: [REVIEW-c910d1](REVIEW-c910d1.md).
-Detailed reports and artifact inspection:
-/srv/swarm/evidence/inanna/g2-peer-review-c910d1-20261021/.
+One warm focused test was admitted. Scratch stayed about 134.7 GiB free, with
+about 1 MiB net growth; available RAM was about 110 GiB at preflight. These are
+observations, not future reservations. The installed swarm-build lacked the
+staged disk-growth switches: do not pass unsupported options or bypass admission.
+Recheck resources and installed tooling before new lanes; retain the 100 GiB floor.
+The checkout's daemon was left warm; no shared service was restarted.
 
-Prior evidence remains:
-/srv/swarm/evidence/inanna/g2-closeout-deepseek-20261021/,
-including PEER-PLUS-REVIEW-20261021.md, the four earlier boundary reviews,
-package-witness-path-evidence.json, compare-package-products.py,
-peer-review-package-byte-comparison.json, P/W/N/H/Q receipts and resource records.
+## Preserved work
 
-The prior CBOR comparison corrected field 15 = type graph, 14 = bindings,
-13 = frames. Do not revive the obsolete complete-package recommendation based
-on that mistaken field interpretation.
+The prior handoff records dirty, unqualified GhcPipeline instrumentation and a
+completion-custody hunk in `/srv/swarm/checkouts/tidepool-deepseek-g2-h-20261021`.
+Reinspect and preserve it before reuse; this review did not qualify or discard it.
 
-## Resources
+D's earlier patch is retained at
+`/srv/swarm/evidence/inanna/g2-closeout-deepseek-20261021/d-wip-preservation/575fc4e485-three-files.patch`,
+SHA-256 `ebeaec93cc420142092bbc572d5cdcadf78f16a4e2a5d083136c45eaf9508a41`,
+with diagnostic commit `ecd8e6bbd3`. Preserve those inputs/evidence; do not merge
+unqualified instrumentation merely because it exists.
 
-The last handoff recorded approximately 120 GiB scratch free, 102 GiB available
-RAM and 35 GiB in build.slice after a supported 42 GiB retirement. These are
-historical observations, **not current admission**. Preserve 100 GiB unreserved
-scratch including expected output growth and follow current RAM/lease limits.
-Use measured independent lanes; do not assume either unlimited cold builds or
-a blanket single lane.
-
-S keeps a fresh dispatch/merge ledger here as work starts, without overwriting
-the reviewed-source/evidence boundary above.
+Do not overwrite Persona's authored modules or memory. V must reconcile the
+current private qualification copy and later user edits before any launch.

@@ -1,5 +1,7 @@
 # P: carry the selected package environment to its actual consumer
 
+> Historical assignment, superseded at the 5c759554 review. Use [PACKAGE-CLOSEOUT.md](PACKAGE-CLOSEOUT.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 Working supervisor P owns the cross-language join. P1 owns Haskell producer
 pairing, P2 Rust decoding/selection, P3 independent controls. Use the current
 campaign base and [CONTRACTS](CONTRACTS.md), not the superseded v12 supplement.

@@ -1,11 +1,11 @@
 # Complete the compiler-native architecture
 
 Current continuation (2026-10-21):
-[DeepSeek G2 closeout: B with C investigation](deepseek-g2-closeout/README.md).
+[DeepSeek G2 closeout: current private/native join](deepseek-g2-closeout/README.md).
 Its [state](deepseek-g2-closeout/STATE.md),
 [contracts](deepseek-g2-closeout/CONTRACTS.md) and worker plans govern the active
 wave. G2 is not accepted. Reviewed implementation base is
-`0ea5b8e2a9168752c05bcba9cd927635d9004b5a` on
+`5c759554c6f9478bc2344ef17ee026c6ec23fed0` on
 `g2-closeout/deepseek-20261021`; `integration/compiler-query-warm-final` remains
 the broader consolidation destination. Reconcile current refs before promotion.
 
@@ -36,10 +36,11 @@ their recorded source. The current map and exact receipts live in
 [the compiler map](../../../docs/compiler-work-map.md) and
 [the verification ledger](tests/verification-ledger.md).
 
-The current three repair fronts are exact package occurrence linkage, selected
-interface provenance versus retained-copy location, and compiler-progress evidence
-for native no-cell publication. Defining-Name correction is a reviewed unmerged
-prerequisite. Required cold/eviction and joined bundle evidence remain incomplete.
+The current repair fronts are coherent private-state progression and exact
+selected native support through package/source narrowing. The active review and
+plan replace the old per-symptom dispatch; completed occurrence-format, witness,
+logging and role-census changes are retained. Required ordinary activation,
+cold/eviction and joined bundle evidence remain incomplete.
 
 Common `NativeInstantiationPlan` installation and deletion of `code_exports`
 are already implemented. Preserve them; do not restart their migration. The
@@ -48,10 +49,10 @@ closed-support, HOME census, affine initialization or logging work.
 
 ## Ownership and integration
 
-The [current worker tree](deepseek-g2-closeout/README.md#worker-tree) assigns a
-package producer/consumer subtree, independent witness and publication owners,
-four quality leaves, history work, two producer-demand investigators, resource
-inspection, review and qualification. Its supervisor maintains actual owner,
+The [current worker tree](deepseek-g2-closeout/README.md#worker-tree) assigns private
+state and native/package owners, bounded actor/producer leaves, support narrowing,
+production-history tests, independent review and qualification. Its supervisor
+maintains actual owner,
 branch, dependency and evidence state; a proposed role is not a running worker.
 
 Reuse existing isolated warm checkouts. Children report proposal, blocker,
@@ -66,11 +67,12 @@ integration checkpoints labelled with their actual qualification state.
 
 ## Sequence and gates
 
-1. Merge the defining-Name prerequisite, freeze the package-linkage contract and
-   dispatch the independent repairs/cleanup. Preserve D's dirty history work.
+1. Follow NEXT-WAVE's current-state and exact-support contracts; preserve H/D WIP.
+   Do not restart already integrated prerequisites.
 2. Join reviewed tranches and compile production plus test consumers early.
-   Run real imported HOME, package, native publication and interface-copy controls.
-3. Run unchanged Discovery/notebook and required finite/cold/eviction, cutoff,
+   Run accepted-result reuse, parked Job, cached/transitive HOME and actual source
+   installation controls, then activation/retirement/publication histories.
+3. Run unchanged Discovery/notebook and required activation/cold/eviction, cutoff,
    private-input, reload/caller-loss and uncertain-END controls on the joined tip.
 4. Freeze and qualify one matched bundle, reconcile the map, publish the candidate
    and deliver a fresh Persona conversation. C investigation does not block B.

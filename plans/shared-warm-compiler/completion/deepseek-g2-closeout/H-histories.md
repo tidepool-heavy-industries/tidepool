@@ -1,5 +1,7 @@
 # H: retain exact historical edges without selecting from custody
 
+> Historical assignment, superseded at the 5c759554 review. Use [PACKAGE-CLOSEOUT.md](PACKAGE-CLOSEOUT.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 Primary outcome: replace the owner-census role repair and finish the real
 historical/cold/eviction gate. Adjacent questions: partial group permissions,
 narrowing costs and whether test expectations mistake namespace for authority.

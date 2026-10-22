@@ -1,5 +1,7 @@
 # N: one owner for coherent private publication
 
+> Historical assignment, superseded at the 5c759554 review. Use [PRIVATE-STATE.md](PRIVATE-STATE.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 N consolidates N1 runtime selection and N2 execution/host-write progress.
 Primary goal: publish actual private work without losing independent public
 progress or fabricating checked completion.

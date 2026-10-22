@@ -6,10 +6,11 @@ route survives, and make all claims traceable to exact commands/artifacts.
 
 ## Joined-review gates before broad qualification
 
-The controlling source review is [REVIEW-c910d1](REVIEW-c910d1.md).
-Existing six-case ordinary passes are smoke evidence; they do not qualify the
-segment-item or exact-history contract. N's boolean table does not qualify
-publication progress. Q1's Haskell logging pass does not qualify its Rust decoder.
+The controlling source review is [REVIEW-5c759554](REVIEW-5c759554.md), with the
+sequence in [NEXT-WAVE](NEXT-WAVE.md). The incoming nine-case package pass and
+one-pass/five-failure actor cohort have narrower scope than G2. See STATE for
+exact retained evidence. Do not restart completed logging/witness migrations;
+qualify their actual joined callers.
 
 Prepare these small joined gates first, using each repair's actual production
 constructors and current declared resources:
@@ -17,12 +18,17 @@ constructors and current declared resources:
 | Boundary | Required discriminator |
 |---|---|
 | Stage -> item -> native admission | Package-using World item retains its own roots after scaffold naming |
+| Cached HOME -> item -> machine | Real cached package-bearing item passes the shared policy and installs with exact source custody |
+| Target -> HOME A -> HOME B -> package | The real non-inlined transitive demand retains B's ordered roots without unrelated HOME demand |
 | First -> second target | Shared Fresh HOME with prior completion keeps exact package imports |
 | Selected scope -> graph owner | Unused competing projection cannot affect selected roots/children |
 | Support narrowing -> compiler roles | Unused historical Original cannot replace or change selected A's closure |
 | Public B -> finishing private A | Runtime selection and World both preserve B's exact selected source |
 | Native output -> next cell | Retained host value and type survive publication/private retirement |
+| Accepted result -> next private cell | Text is usable before publication; a parked Job completes its original program before host deltas apply |
 | Checked start -> freeze | In-flight/failed work cannot publish as Unchanged |
+| Whole authored program -> internal item | Declaration-only starts and later items retain one advancement owner across effects |
+| Caller A -> recipient B activation | Exact original input/renderer authority survives World-backed mount and publication; both old finite gates disappear |
 | Interface copy -> catalog | Ordinary and segment reuse retain original selected witness |
 | Diagnostic transport | Malformed record with a valid level stays malformed |
 
@@ -73,10 +79,13 @@ cold/cutoff/private/reload selectors from actual targets and command manifests.
    notebook cases unchanged in semantic purpose. The latter need both W and N;
    treat progress to a new frontier as a failure with better diagnosis. Include
    P's producer→decoder→install control rather than waiting for a giant suite.
-3. **Required G2 histories:** query/status, finite/historical/cold, actual eviction
+3. **Required G2 histories:** query/status, ordinary activation, historical/cold, actual eviction
    and reacquisition, private input, captured-A cutoff, ordinary reload,
    caller-loss and uncertain END. H supplies history-specific evidence; verify
-   it applies to the joined source. Preserve refusal and cleanup controls.
+   it applies to the joined source. Preserve refusal and cleanup controls. Cold
+   compiler reacquisition is distinct from restoring a dead process's heap values;
+   the full process-recovery matrix belongs to G3. Port useful finite-path tests
+   to production World admission; don't reintroduce the finite private API.
 4. **Serialization/translation changes:** run the affected declared fixture
    cohorts via `just fixtures-check` and cross-language tests. Missing compiler
    inputs are failures, not passing skips. New fixtures need their declared

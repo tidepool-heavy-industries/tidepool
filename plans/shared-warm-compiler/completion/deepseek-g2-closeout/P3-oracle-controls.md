@@ -1,5 +1,7 @@
 # P3: current coverage and required oracles
 
+> Historical assignment, superseded at the 5c759554 review. Use [NEXT-WAVE.md](NEXT-WAVE.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 This replaces the earlier coverage claims after staff review of c910d1aae0.
 The prior implementation/evidence remain in Git; the controlling assignment is
 [P-package-linkage](P-package-linkage.md). The detailed audit is

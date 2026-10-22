@@ -1,87 +1,58 @@
-# G2 closeout after the joined c910d1 review
+# G2 closeout: finish the current private/native join
 
-This is the controlling next DeepSeek work pack. Accepted direction remains
-**B: correctness and bounded quality repair, with C investigated separately**.
-The reviewed implementation is c910d1aae0e64c76449bef8170b53400133cbd23.
-The documentation commit containing this revision does not qualify that code.
+The controlling code checkpoint is `5c759554c6f9478bc2344ef17ee026c6ec23fed0`,
+handed over at `3ed7a15c83998e93a31a768d2ae2bd42bcc5c59a` on
+`g2-closeout/deepseek-20261021`. This pack's new revision is a review and plan,
+not a runtime repair or G2 acceptance.
 
-Read [STATE](STATE.md), [the joined review](REVIEW-c910d1.md),
-[CONTRACTS](CONTRACTS.md), and [SUPERVISOR](SUPERVISOR.md). This revision replaces
-the earlier assignments and contradictory occurrence supplement. Git retains
-their history. Do not restart already integrated Q2/Q3/Q4 implementations.
+Start with [STATE](STATE.md), [REVIEW-5c759554](REVIEW-5c759554.md), and
+[NEXT-WAVE](NEXT-WAVE.md). [CONTRACTS](CONTRACTS.md) and the
+[G2 contract](../g2-completion.md) remain controlling. Concrete private-state
+semantics are refined by [PRIVATE-STATE](PRIVATE-STATE.md); exact native/package
+ownership by [PACKAGE-CLOSEOUT](PACKAGE-CLOSEOUT.md).
 
-## Outcome and current judgment
+The direction remains B: bounded correctness/quality repair, with C research
+separate. Keep the existing live compiler and its useful integrated work.
+Resolve the current joins instead of adding more stale-check exceptions.
 
-Deliver a reviewed, passing G2 candidate through the existing live compiler,
-then qualify one matched frozen bundle and a fresh DeepSeek Persona session.
-Preserve Persona's authored files and memory. Verify selected spec, installed
-tools and rendered initial memory before calling the launch ready.
+## Worker tree
 
-**G2 is not accepted.** The historical reader's segment-item failure is a
-producer/consumer pairing loss, not missing package bytes. The joined review
-also found source-selection rollback, reconstructed historical choices,
-an uncompleted interface-witness migration and weak test oracles.
+Use one working supervisor, two working implementation owners and bounded leaves:
 
-Keep the useful work: producer-local occurrence data, finite graph issuance,
-the segment witness repair, cancellation/commit ownership, bounded logging,
-census shortcuts, trace aggregation and deletion of facade-Original substitution.
-Repair their actual joins; do not replace the live compiler architecture.
+| Owner | Assignment |
+|---|---|
+| S | [SUPERVISOR](SUPERVISOR.md): design decisions, integration and actual evidence |
+| N | Private-state progression; owns runtime admission/resident/publication hunks |
+| N actor leaf | Activation and caller migration after N publishes the small interface |
+| P | Exact native/package row through certification, completion and installation |
+| P producer leaf | Target-local transitive HOME demand, after P's coordinate contract |
+| H | The diagnosed support-projection custody loss, in functions coordinated with P |
+| T | Production-admission histories; remove test-only authority shortcuts |
+| R-N / R-P | Independent review of the two joined areas and refusal paths |
+| V | [V-qualification](V-qualification.md): joined gates, map and matched Persona bundle |
 
-## Working tree
+These are proposed assignments for the external DeepSeek harness, not observed
+running workers. Reuse context-loaded owners where possible, with new exact bases
+and acknowledged source-hunk ownership. A parent should implement/review its own
+area, not exist only to route messages. Resource admission depends on measurements,
+not worker headcount. No native Codex goals.
 
-DeepSeek workers run in the caller's harness. These are assignments to launch,
-not claims that any such worker is running. Reuse context-loaded owners at a
-verified new base. A useful maximum is 12–15 active workers, including reviewers
-and supervisors; compiler/build concurrency depends on measured resources.
+## Milestones
 
-| Role | Outcome | Start and owner |
-|---|---|---|
-| S | Technical decisions, exact integration, gates | Campaign root; [runbook](SUPERVISOR.md) |
-| P | Paired package projection contract and consolidated implementation | Working supervisor; [P](P-package-linkage.md) |
-| P1 | Producer preserves ordinary, item and fresh-HOME choices | P; implementation after one cross-language contract review |
-| P2 | Bound Rust selection, demanded graph issuance, exact reuse | P; same contract |
-| P3 | Independent discriminating controls through actual consumers | P; design now, implement against agreed constructors |
-| N | Atomic runtime/World publication and execution progress | Working supervisor; [N](N-publication.md) |
-| N1 | Original/private/latest runtime-selection composition | N; BindingTable owner first |
-| N2 | Real started/completed and retained-host-write evidence | N; coordinate shared publication hunks with N1 |
-| H | Exact historical custody/role repair and joined recovery history | S; [H](H-histories.md), immediate |
-| W | Finish authenticated interface reuse on ordinary and segment routes | S; [W](W-interface-witness.md), immediate |
-| Q | Typed logging decoder and fixture-policy cleanup | S; [Q](Q-quality.md), immediate |
-| R-P | Independent P/H/W joined review and oracle challenge | S; trace now, review exact candidates |
-| R-N | Independent N/Q review, cancellation/recovery controls | S; trace now |
-| V | Compile/gate preparation, joined qualification and map | S; [V](V-qualification.md), immediate |
+1. Current private snapshot, accepted-result reconciliation and exact program
+   progress; package/native support reaches actual runtime installation.
+2. Activation, retirement/freeze, source-selection composition and required joined
+   notebook/discovery/reload histories pass on the same tip.
+3. One matched frozen bundle; actual Persona selection/tools/initial memory;
+   bounded DeepSeek multi-turn smoke, then fresh user conversation.
+4. G3 force/fork/callback/recovery matrices, full bundle gates, map/timing evidence
+   and reviewed release/main convergence.
 
-S or V owns resource accounting; a separate resource helper is justified only
-by actual storage work. Finished reviewers may take bounded implementation in
-another subtree; independent final acceptance must come from somebody else.
-Do not add routing-only supervisors.
+See NEXT-WAVE for discriminators and scope. G2 is explicitly unqualified until
+its actual acceptance passes. Component counts, review reports and progress to a
+later error are not replacements.
 
-## First useful milestones
-
-1. P records the concrete paired ordinary/item/HOME wire and owner interfaces.
-   P3/R-P challenge them before P1/P2 diverge. In parallel N1 demonstrates
-   unchanged A after selected-source B, H removes owner-census selection, W
-   repairs ordinary reuse, and Q replaces the handwritten JSON scanner.
-2. P lands producer and consumer together on its consolidation branch. Execute
-   a small package-using World item immediately, plus the repeated-Fresh
-   multi-target history. Do not wait for the entire historical reader.
-3. N joins selection/progress/host-write changes and executes the real retained
-   output and concurrent-publication controls. Integrate reviewed W/H/Q work
-   promptly; keep every accepted parcel reachable from campaign.
-4. Run Discovery, all four notebook cases and required G2 histories on the joined
-   candidate. Inspect first failures rather than changing expectations to match.
-5. Reconcile the compiler map, freeze one bundle, qualify it, then launch Persona.
-   Publish exact candidate/release/main refs at the existing ownership boundary.
-
-C reports remain useful research, not permission to redesign package metadata,
-compile whole packages, or defer G2 correctness. A new unrelated optimization
-must not restart an already frozen qualification run.
-
-## Design taste
-
-Carry a decision from the owner that made it. Keep selection, retained bytes,
-interface compatibility and execution permission separate. Couple a program
-with its selected imports so forgetting one is not representable. Walk demanded
-exact edges, not all available bodies. Delete reconstruction helpers when their
-facts are carried correctly. Tests must discriminate the promised relationship,
-not merely observe a nonempty result.
+Earlier REVIEW-c910d1 and REVIEW-WIP-5c759554 preserve provenance. Earlier P/N/H/W/Q
+assignment files are historical reference, not parallel work queues. Do not
+restart completed occurrence-format, witness, logging or owner-census migrations.
+Preserve their guarantees and check the joined consumers.

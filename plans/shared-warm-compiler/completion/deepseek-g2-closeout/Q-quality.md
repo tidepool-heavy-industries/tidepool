@@ -1,5 +1,7 @@
 # Q: bounded quality repairs; keep accepted simplifications
 
+> Historical assignment, superseded at the 5c759554 review. Use [NEXT-WAVE.md](NEXT-WAVE.md) and STATE for current work. Preserve useful contracts below; do not launch this old task list unchanged.
+
 Primary outcome: use the existing typed JSON ecosystem for logging and give
 the historical fixture an honest ownership contract.
 Adjacent questions: cancellation/error fidelity, diagnostic-only overhead,
