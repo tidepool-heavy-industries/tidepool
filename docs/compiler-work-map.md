@@ -179,6 +179,14 @@ selection transfer and the full ordinary journey remain open.
 | Native build and custody qualification | Native actions require `bind_owned` and declared compiler-service resources; portable actions remain direct. Qualify actual catalog production and the exact frozen bundle through [package qualification](../build/package/qualification.py). Retain exact-source limits on custody/recovery passes. |
 | Joined ordinary workflow | Execute finite source → installer → public World → repeated package-using cells, A retirement and new B execution with genuine captured-A refusal. Qualify discovery, private inputs, reload and caller loss before selected Persona startup and real DeepSeek smoke on one bundle. |
 
+The [linked-code verification plan](../plans/shared-warm-compiler/completion/linked-code-ownership/verification.md)
+names the early staged World controls: toolchain preparation first, then the
+small runtime history through declaration prefixes, first package-free and
+package-bearing demand, forced Display, real effects and a fresh public consumer.
+Their selected-demand observations are separate from immutable carrier availability;
+they do not infer graph identity from scoped acquisition IDs. These are acceptance
+contracts, not passing evidence for the ownership migration.
+
 G2 includes ordinary-workflow correctness. The G2 contract assigns the full
 force/fork/callback/process-recovery matrices and full campaign M1–M3 to G3;
 unsupported operations must refuse explicitly.

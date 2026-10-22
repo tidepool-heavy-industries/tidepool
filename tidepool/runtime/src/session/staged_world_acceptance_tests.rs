@@ -35,6 +35,34 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                 for index in [1, 3] {
                     assert!(program.items()[index].native().is_none());
                 }
+                let initial_context = program.items()[0]
+                    .native_products()
+                    .unwrap()
+                    .original_execution_context()
+                    .unwrap();
+                let originals = initial_context.recovery_products();
+                let available = originals
+                    .iter()
+                    .find(|product| product.owner().module == "SegmentProbeSupport")
+                    .expect("initial compilation retains the complete immutable helper carrier");
+                let bodies = tidepool_repr::execution_schema::parse_module_products(
+                    available.product_bytes(),
+                    &tidepool_toolchain::prepared_artifact::production_requirements().unwrap(),
+                    tidepool_repr::execution_schema::InventoryDecodeLimits::default(),
+                )
+                .unwrap();
+                let [body] = bodies.as_slice() else {
+                    panic!("one authenticated helper carrier");
+                };
+                for name in ["carrierBaseline", "lateCarrierTextLength"] {
+                    assert!(
+                        body.groups.iter().any(|group| group
+                            .binders()
+                            .iter()
+                            .any(|binder| binder.occurrence == name)),
+                        "{name} is physically available before its first demand"
+                    );
+                }
                 let mut demanded = BTreeMap::<usize, BTreeMap<String, usize>>::new();
                 for (index, item) in program.items().iter().enumerate() {
                     let Some(products) = item.native_products() else {
@@ -47,6 +75,7 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                         if product.owner().module != "SegmentProbeSupport" {
                             continue;
                         }
+                        assert_eq!(product.owner(), available.owner());
                         for binder in product.group().binders() {
                             if matches!(
                                 binder.occurrence.as_str(),
