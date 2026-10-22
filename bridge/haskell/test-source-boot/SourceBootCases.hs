@@ -6869,24 +6869,34 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
   base <- structuralCandidate component
   -- These groups exercise DATA reference framing only. Real interface/source
   -- custody does not turn them into an executable package target.
-  let candidate globals = base
-        { candidateUnit = "main", candidateModule = "InstanceConsumer"
-        , candidateSource = source, candidateSourceSha256 = digest sourceBytes
-        , candidateInterface = interfacePath, candidateInterfaceSha256 = digest interfaceBytes
-        , candidateModuleVersion = replicate 64 '1'
-        , candidateProductSha256 = replicate 64 '2'
-        , candidateEvidenceSha256 = replicate 64 '3'
-        , candidateImports = []
-        , candidateGroups = [CandidateGroup 0 []
-            [CandidateGlobal identity rep signature evaluated (fromIntegral <$> generation)
-              | GlobalDecl identity rep signature evaluated generation <- globals]]
-        , candidatePackageImports = interfacePath ++ ".packages"
-        , candidatePackageImportsSha256 = digest sidecar
-        , candidateProductPath = interfacePath ++ ".product.cbor"
-        , candidateExecutionSource = Nothing }
-      encodeIn environment globals = encodeCertifiedProducts environment OrdinaryExecutionSource
-        (Map.singleton (mkModuleName "InstanceConsumer") iface)
-        (emptyFinalizedModuleArtifacts environment) [candidate globals] Nothing [] [] evidence "" ""
+  let candidate globals = do
+        let ownerProgram = program globals
+        references <- forM (programGlobals ownerProgram) $ \global -> do
+          signature <- traverse (\(SignatureId index) ->
+            case drop (fromIntegral index) (programSignatures ownerProgram) of
+              actual : _ -> pure actual
+              [] -> fail "structural package reference has an absent owning program signature")
+            (globalEntrySignature global)
+          pure (CandidateGlobal (globalIdentity global) (globalRep global) signature
+            (globalRequiredEvaluated global) (fromIntegral <$> globalRequiredGeneration global))
+        pure base
+          { candidateUnit = "main", candidateModule = "InstanceConsumer"
+          , candidateSource = source, candidateSourceSha256 = digest sourceBytes
+          , candidateInterface = interfacePath, candidateInterfaceSha256 = digest interfaceBytes
+          , candidateModuleVersion = replicate 64 '1'
+          , candidateProductSha256 = replicate 64 '2'
+          , candidateEvidenceSha256 = replicate 64 '3'
+          , candidateImports = []
+          , candidateGroups = [CandidateGroup 0 [] references]
+          , candidatePackageImports = interfacePath ++ ".packages"
+          , candidatePackageImportsSha256 = digest sidecar
+          , candidateProductPath = interfacePath ++ ".product.cbor"
+          , candidateExecutionSource = Nothing }
+      encodeIn environment globals = do
+        projected <- candidate globals
+        encodeCertifiedProducts environment OrdinaryExecutionSource
+          (Map.singleton (mkModuleName "InstanceConsumer") iface)
+          (emptyFinalizedModuleArtifacts environment) [projected] Nothing [] [] evidence "" ""
       encode = encodeIn producer
   withTiming $ do
     let repeated = replicate 1000 (global package Nothing)
