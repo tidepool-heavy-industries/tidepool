@@ -871,13 +871,13 @@ impl PersistentSession {
             machine,
             ..
         } = self;
-        Self::settle_package_domain_retirements(bindings, machine.as_mut());
+        Self::settle_native_domain_retirements(bindings, machine.as_mut());
         plan.instantiate(selection, |request, selected| {
             let permit = bindings
-                .package_slot_permit_in(scopes, scope, request)
+                .native_slot_permit_in(scopes, scope, request)
                 .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
             let witness = match machine.as_mut() {
-                Some(engine) => engine.lookup_world_package_slot(&permit, selected)?,
+                Some(engine) => engine.lookup_world_native_slot(&permit, selected)?,
                 None if selected.is_none() => None,
                 None => return Err(PreparedRuntimeError::SourceScopeAdmission),
             };
@@ -885,13 +885,13 @@ impl PersistentSession {
         })
     }
 
-    fn settle_package_domain_retirements(
+    fn settle_native_domain_retirements(
         bindings: &mut BindingTable,
         machine: Option<&mut PreparedEngine>,
     ) {
-        let retired = bindings.take_package_domain_retirements();
+        let retired = bindings.take_native_domain_retirements();
         if let Some(engine) = machine {
-            engine.retire_world_package_domains(retired);
+            engine.retire_world_native_domains(retired);
         }
     }
 
@@ -1025,7 +1025,7 @@ impl PersistentSession {
         // The staged groups exist and remain pinned. Reserve weak occupancy
         // metadata now; publish it only after the exact source tokens enter
         // this scope's custody.
-        let package_slots = match engine.prepare_package_slot_publication(&mut staged) {
+        let native_slots = match engine.prepare_native_slot_publication(&mut staged) {
             Ok(prepared) => prepared,
             Err(primary) => {
                 let tokens = std::mem::take(&mut staged.leases);
@@ -1050,7 +1050,7 @@ impl PersistentSession {
                     .or(self.machine.as_mut())
                     .expect("certified machine remains installed");
                 let native_sources = staged.native_sources.clone();
-                let target = engine.commit_certified_turn(staged, package_slots);
+                let target = engine.commit_certified_turn(staged, native_slots);
                 self.session_table = admitted_metadata;
                 if let Some(engine) = bootstrap {
                     self.machine = Some(engine);
@@ -2530,7 +2530,7 @@ impl PersistentSession {
                     bindings.commit_source_owner_origin(source_origin);
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
-                Self::settle_package_domain_retirements(bindings, machine.as_mut());
+                Self::settle_native_domain_retirements(bindings, machine.as_mut());
                 epochs.insert(scope, next_epoch);
                 activate(lib);
                 DeclarationPlaneCommit {
@@ -4439,7 +4439,7 @@ impl PersistentSession {
             .expect("preflight library")
             .publish_staged_public_manifest_unchecked(ticket, declaration, |lib| {
                 bindings.commit_exact_binding_promotion(prepared);
-                Self::settle_package_domain_retirements(bindings, machine.as_mut());
+                Self::settle_native_domain_retirements(bindings, machine.as_mut());
                 public_visibility_epochs.insert(public_scope, next_epoch);
                 if let Some(world) = promoted_world {
                     lib.tips
@@ -5029,7 +5029,7 @@ impl PersistentSession {
             retired.extend(drained.bindings);
             source_instances.extend(drained.source_instances);
         }
-        Self::settle_package_domain_retirements(&mut self.bindings, self.machine.as_mut());
+        Self::settle_native_domain_retirements(&mut self.bindings, self.machine.as_mut());
         retired.extend(self.bindings.collect_observations());
         receipt.bindings_retired = retired.len();
         receipt.roots_released = self.release_binding_roots(retired)

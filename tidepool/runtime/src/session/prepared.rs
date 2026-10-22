@@ -972,8 +972,8 @@ pub(crate) struct CertifiedTurnInstall {
     pub groups: Vec<ProgramId>,
     pub leases: Vec<NativeInstanceLease>,
     pub domain_leases: Vec<NativeInstanceAttachment>,
-    package_slots: Vec<(
-        tidepool_codegen::binding_table::WorldPackageSlotPermit,
+    native_slots: Vec<(
+        tidepool_codegen::binding_table::WorldNativeSlotPermit,
         tidepool_codegen::prepared_program::GroupInstanceId,
     )>,
     admitted: Vec<AdmittedProgramFacts>,
@@ -3316,34 +3316,34 @@ impl PreparedEngine {
         bindings.register_source_instances_in_domains(scopes, scope, attachments, &self.machine)
     }
 
-    pub(in crate::session) fn lookup_world_package_slot(
+    pub(in crate::session) fn lookup_world_native_slot(
         &mut self,
-        permit: &tidepool_codegen::binding_table::WorldPackageSlotPermit,
+        permit: &tidepool_codegen::binding_table::WorldNativeSlotPermit,
         selected: Option<&NativeInstanceLease>,
     ) -> Result<
-        Option<tidepool_codegen::prepared_program::WorldPackageInstanceWitness>,
+        Option<tidepool_codegen::prepared_program::WorldNativeInstanceWitness>,
         PreparedRuntimeError,
     > {
         self.machine
-            .lookup_world_package_slot(permit, selected)
+            .lookup_world_native_slot(permit, selected)
             .map_err(PreparedRuntimeError::Install)
     }
 
-    pub(in crate::session) fn prepare_package_slot_publication(
+    pub(in crate::session) fn prepare_native_slot_publication(
         &mut self,
         staged: &mut CertifiedTurnInstall,
-    ) -> Result<tidepool_codegen::prepared_program::PreparedWorldPackageSlots, PreparedRuntimeError>
+    ) -> Result<tidepool_codegen::prepared_program::PreparedWorldNativeSlots, PreparedRuntimeError>
     {
         self.machine
-            .prepare_world_package_slot_publication(std::mem::take(&mut staged.package_slots))
+            .prepare_world_native_slot_publication(std::mem::take(&mut staged.native_slots))
             .map_err(PreparedRuntimeError::Install)
     }
 
-    pub(in crate::session) fn retire_world_package_domains(
+    pub(in crate::session) fn retire_world_native_domains(
         &mut self,
-        retired: impl IntoIterator<Item = tidepool_codegen::binding_table::WorldPackageDomainRetirement>,
+        retired: impl IntoIterator<Item = tidepool_codegen::binding_table::WorldNativeDomainRetirement>,
     ) {
-        self.machine.retire_world_package_domains(retired);
+        self.machine.retire_world_native_domains(retired);
     }
 
     /// Publish the staged native batch only after scope custody accepted all
@@ -3352,7 +3352,7 @@ impl PreparedEngine {
     pub(crate) fn commit_certified_turn(
         &mut self,
         staged: CertifiedTurnInstall,
-        package_slots: tidepool_codegen::prepared_program::PreparedWorldPackageSlots,
+        native_slots: tidepool_codegen::prepared_program::PreparedWorldNativeSlots,
     ) -> ProgramId {
         assert!(
             staged.leases.is_empty(),
@@ -3371,7 +3371,7 @@ impl PreparedEngine {
         for (id, admitted) in programs.zip(staged.admitted) {
             self.publish_admitted_program(id, admitted);
         }
-        self.machine.commit_world_package_slots(package_slots);
+        self.machine.commit_world_native_slots(native_slots);
         self.installs_since_major += staged.groups.len() + 1;
         for group in staged.groups {
             assert!(self.unpin(group), "scoped source root replaces install pin");
@@ -3380,7 +3380,7 @@ impl PreparedEngine {
     }
 
     /// Discard an unpublished native batch after scope admission refuses its
-    /// tokens. No session metadata or package roots were committed, so once
+    /// tokens. No session metadata or native choices were committed, so once
     /// these exact machine handles/pins release, collection retires the batch.
     pub(crate) fn abort_certified_turn(
         &mut self,
