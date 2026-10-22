@@ -38,7 +38,7 @@ import Test.QuickCheck
 import Tidepool.CompilerProducts
   ( prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts, preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, writeCertifiedSegmentProducts
-  , writeCertifiedSegmentItemProductsWithInputs )
+  , writeCertifiedSegmentItemProductsWithInputs, retainPreparedPackageTargets )
 import Tidepool.CompilerRequest
 import Tidepool.ExecutionProjection (preparedModuleProductOutcomes, projectOriginalHomeModuleProducts)
 import Tidepool.ExtractRequest
@@ -656,6 +656,15 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
           PortableOutputs _ -> fail "native package fixture selected portable output"
           NativeOutputs artifacts products -> do
             unless (length artifacts == length names) (fail "native package fixture lost its targets")
+            provenance <- scopedNativeProductProvenance scope
+            targets <- forM artifacts $ \artifact -> maybe
+              (fail "native package fixture lost its actual target projection") pure (paPackageTarget artifact)
+            duplicate <- try (void (retainPreparedPackageTargets provenance
+              (targets ++ take 1 targets) Map.empty products)) :: IO (Either SomeException ())
+            case duplicate of
+              Left failure | "package projections repeat a target" `isInfixOf` show failure -> pure ()
+              Left failure -> throwIO failure
+              Right () -> fail "package issuer accepted duplicate actual target projections"
             forM_ artifacts $ \artifact -> unless
               (not (any ((== "reverse") . symbolOccurrence)
                 [identity | group <- programBindings (paProgram artifact)
@@ -682,13 +691,21 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 [TString "ordinary",_,_,TList rows,_,_,_,_,_,links]]) | BL.null rest -> pure (rows,links)
               _ -> fail "native writer emitted a malformed package witness table"
             ordinaryStageId <- case packageLinks of
-              TList [TInt 3,TBytes stageId,TList occurrences,TList roots,TList _,TList products] -> do
-                let packageRoots = case roots of
-                      [TList [TString "__result",TList ids]] -> ids
-                      _ -> []
+              TList [TInt 4,TBytes stageId,TList occurrences,TList roots,TList _,TList originalUses,TList products] -> do
+                byTarget <- forM roots $ \root -> case root of
+                  TList [TString target,TList ids] -> pure (target,ids)
+                  _ -> fail "native writer emitted malformed target package roots"
+                let packageRoots = concatMap snd byTarget
+                    occurrenceSets = [Set.fromList
+                      [occurrence | TList [TString "local",TInt occurrence] <- ids]
+                      | (_,ids) <- byTarget]
                 unless (BS.length stageId == 32
                     && length products == length paths
-                    && (not wantsCode || not (null packageRoots))
+                    && Set.fromList (map fst byTarget) == Set.fromList (map Text.pack names)
+                    && length byTarget == length names
+                    && null originalUses
+                    && (not wantsCode || all (not . null . snd) byTarget)
+                    && sum (map Set.size occurrenceSets) == Set.size (Set.unions occurrenceSets)
                     && all (validOccurrence (length occurrences)) packageRoots)
                   (fail "native writer emitted crossed or out-of-range package links")
                 pure stageId
@@ -709,7 +726,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
                 case deserialiseFromBytes decodeTerm (BL.fromStrict itemCertificate) of
                   Right (rest,TList [TString "TPCERT",TInt 13,TList
                     [TString "segment-item",_,_,TList
-                      [TInt 1,TBytes stageId,TBytes programSha,TString target,TList _,TList _]]])
+                      [TInt 2,TBytes stageId,TBytes programSha,TString target,TList _,TList _,TList []]]])
                     | BL.null rest
                     , stageId == ordinaryStageId
                     , programSha == SHA256.hash (paBytes artifact)
@@ -768,8 +785,9 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
     cases =
       [("NativePackageTarget",
         ["module NativePackageTarget where", "import Data.List (reverse)"
-        ,"{-# NOINLINE __result #-}", "__result :: [Int] -> [Int]", "__result = reverse"],
-        ["__result"],True)
+        ,"{-# NOINLINE __result #-}", "__result :: [Int] -> [Int]", "__result = reverse"
+        ,"{-# NOINLINE __other #-}", "__other :: [Bool] -> [Bool]", "__other = reverse"],
+        ["__result","__other"],True)
       ,("NativeTypeSupport",
         ["{-# LANGUAGE NoImplicitPrelude #-}", "module NativeTypeSupport where"
         ,"data Token = First | Second", "first = First", "second = Second"],

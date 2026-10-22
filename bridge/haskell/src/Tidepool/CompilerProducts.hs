@@ -522,6 +522,8 @@ retainPreparedPackageTargets provenance targets captures context = do
                        , group <- packageTargetGroups target ]
     unless (BS.length producer == 32 && BS.length profile == 32)
       (fail "package product deployment commitments are malformed")
+    unless (length targets == Set.size (Set.fromList (map packageTargetName targets)))
+      (fail "package projections repeat a target")
     encodings <- forM targetGroups $ \(name, group) -> do
       let owner = projectedPackageModule group
       body <- maybe (fail "package product lacks its captured defining interface") pure
@@ -533,8 +535,6 @@ retainPreparedPackageTargets provenance targets captures context = do
             producer profile (projectedPackageInterfaceSha256 group) (projectedPackageDefiningVersion group)
           bytes = encodePackageGroup provenance' (projectedPackageEncoding group)
       pure (name, group, bytes)
-    unless (length targets == Set.size (Set.fromList (map packageTargetName targets)))
-      (fail "package projections repeat a target")
     ownersByTarget <- Map.fromList <$> forM targets (\target -> do
       owners <- foldM insertOwner Map.empty
                 [ (binder, fromIntegral index)
