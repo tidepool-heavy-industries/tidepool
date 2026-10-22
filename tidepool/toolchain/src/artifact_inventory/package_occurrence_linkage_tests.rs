@@ -7,51 +7,127 @@
 //!
 //! These tests are ignored by default because they require the rooted
 //! compiler service; the joined qualification runs them in that environment.
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use crate::artifact_inventory::CompletedNativeTargetImport;
+use crate::artifact_inventory::{
+    ArtifactBinding, CompletedNativeImport, CompletedNativeTargetImport, PackageCodeBinding,
+};
 use crate::artifacts::test_support::compile_invocation;
 use crate::artifacts::CompileInvocation;
 
-/// One ordered package slot of a completed target: the defining identity, the
-/// resolved body bytes, and the exact ordered child history. This is the
-/// discriminating observation the old `(seal, symbol)` selector could not
-/// produce; it keeps repeated slots in order instead of collapsing them.
+/// A finite observation of one issued package graph. Nodes are keyed by their
+/// exact artifact binding, so cycles terminate without silently truncating the
+/// graph and repeated edges retain their positions.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PackageGraphObservation {
+    root: ArtifactBinding,
+    nodes: BTreeMap<ArtifactBinding, PackageGraphNode>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PackageGraphNode {
+    owner: String,
+    envelope_sha256: [u8; 32],
+    interface_sha256: [u8; 32],
+    body_sha256: [u8; 32],
+    imports: Vec<ArtifactBinding>,
+}
+
+/// One ordered package slot of a completed target: the defining identity and
+/// the exact issued graph selected for that slot.
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct PackageSlotRecord {
     identity: String,
-    body_sha256: [u8; 32],
-    child_history: Vec<(String, [u8; 32])>,
+    graph: PackageGraphObservation,
 }
 
-fn child_history(
-    binding: &crate::artifact_inventory::PackageCodeBinding,
-) -> Vec<(String, [u8; 32])> {
-    let mut history = Vec::new();
-    collect_child_history(binding, &mut history, 0);
-    history
-}
-
-fn collect_child_history(
-    binding: &crate::artifact_inventory::PackageCodeBinding,
-    history: &mut Vec<(String, [u8; 32])>,
-    depth: usize,
-) {
-    if depth > 8 {
-        return;
+fn observe_package_graph(binding: &PackageCodeBinding) -> PackageGraphObservation {
+    let root = binding.binding();
+    let mut nodes = BTreeMap::new();
+    let mut pending = VecDeque::from([binding.clone()]);
+    while let Some(binding) = pending.pop_front() {
+        let exact = binding.binding();
+        if nodes.contains_key(&exact) {
+            continue;
+        }
+        let product = binding.product();
+        let imports = binding
+            .imports()
+            .map(|child| child.binding())
+            .collect::<Vec<_>>();
+        nodes.insert(
+            exact,
+            PackageGraphNode {
+                owner: format!(
+                    "{}:{}",
+                    product.code().owner().unit,
+                    product.code().owner().module
+                ),
+                envelope_sha256: *product.envelope_sha256(),
+                interface_sha256: *product.defining_interface().sha256(),
+                body_sha256: sha256(product.bytes()),
+                imports,
+            },
+        );
+        pending.extend(binding.imports());
     }
-    let product = binding.product();
-    let owner = product.code().owner();
-    let digest: [u8; 32] = sha256(product.bytes());
-    history.push((format!("{}:{}", owner.unit, owner.module), digest));
-    for (child, _) in binding.import_links() {
-        collect_child_history(&child, history, depth + 1);
-    }
+    PackageGraphObservation { root, nodes }
 }
 
-fn sha256(bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes).into()
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct HomePackageRoot {
+    finder_binder: String,
+    imports: Vec<PackageGraphObservation>,
+}
+
+fn home_package_roots(
+    selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
+) -> BTreeMap<u32, HomePackageRoot> {
+    let mut roots = BTreeMap::new();
+    for row in selection.completion().rows() {
+        let imports = row
+            .imports()
+            .iter()
+            .filter_map(|import| match import {
+                CompletedNativeImport::Package { binding, .. } => {
+                    Some(observe_package_graph(binding))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if imports.is_empty() {
+            continue;
+        }
+        let finder_binder = row
+            .product()
+            .group()
+            .binders()
+            .iter()
+            .map(|binder| binder.occurrence.as_str())
+            .find(|binder| matches!(*binder, "byList" | "byText"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "HOME package row ordinal {} has no fixture binder: {:?}",
+                    row.binding().original_ordinal,
+                    row.product().group().binders()
+                )
+            })
+            .to_owned();
+        assert!(
+            roots
+                .insert(
+                    row.binding().original_ordinal,
+                    HomePackageRoot {
+                        finder_binder,
+                        imports,
+                    },
+                )
+                .is_none(),
+            "one completed HOME row per issued ordinal"
+        );
+    }
+    roots
 }
 
 fn package_slot_records(
@@ -59,24 +135,32 @@ fn package_slot_records(
     selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>,
     target: &str,
 ) -> Vec<PackageSlotRecord> {
-    output.targets[target]
-        .prepared
-        .prepared()
-        .globals()
+    let globals = output.targets[target].prepared.prepared().globals();
+    let links = selection.target_imports();
+    assert_eq!(
+        globals.len(),
+        links.len(),
+        "{target} completion must have one ordered slot per physical global"
+    );
+    globals
         .iter()
-        .zip(selection.target_imports())
+        .zip(links)
         .filter_map(|(global, link)| match link {
             CompletedNativeTargetImport::Package { binding, .. } => Some(PackageSlotRecord {
                 identity: format!(
                     "{}:{}:{}",
                     global.identity.unit, global.identity.module, global.identity.occurrence
                 ),
-                body_sha256: sha256(binding.product().bytes()),
-                child_history: child_history(binding),
+                graph: observe_package_graph(binding),
             }),
             _ => None,
         })
         .collect()
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
 }
 
 fn compile_fixture(source: &str, targets: &[&str]) -> crate::artifacts::CompiledArtifacts {
@@ -105,7 +189,7 @@ fn completed_selection(
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
-fn reversed_targets_keep_exact_ordered_package_slots() {
+fn reversed_targets_preserve_exact_package_graphs() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/SameSealTwoProducts.hs");
     let mut expected: Option<(Vec<PackageSlotRecord>, Vec<PackageSlotRecord>)> = None;
@@ -118,10 +202,8 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
         let pack_then_unpack = completed_selection(&output, "packThenUnpack");
 
         // Both targets retain actual package code resolved through the export
-        // contract (not merely a digest match). Ordering a target first or
-        // second must not change its own ordered slots, resolved body, or
-        // child history: the producer's paired occurrence, not a request-wide
-        // binder map, decides which occurrence each slot resolves to.
+        // contract. Ordering a target first or second must not change its own
+        // ordered slots or exact issued graph.
         let only_pack_slots = package_slot_records(&output, &only_pack, "onlyPack");
         let pack_then_unpack_slots =
             package_slot_records(&output, &pack_then_unpack, "packThenUnpack");
@@ -133,7 +215,7 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
         if let Some(previous) = &expected {
             assert_eq!(
                 previous, &order,
-                "reversing target order changed a target's exact package slots, body, or child history"
+                "reversing target order changed a target's exact package slots or issued graph"
             );
         } else {
             expected = Some(order);
@@ -144,33 +226,29 @@ fn reversed_targets_keep_exact_ordered_package_slots() {
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
-fn transitive_import_prefers_exact_child_over_competing_sibling() {
+fn shared_package_symbol_graph_is_order_invariant() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/TransitiveCompetitor.hs");
     let output = compile_fixture(source, &["viaText", "directText"]);
     let via_text = completed_selection(&output, "viaText");
     let direct_text = completed_selection(&output, "directText");
 
-    // Data.Text's transitive child selection and the direct sibling target may
-    // retain two distinct projections of the same defining module. The exact
-    // link must not silently borrow the sibling's body.
+    // Shared package products must keep their exact issued graphs when target
+    // order changes. This is order-invariance coverage, not a competing-child
+    // discriminator.
     let via = package_slot_records(&output, &via_text, "viaText");
     let direct = package_slot_records(&output, &direct_text, "directText");
     assert!(!via.is_empty(), "viaText must retain actual package code");
-    // The shared defining module's occurrence must resolve from each target's
-    // own projection; a first-match or shared-map selector would give both
-    // targets the same child history even when they differ.
+    // If the two projections share a package global, its complete finite graph
+    // observation must agree. The current fixture does not establish that two
+    // different candidates exist, so it does not claim transitive competition.
     if !direct.is_empty() {
         for left in &via {
             for right in &direct {
                 if left.identity == right.identity {
                     assert_eq!(
-                        left.body_sha256, right.body_sha256,
-                        "a shared symbol keeps one immutable envelope"
-                    );
-                    assert_eq!(
-                        left.child_history, right.child_history,
-                        "the transitive child history must match the direct sibling for one symbol"
+                        left.graph, right.graph,
+                        "one shared symbol keeps its complete issued graph"
                     );
                 }
             }
@@ -181,7 +259,7 @@ fn transitive_import_prefers_exact_child_over_competing_sibling() {
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
-fn repeated_slots_share_immutable_bytes_without_losing_multiplicity() {
+fn compiler_deduplicates_physical_sort_global() {
     let source = include_str!("../../tests/fixtures/package-occurrence-linkage/RepeatedSlots.hs");
     let output = compile_fixture(source, &["threeSorts"]);
     let selection = completed_selection(&output, "threeSorts");
@@ -203,7 +281,7 @@ fn repeated_slots_share_immutable_bytes_without_losing_multiplicity() {
 
 #[test]
 #[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
-fn duplicate_envelope_histories_remain_distinct_bindings() {
+fn duplicate_envelope_smoke_compiles_both_targets() {
     let source =
         include_str!("../../tests/fixtures/package-occurrence-linkage/DuplicateEnvelope.hs");
     let output = compile_fixture(source, &["firstHistory", "secondHistory"]);
@@ -244,32 +322,196 @@ fn multi_ordinal_home_keeps_per_ordinal_package_roots() {
     )
     .expect("fresh multi-ordinal HOME module compiles through common admission");
 
-    // Each original ordinal keeps exactly its own package slot. The shared
-    // `sort` body must be reached only by `byList`; `byText` reaches `pack`.
-    // Fresh HOME package roots live on the source rows, not the target slots.
     let selection = completed_selection(&output, "result");
-    let mut home_package_owners = std::collections::BTreeSet::new();
-    for row in selection.completion().rows() {
-        for import in row.imports() {
-            if let crate::artifact_inventory::CompletedNativeImport::Package { binding, .. } =
-                import
+    let roots = home_package_roots(&selection);
+    assert_eq!(
+        roots.len(),
+        2,
+        "exactly two fresh HOME ordinals carry package roots: {roots:#?}"
+    );
+    let by_list = roots
+        .iter()
+        .find(|(_, root)| root.finder_binder == "byList")
+        .expect("the issued byList ordinal");
+    let by_text = roots
+        .iter()
+        .find(|(_, root)| root.finder_binder == "byText")
+        .expect("the issued byText ordinal");
+    assert!(
+        by_list.0 != by_text.0,
+        "byList and byText are distinct issuer ordinals"
+    );
+    assert_eq!(
+        by_list.1.imports.len(),
+        2,
+        "byList imports its sort body and Ord dictionary"
+    );
+    assert_eq!(by_text.1.imports.len(), 1, "byText imports its pack body");
+    let by_list_modules = by_list
+        .1
+        .imports
+        .iter()
+        .map(|root| root.nodes[&root.root].owner.as_str())
+        .collect::<Vec<_>>();
+    let by_text_modules = by_text
+        .1
+        .imports
+        .iter()
+        .map(|root| root.nodes[&root.root].owner.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        by_list_modules
+            .iter()
+            .any(|owner| owner.ends_with("OldList")),
+        "byList keeps its exact OldList root: {by_list_modules:?}"
+    );
+    assert!(
+        by_list_modules
+            .iter()
+            .all(|owner| !owner.ends_with("Data.Text.Internal")),
+        "byList must not receive byText's root: {by_list_modules:?}"
+    );
+    assert!(
+        by_text_modules
+            .iter()
+            .any(|owner| owner.ends_with("Data.Text.Internal")),
+        "byText keeps its exact Data.Text root: {by_text_modules:?}"
+    );
+    assert!(
+        by_text_modules
+            .iter()
+            .all(|owner| !owner.ends_with("OldList")),
+        "byText must not receive byList's root: {by_text_modules:?}"
+    );
+    drop(output);
+}
+
+#[test]
+#[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+fn repeated_fresh_home_targets_reuse_exact_ordinal_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("MultiOrdinalHome.hs"),
+        include_str!("../../tests/fixtures/package-occurrence-linkage/MultiOrdinalHome.hs"),
+    )
+    .unwrap();
+    let source =
+        include_str!("../../tests/fixtures/package-occurrence-linkage/MultiOrdinalHomeConsumer.hs");
+    let compile = |targets: &[&str]| {
+        compile_invocation(
+            &CompileInvocation {
+                source,
+                targets,
+                include: &[root.path().to_owned()],
+                fallback_module_name: "MultiOrdinalHomeConsumer",
+            },
+            |_, _, _| {},
+        )
+        .expect("both targets consume the shared fresh HOME issuers")
+    };
+
+    let forward = compile(&["result", "result2"]);
+    let result = completed_selection(&forward, "result");
+    let result2 = completed_selection(&forward, "result2");
+    let result_roots = home_package_roots(&result);
+    let result2_roots = home_package_roots(&result2);
+    assert_eq!(result_roots.len(), 2);
+    assert_eq!(result2_roots, result_roots);
+
+    let package_bindings =
+        |selection: &Arc<crate::artifact_inventory::CompletedNativeSelection>, ordinal: u32| {
+            selection
+                .completion()
+                .rows()
+                .find(|row| row.binding().original_ordinal == ordinal)
+                .expect("shared HOME row")
+                .imports()
+                .iter()
+                .filter_map(|import| match import {
+                    CompletedNativeImport::Package { binding, .. } => Some(binding.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+    for (ordinal, left) in &result_roots {
+        let left_bindings = package_bindings(&result, *ordinal);
+        let right_bindings = package_bindings(&result2, *ordinal);
+        assert_eq!(
+            left_bindings.len(),
+            left.imports.len(),
+            "ordinal {ordinal} keeps its exact root cardinality"
+        );
+        assert_eq!(right_bindings.len(), left_bindings.len());
+        for (left, right) in left_bindings.iter().zip(&right_bindings) {
+            assert_eq!(
+                left.binding(),
+                right.binding(),
+                "ordinal {ordinal} reuses the same exact package binding"
+            );
+            assert!(
+                Arc::ptr_eq(left.product(), right.product()),
+                "ordinal {ordinal} reuses immutable payload custody"
+            );
+        }
+    }
+    drop(forward);
+
+    let reversed = compile(&["result2", "result"]);
+    assert_eq!(
+        home_package_roots(&completed_selection(&reversed, "result")),
+        result_roots,
+        "target order cannot change result's exact HOME roots"
+    );
+    assert_eq!(
+        home_package_roots(&completed_selection(&reversed, "result2")),
+        result2_roots,
+        "target order cannot change result2's exact HOME roots"
+    );
+    drop(reversed);
+}
+
+#[test]
+#[ignore = "requires the rooted compiler service declared by toolchain_finite_output_tests"]
+fn same_direct_package_with_different_children_has_a_real_premise() {
+    let source = include_str!(
+        "../../tests/fixtures/package-occurrence-linkage/SameDirectDifferentChildren.hs"
+    );
+    let ints = compile_fixture(source, &["sortInts"]);
+    let strings = compile_fixture(source, &["sortStrings"]);
+    let int_slots =
+        package_slot_records(&ints, &completed_selection(&ints, "sortInts"), "sortInts");
+    let string_slots = package_slot_records(
+        &strings,
+        &completed_selection(&strings, "sortStrings"),
+        "sortStrings",
+    );
+    let mut crossed_children = Vec::new();
+    for left in &int_slots {
+        let left = &left.graph.nodes[&left.graph.root];
+        for right in &string_slots {
+            let right = &right.graph.nodes[&right.graph.root];
+            if left.owner == right.owner
+                && left.interface_sha256 == right.interface_sha256
+                && left.envelope_sha256 == right.envelope_sha256
+                && left.body_sha256 == right.body_sha256
+                && left.imports != right.imports
             {
-                let owner = binding.product().code().owner();
-                home_package_owners.insert(format!("{}:{}", owner.unit, owner.module));
+                crossed_children.push((
+                    left.owner.clone(),
+                    left.envelope_sha256,
+                    left.imports.clone(),
+                    right.imports.clone(),
+                ));
             }
         }
     }
-    let has_sort = home_package_owners
-        .iter()
-        .any(|owner| owner.contains("OldList"));
-    let has_pack = home_package_owners
-        .iter()
-        .any(|owner| owner.contains("Data.Text"));
-    assert!(
-        has_sort && has_pack,
-        "both HOME ordinals select their own package roots, found {home_package_owners:?}"
+    assert_eq!(
+        crossed_children.len(),
+        1,
+        "exactly one direct package identity must have two real child histories: {crossed_children:#?}"
     );
-    drop(output);
+    drop(ints);
+    drop(strings);
 }
 
 // ---------------------------------------------------------------------------
@@ -448,18 +690,26 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
     assert_eq!(manifest.pairs.len(), 2, "two authenticated package pairs");
     let inventory = crate::artifact_inventory::ArtifactInventory::default();
     let view = inventory.empty_view();
-    let operation =
-        tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
     let root = tempfile::tempdir().unwrap();
 
     for pair in &manifest.pairs {
-        assert_eq!(pair.bodies.len(), 2, "{} one complete and one minimal body", pair.label);
+        assert_eq!(
+            pair.bodies.len(),
+            2,
+            "{} one complete and one minimal body",
+            pair.label
+        );
         let mut products = Vec::new();
         for body in &pair.bodies {
             let product = restore_historical_product(root.path(), pair, body);
             let owner = product.code().owner();
             assert_eq!(owner.unit, pair.unit, "{} decoded owner unit", pair.label);
-            assert_eq!(owner.module, pair.module, "{} decoded owner module", pair.label);
+            assert_eq!(
+                owner.module, pair.module,
+                "{} decoded owner module",
+                pair.label
+            );
             assert_eq!(
                 hex_encode(&owner.compiler_sha256),
                 pair.compiler_sha256,
@@ -498,8 +748,16 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
             let binder = &binders[0];
             assert_eq!(binder.unit, pair.unit, "{} binder unit", pair.label);
             assert_eq!(binder.module, pair.module, "{} binder module", pair.label);
-            assert_eq!(binder.namespace, pair.namespace, "{} binder namespace", pair.label);
-            assert_eq!(binder.occurrence, pair.occurrence, "{} binder occurrence", pair.label);
+            assert_eq!(
+                binder.namespace, pair.namespace,
+                "{} binder namespace",
+                pair.label
+            );
+            assert_eq!(
+                binder.occurrence, pair.occurrence,
+                "{} binder occurrence",
+                pair.label
+            );
             assert_eq!(
                 product.code().globals().len(),
                 0,
@@ -534,8 +792,18 @@ fn historical_same_seal_bodies_select_separately_and_refuse_seal_symbol_match() 
         // coordinate (ArtifactId), through the existing graph issuer.
         let complete_graph = issue_historical_product(&view, &operation, complete);
         let minimal_graph = issue_historical_product(&view, &operation, minimal);
-        assert_eq!(complete_graph.roots().len(), 1, "{} complete root", pair.label);
-        assert_eq!(minimal_graph.roots().len(), 1, "{} minimal root", pair.label);
+        assert_eq!(
+            complete_graph.roots().len(),
+            1,
+            "{} complete root",
+            pair.label
+        );
+        assert_eq!(
+            minimal_graph.roots().len(),
+            1,
+            "{} minimal root",
+            pair.label
+        );
         assert_eq!(
             complete_graph.roots()[0].artifact,
             complete.artifact_id(),
