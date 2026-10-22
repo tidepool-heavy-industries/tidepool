@@ -248,6 +248,13 @@ fn admit_original_entry(
                     &crate::prepared_artifact::production_requirements()?,
                     DecodeLimits::default(),
                 )?);
+                let program =
+                    crate::prepared_artifact::PreparedArtifact::bind_package_program_from_bytes(
+                        Arc::new(prepared_bytes.to_vec()),
+                        Arc::clone(&prepared),
+                        &crate::prepared_artifact::production_requirements()?,
+                        DecodeLimits::default(),
+                    )?;
                 let (table, warnings) =
                     tidepool_repr::serial::read_metadata_for_program(metadata, &prepared)?;
                 let sites = parse_asks(asks)?.sites();
@@ -260,7 +267,7 @@ fn admit_original_entry(
                     &root,
                     source_path,
                     &source,
-                    &prepared,
+                    &program,
                     "__prepared",
                     Some((&table, &sites)),
                     None,

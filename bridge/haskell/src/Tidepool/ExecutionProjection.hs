@@ -33,7 +33,7 @@ module Tidepool.ExecutionProjection
   , projectSelected
   , projectSelectedWithHostBindings
   , PreparedCandidate, projectSelectedCandidateWithHostBindings
-  , candidateGlobals, finalizePreparedCandidate
+  , candidateGlobals, candidateBindingIdentities, finalizePreparedCandidate
   , preparedTopIdentities, preparedTopIdentityBindings
   , preparedTargetReferences
   , ReferenceFact(..)
@@ -958,9 +958,11 @@ data PreparedPackageTarget = PreparedPackageTarget
 
 projectPreparedPackageTarget :: HscEnv -> [HostBindingRepresentation] -> Text
   -> ProjectionContext -> Map Module (Map Word32 ProjectedGroup) -> [ModuleCandidate]
+  -> Set (String, String, Word)
   -> [PreparedModule] -> [PreparedComponents] -> PreparedReachability
   -> Either ProjectionError PreparedPackageTarget
-projectPreparedPackageTarget env hostBindings targetName context homeProducts cached home components reach = do
+projectPreparedPackageTarget env hostBindings targetName context homeProducts cached reachedHome
+    home components reach = do
   let packageModules = concatMap preparedComponentModules components
       modules = home ++ packageModules
       identities = buildTopIdentityMap modules
@@ -995,21 +997,15 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
   candidate <- projectPreparedCandidateWithImports imported hostBindings
     checkedContext selected checkedIdentities
   (program, constructors) <- finalizePreparedCandidate candidate
-  let programBinders = Set.fromList
-        [ identity
-        | group <- programBindings program
-        , binding <- case group of
-            NonRecursive top -> [top]
-            Recursive tops -> tops
-        , TopBinding identity _ <- [binding] ]
-      targetSymbols = Set.union programBinders
-        (Set.fromList (map globalIdentity (programGlobals program)))
+  let isReachedHome unit name ordinal =
+        Set.member (Text.unpack unit, Text.unpack name, ordinal) reachedHome
   preparedHomeImports <- concat <$> forM home (\prepared -> do
     let selected = Set.fromList
           [ ordinal
           | (ordinal, one) <- preparedBindingGroups prepared
-          , item <- pmBindings one
-          , reachable item ]
+          , let unit = Text.pack (unitString (moduleUnit (pmModule prepared)))
+                name = Text.pack (moduleNameString (moduleName (pmModule prepared)))
+          , isReachedHome unit name (fromIntegral ordinal) ]
     groups <- maybe
       (Left (InvalidPreparedRepresentation "selected HOME module lacks its issued original product"))
       Right (Map.lookup (pmModule prepared) homeProducts)
@@ -1017,7 +1013,6 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
       group <- maybe
         (Left (InvalidPreparedRepresentation "selected HOME group lacks its issued original product"))
         Right (Map.lookup ordinal groups)
-      let groupSymbols = Set.fromList (projectedBinders group)
       let key = ( Text.pack (unitString (moduleUnit (pmModule prepared)))
                 , Text.pack (moduleNameString (moduleName (pmModule prepared)))
                 , fromIntegral ordinal )
@@ -1026,7 +1021,7 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
             [ globalIdentity global
             | global <- projectedGlobals (projectedBody group)
             , isPackageImport global ]
-          demanded = not (Set.null (Set.intersection groupSymbols targetSymbols))
+          demanded = isReachedHome unit name ordinalKey
       pure (unit, name, ordinalKey, identities, demanded))
     pure (map (\(unit,name,ordinal,identities,_) -> (unit,name,ordinal,identities))
       (filter (\(_,_,_,identities,demanded) ->
@@ -1037,13 +1032,11 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
         , (ordinal, group) <- Map.toAscList groups
         , let unit = Text.pack (unitString (moduleUnit owner))
               name = Text.pack (moduleNameString (moduleName owner))
-              groupSymbols = Set.fromList (projectedBinders group)
               identities =
                 [ globalIdentity global
                 | global <- projectedGlobals (projectedBody group)
                 , isPackageImport global ]
-              demanded = not (Set.null
-                (Set.intersection groupSymbols targetSymbols))
+              demanded = isReachedHome unit name (fromIntegral ordinal)
         , demanded
         , not (null identities) ]
       cachedHomeImports =
@@ -1058,9 +1051,10 @@ projectPreparedPackageTarget env hostBindings targetName context homeProducts ca
                 | global <- candidateGroupGlobals group
                 , candidateGlobalGeneration global == Nothing
                 , isPackageImportIdentity (candidateGlobalIdentity global) ]
-              demanded = not (Set.null
-                (Set.intersection
-                  (Set.fromList (candidateGroupBinders group)) targetSymbols))
+              demanded = isReachedHome
+                (Text.pack (candidateUnit candidate))
+                (Text.pack (candidateModule candidate))
+                (fromIntegral (candidateGroupOrdinal group))
         , demanded
         , not (null identities) ]
   homeImports <- do
@@ -1126,6 +1120,14 @@ data PreparedCandidate = PreparedCandidate WireProgram [IssuedConstructor] [Proj
 
 candidateGlobals :: PreparedCandidate -> [GlobalDecl]
 candidateGlobals (PreparedCandidate program _ _) = programGlobals program
+
+candidateBindingIdentities :: PreparedCandidate -> [SymbolIdentity]
+candidateBindingIdentities (PreparedCandidate program _ _) =
+  [ identity | group <- programBindings program
+  , binding <- case group of
+      NonRecursive top -> [top]
+      Recursive tops -> tops
+  , TopBinding identity _ <- [binding] ]
 
 finalizePreparedCandidate :: PreparedCandidate -> Either ProjectionError (WireProgram, [IssuedConstructor])
 finalizePreparedCandidate (PreparedCandidate program constructors failures) = case failures of

@@ -55,12 +55,14 @@ import Tidepool.CompilerProducts
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
 import Tidepool.ExactScope
-import Tidepool.ExecutionSchema (SymbolIdentity(..), WireProgram(..), SiteRow(..), ProjectedGroup(..))
+import Tidepool.ExecutionSchema
+  ( SymbolIdentity(..), WireProgram(..), SiteRow(..), ProjectedGroup(..), GlobalDecl(..) )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, projectedGroupEncodingInput)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability
-  , projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate
+  , projectSelectedCandidateWithHostBindings, candidateGlobals, candidateBindingIdentities
+  , finalizePreparedCandidate
   , preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductOutcomes
   , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget
   , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups, packageTargetImports
@@ -73,7 +75,9 @@ import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCh
 import Tidepool.CertifiedProducts (resolvePackageGlobal, encodeReceiptIdentity)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..))
-import Tidepool.OriginalProductRoots (requiredOriginalExternalGlobalsWithPrior, unrecoveredExactProducts)
+import Tidepool.OriginalProductRoots
+  ( OriginalExternalDemand(..), requiredOriginalExternalDemandForSeeds
+  , unrecoveredExactProducts )
 import Tidepool.PreparedStg (PreparedModule, pmModule, pmYieldSites, pmIdentityResolver
   , preparedComponentVersion, preparedComponentModules, capturePreparedPackageInterfaces)
 import Tidepool.FatIface (fatOriginalOwner)
@@ -758,7 +762,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         unless (isNothing exactScope && null candidates && Map.null retainedGenerations
             && null hostBindings) $
           fail "portable output cannot consume retained native or host-binding inputs"
-        pure (modules,Nothing,Map.empty,Set.empty,[],[],const (Right []),Map.empty)
+        pure (modules,Nothing,Map.empty,Set.empty,[],[]
+          ,const (const (Right (OriginalExternalDemand Set.empty []))),Map.empty)
       NativeOriginals -> do
         (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
           prepareCompilationOriginals completion prior (contextFor firstTarget) externalOriginalBinders
@@ -786,11 +791,13 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                 [(originalOrdinal group, originalBinders group, originalGlobals group)
                  | group <- originalGroups originalProduct])
               | originalProduct <- unrecoveredExactProducts (currentReconciledOriginalProducts inventory)]
-            originalPackageGlobals = requiredOriginalExternalGlobalsWithPrior
-              originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
-              (\identity -> case Map.lookup identity (pprOriginalReferences prepared) of
-                Just _ -> Right (Just (Set.singleton identity))
-                Nothing -> stagedOriginalExternalDemand priorNative identity)
+            originalPackageGlobals globals bindings =
+              requiredOriginalExternalDemandForSeeds
+                originalProducts candidates exactOriginals (Map.keysSet retainedGenerations)
+                (\identity -> case Map.lookup identity (pprOriginalReferences prepared) of
+                  Just _ -> Right (Just (Set.singleton identity))
+                  Nothing -> stagedOriginalExternalDemand priorNative identity)
+                (map globalIdentity globals ++ bindings)
         pure (originalModules,Just productContext,originalBindings,admittedOriginalBinders,
           originalConstructors,originalSites,originalPackageGlobals,homeProductGroups)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
@@ -815,7 +822,11 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
               (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
           project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate))
-          required <- either (ioError . userError) pure (originalPackageGlobals (candidateGlobals candidate))
+          demand <- either (ioError . userError) pure
+            (originalPackageGlobals
+              (candidateGlobals candidate) (candidateBindingIdentities candidate))
+          let required = originalExternalPackageGlobals demand
+              reachedHome = originalExternalHomeGroups demand
           let uses = Set.fromList [(identity,reference) | identity <- required
                 , reference <- maybe [] pure (originalReference identity)]
               packages = Set.fromList [identity | identity <- required,isNothing (originalReference identity)]
@@ -849,7 +860,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     home = closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents
                 let homeProducts = homeProductGroups
                 paired <- project (projectPreparedPackageTarget hscEnv hostBindings (T.pack target)
-                  finalContext homeProducts candidates
+                  finalContext homeProducts candidates reachedHome
                   (closureHomeModules recovered ++ concatMap preparedComponentModules homeComponents)
                   packageComponents (closureReachability recovered))
                 let groups = packageTargetGroups paired

@@ -15,7 +15,8 @@ import Data.Maybe (isJust)
 import Data.String (fromString)
 import Tidepool.OriginalProductRoots
   ( requiredOriginalPackageGlobals, requiredOriginalPackageGlobalsWithExact
-  , requiredOriginalPackageGlobalsWithRetained
+  , requiredOriginalPackageGlobalsWithRetained, requiredOriginalExternalDemandWithPrior
+  , OriginalExternalDemand(..)
   , projectedOriginalGlobalDemand, candidateOriginalGlobalDemand )
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ModuleCandidates
@@ -482,6 +483,15 @@ originalProductRootsProofWith projectedDemand = do
     (fail "retained original home import reopened its implementation closure")
   unless (roots [global caller] == Right [package])
     (fail "demanded parser original-group package closure changed")
+  case requiredOriginalExternalDemandWithPrior [] [parserCandidate, input, other] []
+      Set.empty (const (Right Nothing)) [global caller] of
+    Right demand -> unless
+      (Set.fromList [("main", "Caller", 2)
+                    ,("main", "Tidepool.Aeson.FromJSON", 137)]
+        == originalExternalHomeGroups demand
+        && [package] == originalExternalPackageGlobals demand)
+      (fail "target-local HOME walk did not retain every reached group and package leaf")
+    Left reason -> fail ("target-local HOME demand refused: " ++ reason)
   unless (roots [global (identity "other-unit" "Caller" "parseInput")] == Right [])
     (fail "package root selection inferred a different unit from occurrence")
   unless (roots [(global caller) { Execution.globalRequiredGeneration = Just 7 }] == Right [])
