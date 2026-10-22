@@ -205,7 +205,6 @@ enum PrivateExecutionPhase {
     Frozen,
 }
 
-#[derive(Debug)]
 enum PrivateAuthoredProgram {
     Ready(Arc<PrivateSettledFrontier>),
     Active {
@@ -214,6 +213,24 @@ enum PrivateAuthoredProgram {
         predecessor: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
     },
     Failed,
+}
+
+impl std::fmt::Debug for PrivateAuthoredProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(frontier) => formatter.debug_tuple("Ready").field(frontier).finish(),
+            Self::Active {
+                admission_digest,
+                predecessor,
+                ..
+            } => formatter
+                .debug_struct("Active")
+                .field("admission_digest", admission_digest)
+                .field("predecessor", predecessor.logical_id())
+                .finish(),
+            Self::Failed => formatter.write_str("Failed"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1240,6 +1257,12 @@ impl PrivateExecutionAdmission {
         if !state.pending_hosts.is_empty()
             || !matches!(state.authored, PrivateAuthoredProgram::Ready(_))
         {
+            tracing::debug!(target: "tidepool::session::private_host_mount",
+                scope = self.private_scope.0, phase = ?state.phase, progress = ?state.authored,
+                pending_hosts = state.pending_hosts.len(),
+                accepted_revision = state.accepted_visible_revision,
+                applied_revision = state.applied_visible_revision,
+                "private freeze refused before reconciliation");
             return Err(SessionError::WorldCellPublicationIncomplete);
         }
         state.phase = PrivateExecutionPhase::Freezing;

@@ -1731,7 +1731,6 @@ impl CompilerWorld {
 
 /// Immutable certificate of the current settled private lineage. Runtime owns
 /// its replacement and the active lease; this value retains no history graph.
-#[derive(Debug)]
 pub struct PrivateSettledFrontier {
     birth: [u8; 32],
     world: Arc<CompilerWorld>,
@@ -1743,6 +1742,17 @@ enum PrivateSettledKind {
     Borrowed,
     Host,
     Checked,
+}
+
+impl std::fmt::Debug for PrivateSettledFrontier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PrivateSettledFrontier")
+            .field("birth", &self.birth)
+            .field("current", self.world.logical_id())
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 impl PrivateSettledFrontier {
