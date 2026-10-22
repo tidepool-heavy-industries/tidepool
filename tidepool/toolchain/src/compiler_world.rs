@@ -436,7 +436,7 @@ impl<'a> CompilerWorldHostBinding<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct PrivateHostBindingProgressBinding {
     occurrence: String,
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
@@ -471,6 +471,25 @@ impl PrivateHostBindingProgress {
             .iter()
             .filter(|binding| binding.kind == PrivateHostBindingKind::HostInterface)
             .count()
+    }
+
+    fn resumed_from(
+        prior: &Arc<Self>,
+        extension: &Arc<Self>,
+    ) -> Result<Arc<Self>, CompileError> {
+        let mut bindings = prior.bindings.clone();
+        for binding in &extension.bindings {
+            if bindings
+                .iter()
+                .any(|held| held.session_var == binding.session_var)
+            {
+                return Err(source_failure(
+                    "visible host binding progress repeats an occurrence",
+                ));
+            }
+            bindings.push(binding.clone());
+        }
+        Ok(Arc::new(Self { bindings }))
     }
 }
 
@@ -1588,6 +1607,16 @@ pub enum PrivateCompilerProgress {
     Incomplete,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivatePublicationDiagnostic {
+    pub same_product: bool,
+    pub position_present: bool,
+    pub fences_match: bool,
+    pub original_base_matches: bool,
+    pub position_complete: bool,
+    pub host_matches: bool,
+}
+
 /// Runtime-observed lifecycle of the checked item belonging to one private
 /// execution. The runtime moves this only at the actual prefix start and
 /// settlement boundaries; the compiler still validates the resulting World.
@@ -1607,6 +1636,10 @@ struct WorldCellPosition {
 }
 
 impl CompilerWorld {
+    pub fn binding_scope(&self) -> u64 {
+        self.restoration.inputs.bindings.query_scope
+    }
+
     pub fn logical_id(&self) -> &[u8; 32] {
         &self.restoration.logical_id
     }
@@ -1620,6 +1653,24 @@ impl CompilerWorld {
         checked: PrivateCheckedItemProgress,
         host: Option<Arc<PrivateHostBindingProgress>>,
     ) -> PrivateCompilerProgress {
+        let diagnostic = Self::diagnose_private_publication(private, original_public, host.clone());
+        classify_private_world(
+            checked,
+            host,
+            private,
+            diagnostic.same_product,
+            diagnostic.position_present,
+            diagnostic.fences_match,
+            diagnostic.original_base_matches,
+            diagnostic.position_complete,
+        )
+    }
+
+    pub fn diagnose_private_publication(
+        private: &Arc<Self>,
+        original_public: &Arc<Self>,
+        host: Option<Arc<PrivateHostBindingProgress>>,
+    ) -> PrivatePublicationDiagnostic {
         let fences_match = |candidate: &Self, base: &Self| {
             candidate.restoration.producer == base.restoration.producer
                 && candidate.restoration.profile == base.restoration.profile
@@ -1635,16 +1686,30 @@ impl CompilerWorld {
             ),
             None => (false, false, false),
         };
-        classify_private_world(
-            checked,
-            host,
-            private,
+        let host_matches = host.as_ref().is_none_or(|host| {
+            host.bindings.iter().all(|binding| {
+                private
+                    .restoration
+                    .inputs
+                    .bindings
+                    .entries
+                    .get(&binding.occurrence)
+                    .is_some_and(|fact| {
+                        fact.symbol == binding.symbol
+                            && fact.session_var == binding.session_var
+                            && fact.defining_scope == binding.defining_scope
+                            && Arc::ptr_eq(&fact.row, &binding.row)
+                    })
+            })
+        });
+        PrivatePublicationDiagnostic {
             same_product,
             position_present,
-            fences_match(private, original_public),
+            fences_match: fences_match(private, original_public),
             original_base_matches,
-            complete,
-        )
+            position_complete: complete,
+            host_matches,
+        }
     }
     /// The last actual Ready admission's optional storage observation. This
     /// is neither current residency nor a lease and may be stale after END.
@@ -2225,6 +2290,17 @@ impl CompilerWorld {
         target_scope: u64,
         bindings: impl IntoIterator<Item = CompilerWorldHostBinding<'a>>,
     ) -> Result<CompilerWorldHostSuccessor, CompileError> {
+        self.with_visible_host_bindings_resuming(target_scope, bindings, None)
+    }
+
+    /// Extend one private World with accepted host rows while carrying the
+    /// exact host-binding progress already applied to that same lineage.
+    pub fn with_visible_host_bindings_resuming<'a>(
+        self: &Arc<Self>,
+        target_scope: u64,
+        bindings: impl IntoIterator<Item = CompilerWorldHostBinding<'a>>,
+        prior_progress: Option<Arc<PrivateHostBindingProgress>>,
+    ) -> Result<CompilerWorldHostSuccessor, CompileError> {
         let mut progress = Vec::new();
         let mut compiler_bindings = Vec::new();
         for binding in bindings {
@@ -2250,9 +2326,14 @@ impl CompilerWorld {
             compiler_bindings,
         )?;
         if additions.entries.is_empty() {
+            let extension = Arc::new(PrivateHostBindingProgress { bindings: progress });
+            let progress = match prior_progress {
+                Some(prior) => PrivateHostBindingProgress::resumed_from(&prior, &extension)?,
+                None => extension,
+            };
             return Ok(CompilerWorldHostSuccessor {
                 world: self.clone(),
-                progress: Arc::new(PrivateHostBindingProgress { bindings: progress }),
+                progress,
             });
         }
         for (occurrence, fact) in &additions.entries {
@@ -2273,9 +2354,14 @@ impl CompilerWorld {
             self.position.clone(),
             None,
         )?;
+        let extension = Arc::new(PrivateHostBindingProgress { bindings: progress });
+        let progress = prior_progress
+            .map(|prior| PrivateHostBindingProgress::resumed_from(&prior, &extension))
+            .transpose()?
+            .unwrap_or(extension);
         Ok(CompilerWorldHostSuccessor {
             world,
-            progress: Arc::new(PrivateHostBindingProgress { bindings: progress }),
+            progress,
         })
     }
 

@@ -518,9 +518,15 @@ impl PersistentSession {
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        admission.begin_freeze()?;
-        let completed_values = admission.completed_values.lock();
-        self.freeze_execution_intent_locked(admission, write_ids, source_keys, &completed_values)
+        let transition = admission.begin_freeze()?;
+        let result =
+            self.freeze_execution_intent_locked(admission, write_ids, source_keys);
+        if result.is_ok() {
+            if let Some(transition) = transition {
+                transition.commit();
+            }
+        }
+        result
     }
 
     /// The caller holds this admission's ledger lock from write selection
@@ -530,10 +536,6 @@ impl PersistentSession {
         admission: &super::PrivateExecutionAdmission,
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
-        completed_values: &parking_lot::MutexGuard<
-            '_,
-            std::collections::HashMap<SessionVarId, super::admission::CertifiedPrivateValueWrite>,
-        >,
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         let stale_reason = if !Arc::ptr_eq(&admission.owner, self.admission_owner()) {
             Some("owner")
@@ -556,7 +558,6 @@ impl PersistentSession {
             );
             return Err(SessionError::StaleStagedDeclaration);
         }
-        self.settle_private_host_retirements(admission)?;
         if let Some(intent) = admission.final_intent.get() {
             let world_facts = admission.world_execution_facts();
             if self
@@ -617,6 +618,8 @@ impl PersistentSession {
             }
             return Ok(intent.clone());
         }
+        self.reconcile_private_visible_hosts(admission, true)?;
+        let completed_values = admission.completed_values.lock();
         let facts = admission.world_execution_facts();
         let private = self
             .lib()
@@ -647,79 +650,15 @@ impl PersistentSession {
         let private_visibility = self
             .public_visibility_snapshot_in(admission.private_scope())
             .ok_or(SessionError::DeadScope(admission.private_scope()))?;
-        let mut host_bindings = Vec::new();
-        for (id, write) in completed_values.iter() {
-            if !private_visibility
-                .bindings
-                .iter()
-                .any(|(_, winner)| winner == id)
-            {
-                continue;
-            }
-            let Some(mount) = write.visible_host() else {
-                continue;
-            };
-            if mount.before.base.scope != admission.private_scope()
-                || mount.after.base.scope != admission.private_scope()
-                || !Arc::ptr_eq(&mount.before.world, &mount.after.world)
-            {
-                return Err(SessionError::WorldCellPublicationBaseStale);
-            }
-            let entry = self
-                .bindings()
-                .get(*id)
-                .filter(|entry| entry.scope == admission.private_scope() && write.matches(entry))
-                .ok_or(SessionError::StaleStagedDeclaration)?;
-            host_bindings.push(match &write.proof {
-                super::admission::CertifiedPrivateValueProof::Execution(execution) => {
-                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_checked_execution(
-                        write.name(),
-                        &entry.value.identity,
-                        *id,
-                        entry.scope.0,
-                        execution.clone(),
-                    )
-                }
-                super::admission::CertifiedPrivateValueProof::HostInterface(interface) => {
-                    tidepool_toolchain::compiler_world::CompilerWorldHostBinding::from_host_interface(
-                        write.name(),
-                        &entry.value.identity,
-                        *id,
-                        entry.scope.0,
-                        interface.clone(),
-                    )
-                }
-            });
-        }
-        let (private_world, host_progress) = if host_bindings.is_empty() {
-            (private.world.clone(), None)
-        } else {
-            let successor = private
-                .world
-                .with_visible_host_bindings(admission.private_scope().0, host_bindings)?;
-            (
-                successor.world().clone(),
-                Some(successor.progress().clone()),
-            )
-        };
+        let host_progress = admission.accepted_host_progress();
+        let private_world = private.world.clone();
         if let Some(progress) = &host_progress {
             tracing::debug!(target: "exomonad_harness::timing",
                 checked_execution_bindings = progress.checked_execution_bindings(),
                 host_interface_bindings = progress.host_interface_bindings(),
                 "private host binding progress issued");
         }
-        let mut private = private;
-        if host_progress.is_some() {
-            private = Arc::new(super::inspection::InspectionWorldAssociation {
-                base: private.base.clone(),
-                world: private_world,
-            });
-            self.lib_mut()
-                .tips
-                .get_mut(&admission.private_scope())
-                .expect("validated private association")
-                .inspection_world = Some(private.clone());
-        }
+        let private = private;
         let progress = CompilerWorld::classify_private_publication(
             &private.world,
             &facts.published.world,
@@ -752,7 +691,7 @@ impl PersistentSession {
             source_keys,
             Some(admission.scope_lease.clone()),
             admission.durable_owner.clone(),
-            completed_values,
+            &completed_values,
             world,
         )?;
         assert!(
@@ -760,82 +699,6 @@ impl PersistentSession {
             "exclusive session checkout finalizes an admission once"
         );
         Ok(intent)
-    }
-
-    fn settle_private_host_retirements(
-        &mut self,
-        admission: &super::PrivateExecutionAdmission,
-    ) -> Result<(), SessionError> {
-        let mut records = admission.host_retirements.lock();
-        if records.is_empty() {
-            return Ok(());
-        }
-        if admission.final_intent.get().is_some() {
-            return Err(SessionError::WorldCellPublicationBaseStale);
-        }
-        let facts = admission.world_execution_facts();
-        let target = admission.retained_lexical_scope();
-        super::RuntimeOriginalSource::with_sources_and_targets(
-            [facts.original_source.clone()],
-            [target.clone()],
-            |sources, _| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    sources.iter().map(|source| source.source_admission()),
-                    || {
-                        let private = self
-                            .lib()
-                            .tips
-                            .get(&admission.private_scope())
-                            .and_then(|tip| tip.inspection_world.clone())
-                            .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                        if !private.base.original_source.matches(&facts.original_source)
-                            || !private.base.target.matches(&target)
-                            || !Arc::ptr_eq(&private.base.owner, self.admission_owner())
-                            || private.base.epoch != self.admission_owner().epoch()
-                            || private.base.source.sha256() != facts.source.sha256()
-                        {
-                            return Err(SessionError::WorldCellPublicationBaseStale);
-                        }
-                        let mut expected = records.first().map(|record| record.before().clone());
-                        for record in records.iter() {
-                            let key = record
-                                .following_key(
-                                    self,
-                                    &target,
-                                    expected
-                                        .as_ref()
-                                        .expect("private host retirements form one chain"),
-                                )
-                                .ok_or(SessionError::WorldCellPublicationBaseStale)?;
-                            expected = Some(key.clone());
-                        }
-                        if expected.is_none()
-                            || records.iter().any(|record| {
-                                let association = record.association();
-                                !Arc::ptr_eq(
-                                    &association.base.owner,
-                                    self.admission_owner(),
-                                ) || association.base.epoch != self.admission_owner().epoch()
-                                    || association.base.source.sha256() != facts.source.sha256()
-                                    || !association
-                                        .base
-                                        .original_source
-                                        .matches(&facts.original_source)
-                                    || !association.base.target.matches(&target)
-                                    || association.world.logical_id() != private.world.logical_id()
-                            })
-                            || self.compile_view_key_in(admission.private_scope()).as_ref()
-                                != Some(&private.base.key)
-                        {
-                            return Err(SessionError::WorldCellPublicationBaseStale);
-                        }
-                        records.clear();
-                        Ok(())
-                    },
-                )
-            },
-        )??;
-        Ok(())
     }
 
     fn freeze_execution_intent_from_snapshot(
