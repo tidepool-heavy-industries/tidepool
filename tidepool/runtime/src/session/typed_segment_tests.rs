@@ -9,6 +9,9 @@ use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::EffectError;
 
+#[path = "staged_world_acceptance_tests.rs"]
+mod staged_world_acceptance;
+
 #[derive(FromHaskell)]
 enum ProbeRequest {
     #[haskell(name = "Print")]

@@ -1,0 +1,112 @@
+//! Small actual World history before actor startup and scheduling are involved.
+
+use super::*;
+use std::collections::BTreeMap;
+use tidepool_toolchain::certified_products::SelectedNativeImport;
+
+#[test]
+fn declarations_precede_first_native_demands_and_display_without_replaying_effects() {
+    let mut session = SemanticSession::new();
+    // The independent oracle uses ordinary values, not compiler graph identities
+    // or the implementation of either captured helper.
+    let expected = ghc_trace(
+        "segmentRecord 11\nlet seed = (41 :: Int)\nsegmentRecord 12\nlet plain = seed\nsegmentRecord 13\nlet text = length \"forty-one\"\nsegmentRecord text\nsegmentRecord (plain + text)",
+    );
+    assert_eq!(expected, [11, 12, 13, 9, 50]);
+    let before_effects = session.trace.clone();
+    let imports = SourceImports::from_specs([
+        "qualified SegmentProbeSupport as Carrier",
+        "qualified Tidepool.Inspection.Display as StageDisplay",
+    ]);
+    session
+        .execute_observed(
+            "staged_world_first_demands",
+            include_str!("fixtures/staged-world-first-demands.hs"),
+            CellDeclarationExpectation::Total(2),
+            SemanticChecks::None,
+            &imports,
+            None,
+            |program| {
+                assert!(
+                    before_effects.lock().is_empty(),
+                    "actual compiler preparation and END cannot execute effects"
+                );
+                assert_eq!(program.items().len(), 8);
+                for index in [1, 3] {
+                    assert!(program.items()[index].native().is_none());
+                }
+                let mut demanded = BTreeMap::<usize, BTreeMap<String, usize>>::new();
+                for (index, item) in program.items().iter().enumerate() {
+                    let Some(products) = item.native_products() else {
+                        continue;
+                    };
+                    let sources = products.native_source_products().unwrap();
+                    let mut helpers = BTreeMap::new();
+                    for row in sources.groups() {
+                        let product = row.group();
+                        if product.owner().module != "SegmentProbeSupport" {
+                            continue;
+                        }
+                        for binder in product.group().binders() {
+                            if matches!(
+                                binder.occurrence.as_str(),
+                                "carrierBaseline" | "lateCarrierTextLength"
+                            ) {
+                                let packages = row
+                                    .imports()
+                                    .iter()
+                                    .filter(|slot| {
+                                        matches!(slot, SelectedNativeImport::Package { .. })
+                                    })
+                                    .count();
+                                assert!(helpers
+                                    .insert(binder.occurrence.clone(), packages)
+                                    .is_none());
+                            }
+                        }
+                    }
+                    demanded.insert(index, helpers);
+                }
+                assert_eq!(
+                    demanded[&2].get("carrierBaseline"),
+                    Some(&0),
+                    "the actual package-free helper is demanded after its declaration prefix"
+                );
+                assert!(
+                    demanded[&4]
+                        .get("lateCarrierTextLength")
+                        .is_some_and(|slots| *slots > 0),
+                    "the actual package-bearing helper must exercise ordered package slots"
+                );
+                for (first, helper) in [(2, "carrierBaseline"), (4, "lateCarrierTextLength")] {
+                    for (index, helpers) in &demanded {
+                        if *index < first {
+                            assert!(
+                                !helpers.contains_key(helper),
+                                "available helper {helper} must not be selected by earlier item {index}"
+                            );
+                        }
+                    }
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(session.observed(), expected);
+    for name in ["stagedSeed", "stagedPlain", "stagedText"] {
+        assert!(session
+            .resident
+            .current_binding_in(session.public, name)
+            .is_some());
+    }
+    // The existing executor has published and retired the private scope. A new
+    // admitted World cell must consume the surviving values without replay.
+    session
+        .execute(
+            "staged_world_fresh_consumer",
+            "segmentRecord (stagedPlain + stagedText + 1)",
+            0,
+        )
+        .unwrap();
+    assert_eq!(session.observed(), [11, 12, 13, 9, 50, 51]);
+    session.assert_no_compiler_since_last_effect();
+}

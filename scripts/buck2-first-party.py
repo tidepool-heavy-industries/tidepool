@@ -1415,6 +1415,21 @@ def runtime_test_cases(binary):
         runtime_arguments(semantic_env, semantic_resources, semantic_worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
+    staged_history = "session::turn::scaling_tests::typed_segment_tests::staged_world_acceptance::declarations_precede_first_native_demands_and_display_without_replaying_effects"
+    staged_env, staged_resources, staged_worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_staged_world_first_demands_test"
+    )
+    rules.append("\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_staged_world_first_demands_test",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings([staged_history], 8), "    ],",
+        "    expected_count = 1,", "    jobs = 1,", "    timeout = 600,",
+        "    test_rule_timeout_ms = 660000,",
+        '    case_compiler_modes = {' + json.dumps(staged_history) + ': "owned-resident"},',
+        runtime_arguments(staged_env, staged_resources, staged_worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ]))
     finite_tests = ["session::turn::scaling_tests::typed_segment_tests::finite_component_controls::" + name for name in (
         "finite_receipts_refuse_cross_item_mutations_before_effects",
         "finite_inference_ledgers_record_single_pass_segments",
