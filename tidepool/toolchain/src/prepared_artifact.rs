@@ -73,15 +73,6 @@ impl BoundPackageProgram {
     pub(crate) fn prepared(&self) -> &Arc<PreparedProgram> {
         &self.prepared
     }
-
-    #[cfg(test)]
-    pub(crate) fn fixture(prepared: Arc<PreparedProgram>, sha256: [u8; 32]) -> Self {
-        Self {
-            bytes: Arc::new(Vec::new()),
-            sha256: Arc::new(OnceLock::from(sha256)),
-            prepared,
-        }
-    }
 }
 
 impl PreparedArtifact {

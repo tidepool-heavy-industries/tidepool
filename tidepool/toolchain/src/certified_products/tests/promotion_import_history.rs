@@ -944,15 +944,20 @@ fn check_retained_core_promotion_history(item_count: usize) {
         ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
         HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
     );
-    let prepared = testing::prepare(testing::wire_program()).unwrap();
-    let prepared_binding = crate::prepared_artifact::BoundPackageProgram::fixture(
-        Arc::new(prepared.clone()),
-        [0; 32],
-    );
+    let prepared_artifact = crate::prepared_artifact::PreparedArtifact::parse(
+        tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program()),
+        tidepool_repr::execution_schema::DecodeLimits::default(),
+    )
+    .unwrap();
+    let prepared = prepared_artifact.prepared().clone();
+    let prepared_binding = prepared_artifact.bind_package_program();
     let empty_delta = receipt_bytes(&segment_item_receipt(&SegmentItemReceipt {
         globals: vec![],
         packages: BTreeMap::new(),
-        selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
+        selection: PackageSelection {
+            program_sha256: *prepared_binding.sha256(),
+            ..empty_item_selection(*shared.receipt.package_links.stage_id())
+        },
     }));
     let native_issues = HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get);
     for item in 0..item_count {
@@ -1039,11 +1044,13 @@ fn check_retained_core_promotion_history(item_count: usize) {
             required_evaluated: false,
             required_generation: None,
         });
-        let target = Arc::new(testing::prepare(wire).unwrap());
-        let target_binding = crate::prepared_artifact::BoundPackageProgram::fixture(
-            Arc::clone(&target),
-            [0; 32],
-        );
+        let artifact = crate::prepared_artifact::PreparedArtifact::parse(
+            tidepool_test_data::prepared_encode::encode_wire_program(&wire),
+            tidepool_repr::execution_schema::DecodeLimits::default(),
+        )
+        .unwrap();
+        let target = Arc::clone(artifact.prepared_shared());
+        let target_binding = artifact.bind_package_program();
         let owner = (identity.unit.clone(), identity.module.clone());
         let witness = PackageInterfaceWitness {
             selected_path: path.clone(),
@@ -1052,7 +1059,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
         let addition = || SegmentItemReceipt {
             globals: vec![global.clone()],
             packages: BTreeMap::from([(owner.clone(), witness.clone())]),
-            selection: empty_item_selection(*shared.receipt.package_links.stage_id()),
+            selection: PackageSelection {
+                program_sha256: *target_binding.sha256(),
+                ..empty_item_selection(*shared.receipt.package_links.stage_id())
+            },
         };
         let (selected, globals, packages, _) = shared
             .select_item(

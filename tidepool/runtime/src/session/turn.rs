@@ -6644,6 +6644,14 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             cell: CheckedHomeCell,
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+            Self::execute_with_source_control(resident, cell, false)
+        }
+
+        fn execute_with_source_control(
+            resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
+            cell: CheckedHomeCell,
+            check_source_selection: bool,
+        ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
             let source = cell.admission.source_lease();
             let executed = resident.with_source_compiler_transaction(
                 source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -6654,6 +6662,8 @@ mod tests {
                 .unwrap()
                 .expect("fixture must execute a nonempty checked program");
             let mut artifacts = Vec::new();
+            let mut previous_selection = None;
+            let mut source_controls = 0;
             for index in 0..cell.checked.items.len() {
                 let item = cell.checked.checked_item(index).unwrap();
                 let kind = item.kind();
@@ -6672,6 +6682,15 @@ mod tests {
                 else {
                     panic!("the checked fixture must compile a native bind");
                 };
+                if check_source_selection {
+                    if let Some(previous) = previous_selection.take() {
+                        let mut crossed = compiled.code();
+                        crossed.certification.to_mut().as_mut().unwrap().native_selection = Some(previous);
+                        resident.assert_checked_native_source_selection(&compiled.code(), &crossed);
+                        source_controls += 1;
+                    }
+                    previous_selection = compiled.certification.as_ref().unwrap().native_selection.clone();
+                }
                 artifacts.push(
                     compiled
                         .certification
@@ -6745,6 +6764,9 @@ mod tests {
                     .filter(|item| matches!(item.verdict.kind, TurnKind::Bind | TurnKind::Expr))
                     .count()
             );
+            if check_source_selection {
+                assert_eq!(source_controls, 1, "source control must cross the two actual targets");
+            }
             artifacts
                 },
             ).unwrap();
@@ -6912,6 +6934,22 @@ mod tests {
             self.execute(cell);
             self.assert_number("retainedObserved", 41);
         }
+    }
+
+    #[test]
+    fn checked_native_source_selection_refuses_crossed_target_before_install() {
+        let mut fixture = CheckedHomeFixture::new();
+        let cell = fixture
+            .check(
+                "let nativeFirst = homeNumber home\nlet nativeSecond = homeNumber home",
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(cell.checked.items.len(), 2);
+        CheckedHomeFixture::execute_with_source_control(&mut fixture.resident, cell, true);
+        fixture.assert_number("nativeFirst", 41);
+        fixture.assert_number("nativeSecond", 41);
     }
 
     #[test]

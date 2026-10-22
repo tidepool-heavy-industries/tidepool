@@ -35507,12 +35507,15 @@ None,
             products: Arc::from([]),
         };
         let operation = InventoryOperation::new(Default::default());
-        let program = Arc::new(testing::prepare(testing::wire_program()).unwrap());
-        let program_binding =
-            BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
+        let artifact = crate::prepared_artifact::PreparedArtifact::parse(
+            tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program()),
+            tidepool_repr::execution_schema::DecodeLimits::default(),
+        )
+        .unwrap();
+        let program_binding = artifact.bind_package_program();
         let selection = PackageSelection {
             stage_id: [0; 32],
-            program_sha256: [1; 32],
+            program_sha256: *program_binding.sha256(),
             target: "item".into(),
             target_roots: vec![PackageLink::Local { occurrence: 0 }],
             home_roots: BTreeMap::from([(home_key, vec![PackageLink::Local { occurrence: 1 }])]),
@@ -35557,7 +35560,7 @@ None,
         .is_err());
         let mut crossed_roots = selection.clone();
         crossed_roots.target_roots = vec![PackageLink::Local { occurrence: 1 }];
-        let crossed_program = BoundPackageProgram::fixture(Arc::clone(&program), [1; 32]);
+        let crossed_program = artifact.bind_package_program();
         assert!(BoundPackageSelection::item(
             &stage,
             &crossed_roots,
@@ -35572,7 +35575,7 @@ None,
         assert!(BoundPackageSelection::item(
             &stage,
             &crossed_home,
-            BoundPackageProgram::fixture(program, [1; 32]),
+            artifact.bind_package_program(),
             &[],
             &operation,
         )

@@ -302,6 +302,7 @@ struct FiniteNativeOutput {
     profile: [u8; 32],
     operation: Arc<InventoryOperation>,
     files: BTreeMap<PathBuf, Arc<[u8]>>,
+    package_links: Arc<certified_products::PackageLinks>,
 }
 
 /// A named ordinary target closed by the completed output that owns both its
@@ -336,7 +337,7 @@ impl<'a> CapturedNativeOutput<'a> {
         target: &str,
         program: &crate::prepared_artifact::BoundPackageProgram,
     ) -> Result<certified_products::BoundPackageSelection, CompileError> {
-        let NativeOutputOwner::Finite(_, receipt) = &self.owner else {
+        let NativeOutputOwner::Finite(output, receipt) = &self.owner else {
             return Err(CompileError::ExtractFailed(
                 "ordinary target lacks its completed finite output".into(),
             ));
@@ -358,7 +359,7 @@ impl<'a> CapturedNativeOutput<'a> {
         .map_err(compiler_evidence_failure)?;
         certified_products::BoundPackageSelection::ordinary(CapturedOrdinaryTarget {
             target: target.to_owned(),
-            links: Arc::new(receipt.package_links.clone()),
+            links: Arc::clone(&output.package_links),
             imports,
         })
         .map_err(compiler_evidence_failure)
@@ -723,6 +724,7 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         profile,
         operation: Arc::clone(bundle.operation()),
         files,
+        package_links: Arc::new(receipt.package_links.clone()),
     };
     #[cfg(test)]
     capture_observation::observe(&output);
@@ -1141,12 +1143,16 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(crossed.prepared().globals(), artifact.prepared().globals());
-                assert!(
-                    owner
-                        .ordinary_package_selection("__prepared", &crossed.bind_package_program(),)
-                        .is_err(),
-                    "equal import signatures cannot replace the physical named target"
-                );
+                certified_products::AuthenticatedTargetImports::issue(
+                    crossed.prepared_shared(),
+                    &captured.receipt.targets["__prepared"],
+                    owner.operation(),
+                ).expect("crossed program independently passes ordinary import authentication");
+                assert!(matches!(
+                    owner.ordinary_package_selection("__prepared", &crossed.bind_package_program()),
+                    Err(CompileError::ExtractFailed(reason))
+                        if reason == "ordinary target differs from its named completed output"
+                ), "equal import signatures cannot replace the physical named target");
                 let mut validation =
                     crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
                         Arc::clone(owner.operation()),

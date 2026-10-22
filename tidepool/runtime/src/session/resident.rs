@@ -5657,6 +5657,53 @@ where
         self.state.residency()
     }
 
+    #[cfg(test)]
+    pub(super) fn assert_checked_native_source_selection(
+        &self,
+        code: &TurnCode<'_>,
+        crossed: &TurnCode<'_>,
+    ) {
+        let scope = self.run_context().lexical_scope;
+        let registry = self.state.certified_image_registry();
+        let plan = Arc::new(
+            super::prepared::NativeInstantiationPlan::prepare_code(code, &registry)
+                .expect("honest checked native plan"),
+        );
+        let crossed_plan = Arc::new(
+            super::prepared::NativeInstantiationPlan::prepare_code(crossed, &registry)
+                .expect("crossed selections keep compatible import shapes"),
+        );
+        let provenance = &self.binding_provenance;
+        let retained = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
+            provenance
+                .get(&input.id().raw())
+                .map(|owner| owner.source_custody())
+        };
+        let before = self.state.public_visibility_snapshot_in(scope).unwrap();
+        let residency = self.state.residency();
+        assert!(
+            matches!(
+                self.state
+                    .resolve_native_turn_in(scope, crossed, crossed_plan, &retained),
+                Err(PreparedRuntimeError::NativeSourceEvidence(_))
+            ),
+            "the actual source consumer must refuse a different checked target selection"
+        );
+        assert_eq!(self.state.residency(), residency);
+        assert_eq!(
+            self.state.public_visibility_snapshot_in(scope).unwrap(),
+            before
+        );
+        self.state
+            .resolve_native_turn_in(scope, code, plan, &retained)
+            .expect("honest checked target resolves its own physical current source");
+        assert_eq!(self.state.residency(), residency);
+        assert_eq!(
+            self.state.public_visibility_snapshot_in(scope).unwrap(),
+            before
+        );
+    }
+
     /// Lifetime `(functions, code_bytes)` of Cranelift work this session's
     /// prepared installs have caused; `None` before bootstrap. Diff across a turn to attribute that
     /// turn's code generation.
