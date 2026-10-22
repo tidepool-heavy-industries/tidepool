@@ -1055,6 +1055,30 @@ mod tests {
                 .instance(),
             next.leases[0].instance()
         );
+        for programs in [&installed.programs, &next.programs] {
+            let returned = machine
+                .run_entry_retained(
+                    programs[0],
+                    ValueId(0),
+                    &[],
+                    PreparedCallOptions {
+                        observation_budget: 0,
+                        collect_before_observation: true,
+                    },
+                    RealmId::ROOT,
+                )
+                .unwrap();
+            let [PreparedResult::Managed(returned)] = returned.values.as_slice() else {
+                panic!("linked consumer returns the selected provider CAF")
+            };
+            let provider = machine.retain_top(programs[1], ValueId(0)).unwrap();
+            assert_eq!(
+                machine.handle_current_pointer(*returned),
+                machine.handle_current_pointer(provider)
+            );
+            assert!(machine.release(*returned));
+            assert!(machine.release(provider));
+        }
         release_scope(&mut table, &mut machine, &mut tree, scope);
         machine.collect_major(machine.quiesce().unwrap()).unwrap();
         assert_eq!(machine.residency().programs, 0);
