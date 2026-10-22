@@ -10,7 +10,7 @@ module Tidepool.ExactScope
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
-  , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule
+  , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule, resolveShippedHomeModuleWithEvidence, ShippedHomeModuleRefusal(..), ShippedHomeModuleOrigin(..), CanonicalAdmissionKind(..)
   , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), CapturedCanonicalMetadata, captureCanonicalMetadata, capturedCanonicalMetadataProof, canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
   , captureFinalizedSourceOriginals, captureSourceOriginals, compilationOriginalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
@@ -39,7 +39,7 @@ module Tidepool.ExactScope
   , WorldBinding, WorldBindingRow, worldInputsBindingScope, worldInputsBindings
   , WorldSourceClosureEntry(..)
   , WorldTypeClosureEntry, readWorldTypeInputs
-  , worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody
+  , worldTypeEntryArtifact, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryEvidence, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission
   , VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs
   , verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, verifiedWorldDeclarationTypeInputs
   , worldBindingSymbol, worldBindingSessionVar, worldBindingScope, worldBindingGeneration, worldBindingRow
@@ -894,6 +894,25 @@ scopeModuleInterfaceProofs = Map.mapMaybe select . scopeInterfaceEvidence
     select (ModuleInterfaceEvidence proof) = Just proof
     select _ = Nothing
 
+-- TYPE custody may authenticate a shipped host representation without selecting
+-- SOURCE execution. Preserve the exact admitted interface owner and proof kind.
+worldTypeCanonicalInterfaceAdmission
+  :: WorldTypeClosureEntry -> Either String (Maybe CanonicalInterfaceAdmission)
+worldTypeCanonicalInterfaceAdmission entry = case worldTypeEntryEvidence entry of
+  ModuleInterfaceEvidence proof -> checked (ModuleInterfaceAdmission proof)
+  LocalNativeDeclarationEvidence native -> checked (LocalInterfaceAdmission (localNativeProof native))
+  _ -> Right Nothing
+  where
+    expected = worldTypeEntryArtifact entry
+    checked admission = do
+      let (actual,_,_) = case admission of
+            ModuleInterfaceAdmission proof -> canonicalInterfaceInput proof
+            LocalInterfaceAdmission proof -> localFinalizedInterface proof
+      unless ((exactUnit actual,exactModule actual,exactSha256 actual,exactRequirements actual)
+          == (exactUnit expected,exactModule expected,exactSha256 expected,exactRequirements expected))
+        (Left "World TYPE origin differs from its authenticated interface owner")
+      Right (Just admission)
+
 admittedInterfaceHomeUnits :: CanonicalInterfaceAdmission -> Set.Set String
 admittedInterfaceHomeUnits (ModuleInterfaceAdmission proof) = canonicalHomeUnits proof
 admittedInterfaceHomeUnits (LocalInterfaceAdmission proof) = localFinalizedHomeUnits proof
@@ -902,27 +921,73 @@ admittedInterfaceSourceSha256 :: CanonicalInterfaceAdmission -> String
 admittedInterfaceSourceSha256 (ModuleInterfaceAdmission proof) = canonicalSourceSha256 proof
 admittedInterfaceSourceSha256 (LocalInterfaceAdmission proof) = localFinalizedSourceSha256 proof
 
+data CanonicalAdmissionKind = CanonicalModuleOrigin | LocalNativeDeclarationOrigin
+  deriving (Eq, Show)
+
+data ShippedHomeModuleOrigin
+  = ShippedPhysicalSource
+  | ShippedCanonicalSource CanonicalAdmissionKind String
+  deriving (Eq, Show)
+
+data ShippedHomeModuleRefusal
+  = ShippedModuleNotFound String
+  | ShippedModuleAmbiguous String
+  | ShippedModulePackageUnavailable String
+  | ShippedModuleOutsideHome (String,String)
+  | ShippedSourceReadFailed (String,String) FilePath IOException
+  | ShippedSourceMismatch (String,String) String String
+  | ShippedSourceProofMissing (String,String)
+  | ShippedSourceProofOwnerMismatch (String,String) (String,String)
+  | ShippedSourceProofMismatch (String,String) CanonicalAdmissionKind String String
+  deriving (Show)
+
 -- | Authenticate one selected home owner against shipped source. A virtual
--- finder location uses only the exact request's verified canonical proof.
+-- finder location uses the selected interface's admitted source-origin proof.
 resolveShippedHomeModule :: HscEnv
   -> Map.Map (String,String) CanonicalInterfaceAdmission
   -> String -> BS.ByteString -> IO (Maybe Module)
-resolveShippedHomeModule env admitted name expected = do
+resolveShippedHomeModule env admitted name expected =
+  fmap (either (const Nothing) (Just . fst))
+    (resolveShippedHomeModuleWithEvidence env admitted name expected)
+
+resolveShippedHomeModuleWithEvidence :: HscEnv
+  -> Map.Map (String,String) CanonicalInterfaceAdmission
+  -> String -> BS.ByteString
+  -> IO (Either ShippedHomeModuleRefusal (Module,ShippedHomeModuleOrigin))
+resolveShippedHomeModuleWithEvidence env admitted name expected = do
   found <- findImportedModule env (mkModuleName name) NoPkgQual
   case found of
     Found location exactHome
-      | moduleUnit exactHome == homeUnitAsUnit (hsc_home_unit env) ->
-        case ml_hs_file location of
+      | moduleUnit exactHome /= homeUnitAsUnit (hsc_home_unit env) ->
+          pure (Left (ShippedModuleOutsideHome (owner exactHome)))
+      | otherwise -> case ml_hs_file location of
           Just source -> do
             actual <- try (BS.readFile source) :: IO (Either IOException BS.ByteString)
             pure $ case actual of
-              Right bytes | bytes == expected -> Just exactHome
-              _ -> Nothing
-          Nothing -> pure $ case Map.lookup
-              (unitString (moduleUnit exactHome), moduleNameString (moduleName exactHome)) admitted of
-            Just proof | admittedInterfaceSourceSha256 proof == digest expected -> Just exactHome
-            _ -> Nothing
-    _ -> pure Nothing
+              Left failure -> Left (ShippedSourceReadFailed (owner exactHome) source failure)
+              Right bytes | bytes == expected -> Right (exactHome,ShippedPhysicalSource)
+              Right bytes -> Left (ShippedSourceMismatch (owner exactHome) (digest expected) (digest bytes))
+          Nothing -> pure $ case Map.lookup (owner exactHome) admitted of
+            Nothing -> Left (ShippedSourceProofMissing (owner exactHome))
+            Just proof -> do
+              let (artifact,_,_) = case proof of
+                    ModuleInterfaceAdmission original -> canonicalInterfaceInput original
+                    LocalInterfaceAdmission original -> localFinalizedInterface original
+                  actualOwner = (exactUnit artifact,exactModule artifact)
+                  kind = case proof of
+                    ModuleInterfaceAdmission _ -> CanonicalModuleOrigin
+                    LocalInterfaceAdmission _ -> LocalNativeDeclarationOrigin
+                  actual = admittedInterfaceSourceSha256 proof
+              unless (actualOwner == owner exactHome)
+                (Left (ShippedSourceProofOwnerMismatch (owner exactHome) actualOwner))
+              unless (actual == digest expected)
+                (Left (ShippedSourceProofMismatch (owner exactHome) kind (digest expected) actual))
+              Right (exactHome,ShippedCanonicalSource kind actual)
+    FoundMultiple _ -> pure (Left (ShippedModuleAmbiguous name))
+    NoPackage _ -> pure (Left (ShippedModulePackageUnavailable name))
+    NotFound {} -> pure (Left (ShippedModuleNotFound name))
+  where
+    owner value = (unitString (moduleUnit value),moduleNameString (moduleName value))
 
 admittedInterfaceRequirements :: CanonicalInterfaceAdmission -> Map.Map (String,String) String
 admittedInterfaceRequirements (ModuleInterfaceAdmission proof) = canonicalRequirements proof

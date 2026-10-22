@@ -93,7 +93,9 @@ import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthority)
 import Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..), resolveHostBindingAuthorities
   , hostBindingRepresentationForType, hostBindingRepresentationAuthority
-  , hostBindingRepresentationConstructors )
+  , hostBindingRepresentationConstructors
+  , HostBindingDecision(..), HostBindingRefusal(..), classifyHostBinding )
+import Tidepool.ExactScope (ShippedHomeModuleRefusal(..))
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -217,10 +219,11 @@ assertProjects label outcome = case outcome of
 
 verifyJsonDependencyAuthority :: FilePath -> IO ()
 verifyJsonDependencyAuthority dir = do
+  effects <- getEnv "TIDEPOOL_TEST_EFFECTS_DIR"
   let fixture = "test-prepared-stg/JsonAuthorityContract.hs"
       shadowRoot = dir </> "json-shadow"
       shadowDirectory = shadowRoot </> "Tidepool" </> "Aeson"
-  trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib"]
+  trusted <- runPipelineSelected PreparedStg fixture ["test-prepared-stg", "lib", effects]
   trustedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult trusted))
   assert (trustedAuthority /= Nothing) "shipped JSON dependency graph lacks authority"
   trustedOwner <- maybe (ioError (userError "installed JSON owners did not resolve")) pure
@@ -233,11 +236,29 @@ verifyJsonDependencyAuthority dir = do
   assert (shadow /= source) "Scientific shadow fixture did not change semantics"
   createDirectoryIfMissing True shadowDirectory
   writeUtf8Source (shadowDirectory </> "Scientific.hs") shadow
+  commandSource <- readUtf8Source "lib/Tidepool/Command/Types.hs"
+  let commandDirectory = shadowRoot </> "Tidepool" </> "Command"
+  createDirectoryIfMissing True commandDirectory
+  writeUtf8Source (commandDirectory </> "Types.hs") (commandSource <> "\n-- distinct source control\n")
   substituted <- runPipelineSelected PreparedStg fixture
-    [shadowRoot, "test-prepared-stg", "lib"]
+    [shadowRoot, "test-prepared-stg", "lib", effects]
   substitutedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult substituted))
   assert (substitutedAuthority == Nothing)
     "JSON authority admitted a same-shaped Scientific dependency with changed semantics"
+  let substitutedPipeline = pprPipelineResult substituted
+      substitutedJobs = [idType binder | prepared <- pprModules substituted
+        , moduleNameString (moduleName (pmModule prepared)) == "JsonAuthorityContract"
+        , (binding,_) <- pmBindings prepared, binder <- Projection.topBinders binding
+        , occNameString (nameOccName (idName binder)) == "hostJob"]
+  substitutedJob <- case substitutedJobs of
+    [ty] -> pure ty
+    _ -> fail "source refusal fixture lacks its unique Job binder"
+  refusedAuthorities <- resolveHostBindingAuthorities [substitutedJob]
+    (prHscEnv substitutedPipeline) (prCanonicalInterfaceAdmissions substitutedPipeline)
+  case classifyHostBinding refusedAuthorities substitutedJob of
+    HostBindingRejected (HostOriginRefused (ShippedSourceMismatch _ _ _)) -> pure ()
+    HostBindingRejected failure -> fail ("wrong Job source refusal: " ++ show failure)
+    _ -> fail "same-shaped Job from altered source acquired host authority"
   let eitherRoot = dir </> "json-either-shadow"
       eitherDirectory = eitherRoot </> "GHC" </> "Internal" </> "Data"
   createDirectoryIfMissing True eitherDirectory
@@ -301,14 +322,24 @@ verifyJsonLayoutDemand authority result = do
       pipeline = pprPipelineResult result
   jsonType <- bindingType "hostValue"
   textType <- bindingType "result"
-  authorities <- resolveHostBindingAuthorities [jsonType, textType] (prHscEnv pipeline)
+  jobType <- bindingType "hostJob"
+  ordinaryType <- bindingType "unrelated"
+  authorities <- resolveHostBindingAuthorities [jsonType, textType, jobType] (prHscEnv pipeline)
     (prCanonicalInterfaceAdmissions pipeline)
   jsonRepresentation <- maybe (ioError (userError "Value lacks a complete host representation")) pure
     (hostBindingRepresentationForType authorities jsonType)
   textRepresentation <- maybe (ioError (userError "Text lacks a complete host representation")) pure
     (hostBindingRepresentationForType authorities textType)
+  jobRepresentation <- case classifyHostBinding authorities jobType of
+    HostBindingAccepted value -> pure value
+    HostBindingRejected failure -> ioError (userError ("Job host authority refused: " ++ show failure))
+    NotHostBinding -> ioError (userError "Job was not recognized as a host candidate")
+  case classifyHostBinding authorities ordinaryType of
+    NotHostBinding -> pure ()
+    _ -> ioError (userError "ordinary Int acquired a host classification")
   assert (hostBindingRepresentationAuthority jsonRepresentation == JsonValueAuthority
-      && hostBindingRepresentationAuthority textRepresentation == TextAuthority)
+      && hostBindingRepresentationAuthority textRepresentation == TextAuthority
+      && hostBindingRepresentationAuthority jobRepresentation == CommandJobAuthority)
     "host representation lost its authenticated root authority"
   selected <- require "unrelated prepared selection"
     (Projection.prepareProjection plain (pprModules result))

@@ -331,7 +331,7 @@ import Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, readWorldCellOperandWithOwner, worldCellOperandExposure, WorldCellOperandExposure(..)
   , worldCellOperandBinding, worldCellOperandInterface, worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
-  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
+  , WorldTypeClosureEntry, readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryEvidence, worldTypeEntryVerifiedInterface, worldTypeEntryInterface, worldTypeEntryPackages, worldTypeEntryInterfaceBody, worldTypeCanonicalInterfaceAdmission, VerifiedWorldDeclarationSurface, hydrateWorldDeclarationInputs, verifiedWorldDeclarationTypeInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports
   , WorldInputsFailure(..), WorldInputsFailureCause(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
@@ -1345,6 +1345,8 @@ data PipelineVariant = PipelineVariant
   , pvWorldCompletedDependencies :: Maybe WorldPrivateCompletion
   , pvWorldSources :: Maybe WorldSourceInputBasis
     -- ^ Admitted immutable declaration owners, independent of live values.
+  , pvHostBindingTypeInputs :: IO [WorldTypeClosureEntry]
+    -- ^ This operation's selected TYPE inputs, resolved before the target callback.
   , pvCompilerProducer :: Maybe CompilerProducerIdentity
   , pvGeneratedScaffold :: Maybe GeneratedScaffoldRecipe
     -- ^ The protected target and its compiler-owned support import.
@@ -3032,6 +3034,11 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions canonicalRecovery))
             _ -> Nothing
         , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces importBasis prefixImports)
+        , pvHostBindingTypeInputs=do
+            resolved <- requireResolved
+            pure (worldResolvedTypes resolved ++ worldImportEntries importBasis
+              ++ maybe [] verifiedWorldDeclarationTypeInputs verifiedDeclaration
+              ++ maybe [] (Map.elems . worldCellOperandTypes) operand)
         , pvTransformParsed = \target environment summary parsed -> do
             annotated <- if ms_mod_name summary /= target
               then pvTransformParsed variant target environment summary parsed
@@ -4940,15 +4947,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
     targetOwner <- liftIO (targetModuleFor modGraphRaw path)
     let targetName = moduleName targetOwner
-        prepareTypedTarget summary env tcg = case typedPlanFor selection of
+        prepareTypedTarget originAdmissions summary env tcg = case typedPlanFor selection of
           Just typedPlan | ms_mod_name summary == targetName -> do
             prepare <- maybe (throwIO MissingSegmentPreparation) pure (typedPreparationFor selection)
             segment <- captureTypedSegment typedPlan env tcg
             -- GHC Make can turn a hook exception into a failed load and a
             -- diagnostic. This request owns the preparation callback's exact
             -- refusal or cancellation, independently of source diagnostics.
-            (hydrated, globals, interfaces) <- (prepare env
-              (maybe Map.empty scopeCanonicalInterfaces (pvExactScope variant)) segment)
+            (hydrated, globals, interfaces) <- (do
+              admitted <- originAdmissions
+              prepare env admitted segment)
               `catch` \(failure :: SomeException) -> do
                 writeIORef typedPreparationFailureRef (Just failure)
                 throwIO failure
@@ -5384,6 +5392,22 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           [exactCanonicalInterfaces,candidateCanonicalInterfaces,worldCanonicalInterfaces]
     unless (null duplicateCanonicalOwners) $ liftIO $ fail
       ("canonical interface admissions duplicate an owner: " ++ show duplicateCanonicalOwners)
+    let hostBindingOriginAdmissions = do
+          selectedTypes <- pvHostBindingTypeInputs variant
+          let sourceTypes = case worldSources of
+                Just (WorldSourceSelection _ _ types _ _) -> types
+                Nothing -> []
+          foldM retainOrigin selectedCanonicalInterfaces (sourceTypes ++ selectedTypes)
+        retainOrigin admitted entry = do
+          origin <- either fail pure (worldTypeCanonicalInterfaceAdmission entry)
+          case origin of
+            Nothing -> pure admitted
+            Just proof -> do
+              let artifact = worldTypeEntryArtifact entry
+                  owner = (exactUnit artifact,exactModule artifact)
+              forM_ (Map.lookup owner admitted) $ \previous -> unless (previous == proof)
+                (fail "selected host origin has competing canonical admissions")
+              pure (Map.insert owner proof admitted)
     -- One dependency-order decision combines current admitted originals with
     -- source memo validation. An offered name or a previous HPT entry cannot
     -- substitute for this cycle's accepted candidate proof.
@@ -5864,7 +5888,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (Map.delete (ms_mod summary) known, Map.lookup (ms_mod summary) known))
                 >>= maybe (throwIO MissingLoadedFrontend) pure
               let summaryC = canonicalSummary summary
-              (typedEnv, typedSegment) <- prepareTypedTarget summaryC env tcg
+              (typedEnv, typedSegment) <- prepareTypedTarget hostBindingOriginAdmissions summaryC env tcg
               let flags = hsc_dflags typedEnv
                   resultRoots = [idName identifier | cpKeepPrivateResult plan
                     , ms_mod_name summaryC == targetName
@@ -6165,7 +6189,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   liftIO (writeIORef targetEnvironmentRef (Just tcGblEnv))
                 liftIO (modifyIORef' tcMsRef (+ tcMs))
                 hscEnv0 <- getSession
-                (hscEnv, typedSegment) <- liftIO (prepareTypedTarget modSum
+                (hscEnv, typedSegment) <- liftIO (prepareTypedTarget hostBindingOriginAdmissions modSum
                   (scopeRetainedSummaryHscEnv modSum hscEnv0) tcGblEnv)
                 setSession hscEnv
                 let -- Capture the inferred type of the eval's top expression NOW,
@@ -9049,6 +9073,7 @@ normalVariant purpose = do
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
    , pvWorldSources = Nothing
+   , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
@@ -9854,6 +9879,7 @@ sessionVariant purpose scope = do
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
    , pvWorldSources = Nothing
+   , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing
    , pvGeneratedScaffold = generatedRecipe purpose
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose

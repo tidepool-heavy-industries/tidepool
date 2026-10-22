@@ -64,7 +64,8 @@ import Tidepool.ConstructorIdentity
 import Tidepool.Identity (stableVarId)
 import Tidepool.HostBindingAuthority
   ( HostBindingAuthority(..), HostBindingRepresentation, hostBindingRepresentationForType
-  , hostBindingRepresentationAuthority, resolveHostBindingAuthorities )
+  , hostBindingRepresentationAuthority, resolveHostBindingAuthorities
+  , HostBindingDecision(..), classifyHostBinding, renderHostBindingRefusal, observeHostBindingDecision )
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIfaceWithFixities, parseSessionModule, sessionBinderName
@@ -113,6 +114,8 @@ prepareSessionBindings bindNames result = do
   let persistedTypes = map stabilizeEffectRows componentTypes
   authorities <- resolveHostBindingAuthorities persistedTypes (prHscEnv result)
     (prCanonicalInterfaceAdmissions result)
+  forM_ (zip bindNames persistedTypes) $ \(name,ty) ->
+    observeHostBindingDecision name authorities ty
   pure (PreparedSessionBindings result
     (zipWith3 (\name ty persisted -> (name, ty, persisted,
       hostBindingRepresentationForType authorities persisted))
@@ -235,6 +238,11 @@ prepareTypedSegmentSessionBindings initial admitted segment stagingRoot = do
     (fail "typed segment repeats a session generation")
   forM_ outputs refuseExisting
   authorities <- resolveHostBindingAuthorities (map persisted captures) initial admitted
+  forM_ items $ \item -> forM_ (typedItemCaptures item) $ \capture ->
+    observeHostBindingDecision
+      (sessionModuleString (itemModule item) ++ ":"
+        ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture))))
+      authorities (persisted capture)
   let representation capture = hostBindingRepresentationForType authorities (persisted capture)
   (do
     forM_ items $ \item -> unless (null (typedItemCaptures item)) $ do
@@ -353,8 +361,12 @@ emitHostBindingInterface operations scope input = runExactInterfaceOperation ope
   (representation, issuedPurpose) <- case purpose of
     HostBuilt -> do
       authorities <- resolveHostBindingAuthorities [ty] hydrated (scopeCanonicalInterfaces scope)
-      representation <- maybe (fail "checked signature has no authenticated host representation") pure
-        (hostBindingRepresentationForType authorities ty)
+      observeHostBindingDecision name authorities ty
+      representation <- case classifyHostBinding authorities ty of
+        HostBindingAccepted value -> pure value
+        NotHostBinding -> fail "checked signature has no authenticated host representation: not a host type"
+        HostBindingRejected refusal -> fail
+          ("checked signature has no authenticated host representation: " ++ renderHostBindingRefusal refusal)
       pure (Just representation, HostBuilt)
     OriginalLiveInput offered -> withWitnessScratch $ \scratch -> do
       originalInterfaces <- newOriginalInterfaceArtifactsWithReader (scopeInterfaceToken scope) hydrated Map.empty artifacts [] [] scratch

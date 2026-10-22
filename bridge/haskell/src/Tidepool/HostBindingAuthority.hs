@@ -9,11 +9,14 @@ module Tidepool.HostBindingAuthority
   , resolveHostBindingAuthorities
   , HostBindingRepresentation
   , hostBindingRepresentationForType
+  , HostBindingDecision(..), HostBindingRefusal(..), HostRepresentationRefusal(..)
+  , classifyHostBinding, renderHostBindingRefusal, observeHostBindingDecision
   , hostBindingRepresentationAuthority
   , hostBindingRepresentationConstructors
   , hostBindingRepresentationJsonAuthority
   ) where
 
+import Control.Monad (unless)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (toList)
@@ -30,6 +33,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.PkgQual (PkgQual(OtherPkg))
 import GHC.Unit.Finder (FindResult(..), findImportedModule)
+import GHC.Unit.Types (unitString)
 import GHC.Unit.Module (Module, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Env (ue_units)
 import GHC.Unit.Info (PackageName(..))
@@ -37,7 +41,10 @@ import GHC.Unit.State (lookupPackageName)
 import GHC.Data.FastString (fsLit)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, loc_filename, location, runIO)
 import System.FilePath (takeDirectory, (</>))
-import Tidepool.ExactScope (CanonicalInterfaceAdmission, resolveShippedHomeModule)
+import Tidepool.ExactScope
+  ( CanonicalInterfaceAdmission, resolveShippedHomeModuleWithEvidence
+  , ShippedHomeModuleRefusal, ShippedHomeModuleOrigin )
+import Tidepool.Logging (LogLevel(..), LogValue(..), readLogger, logEvent)
 import Tidepool.PreparedJson
   ( JsonAuthority, jsonAuthorityLayout, jsonValueLayoutForType, resolveJsonAuthorityWithCanonicalInterfaces )
 
@@ -49,8 +56,8 @@ data HostBindingAuthority
 
 data HostBindingAuthorities = HostBindingAuthorities
   { jsonValueAuthority :: Maybe JsonAuthority
-  , textModule :: Maybe Module
-  , commandJobModule :: Maybe Module
+  , textModule :: Either HostRepresentationRefusal Module
+  , commandJobModule :: Maybe (Either ShippedHomeModuleRefusal (Module,ShippedHomeModuleOrigin))
   }
 
 shippedCommandTypesSource :: ByteString
@@ -72,24 +79,25 @@ resolveHostBindingAuthorities roots env admitted = do
   jsonValueAuthority <- if needsJson
     then resolveJsonAuthorityWithCanonicalInterfaces env admitted
     else pure Nothing
-  textModule <- if needsText || needsJob then resolveTextModule env else pure Nothing
-  commandJobModule <- if needsJob then resolveCommandJobModule env admitted else pure Nothing
+  textModule <- if needsText || needsJob then resolveTextModule env else pure (Left HostTextNotRequested)
+  commandJobModule <- if needsJob then Just <$> resolveCommandJobModule env admitted else pure Nothing
   pure HostBindingAuthorities { jsonValueAuthority, textModule, commandJobModule }
 
-resolveTextModule :: HscEnv -> IO (Maybe Module)
+resolveTextModule :: HscEnv -> IO (Either HostRepresentationRefusal Module)
 resolveTextModule env = case lookupPackageName
     (ue_units (hsc_unit_env env)) (PackageName (fsLit "text")) of
-  Nothing -> pure Nothing
+  Nothing -> pure (Left HostTextPackageUnavailable)
   Just selected -> do
     found <- findImportedModule env (mkModuleName "Data.Text.Internal") (OtherPkg selected)
     pure $ case found of
-      Found _ owner -> Just owner
-      _ -> Nothing
+      Found _ owner -> Right owner
+      _ -> Left HostTextModuleUnavailable
 
 resolveCommandJobModule :: HscEnv
-  -> Map.Map (String,String) CanonicalInterfaceAdmission -> IO (Maybe Module)
+  -> Map.Map (String,String) CanonicalInterfaceAdmission
+  -> IO (Either ShippedHomeModuleRefusal (Module,ShippedHomeModuleOrigin))
 resolveCommandJobModule env admitted =
-  resolveShippedHomeModule env admitted "Tidepool.Command.Types" shippedCommandTypesSource
+  resolveShippedHomeModuleWithEvidence env admitted "Tidepool.Command.Types" shippedCommandTypesSource
 
 -- The representation and authority are issued together. An authority tag
 -- cannot survive native projection without its exact compiler constructors.
@@ -115,21 +123,89 @@ hostBindingRepresentationJsonAuthority representation = case representation of
   JsonValueRepresentation authority -> Just authority
   _ -> Nothing
 
--- | Admit only the exact outer TyCon and its complete representation. This
--- neither reads a rendered type nor lends authority to its arguments.
+data HostRepresentationRefusal
+  = HostTextNotRequested
+  | HostTextPackageUnavailable
+  | HostTextModuleUnavailable
+  | HostJsonAuthorityUnavailable
+  | HostJsonRepresentationMismatch
+  | HostJobOriginUnavailable
+  | HostRootOwnerMismatch (String,String) (Maybe (String,String))
+  | HostConstructorCount String Int
+  | HostConstructorName String String
+  | HostJobStrictness [Bool]
+  | HostJobFieldCount Int
+  | HostTypeHasNoRoot
+  deriving (Eq, Show)
+
+data HostBindingRefusal
+  = HostOriginRefused ShippedHomeModuleRefusal
+  | HostRepresentationRefused HostRepresentationRefusal
+  deriving (Show)
+
+data HostBindingDecision
+  = NotHostBinding
+  | HostBindingRejected HostBindingRefusal
+  | HostBindingAccepted HostBindingRepresentation
+
+renderHostBindingRefusal :: HostBindingRefusal -> String
+-- A refusal message is diagnostic evidence, not a limit on a valid type.
+renderHostBindingRefusal = take 4096 . show
+
+-- Candidate spelling only decides whether authentication is relevant. The
+-- selected module and complete constructor representation still issue authority.
+classifyHostBinding :: HostBindingAuthorities -> Type -> HostBindingDecision
+classifyHostBinding authorities ty
+  | hasRoot "Tidepool.Aeson.Value" "Value" ty = accepted $ do
+      authority <- maybe (Left (HostRepresentationRefused HostJsonAuthorityUnavailable)) Right
+        (jsonValueAuthority authorities)
+      _ <- maybe (Left (HostRepresentationRefused HostJsonRepresentationMismatch)) Right
+        (jsonValueLayoutForType authority ty)
+      Right (JsonValueRepresentation authority)
+  | hasRoot "Data.Text.Internal" "Text" ty = accepted $ do
+      text <- representation (textModule authorities)
+      TextRepresentation <$> representation (checkedTextConstructor text ty)
+  | hasRoot "Tidepool.Command.Types" "Job" ty = accepted $ do
+      job <- maybe (Left (HostRepresentationRefused HostJobOriginUnavailable))
+        (either (Left . HostOriginRefused) (Right . fst)) (commandJobModule authorities)
+      text <- representation (textModule authorities)
+      (jobConstructor,textConstructor) <- representation (checkedJobConstructors job text ty)
+      Right (CommandJobRepresentation jobConstructor textConstructor)
+  | otherwise = NotHostBinding
+  where
+    representation :: Either HostRepresentationRefusal a -> Either HostBindingRefusal a
+    representation = either (Left . HostRepresentationRefused) Right
+    accepted = either HostBindingRejected HostBindingAccepted
+
+-- | Admit only the exact outer TyCon and its complete representation.
 hostBindingRepresentationForType :: HostBindingAuthorities -> Type -> Maybe HostBindingRepresentation
-hostBindingRepresentationForType authorities ty =
-  case jsonValueAuthority authorities of
-    Just authority | Just _ <- jsonValueLayoutForType authority ty ->
-      Just (JsonValueRepresentation authority)
-    _ -> case textModule authorities of
-      Just text | Just constructor <- exactTextConstructor text ty ->
-        Just (TextRepresentation constructor)
-      _ -> case (commandJobModule authorities, textModule authorities) of
-        (Just job, Just text) -> do
-          (jobConstructor, textConstructor) <- exactJobConstructors job text ty
-          pure (CommandJobRepresentation jobConstructor textConstructor)
-        _ -> Nothing
+hostBindingRepresentationForType authorities ty = case classifyHostBinding authorities ty of
+  HostBindingAccepted representation -> Just representation
+  NotHostBinding -> Nothing
+  HostBindingRejected _ -> Nothing
+
+-- Ordinary values never enter diagnostic configuration or authority I/O.
+-- Binder names include their stage generation for correlation with item output.
+observeHostBindingDecision :: String -> HostBindingAuthorities -> Type -> IO ()
+observeHostBindingDecision binder authorities ty = case classifyHostBinding authorities ty of
+  NotHostBinding -> pure ()
+  HostBindingAccepted value -> observe (show (hostBindingRepresentationAuthority value))
+  HostBindingRejected refusal -> observe (renderHostBindingRefusal refusal)
+  where
+   observe result = do
+    logger <- readLogger "host_binding_authority"
+    let root = case rootTyCon ty of
+          Nothing -> Nothing
+          Just value -> fmap moduleOwner (nameModule_maybe (tyConName value))
+    logEvent logger LogDebug "classified" [ ("binder",LogText binder)
+      , ("root_owner",LogText (show root))
+      , ("text_owner",LogText (show (fmap moduleOwner (textModule authorities))))
+      , ("job_origin",LogText (show (fmap (fmap (\(owner,origin) -> (moduleOwner owner,origin)))
+          (commandJobModule authorities))))
+      , ("decision",LogText result) ]
+
+moduleOwner :: Module -> (String,String)
+moduleOwner owner = (unitString (moduleUnit owner),moduleNameString (moduleName owner))
 
 rootTyCon :: Type -> Maybe TyCon
 rootTyCon ty = go body
@@ -160,24 +236,36 @@ isExactRoot expected expectedModule expectedName ty = case rootTyCon ty of
     Nothing -> False
   Nothing -> False
 
-exactTextConstructor :: Module -> Type -> Maybe DataCon
-exactTextConstructor owner ty = do
-  textTyCon <- rootTyCon ty
-  case tyConDataCons textTyCon of
-    [text]
-      | isExactRoot owner "Data.Text.Internal" "Text" ty
-      , occNameString (nameOccName (dataConName text)) == "Text" -> Just text
-    _ -> Nothing
+checkedRoot :: Module -> String -> String -> Type -> Either HostRepresentationRefusal TyCon
+checkedRoot owner expectedModule expectedName ty = do
+  root <- maybe (Left HostTypeHasNoRoot) Right (rootTyCon ty)
+  unless (isExactRoot owner expectedModule expectedName ty)
+    (Left (HostRootOwnerMismatch (moduleOwner owner) (moduleOwner <$> nameModule_maybe (tyConName root))))
+  Right root
 
-exactJobConstructors :: Module -> Module -> Type -> Maybe (DataCon, DataCon)
-exactJobConstructors jobModule textModule ty = do
-  jobTyCon <- rootTyCon ty
-  case tyConDataCons jobTyCon of
-    [constructor]
-      | isExactRoot jobModule "Tidepool.Command.Types" "Job" ty
-      , occNameString (nameOccName (dataConName constructor)) == "Job"
-      , dataConRepStrictness constructor == [MarkedStrict]
-      , [Scaled _ field] <- dataConOrigArgTys constructor -> do
-          text <- exactTextConstructor textModule field
-          pure (constructor, text)
-    _ -> Nothing
+checkedTextConstructor :: Module -> Type -> Either HostRepresentationRefusal DataCon
+checkedTextConstructor owner ty = do
+  root <- checkedRoot owner "Data.Text.Internal" "Text" ty
+  case tyConDataCons root of
+    [constructor] -> do
+      let name = occNameString (nameOccName (dataConName constructor))
+      unless (name == "Text") (Left (HostConstructorName "Text" name))
+      Right constructor
+    constructors -> Left (HostConstructorCount "Text" (length constructors))
+
+checkedJobConstructors :: Module -> Module -> Type
+  -> Either HostRepresentationRefusal (DataCon, DataCon)
+checkedJobConstructors jobModule expectedText ty = do
+  root <- checkedRoot jobModule "Tidepool.Command.Types" "Job" ty
+  case tyConDataCons root of
+    [constructor] -> do
+      let name = occNameString (nameOccName (dataConName constructor))
+          strictness = map (== MarkedStrict) (dataConRepStrictness constructor)
+      unless (name == "Job") (Left (HostConstructorName "Job" name))
+      unless (strictness == [True]) (Left (HostJobStrictness strictness))
+      case dataConOrigArgTys constructor of
+        [Scaled _ field] -> do
+          text <- checkedTextConstructor expectedText field
+          Right (constructor,text)
+        fields -> Left (HostJobFieldCount (length fields))
+    constructors -> Left (HostConstructorCount "Job" (length constructors))

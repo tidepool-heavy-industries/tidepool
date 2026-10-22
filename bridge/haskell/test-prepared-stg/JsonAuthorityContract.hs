@@ -2,11 +2,16 @@
 module JsonAuthorityContract where
 
 import Data.Text (Text)
+import Tidepool.Command.Types (Job(..))
 import Tidepool.Aeson.Value
 import GHC.Magic (lazy)
 
 unrelated :: Int
 unrelated = 42
+
+{-# NOINLINE hostJob #-}
+hostJob :: Job
+hostJob = Job "job authority control"
 
 -- The host replaces this payload-independent carrier without entering it.
 {-# NOINLINE hostValue #-}
