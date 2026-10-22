@@ -303,6 +303,7 @@ struct FiniteNativeOutput {
     operation: Arc<InventoryOperation>,
     files: BTreeMap<PathBuf, Arc<[u8]>>,
     package_links: Arc<certified_products::PackageLinks>,
+    targets: BTreeMap<String, Arc<Vec<u8>>>,
 }
 
 /// A named ordinary target closed by the completed output that owns both its
@@ -342,8 +343,12 @@ impl<'a> CapturedNativeOutput<'a> {
                 "ordinary target lacks its completed finite output".into(),
             ));
         };
-        let name = crate::prepared_artifact::prepared_artifact_name(target);
-        if self.bytes(Path::new(&name))?.as_ref() != program.bytes() {
+        let target_bytes = output.targets.get(target).ok_or_else(|| {
+            CompileError::MissingOutput(output.root.join(
+                crate::prepared_artifact::prepared_artifact_name(target),
+            ))
+        })?;
+        if target_bytes.as_slice() != program.bytes() {
             return Err(CompileError::ExtractFailed(
                 "ordinary target differs from its named completed output".into(),
             ));
@@ -714,6 +719,18 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
             .map_err(|error| compiler_evidence_failure(error.into()))?;
         files.insert(relative.to_path_buf(), bytes.into());
     }
+    let target_count = bundle.artifacts.iter()
+        .filter(|(artifact, _)| matches!(artifact, Artifact::Prepared(_))).count();
+    bundle.operation().reserve::<(String, Arc<Vec<u8>>)>(target_count)
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let mut targets = BTreeMap::new();
+    for (artifact, bytes) in &bundle.artifacts {
+        if let Artifact::Prepared(target) = artifact {
+            bundle.operation().charge(target.len())
+                .map_err(|error| compiler_evidence_failure(error.into()))?;
+            targets.insert(target.clone(), Arc::clone(bytes));
+        }
+    }
     let output = FiniteNativeOutput {
         root,
         issuing_root: issuing_root.to_path_buf(),
@@ -725,6 +742,7 @@ fn capture_native_bundle<P: NativeOutputPurpose>(
         operation: Arc::clone(bundle.operation()),
         files,
         package_links: Arc::new(receipt.package_links.clone()),
+        targets,
     };
     #[cfg(test)]
     capture_observation::observe(&output);
@@ -1111,7 +1129,7 @@ mod tests {
                     .complete()
                     .unwrap();
                 let owner = captured.native_output();
-                let prepared_bytes = owner.bytes(Path::new("__prepared.prepared.cbor")).unwrap();
+                let prepared_bytes = captured.bundle.get(&Artifact::Prepared("__prepared".into()));
                 let artifact = crate::prepared_artifact::PreparedArtifact::parse(
                     prepared_bytes.to_vec(),
                     tidepool_repr::execution_schema::DecodeLimits::default(),
