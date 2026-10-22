@@ -3742,8 +3742,12 @@ originalProjectionProducts = withScratch $ \work -> do
         , (dependencyModuleUnit node,dependencyModuleName node) == metadataOwner]
   unless (all (\(_,_,_,groups) -> not (null groups)) emitted
       && all (\(unit,owner,_,_) -> (T.unpack unit,T.unpack owner) /= metadataOwner) emitted
-      && Map.member metadataOwner
-          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate))
+      && (case lookup (mkModule (stringToUnit "main") (mkModuleName "ProjectionMetadata"))
+          (preparedModuleProductOutcomes completeProducts) of
+            Just (Right []) -> True
+            _ -> False)
+      && maybe False (isJust . localFinalizedCore) (Map.lookup metadataOwner
+          (finalizedLocalAdmissions (certifiedFinalizedArtifacts currentCertificate)))
       && metadataDependencies == [ProductInterfaceOnly]) $
     fail "metadata-only owner lost its finalization or acquired native product authority"
   let emittedBinders = Set.fromList [binder | product' <- certifiedOriginalProducts currentCertificate
