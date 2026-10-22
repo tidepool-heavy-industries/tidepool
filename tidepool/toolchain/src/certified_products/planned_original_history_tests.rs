@@ -246,7 +246,7 @@ pub(super) fn issue_planned_original_with_retained_child(
     let source_admission = request
         .admit_source(&input, &source, &evidence_bytes)
         .unwrap();
-    let home_imports = source_admission.home_imports()?;
+    let home_imports = source_admission.consumed_home_adjacency()?;
     assert_eq!(source_admission.evidence().modules.len(), 1);
     assert_eq!(
         home_imports[&crate::declaration_join::ExactModuleIdentity {

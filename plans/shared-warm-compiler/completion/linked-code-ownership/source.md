@@ -34,3 +34,21 @@ finite and World adapters preserve the same classifications; failed admission
 does not change prior context and honest continuation remains usable. Then execute
 the actual Text/Display history. The latest exact failing owner is still unknown;
 do not weaken the guard based on that hypothesis alone.
+
+## Implementation checkpoint
+
+S works from contract `1e1e42072a` in
+`/srv/swarm/checkouts/tidepool-g2-source-admission-owner-20261022`, branch
+`agent/g2-source-admission-owner-20261022`. The first source cut issues private
+receipt claims from the authenticated compilation root and explicit current
+selection, with exact protected recipe edges excluded from lexical traversal.
+Consumed adjacency remains a separate compiler dependency view. Finite and World
+support adapters use one product-bound issuer; local typed refusals retain owner,
+claim, held kind and request/stage boundary through the existing VersionSkew class.
+Program-source rows retain the shared admission owner independently of physical
+native availability. The old missing-Target receipt fixture is being migrated;
+the arbitrary-mask source-history property is T-owned pure-reader migration.
+
+Verification is pending. P's phase API and B's linked-code API have not yet been
+joined; V owns warm compilation and actual selected test execution. Formatting
+and source inspection do not qualify source classification or Text/Display.

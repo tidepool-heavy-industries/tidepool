@@ -828,7 +828,7 @@ fn certify_authored_declaration_inner(
         module: selected.owner().module.clone(),
     };
     let source_imports = match compiled.exact_source_admission.as_ref() {
-        Some(admission) => admission.home_imports()?,
+        Some(admission) => admission.consumed_home_adjacency()?,
         None => crate::declaration_context::consumed_source_home_imports(
             compiled
                 .completed_source_evidence

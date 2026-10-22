@@ -11598,7 +11598,7 @@ mod module_product_tests {
                 .unwrap();
                 let surface = crate::declaration_join::source_lexical_closure(
                     std::slice::from_ref(&quoted_owner),
-                    &admission.home_imports().unwrap(),
+                    &admission.consumed_home_adjacency().unwrap(),
                     &[],
                     &compiled.artifact_view.retained_source_implementations(),
                 )

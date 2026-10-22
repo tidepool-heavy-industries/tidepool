@@ -4956,7 +4956,7 @@ impl CompilerSourceSupport {
             ));
         }
         let generated = source.generated_source_owner()?;
-        let mut owners = source.home_imports()?.into_keys().collect::<BTreeSet<_>>();
+        let mut owners = source.compiler_dependencies().owners();
         let executable = matches!(
             stage.identity(),
             crate::compiler_world::WorldCellStageIdentity::Executable { .. }
@@ -5086,16 +5086,11 @@ impl CompilerSourceSupport {
         &self,
         selection: &crate::certified_products::CertifiedSourceSelection,
         artifacts: &ArtifactView,
-        admissions: &[crate::declaration_context::ExactSourceAdmission],
+        issued: &CompilerInputProjection,
+        dependencies: &crate::declaration_context::CompilerDependencies,
     ) -> Result<Self, CompileError> {
-        let mut owners = BTreeSet::new();
-        for admission in admissions {
-            owners.extend(admission.home_imports()?.into_keys());
-        }
-        let incoming = selection
-            .compiler_support_projection(artifacts, admissions)
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-            .for_source_owners(&owners);
+        let owners = dependencies.owners();
+        let incoming = issued.for_source_owners(&owners);
         let continuation =
             IssuedInputNativeDecisions::from_certified_continuation(selection, &incoming)?;
         let (artifacts, projection, decisions) = self.artifacts.merge_compiler_inputs_with_demand(
