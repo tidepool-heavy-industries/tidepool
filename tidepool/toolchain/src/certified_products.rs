@@ -433,7 +433,7 @@ impl BoundPackageSelection {
             return Ok(PackageHomeSourceOrigin::CurrentContract);
         };
         if product.row().original_owner() != owner
-            || product.row().original_artifact_id() != binding.artifact()
+            || product.row().original_artifact_id() != binding.binding.artifact()
         {
             return Err(CertificationError::Mismatch(
                 "HOME source differs from its prior program issuer",
@@ -442,7 +442,7 @@ impl BoundPackageSelection {
         let chosen = product
             .choose_own_group(
                 crate::artifact_inventory::NativeGroupKey {
-                    artifact: binding.artifact(),
+                    artifact: binding.binding.artifact(),
                     original_ordinal: binding.original_ordinal,
                 },
                 operation,
