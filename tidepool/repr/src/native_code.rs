@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::execution_schema::{
-    encoding::encode_projected_group, CertifiedGroupCode, DefinitionsView, InventoryOperation,
+    encoding::hash_projected_group, CertifiedGroupCode, DefinitionsView, InventoryOperation,
     PackageGroupCode, ParseError, SymbolIdentity, ValueId,
 };
 
@@ -46,58 +46,65 @@ impl NativeCodeBody {
         .exported_values()
     }
     fn key(&self, operation: &InventoryOperation) -> Result<NativeCodeBodyKey, NativeCodeError> {
-        let (kind, nominal, group) = match self {
+        let (nominal, group) = match self {
             Self::Home(code) => {
                 let owner = code.owner();
+                operation.charge(owner.unit.len().saturating_add(owner.module.len()))?;
                 (
-                    0,
-                    encode(&(
-                        &owner.unit,
-                        &owner.module,
-                        owner.module_version.0,
-                        owner.skinny_iface_sha256,
-                        owner.product_sha256,
-                        code.original_ordinal(),
-                    ))?,
+                    NativeCodeNominalKey::Home {
+                        owner: NativeHomeOwnerKey {
+                            unit: owner.unit.clone(),
+                            module: owner.module.clone(),
+                            module_version: owner.module_version.0,
+                            skinny_iface_sha256: owner.skinny_iface_sha256,
+                            product_sha256: owner.product_sha256,
+                        },
+                        original_ordinal: code.original_ordinal(),
+                    },
                     code.projected_group(),
                 )
             }
             Self::Package(code) => {
                 let owner = code.owner();
+                operation.reserve::<NativeSymbolKey>(code.binders().len())?;
+                operation.charge(owner.unit.len().saturating_add(owner.module.len()))?;
+                let mut definitions = Vec::new();
+                for symbol in code.binders() {
+                    operation.charge(
+                        symbol.unit.len()
+                            + symbol.module.len()
+                            + symbol.namespace.len()
+                            + symbol.occurrence.len()
+                            + symbol.record_parent.as_ref().map_or(0, String::len),
+                    )?;
+                    definitions.push(NativeSymbolKey {
+                        unit: symbol.unit.clone(),
+                        module: symbol.module.clone(),
+                        namespace: symbol.namespace.clone(),
+                        occurrence: symbol.occurrence.clone(),
+                        record_parent: symbol.record_parent.clone(),
+                    });
+                }
+                definitions.sort();
                 (
-                    1,
-                    encode(&(
-                        &owner.unit,
-                        &owner.module,
-                        owner.compiler_sha256,
-                        owner.profile_sha256,
-                        owner.interface_sha256,
-                        owner.defining_version_sha256,
-                        code.binders()
-                            .iter()
-                            .map(|symbol| {
-                                (
-                                    &symbol.unit,
-                                    &symbol.module,
-                                    &symbol.namespace,
-                                    &symbol.occurrence,
-                                    &symbol.record_parent,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    ))?,
+                    NativeCodeNominalKey::Package {
+                        owner: NativePackageOwnerKey {
+                            unit: owner.unit.clone(),
+                            module: owner.module.clone(),
+                            compiler_sha256: owner.compiler_sha256,
+                            profile_sha256: owner.profile_sha256,
+                            interface_sha256: owner.interface_sha256,
+                            defining_version_sha256: owner.defining_version_sha256,
+                        },
+                        definitions,
+                    },
                     code.projected_group(),
                 )
             }
         };
-        operation.charge(nominal.len())?;
-        group.charge_canonical_encoding(operation)?;
-        let bytes = encode_projected_group(group);
-        operation.charge(bytes.len())?;
         Ok(NativeCodeBodyKey {
-            kind,
             nominal,
-            definitions_sha256: Sha256::digest(bytes).into(),
+            definitions_sha256: hash_projected_group(group, operation)?,
         })
     }
 }
@@ -254,9 +261,47 @@ impl NativeCodeRef {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCodeBodyKey {
-    pub kind: u8,
-    pub nominal: Vec<u8>,
+    pub nominal: NativeCodeNominalKey,
     pub definitions_sha256: [u8; 32],
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum NativeCodeNominalKey {
+    Home {
+        owner: NativeHomeOwnerKey,
+        original_ordinal: u32,
+    },
+    Package {
+        owner: NativePackageOwnerKey,
+        definitions: Vec<NativeSymbolKey>,
+    },
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeHomeOwnerKey {
+    pub unit: String,
+    pub module: String,
+    pub module_version: [u8; 32],
+    pub skinny_iface_sha256: [u8; 32],
+    pub product_sha256: [u8; 32],
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePackageOwnerKey {
+    pub unit: String,
+    pub module: String,
+    pub compiler_sha256: [u8; 32],
+    pub profile_sha256: [u8; 32],
+    pub interface_sha256: [u8; 32],
+    pub defining_version_sha256: [u8; 32],
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSymbolKey {
+    pub unit: String,
+    pub module: String,
+    pub namespace: String,
+    pub occurrence: String,
+    pub record_parent: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -437,7 +482,7 @@ impl NativeCodeComponent {
             let mut nominal = BTreeMap::new();
             for key in ordered.keys() {
                 if nominal
-                    .insert((key.kind, key.nominal.clone()), key.definitions_sha256)
+                    .insert(key.nominal.clone(), key.definitions_sha256)
                     .is_some_and(|previous| previous != key.definitions_sha256)
                 {
                     return Err(NativeCodeError::ConflictingDefinition);
@@ -679,32 +724,23 @@ fn validate_export(
     importer: DefinitionsView<'_>,
     operation: &InventoryOperation,
 ) -> Result<(), NativeCodeError> {
-    let count = body
-        .definitions()
-        .bindings()
-        .iter()
-        .map(|group| match group {
-            crate::execution_schema::Group::NonRecursive(_) => 1,
-            crate::execution_schema::Group::Recursive(group) => group.len(),
-        })
-        .sum::<usize>();
-    operation.charge(count.saturating_mul(2))?;
-    if !body
-        .exported_values()
-        .any(|(identity, exported)| exported == value && identity == &declaration.identity)
-    {
+    if body.definitions().envelope() != importer.envelope() {
         return Err(NativeCodeError::ImportContract);
     }
-
-    let exported = body
-        .definitions()
-        .export_contracts()
-        .find_map(|contract| match contract {
-            Ok(contract) if contract.value == value => Some(Ok(contract)),
-            Err(error) => Some(Err(error)),
-            _ => None,
-        })
-        .ok_or(NativeCodeError::ImportContract)??;
+    let contracts = match body {
+        NativeCodeBody::Home(code) => code.projected_group(),
+        NativeCodeBody::Package(code) => code.projected_group(),
+    };
+    let mut selected = None;
+    for contract in contracts.export_contracts() {
+        operation.charge(1)?;
+        let contract = contract?;
+        if contract.value == value {
+            selected = Some(contract);
+            break;
+        }
+    }
+    let exported = selected.ok_or(NativeCodeError::ImportContract)?;
     let signature = declaration
         .entry_signature
         .map(|id| {
@@ -865,6 +901,143 @@ mod tests {
         assert!(matches!(
             NativeCodeComponent::link(&plans, &[0], &operation()),
             Err(NativeCodeError::ConflictingDefinition)
+        ));
+    }
+
+    #[test]
+    fn distinct_groups_in_one_package_module_keep_distinct_nominal_keys() {
+        let make = |name: &str, child: &str, index| {
+            let mut wire = testing::wire_program();
+            let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+                unreachable!()
+            };
+            top.identity = testing::identity("Shared", name);
+            wire.globals.push(GlobalDecl {
+                identity: testing::identity("Shared", child),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            });
+            NativeCodePlan {
+                body: NativeCodeBody::Package(
+                    PackageGroupCode::admit(
+                        PackageCodeOwner {
+                            unit: "fixture".into(),
+                            module: "Shared".into(),
+                            compiler_sha256: [1; 32],
+                            profile_sha256: [2; 32],
+                            interface_sha256: [3; 32],
+                            defining_version_sha256: [4; 32],
+                        },
+                        testing::projected_group(wire, 9).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                imports: vec![NativeCodePlanImport::Local {
+                    occurrence: index,
+                    value: ValueId(0),
+                }],
+            }
+        };
+        let linked = NativeCodeComponent::link(
+            &[make("left", "right", 1), make("right", "left", 0)],
+            &[0, 1],
+            &operation(),
+        )
+        .unwrap();
+        assert_ne!(linked[0].id(), linked[1].id());
+        assert!(Arc::ptr_eq(linked[0].component(), linked[1].component()));
+    }
+
+    #[test]
+    fn a_private_helper_is_not_a_selectable_export() {
+        use crate::execution_schema::{
+            encoding::encode_projected_group, parse_projected_group, DecodeLimits,
+            ProgramRequirements,
+        };
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(mut helper) = wire.bindings[0].clone() else {
+            unreachable!()
+        };
+        helper.identity = testing::identity("Fixture", "helper");
+        let Group::NonRecursive(entry) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        entry.binding.id = ValueId(1);
+        wire.bindings.insert(0, Group::NonRecursive(helper));
+        wire.entry = ValueId(1);
+        let requirements = ProgramRequirements {
+            schema_version: wire.envelope.schema_version,
+            projection_profile: wire.envelope.projection_profile.clone(),
+            toolchain: wire.envelope.toolchain.clone(),
+            execution_abi_version: wire.envelope.execution_abi_version,
+            target: wire.envelope.target.clone(),
+        };
+        let encoded = encode_projected_group(&testing::projected_group(wire, 4).unwrap());
+        let mut value: ciborium::value::Value =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let ciborium::value::Value::Array(fields) = &mut value else {
+            unreachable!()
+        };
+        let ciborium::value::Value::Array(binders) = &mut fields[3] else {
+            unreachable!()
+        };
+        binders.remove(0);
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&value, &mut encoded).unwrap();
+        let group =
+            parse_projected_group(&encoded, &requirements, DecodeLimits::default()).unwrap();
+        let body = NativeCodeBody::Package(
+            PackageGroupCode::admit(
+                PackageCodeOwner {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    compiler_sha256: [1; 32],
+                    profile_sha256: [2; 32],
+                    interface_sha256: [3; 32],
+                    defining_version_sha256: [4; 32],
+                },
+                group,
+            )
+            .unwrap(),
+        );
+        let mut importer = plan("Importer", &[("Fixture", 1)], 0);
+        let NativeCodeBody::Package(code) = &importer.body else {
+            unreachable!()
+        };
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.identity = testing::identity("Importer", "entry");
+        wire.globals.push(GlobalDecl {
+            identity: testing::identity("Fixture", "helper"),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        importer.body = NativeCodeBody::Package(
+            PackageGroupCode::admit(
+                code.owner().clone(),
+                testing::projected_group(wire, 0).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert!(matches!(
+            NativeCodeComponent::link(
+                &[
+                    importer,
+                    NativeCodePlan {
+                        body,
+                        imports: vec![]
+                    }
+                ],
+                &[0],
+                &operation()
+            ),
+            Err(NativeCodeError::ImportContract)
         ));
     }
 }
