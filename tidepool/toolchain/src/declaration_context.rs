@@ -5486,12 +5486,7 @@ impl ExactCompileContext {
             .compiler_support
             .projection()
             .merge(&protected_projection)?;
-        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-            &effective,
-            &metadata.retained,
-            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-        )
-        .map_err(compiler_evidence_failure)?;
+        effective.entries_from_metadata(&metadata.retained)?;
         self.protected_scaffold.projection = protected_projection;
         self.protected_scaffold
             .native
