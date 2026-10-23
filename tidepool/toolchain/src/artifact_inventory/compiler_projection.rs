@@ -3509,15 +3509,74 @@ impl CompilerSourceSupport {
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
-        Self::new_with_native_facts(
-            projection,
-            artifacts,
+        let selected = projection
+            .roles
+            .iter()
+            .map(|(owner, role)| {
+                let mut row =
+                    self.selected.get(owner).cloned().ok_or_else(|| {
+                        failure("narrowed compiler role lacks its acquired owner")
+                    })?;
+                if row.interface().0.artifact != role.interface() {
+                    return Err(failure("narrowing changed the acquired canonical binding"));
+                }
+                match (role.original(), row.original()) {
+                    (None, _) => row.select_type_only(),
+                    (Some(id), Some((binding, _))) if id == binding.artifact => {}
+                    _ => return Err(failure("narrowing changed the acquired original binding")),
+                }
+                let row = row.with_issued_provenance(role)?;
+                Ok((owner.clone(), row))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        {
+            let state = artifacts.lease.inventory.0.lock().expect("inventory lock");
+            let owned = &artifacts.read_projection(&state).nodes;
+            for row in selected.values() {
+                for (binding, _) in row.bindings() {
+                    if artifacts
+                        .lease
+                        .selection
+                        .namespace
+                        .get(&binding.artifact)
+                        .is_some_and(|selected| selected != binding)
+                        || !owned.contains(&InventoryNodeKey::Artifact(*binding))
+                    {
+                        return Err(failure("narrowing changed an acquired namespace binding"));
+                    }
+                }
+            }
+        }
+        projection.validate_selected_requirements(&selected)?;
+        let selected = SelectedCompilerRows::from_admitted(selected);
+        let offers = offers
+            .into_iter()
+            .filter_map(|offer| {
+                match offer.is_relevant_to_support(selected.admitted_roles(&decisions)) {
+                    Ok(true) => Some(Ok(offer)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.narrow",
+            "retain_acquired_rows",
+        );
+        Self::complete_resolved(
+            ResolvedCompilerInputs {
+                projection,
+                artifacts,
+                selected: selected.rows.into_iter().collect(),
+                input_decisions: decisions,
+            },
             offers,
             self.native_availability.clone(),
-            decisions.clone(),
             Some(&self.native_fact_owner),
             self.native_closures.clone(),
-        )
+            &mut timing,
+        )?
+        .close()
     }
 
     fn with_additional_decisions(
@@ -5458,16 +5517,7 @@ impl CompilerSourceSupport {
                     }
                 })
         });
-        let offers = self
-            .native_offers
-            .iter()
-            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
-                Ok(true) => Some(Ok(offer.clone())),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.rebuild_narrowed(projection, artifacts, offers)
+        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     fn validate_publication_endorsement(
@@ -5552,16 +5602,7 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let artifacts = self.artifacts.select_roots(roots)?;
         let projection = self.projection.for_selected_support(&artifacts);
-        let offers = self
-            .native_offers
-            .iter()
-            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
-                Ok(true) => Some(Ok(offer.clone())),
-                Ok(false) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.rebuild_narrowed(projection, artifacts, offers)
+        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     pub(crate) fn source_support(
@@ -7752,20 +7793,12 @@ mod tests {
                 .projection
                 .source_support(&reusable.artifacts, &owners)
                 .unwrap();
-            let offers = reusable
-                .native_offers
-                .iter()
-                .filter_map(
-                    |offer| match offer.is_relevant_to_support(&legacy.projection) {
-                        Ok(true) => Some(Ok(offer.clone())),
-                        Ok(false) => None,
-                        Err(error) => Some(Err(error)),
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
             let legacy = reusable
-                .rebuild_narrowed(legacy.projection, legacy.artifacts, offers)
+                .rebuild_narrowed(
+                    legacy.projection,
+                    legacy.artifacts,
+                    reusable.native_offers.iter().cloned(),
+                )
                 .unwrap();
             assert_eq!(narrowed.selected, legacy.selected);
             assert_eq!(narrowed.projection, legacy.projection);
@@ -8108,8 +8141,16 @@ mod tests {
                 source.native_fact_owner().native_availability
             );
             assert_eq!(
-                changed.native_fact_owner().input_decisions,
-                source.native_fact_owner().input_decisions
+                changed
+                    .recorded_rows()
+                    .iter()
+                    .filter_map(|(owner, row)| row.native_choices().map(|choices| (owner, choices)))
+                    .collect::<Vec<_>>(),
+                source
+                    .recorded_rows()
+                    .iter()
+                    .filter_map(|(owner, row)| row.native_choices().map(|choices| (owner, choices)))
+                    .collect::<Vec<_>>()
             );
             assert_ne!(
                 changed.native_fact_owner().commitment(),
@@ -8149,10 +8190,7 @@ mod tests {
                 };
                 assert_eq!(first.source_sha256(), second.source_sha256());
                 assert_eq!(
-                    Arc::ptr_eq(
-                        first.original_native().unwrap(),
-                        second.original_native().unwrap()
-                    ),
+                    Arc::ptr_eq(first.original_native(), second.original_native()),
                     !distinct_witness
                 );
             }

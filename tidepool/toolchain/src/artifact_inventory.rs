@@ -20,8 +20,7 @@ mod compiler_projection;
 mod native_availability;
 pub(crate) use compiler_projection::{
     AcquiredNativeClosures, CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection,
-    InputNativeDecision, IssuedInputNativeDecisions, RecordedCompilerRole,
-    RecordedInputNativeDecision,
+    InputNativeDecision, IssuedInputNativeDecisions,
 };
 pub use compiler_projection::{
     AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
@@ -2971,9 +2970,9 @@ impl InventoryState {
 
     fn canonicalize(&self, entry: Arc<ArtifactEntry>) -> Result<Arc<ArtifactEntry>, CompileError> {
         let consistent = match (&entry.facts, &entry.payload) {
-            (ArtifactFactsHandle::Original(owner), ArtifactPayload::Original(product)) => product
-                .facts()
-                .is_some_and(|facts| Arc::ptr_eq(owner, facts)),
+            (ArtifactFactsHandle::Original(owner), ArtifactPayload::Original(product)) => {
+                Arc::ptr_eq(owner, product.facts())
+            }
             (ArtifactFactsHandle::Canonical(owner), ArtifactPayload::Canonical(interface)) => {
                 Arc::ptr_eq(owner, interface.facts())
             }
@@ -11252,7 +11251,7 @@ mod tests {
         let widened = inventory.admit_shared(&selected, vec![extra]).unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
         let partial = offer
-            .within_projection(&projection, &inventory.empty_view())
+            .within_assembly(projection.role_view(), &inventory.empty_view())
             .unwrap()
             .unwrap();
         assert!(!partial.is_full());
@@ -11457,9 +11456,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
-        let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().clone(),
-        ));
+        let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
         let base = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical])
             .unwrap();
@@ -12702,8 +12699,7 @@ mod tests {
             let receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
-            let canonical =
-                ArtifactEntry::canonical_artifact_id(product.module_interface());
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let InputNativeDecision::IssuedChoices(choices) = inputs
                 .compiler_source_support()
                 .checked_native_input_decision(key.artifact, canonical, product.owner())
@@ -12983,9 +12979,7 @@ mod tests {
             let ArtifactPayload::Original(product) = &native.payload else {
                 unreachable!()
             };
-            let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().clone(),
-            ));
+            let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
             let canonical_id = canonical.descriptor.id;
             let base = inventory
                 .admit_shared(&inventory.empty_view(), vec![canonical])
@@ -13087,10 +13081,9 @@ mod tests {
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
-        let native_canonical_id =
-            ArtifactEntry::canonical(product.module_interface().clone())
-                .descriptor
-                .id;
+        let native_canonical_id = ArtifactEntry::canonical(product.module_interface().clone())
+            .descriptor
+            .id;
         let child_id = child.descriptor.id;
         let view = inventory
             .admit_shared(&inventory.empty_view(), vec![native, child.clone()])
@@ -13150,9 +13143,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
-        let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().clone(),
-        ));
+        let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
         let canonical_id = canonical.descriptor.id;
         let base = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
@@ -14159,10 +14150,7 @@ mod tests {
         let ArtifactFactsHandle::Canonical(facts) = &canonical.facts else {
             unreachable!()
         };
-        assert!(Arc::ptr_eq(
-            product.module_interface().facts(),
-            facts
-        ));
+        assert!(Arc::ptr_eq(product.module_interface().facts(), facts));
         assert!(product.original_native().matches_original(product));
         let before = inventory.metrics();
         inventory.admit_shared(&view, vec![owner]).unwrap();
@@ -14280,9 +14268,10 @@ mod tests {
                 let ArtifactPayload::Original(product) = &cold.payload else {
                     unreachable!()
                 };
-                let definitions =
-                    crate::certified_products::original_native_group_definitions(product, **ordinal)
-                        .unwrap();
+                let definitions = crate::certified_products::original_native_group_definitions(
+                    product, **ordinal,
+                )
+                .unwrap();
                 let mut exports = definitions.export_contracts();
                 exports.next().is_some_and(|contract| contract.is_ok()) && exports.next().is_none()
             })
@@ -14441,11 +14430,15 @@ mod tests {
         let ArtifactPayload::Original(product) = &first.payload else {
             unreachable!()
         };
-        let other = ArtifactEntry::original(
+        let other = issued_native_groups_in_unit(
+            "fixture",
             [3; 32],
-            crate::certified_products::fixture_finalized_product(product.clone(), [3; 32]),
-        )
-        .unwrap();
+            "Original",
+            vec![0x42],
+            vec![(0, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        );
         let ArtifactPayload::Original(other_product) = &other.payload else {
             unreachable!()
         };
@@ -15272,9 +15265,7 @@ mod tests {
             unreachable!()
         };
         let projection = CompilerInputProjection::from_issued_entries(&[
-            Arc::new(ArtifactEntry::canonical(
-                product.module_interface().clone(),
-            )),
+            Arc::new(ArtifactEntry::canonical(product.module_interface().clone())),
             Arc::new(next.clone()),
         ])
         .unwrap();
@@ -17712,8 +17703,7 @@ mod tests {
                 let ArtifactPayload::Original(product) = &original.payload else {
                     unreachable!()
                 };
-                let canonical =
-                    ArtifactEntry::canonical(product.module_interface().clone());
+                let canonical = ArtifactEntry::canonical(product.module_interface().clone());
                 let carrier = ArtifactBindingNode::Artifact(namespace[&original.descriptor.id]);
                 let canonical = ArtifactBindingNode::Artifact(namespace[&canonical.descriptor.id]);
                 model
@@ -18618,9 +18608,8 @@ mod tests {
                         let ArtifactPayload::Original(product) = &original.payload else {
                             unreachable!()
                         };
-                        let canonical = ArtifactEntry::canonical_artifact_id(
-                            product.module_interface(),
-                        );
+                        let canonical =
+                            ArtifactEntry::canonical_artifact_id(product.module_interface());
                         let expected_canonical = model
                             .rows
                             .iter()
@@ -19536,10 +19525,9 @@ mod tests {
             let ArtifactPayload::Original(product) = &native.payload else {
                 unreachable!()
             };
-            let canonical_id =
-                ArtifactEntry::canonical(product.module_interface().clone())
-                    .descriptor
-                    .id;
+            let canonical_id = ArtifactEntry::canonical(product.module_interface().clone())
+                .descriptor
+                .id;
             let proof =
                 NativeOriginalRequirement::from_issued_group_custody(native_id, canonical_id, view)
                     .unwrap()
@@ -19780,9 +19768,7 @@ mod tests {
             let projection = CompilerInputProjection::from_issued_entries(&[
                 inspection.clone(),
                 Arc::new(ArtifactEntry::canonical(match &wire.payload {
-                    ArtifactPayload::Original(product) => {
-                        product.module_interface().clone()
-                    }
+                    ArtifactPayload::Original(product) => product.module_interface().clone(),
                     _ => unreachable!(),
                 })),
                 Arc::new(entry("Unrelated", &[])),
@@ -20175,9 +20161,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &root.payload else {
             unreachable!()
         };
-        let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().clone(),
-        ));
+        let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
         let mut issuers = (0..branches)
             .map(|index| {
                 inventory
@@ -20345,9 +20329,7 @@ mod tests {
             let ArtifactPayload::Original(product) = &root.payload else {
                 unreachable!()
             };
-            let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().clone(),
-            ));
+            let canonical = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
             let original = inventory
                 .admit_recovery_selection(
                     &inventory.empty_view(),
@@ -20835,9 +20817,11 @@ mod tests {
     #[test]
     fn independent_native_admission_does_not_inherit_global_source_witness() {
         let (_fixture, cold, fresh) = issued_source_admission_pair();
-        let source = fresh
-            .source_admission_witness()
-            .expect("actual checked source digest");
+        let source = match &fresh.payload {
+            ArtifactPayload::Original(product) => product.source_sha256(),
+            _ => unreachable!(),
+        }
+        .expect("actual checked source digest");
         let ArtifactPayload::Original(cold_product) = &cold.payload else {
             unreachable!()
         };
@@ -20847,7 +20831,8 @@ mod tests {
         assert_eq!(cold, fresh);
         assert_ne!(cold_product, fresh_product);
         let mut observations = Vec::new();
-        for (existing, incoming, expected) in [(&fresh, &cold, None), (&cold, &fresh, Some(source))] {
+        for (existing, incoming, expected) in [(&fresh, &cold, None), (&cold, &fresh, Some(source))]
+        {
             let inventory = ArtifactInventory::default();
             let old = inventory
                 .admit(&inventory.empty_view(), vec![existing.clone()])
@@ -21040,9 +21025,11 @@ mod tests {
     #[test]
     fn native_inventory_reuse_preserves_each_owners_source_admission_witness() {
         let (_fixture, cold, fresh) = issued_source_admission_pair();
-        let source = fresh
-            .source_admission_witness()
-            .expect("actual checked source digest");
+        let source = match &fresh.payload {
+            ArtifactPayload::Original(product) => product.source_sha256(),
+            _ => unreachable!(),
+        }
+        .expect("actual checked source digest");
         let ArtifactPayload::Original(product) = &cold.payload else {
             unreachable!()
         };
@@ -21561,9 +21548,7 @@ mod tests {
         let types = inventory
             .admit(
                 &empty,
-                vec![ArtifactEntry::canonical(
-                    product.module_interface().clone(),
-                )],
+                vec![ArtifactEntry::canonical(product.module_interface().clone())],
             )
             .unwrap();
         assert!(!types.artifact_ids().contains(&original.descriptor.id));
@@ -21854,9 +21839,27 @@ mod tests {
         let existing = CompilerInputRole::InterfaceOnly {
             interface: ArtifactId([1; 32]),
         };
+        let entry = Arc::new(issued_native_groups(
+            "Shared",
+            vec![(0, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let birth = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+            view,
+        )
+        .unwrap();
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
         let incoming = CompilerInputRole::PublishedSourceOriginal {
-            interface: ArtifactId([2; 32]),
-            original: ArtifactId([3; 32]),
+            interface: ArtifactEntry::canonical_artifact_id(product.module_interface()),
+            original: entry.descriptor.id,
             source_revision: "source".into(),
             original_input_identity: "input".into(),
             selection: ExactArtifactSelection::from_recovered_graph_selection(
@@ -21873,18 +21876,7 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
-            native_authority: crate::artifact_inventory::PublicationNativeAuthority::recorded(
-                crate::exact_context::PublicationNativeFacts::maintain(
-                    None,
-                    crate::exact_context::PublicationNativeMaps {
-                        roles: Default::default(),
-                        offers: Default::default(),
-                        native_availability: Default::default(),
-                        input_decisions: Default::default(),
-                    },
-                )
-                .unwrap(),
-            ),
+            native_authority: PublicationNativeAuthority::capture(&birth).unwrap(),
         };
         let mut projection = CompilerInputProjection::default();
         projection
@@ -21899,7 +21891,14 @@ mod tests {
         for rendered in [error.to_string(), format!("{error:?}")] {
             assert!(rendered.len() < 1024);
             assert!(rendered.contains("compiler_role"));
-            assert!(rendered.contains(&"02".repeat(32)));
+            assert!(rendered.contains(
+                &incoming
+                    .interface()
+                    .0
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ));
             assert!(!rendered.contains("selection_sha256"));
         }
         let destination = tempfile::tempdir().unwrap();
@@ -22375,11 +22374,15 @@ mod tests {
     fn artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads() {
         let inventory = ArtifactInventory::default();
         let (_fixture, _cold, native) = issued_source_admission_pair();
-        let source = native
-            .source_admission_witness()
-            .expect("actual checked source digest");
+        let source = match &native.payload {
+            ArtifactPayload::Original(product) => product.source_sha256(),
+            _ => unreachable!(),
+        }
+        .expect("actual checked source digest");
         let id = native.descriptor.id;
-        assert!(native.source_admission_witness().is_some());
+        assert!(
+            matches!(&native.payload, ArtifactPayload::Original(product) if product.source_admission().is_some())
+        );
         let unused = entry_in_unit("fixture", "Unused", vec![]);
         let unused_id = unused.descriptor.id;
         let mut supplied = (0..128)
@@ -22410,16 +22413,24 @@ mod tests {
                 .find(|entry| entry.descriptor.id == id)
                 .unwrap();
             assert!(Arc::ptr_eq(&entries[0], issued));
-            assert_eq!(
-                entries[0].source_admission_witness(),
-                issued.source_admission_witness()
-            );
+            let (ArtifactPayload::Original(actual), ArtifactPayload::Original(expected)) =
+                (&entries[0].payload, &issued.payload)
+            else {
+                unreachable!()
+            };
+            assert!(Arc::ptr_eq(
+                actual.source_admission().unwrap(),
+                expected.source_admission().unwrap()
+            ));
         }
         let after = inventory.metrics();
         assert_eq!(after.graph_visits, before.graph_visits);
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
         assert_eq!(
-            selected.lease.payloads[&id].source_admission_witness(),
+            match &selected.lease.payloads[&id].payload {
+                ArtifactPayload::Original(product) => product.source_sha256(),
+                _ => unreachable!(),
+            },
             Some(source)
         );
         assert!(selected

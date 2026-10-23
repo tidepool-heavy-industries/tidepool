@@ -165,11 +165,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         let interfaces = finalized[..MODULES]
             .iter()
-            .map(|p| {
-                Arc::new(ArtifactEntry::canonical(
-                    p.module_interface().unwrap().clone(),
-                ))
-            })
+            .map(|p| Arc::new(ArtifactEntry::canonical(p.module_interface().clone())))
             .collect::<Vec<_>>();
         for module in 0..MODULES {
             assert_eq!(
@@ -706,7 +702,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
         let ArtifactPayload::Original(product) = &catalog.original(0, version).payload else {
             unreachable!()
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let unchanged = empty
             .close_request(
                 None,
@@ -939,9 +935,7 @@ fn all_groups_distinguishes_native_zero_groups_from_non_native_custody() {
         original_groups_fixture("ProjectionZero", Vec::new(), 1, &BTreeMap::new()),
         producer,
     );
-    let canonical = Arc::new(ArtifactEntry::canonical(
-        zero.module_interface().unwrap().clone(),
-    ));
+    let canonical = Arc::new(ArtifactEntry::canonical(zero.module_interface().clone()));
     let original = Arc::new(ArtifactEntry::original(producer, zero).unwrap());
     let inventory = ArtifactInventory::default();
     let view = inventory

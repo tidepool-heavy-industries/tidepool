@@ -4062,34 +4062,31 @@ mod normalized_dependency_tests {
         }
         let catalog = NativeDependencyCatalog::from_source(&retained).unwrap();
         assert!(!catalog
-            .groups(
+            .group_supports(
                 NativeGroupKey {
                     artifact: hidden_id,
                     original_ordinal: 7
                 },
                 products[0].owner()
             )
-            .unwrap()
             .is_empty());
         assert!(catalog
-            .groups(
+            .group_supports(
                 NativeGroupKey {
                     artifact: hidden_id,
                     original_ordinal: 9
                 },
                 products[0].owner()
             )
-            .unwrap()
             .is_empty());
         assert!(catalog
-            .groups(
+            .group_supports(
                 NativeGroupKey {
                     artifact: sibling_id,
                     original_ordinal: 11
                 },
                 products[2].owner()
             )
-            .unwrap()
             .is_empty());
         let context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
@@ -4570,6 +4567,11 @@ mod normalized_dependency_tests {
         let ArtifactPayload::Original(original) = &entry.payload else {
             unreachable!();
         };
+        let birth = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+            artifacts.clone(),
+        )
+        .unwrap();
         let mut projection = CompilerInputProjection::default();
         projection
             .admit_role(
@@ -4581,18 +4583,7 @@ mod normalized_dependency_tests {
                     original_input_identity: "pending fixture input".into(),
                     selection: ExactArtifactSelection::capture(&artifacts),
                     selection_sha256: [0; 32],
-                    native_authority: PublicationNativeAuthority::recorded(
-                        crate::exact_context::PublicationNativeFacts::maintain(
-                            None,
-                            crate::exact_context::PublicationNativeMaps {
-                                roles: Default::default(),
-                                offers: Default::default(),
-                                native_availability: Default::default(),
-                                input_decisions: Default::default(),
-                            },
-                        )
-                        .unwrap(),
-                    ),
+                    native_authority: PublicationNativeAuthority::capture(&birth).unwrap(),
                 },
             )
             .unwrap();
