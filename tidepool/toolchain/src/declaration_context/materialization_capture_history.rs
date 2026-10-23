@@ -121,7 +121,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
     for index in 0..length {
         let module = format!("CaptureHistory{index}");
         let product = crate::certified_products::fixture_finalized_product(
-            support_product(&module),
+            support_draft(&module),
             context.owner.facts.producer,
         );
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -822,7 +822,7 @@ fn captured_dependency_graph_files_keep_their_issued_directories() {
     let weak_b = Arc::downgrade(&base);
     drop(base);
     let unrelated = crate::certified_products::fixture_finalized_product(
-        support_product("UnrelatedGraphHistory"),
+        support_draft("UnrelatedGraphHistory"),
         [7; 32],
     );
     let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -1170,7 +1170,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
     // qualify a compiler endpoint whose producer bytes cannot match it.
     let extend = |context: &Arc<ExactDeclarationContext>, module: &str| {
         let product =
-            crate::certified_products::fixture_finalized_product(support_product(module), [7; 32]);
+            crate::certified_products::fixture_finalized_product(support_draft(module), [7; 32]);
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
             std::slice::from_ref(&product),
         )

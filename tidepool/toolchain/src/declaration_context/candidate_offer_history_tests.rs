@@ -59,7 +59,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     assert!(offer.is_full());
     let original_offer = offer.snapshot_facts();
     let canonical = Arc::new(ArtifactEntry::canonical(
-        products[1].module_interface().unwrap().clone(),
+        products[1].module_interface().clone(),
     ));
     let projection = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
     let view = inventory

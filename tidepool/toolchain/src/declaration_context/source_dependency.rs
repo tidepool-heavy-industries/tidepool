@@ -410,7 +410,7 @@ mod tests {
         );
         let after = context.snapshot();
         assert_eq!(after.native_availability, before.native_availability);
-        assert_eq!(after.input_decisions, before.input_decisions);
+        assert_eq!(after.recorded_rows(), before.recorded_rows());
         assert_eq!(
             context.artifact_view().capture_graph_selection(),
             before_graph

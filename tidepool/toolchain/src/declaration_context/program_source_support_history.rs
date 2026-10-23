@@ -12,7 +12,7 @@ mod program_source_support_history {
             .map(|product| {
                 Arc::new(
                     crate::artifact_inventory::ArtifactEntry::original(
-                        product.module_interface().unwrap().producer_sha256(),
+                        product.module_interface().producer_sha256(),
                         product.clone(),
                     )
                     .unwrap(),

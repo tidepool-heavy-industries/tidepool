@@ -30,7 +30,7 @@ impl History {
         let context = native_context(&products[0]);
         let producer = context.toolchain_identity_sha256();
         let canonical = Arc::new(ArtifactEntry::canonical(
-            products[0].module_interface().unwrap().clone(),
+            products[0].module_interface().clone(),
         ));
         let entries = products
             .into_iter()
@@ -103,9 +103,16 @@ impl History {
                 .iter()
                 .zip(&self.offers)
                 .map(|(view, offer)| {
+                    let issuer = recover_fixture_compiler_support(
+                        projection.clone(),
+                        view.clone(),
+                        [offer.clone()],
+                    )
+                    .unwrap();
                     RequestNativeAvailability::issue_checked(
-                        &projection,
-                        view,
+                        issuer.compiler_roles(),
+                        &issuer.compiler_metadata(),
+                        issuer.artifacts(),
                         std::slice::from_ref(offer),
                     )
                     .unwrap()
@@ -477,17 +484,32 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         CompilerInputProjection::from_issued_entries(&[parent.clone(), history.canonical.clone()])
             .unwrap();
     let custody = parent_view.retain_custody(&history.views[1]).unwrap();
+    let old_offers = [parent_offer.clone(), history.offers[0].clone()];
+    let old_support = recover_fixture_compiler_support(
+        projection.clone(),
+        parent_view.clone(),
+        old_offers.iter().cloned(),
+    )
+    .unwrap();
     let old_rows = RequestNativeAvailability::issue_checked(
-        &projection,
-        &parent_view,
-        &[parent_offer.clone(), history.offers[0].clone()],
+        old_support.compiler_roles(),
+        &old_support.compiler_metadata(),
+        old_support.artifacts(),
+        &old_offers,
     )
     .unwrap();
     let child_projection =
         CompilerInputProjection::from_issued_entries(&[history.canonical.clone()]).unwrap();
+    let new_support = recover_fixture_compiler_support(
+        child_projection,
+        history.views[1].clone(),
+        [history.offers[1].clone()],
+    )
+    .unwrap();
     let new_rows = RequestNativeAvailability::issue_checked(
-        &child_projection,
-        &history.views[1],
+        new_support.compiler_roles(),
+        &new_support.compiler_metadata(),
+        new_support.artifacts(),
         std::slice::from_ref(&history.offers[1]),
     )
     .unwrap();
