@@ -2217,7 +2217,7 @@ impl<'a> TurnCode<'a> {
         let (source, sites, originals) = match certification.purpose() {
             TurnPurpose::Execution { execution, .. } | TurnPurpose::HostPrototype(execution) => (
                 execution.original_source(self.prepared(), self.table(), self.sites())?,
-                execution.selected_native_sites(),
+                Some(execution.selected_native_sites()),
                 execution.selected_source_originals(),
             ),
             TurnPurpose::ActivationPreview(proof) => (

@@ -955,9 +955,7 @@ impl CellProgram {
                     .get(planned.ordinal())
                     .and_then(CellProgramItem::native)
                     .ok_or_else(|| failure("normalized item has no native entry"))?;
-                let proof = native
-                    .typed_entry()
-                    .ok_or_else(|| failure("native entry lacks its typed origin"))?;
+                let proof = native.typed_entry();
                 if proof.plan_digest() != plan.digest()
                     || proof.origin().occurrence != plan.root()
                     || proof.entry().occurrence != planned.entry()
@@ -1420,16 +1418,10 @@ impl ExactHostBindingPrototype {
             return Err(failure("host prototype requires one original binder"));
         };
         let fields = row(binder, 7)?;
-        let expected_key = match execution.typed_entry() {
-            Some(entry) => {
-                typed_capture_signature_key(&entry.entry().occurrence, string(&fields[0])?)
-            }
-            None => format!(
-                "__tidepool_cell_pin_{}_{}",
-                execution.item().index(),
-                string(&fields[0])?
-            ),
-        };
+        let expected_key = typed_capture_signature_key(
+            &execution.typed_entry().entry().occurrence,
+            string(&fields[0])?,
+        );
         if execution.item().kind() != CheckedItemKind::Bind
             || !matches!(string(&fields[6])?, "JsonValue" | "Text" | "CommandJob")
             || signature.key() != expected_key
@@ -2628,8 +2620,6 @@ type SettledNativeBinding = (
 #[derive(Clone, Debug, Default)]
 pub(crate) struct CheckedSettledValues {
     rows: Vec<SettledNativeBinding>,
-    imports: Vec<(String, Vec<String>)>,
-    authorization: Vec<Value>,
 }
 
 impl CheckedSettledValues {
@@ -2669,42 +2659,6 @@ impl CheckedSettledValues {
         }
         Ok(())
     }
-    fn validate<'a>(
-        &self,
-        actual: impl IntoIterator<
-            Item = (
-                &'a str,
-                &'a tidepool_repr::execution_schema::SymbolIdentity,
-                u64,
-                u64,
-            ),
-        >,
-    ) -> Result<(), CompileError> {
-        let mut actual = actual.into_iter();
-        for (name, identity, generation, id) in &self.rows {
-            let Some((actual_name, actual_identity, actual_generation, actual_id)) = actual.next()
-            else {
-                return Err(failure(
-                    "compiled lexical selection lacks actual protected native settlement",
-                ));
-            };
-            if name != actual_name
-                || identity != actual_identity
-                || *generation != actual_generation
-                || *id != actual_id
-            {
-                return Err(failure(
-                    "compiled lexical selection differs from actual protected native settlement",
-                ));
-            }
-        }
-        if actual.next().is_some() {
-            return Err(failure(
-                "compiled lexical selection omits actual protected native settlement",
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// A checked recipe and its exact prepared target, issued together by the
@@ -2723,7 +2677,7 @@ pub struct ExactCompiledItem {
     observation_name: Option<String>,
     admission: [u8; 32],
     settled_values: CheckedSettledValues,
-    typed_entry: Option<SealedTypedEntry>,
+    typed_entry: SealedTypedEntry,
     source_originals: Vec<Arc<crate::artifacts::PublishedSourceOriginalSelection>>,
 }
 
@@ -3027,8 +2981,8 @@ impl ExactCompiledItem {
         &self.warnings
     }
 
-    pub fn typed_entry(&self) -> Option<&CheckedTypedEntry> {
-        self.typed_entry.as_ref().map(|issued| &issued.entry)
+    pub fn typed_entry(&self) -> &CheckedTypedEntry {
+        &self.typed_entry.entry
     }
 
     /// Existing publications selected by this target's authenticated lexical
@@ -3041,8 +2995,8 @@ impl ExactCompiledItem {
 
     /// Exact native-site selection sealed with this typed target. The original
     /// execution inventory may also retain earlier entries' installed groups.
-    pub fn selected_native_sites(&self) -> Option<&SelectedNativeSites> {
-        self.typed_entry.as_ref().map(|issued| &issued.native_sites)
+    pub fn selected_native_sites(&self) -> &SelectedNativeSites {
+        &self.typed_entry.native_sites
     }
 
     /// Execution evidence is available only for this exact validated output.
@@ -3119,32 +3073,26 @@ impl ExactCompiledItem {
             ),
         >,
     ) -> Result<(), CompileError> {
-        if let Some(proof) = &self.typed_entry {
-            let requirements = &proof.native_requirements;
-            self.settled_values.validate_required(
-                requirements
-                    .bindings
-                    .iter()
-                    .map(|requirement| &requirement.identity)
-                    .chain(self.target.globals().iter().map(|global| &global.identity)),
-                actual,
-            )
-        } else {
-            self.settled_values.validate(actual)
-        }
+        self.settled_values.validate_required(
+            self.typed_entry
+                .native_requirements
+                .bindings
+                .iter()
+                .map(|requirement| &requirement.identity)
+                .chain(self.target.globals().iter().map(|global| &global.identity)),
+            actual,
+        )
     }
     /// Borrow the exact captured value imports demanded by this
     /// issued native entry. Observing demand does not grant runtime leases.
     pub fn required_native_imports(
         &self,
     ) -> impl Iterator<Item = (&tidepool_repr::execution_schema::SymbolIdentity, u64)> {
-        self.typed_entry.iter().flat_map(|proof| {
-            proof
-                .native_requirements
-                .bindings
-                .iter()
-                .map(|requirement| (&requirement.identity, requirement.generation))
-        })
+        self.typed_entry
+            .native_requirements
+            .bindings
+            .iter()
+            .map(|requirement| (&requirement.identity, requirement.generation))
     }
     /// Validate the selected original group against the admitted baseline and
     /// completed native imports. Same-cell field identities are checked
@@ -3413,7 +3361,6 @@ impl ExactCompiledPrefix {
             }
         }
         let mut seen = BTreeSet::new();
-        let mut winners = BTreeMap::new();
         for (name, identity, generation, id) in &rows {
             if identity.unit != "main"
                 || identity.namespace != "value"
@@ -3425,7 +3372,7 @@ impl ExactCompiledPrefix {
                     "actual native selection has a duplicate or foreign identity",
                 ));
             }
-            let (expected_generation, expected_id, artifact) = sealed
+            let (expected_generation, expected_id, _) = sealed
                 .get(&(identity.module.as_str(), name.as_str()))
                 .ok_or_else(|| failure("actual native selection has no same-cell sealed binder"))?;
             if generation != expected_generation || id != expected_id {
@@ -3433,47 +3380,8 @@ impl ExactCompiledPrefix {
                     "actual native selection differs from its sealed binder",
                 ));
             }
-            winners.insert(name.as_str(), (*artifact, *id));
         }
-        let mut by_module = BTreeMap::<&str, (&CheckedValueArtifact, Vec<(&str, u64)>)>::new();
-        for (name, (artifact, id)) in winners {
-            by_module
-                .entry(&artifact.interface.module)
-                .or_insert_with(|| (artifact, Vec::new()))
-                .1
-                .push((name, id));
-        }
-        let imports = by_module
-            .iter()
-            .map(|(module, (_, names))| {
-                (
-                    (*module).to_owned(),
-                    names.iter().map(|(name, _)| (*name).to_owned()).collect(),
-                )
-            })
-            .collect();
-        let authorization = by_module
-            .into_iter()
-            .map(|(module, (artifact, names))| {
-                array([
-                    text("main"),
-                    text(module),
-                    text(artifact.interface.path.to_string_lossy()),
-                    text(&artifact.interface.digest),
-                    Value::Array(
-                        names
-                            .into_iter()
-                            .map(|(name, id)| array([text(name), Value::Integer(id.into())]))
-                            .collect(),
-                    ),
-                ])
-            })
-            .collect();
-        Ok(CheckedSettledValues {
-            rows,
-            imports,
-            authorization,
-        })
+        Ok(CheckedSettledValues { rows })
     }
 }
 
@@ -3776,7 +3684,7 @@ pub(crate) struct PreparedCheckedItemOutput {
     warnings: tidepool_repr::serial::MetaWarnings,
     bound_binders: Vec<Value>,
     authenticated_sites: [u8; 32],
-    typed_entry: Option<SealedTypedEntry>,
+    typed_entry: SealedTypedEntry,
     source_originals: Vec<Arc<crate::artifacts::PublishedSourceOriginalSelection>>,
     has_interface: bool,
 }
@@ -3833,7 +3741,7 @@ impl PreparedCheckedItemOutput {
             {
                 return Err(typed_entry_failure());
             }
-            Some(issued.clone())
+            issued.clone()
         };
         timing.advance("turn_read_decode");
         let turn = decode(output.turn_bytes())?;
@@ -3903,21 +3811,16 @@ impl PreparedCheckedItemOutput {
             .context()
             .published_source_original_selections_for_target(groups, resolved.imports())?;
         timing.advance("select_native_sites");
-        let typed_entry = typed_entry
-            .map(|entry| {
-                let native_sites = original_execution
-                    .context()
-                    .artifact_view()
-                    .native_sites_for_groups(&groups)?;
-                timing.advance("entry_native_requirements");
-                let native_requirements = resolved.requirements_for_entry()?;
-                Ok::<_, CompileError>(SealedTypedEntry {
-                    entry,
-                    native_sites,
-                    native_requirements,
-                })
-            })
-            .transpose()?;
+        let native_sites = original_execution
+            .context()
+            .artifact_view()
+            .native_sites_for_groups(&groups)?;
+        timing.advance("entry_native_requirements");
+        let typed_entry = SealedTypedEntry {
+            entry: typed_entry,
+            native_sites,
+            native_requirements: resolved.requirements_for_entry()?,
+        };
         timing.advance("decode_metadata");
         let (table, warnings) = output.decode_metadata()?;
         timing.advance("assemble_prepared_item");

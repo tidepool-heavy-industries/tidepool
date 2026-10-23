@@ -2295,7 +2295,7 @@ fn warm_target_selects_previously_unselected_original_native_groups() {
                     let NativeRequirementRoot::Group {
                         artifact,
                         original_ordinal,
-                    } = native.typed_entry().unwrap().native_requirement_root()
+                    } = native.typed_entry().native_requirement_root()
                     else {
                         panic!("the warm item must issue an exact native group root");
                     };

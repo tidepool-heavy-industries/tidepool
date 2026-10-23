@@ -2272,8 +2272,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                 .certification
                 .as_ref()
                 .and_then(|certification| certification.checked_execution())
-                .is_some_and(|execution| execution.typed_entry().is_some()),
-            "item {index} retains the complete compiler-issued typed entry"
+                .is_some(),
+            "item {index} retains its compiler-issued checked execution"
         );
         let [binder] = bound.as_slice() else {
             panic!("each selected-site fixture item binds one value");
@@ -2321,7 +2321,6 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                 .checked_execution()
                 .unwrap()
                 .typed_entry()
-                .unwrap()
         })
         .collect::<Vec<_>>();
     for entry in &entries[1..] {
@@ -2444,8 +2443,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .unwrap()
             .checked_execution()
             .unwrap()
-            .selected_native_sites()
-            .expect("typed entries carry their sealed native-site selection");
+            .selected_native_sites();
         assert!(
             value
                 .provenance

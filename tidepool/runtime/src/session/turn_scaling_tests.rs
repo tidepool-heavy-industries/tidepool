@@ -1049,8 +1049,8 @@ fn assert_checked_native_entries<H>(
     let first_native = first.native().unwrap();
     let second_target = second.native().unwrap().target_owned();
     assert_ne!(
-        first_native.typed_entry().unwrap().entry(),
-        second.native().unwrap().typed_entry().unwrap().entry()
+        first_native.typed_entry().entry(),
+        second.native().unwrap().typed_entry().entry()
     );
     let table = first_native.table();
     let turn: ciborium::value::Value =
@@ -1062,10 +1062,7 @@ fn assert_checked_native_entries<H>(
         .unwrap();
     let requirements = context
         .artifact_view()
-        .native_requirements_from_roots(&[first_native
-            .typed_entry()
-            .unwrap()
-            .native_requirement_root()])
+        .native_requirements_from_roots(&[first_native.typed_entry().native_requirement_root()])
         .unwrap();
     assert!(
         !requirements.bindings.is_empty(),
@@ -1114,7 +1111,7 @@ fn assert_checked_capture_refusals(
         .unwrap();
     let requirements = context
         .artifact_view()
-        .native_requirements_from_roots(&[proof.typed_entry().unwrap().native_requirement_root()])
+        .native_requirements_from_roots(&[proof.typed_entry().native_requirement_root()])
         .unwrap();
     let settled = reservation
         .snapshot()
@@ -1193,7 +1190,7 @@ fn assert_segment_shape(
     let entries = program
         .items()
         .iter()
-        .map(|item| item.native().unwrap().typed_entry().unwrap().entry())
+        .map(|item| item.native().unwrap().typed_entry().entry())
         .map(|entry| (&entry.unit, &entry.module, &entry.occurrence))
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
@@ -1215,7 +1212,7 @@ fn assert_segment_shape(
         // The entry stub can call a selected original helper that demands
         // a live capture. Inspect that sealed group closure, not the
         // stub's direct globals or every group in the source capsule.
-        let root = native.typed_entry().unwrap().native_requirement_root();
+        let root = native.typed_entry().native_requirement_root();
         assert!(matches!(
             root,
             tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group { .. }
@@ -1233,7 +1230,7 @@ fn assert_segment_shape(
                     panic!("the count gate's prior action must issue actual bindings");
                 };
                 let prior_native = prior.native().unwrap();
-                let unit = prior_native.typed_entry().unwrap().entry().unit.clone();
+                let unit = prior_native.typed_entry().entry().unit.clone();
                 bound.into_iter().map(move |binder| {
                     (
                         unit.clone(),
@@ -1275,8 +1272,7 @@ fn assert_segment_shape(
             let matching = dependencies
                 .iter()
                 .filter(|global| {
-                    global.identity.unit
-                        == prior.native().unwrap().typed_entry().unwrap().entry().unit
+                    global.identity.unit == prior.native().unwrap().typed_entry().entry().unit
                         && global.identity.module == bound[0].module
                         && global.identity.namespace == "value"
                         && global.identity.occurrence == bound[0].name
@@ -1307,7 +1303,7 @@ pub(super) fn assert_compiler_work(
     let mut owners = std::collections::BTreeMap::new();
     for item in program.items() {
         let owner = if let Some(native) = item.native() {
-            let entry = native.typed_entry().unwrap().entry();
+            let entry = native.typed_entry().entry();
             (entry.unit.clone(), entry.module.clone(), "typed_segment")
         } else {
             let declaration = item.checked_item().planned_declaration().unwrap();
@@ -2921,7 +2917,7 @@ fn generic_program_admission_preserves_delayed_capture_prefix() {
                 let context = native
                     .original_execution_context(&native.target_owned(), table, &sites)
                     .unwrap();
-                let entry = native.typed_entry().unwrap();
+                let entry = native.typed_entry();
                 let requirements = context
                     .artifact_view()
                     .native_binding_requirements_from_roots(&[entry.native_requirement_root()])
