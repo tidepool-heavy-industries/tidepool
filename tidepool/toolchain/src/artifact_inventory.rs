@@ -14571,8 +14571,10 @@ mod tests {
         ))
     }
 
-    // Frozen f866 constructor sequence: the policy solver is deliberately not
-    // duplicated. Its output roots/namespace feed both construction paths.
+    // Recompute retention through the inventory closure constructor, independent
+    // of the direct merge's persistent selection assembly. The policy solver's
+    // chosen roots/namespace feed both paths; explicit custody remains independent
+    // of whether a node is also selected.
     pub(super) fn reference_compiler_selection(
         left: &ArtifactView,
         right: &ArtifactView,
@@ -14586,9 +14588,9 @@ mod tests {
         let custody = joined
             .roots()
             .iter()
-            .chain(joined.custody_roots())
             .copied()
             .filter(|node| !roots.contains(node))
+            .chain(joined.custody_roots().iter().copied())
             .collect::<BTreeSet<_>>();
         let retained = joined.inventory().retain(
             roots.to_vec(),
@@ -22621,6 +22623,9 @@ mod tests {
                 .unwrap();
             assert_eq!(roles, projection);
             assert_eq!(merged.capture_graph_selection(), expected);
+            let recomputed =
+                reference_compiler_selection(left, right, &merged.namespace(), merged.roots());
+            assert_eq!(recomputed.capture_graph_selection(), expected);
             assert_eq!(
                 merged.binding_dependencies(),
                 retained.binding_dependencies()
