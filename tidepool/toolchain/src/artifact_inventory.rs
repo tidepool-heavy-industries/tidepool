@@ -14240,17 +14240,22 @@ mod tests {
 
     #[test]
     fn bound_projection_rebinding_preserves_issuing_none_override() {
-        let cold = Arc::new(issued_native_groups(
-            "Original",
-            vec![(0, Vec::new())],
-            &[],
-            &BTreeMap::new(),
-        ));
-        let ArtifactPayload::Original(product) = &cold.payload else {
-            unreachable!()
-        };
-        let mut fresh = (*cold).clone();
-        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let ordinal = *cold
+            .native_group_ordinals
+            .iter()
+            .find(|ordinal| {
+                let ArtifactPayload::Original(product) = &cold.payload else {
+                    unreachable!()
+                };
+                let definitions =
+                    crate::certified_products::original_native_group_definitions(product, **ordinal)
+                        .unwrap();
+                let mut exports = definitions.export_contracts();
+                exports.next().is_some_and(|contract| contract.is_ok()) && exports.next().is_none()
+            })
+            .expect("actual single-export native group");
+        let cold = Arc::new(cold);
         let inventory = ArtifactInventory::default();
         let cursor = inventory
             .admit_shared_with_demand(
@@ -14292,7 +14297,7 @@ mod tests {
 
         let admitted = {
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-            let (prepared, accepted) = source_target_data(&[(&cold, 0)]);
+            let (prepared, accepted) = source_target_data(&[(&cold, ordinal)]);
             let observed = crate::certified_products::AuthenticatedTargetImports::issue(
                 &prepared,
                 &accepted,
@@ -14864,6 +14869,32 @@ mod tests {
         );
     }
 
+    fn issued_source_admission_pair() -> (
+        crate::artifacts::test_support::SourcePublicationEntryFixture,
+        ArtifactEntry,
+        ArtifactEntry,
+    ) {
+        let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
+            .expect("the matched compiler issues checked source observations");
+        let fresh = (*fixture.helper).clone();
+        let ArtifactPayload::Original(product) = &fresh.payload else {
+            unreachable!()
+        };
+        assert!(product.source_admission().is_some());
+        let recovered =
+            crate::certified_products::tests::recovered_witness_fixtures(&[product.clone()])
+                .remove(0)
+                .product;
+        assert!(
+            recovered.source_admission().is_none(),
+            "durable equal bytes cannot recover a current source observation"
+        );
+        assert!(recovered.same_durable_artifact(product));
+        let cold = ArtifactEntry::original(fresh.descriptor.producer_sha256, recovered).unwrap();
+        assert_eq!(cold.descriptor.id, fresh.descriptor.id);
+        (fixture, cold, fresh)
+    }
+
     fn native_entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
         let interface = crate::certified_products::fixture_module_interface(
             [2; 32],
@@ -14898,7 +14929,7 @@ mod tests {
             digest(interface.certificate_bytes()),
         )
         .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             interface.interface_bytes().to_vec(),
             raw.product_bytes().to_vec(),
@@ -14906,6 +14937,11 @@ mod tests {
             certification,
         )
         .with_module_interface(interface)
+        .unwrap();
+        let product = crate::certified_products::certify_original_draft_with_validation(
+            product,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
         .unwrap();
         ArtifactEntry::original([2; 32], product).unwrap()
     }
@@ -20751,21 +20787,20 @@ mod tests {
 
     #[test]
     fn independent_native_admission_does_not_inherit_global_source_witness() {
-        let cold = native_entry("Original", &[]);
-        let mut fresh = cold.clone();
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let source = fresh
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let ArtifactPayload::Original(cold_product) = &cold.payload else {
             unreachable!()
         };
-        fresh.payload = ArtifactPayload::Original(cold_product.clone().with_source_sha256([1; 32]));
         let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
             unreachable!()
         };
         assert_eq!(cold, fresh);
         assert_ne!(cold_product, fresh_product);
         let mut observations = Vec::new();
-        for (existing, incoming, expected) in
-            [(&fresh, &cold, None), (&cold, &fresh, Some([1; 32]))]
-        {
+        for (existing, incoming, expected) in [(&fresh, &cold, None), (&cold, &fresh, Some(source))] {
             let inventory = ArtifactInventory::default();
             let old = inventory
                 .admit(&inventory.empty_view(), vec![existing.clone()])
@@ -20834,35 +20869,84 @@ mod tests {
         );
     }
 
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config {
+    #[test]
+    fn source_witness_histories_follow_selected_issuer() {
+        // Compile the two actual observations once, outside generated/shrunk histories.
+        let (fixture, cold, fresh) = issued_source_admission_pair();
+        let frozen = crate::artifacts::FrozenEntrySources::capture(
+            &fixture.includes,
+            &fixture.includes[0].join("PublicationTarget.hs"),
+        )
+        .unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let second_entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &frozen,
+            second_directory.path(),
+            &second_directory.path().join("entry"),
+        )
+        .unwrap();
+        let id = fresh.descriptor.id;
+        let independently_checked = second_entry
+            .products()
+            .original_execution_context()
+            .unwrap()
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.descriptor.id == id)
+            .expect("the same frozen source emits the same immutable native facts");
+        let observations = [&fresh, independently_checked.as_ref()].map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            Arc::clone(
+                product
+                    .source_admission()
+                    .expect("actual checked source observation"),
+            )
+        });
+        assert!(
+            !Arc::ptr_eq(&observations[0], &observations[1]),
+            "independent completed compiler requests retain distinct source observations"
+        );
+        let entries = [cold, fresh, (*independently_checked).clone()];
+        assert_eq!(entries[0], entries[1]);
+        assert_eq!(entries[1], entries[2]);
+        let witness = |view: &ArtifactView| {
+            let entries = view.entries();
+            let entry = entries
+                .iter()
+                .find(|entry| entry.descriptor.id == id)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            product.source_admission().map(|actual| {
+                observations
+                    .iter()
+                    .position(|expected| Arc::ptr_eq(actual, expected))
+                    .expect("selection carries an actual issuing source observation")
+                    + 1
+            })
+        };
+        let config = proptest::test_runner::Config {
             cases: 64,
             max_shrink_iters: 4096,
-            failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| Box::new(proptest::test_runner::FileFailurePersistence::Direct(path)) as Box<dyn proptest::test_runner::FailurePersistence>),
+            source_file: Some(file!()),
+            test_name: Some(concat!(
+                module_path!(),
+                "::source_witness_histories_follow_selected_issuer"
+            )),
+            failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| {
+                Box::new(proptest::test_runner::FileFailurePersistence::Direct(path))
+                    as Box<dyn proptest::test_runner::FailurePersistence>
+            }),
             ..proptest::test_runner::Config::default()
-        })]
-        #[test]
-        fn source_witness_histories_follow_selected_issuer(
-            operations in proptest::collection::vec((0u8..5, 0u8..3, proptest::bool::ANY), 1..40)
-        ) {
-            let base = native_entry("Original", &[]);
-            let id = base.descriptor.id;
-            let issue = |choice| {
-                let mut entry = base.clone();
-                if choice != 0 {
-                    let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
-                    entry.payload = ArtifactPayload::Original(product.clone().with_source_sha256([choice; 32]));
-                }
-                entry
-            };
-            let witness = |view: &ArtifactView| {
-                let entries = view.entries();
-                let entry = entries.iter().find(|entry| entry.descriptor.id == id).unwrap();
-                let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
-                product.source_sha256()
-            };
+        };
+        let strategy = proptest::collection::vec((0u8..5, 0usize..3, proptest::bool::ANY), 1..40);
+        proptest::test_runner::TestRunner::new(config).run(&strategy, |operations| {
             let inventory = ArtifactInventory::default();
-            let mut current = inventory.admit(&inventory.empty_view(), vec![issue(0)]).unwrap();
+            let mut current = inventory.admit(&inventory.empty_view(), vec![entries[0].clone()]).unwrap();
             let mut expected = None;
             let mut old_views = Vec::new();
             let mut operation_counts = [0usize; 5];
@@ -20872,16 +20956,16 @@ mod tests {
                 operation_counts[operation as usize] += 1;
                 if warm { proptest::prop_assert_eq!(witness(&current), expected); }
                 old_views.push((current.clone(), expected));
-                let incoming_expected = if choice == 0 { None } else { Some([choice; 32]) };
+                let incoming_expected = (choice != 0).then_some(choice);
                 match operation {
                     0 => {
-                        current = inventory.admit(&inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        current = inventory.admit(&inventory.empty_view(), vec![entries[choice].clone()]).unwrap();
                         expected = incoming_expected;
                     }
-                    1 => { current = inventory.admit(&current, vec![issue(choice)]).unwrap(); }
+                    1 => { current = inventory.admit(&current, vec![entries[choice].clone()]).unwrap(); }
                     2 | 3 => {
                         let other_inventory = if operation == 2 { inventory.clone() } else { ArtifactInventory::default() };
-                        let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![entries[choice].clone()]).unwrap();
                         proptest::prop_assert_eq!(witness(&incoming), incoming_expected);
                         current = current.merge_fixture_selections(&incoming).unwrap();
                     }
@@ -20890,9 +20974,8 @@ mod tests {
                 if warm {
                     warm_reads += 1;
                     proptest::prop_assert_eq!(witness(&current), expected);
-                    let (old, proof) = &old_views[choice as usize % old_views.len()];
+                    let (old, proof) = &old_views[choice % old_views.len()];
                     proptest::prop_assert_eq!(witness(old), *proof);
-                    // Unchanged issuing authority does not copy a map per append.
                     let appended = inventory.admit_shared(&current, current.entries()).unwrap();
                     proptest::prop_assert_eq!(appended.retained_payload_handles(), current.retained_payload_handles());
                     current = appended;
@@ -20903,17 +20986,19 @@ mod tests {
             proptest::prop_assert_eq!(witness(&current), expected);
             for (old, proof) in &old_views { proptest::prop_assert_eq!(witness(old), *proof); }
             eprintln!("source_witness_history operations={operation_counts:?} warm_reads={warm_reads} delayed_reads={delayed_reads}");
-        }
+            Ok(())
+        }).unwrap();
     }
 
     #[test]
     fn native_inventory_reuse_preserves_each_owners_source_admission_witness() {
-        let cold = native_entry("Original", &[]);
-        let mut fresh = cold.clone();
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let source = fresh
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let ArtifactPayload::Original(product) = &cold.payload else {
             unreachable!()
         };
-        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
         let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
             unreachable!()
         };
@@ -20930,7 +21015,7 @@ mod tests {
             .unwrap();
         for (retained, incoming, expected_source) in [
             (&cold_view, &fresh_view, None),
-            (&fresh_view, &cold_view, Some([1; 32])),
+            (&fresh_view, &cold_view, Some(source)),
         ] {
             let merged = retained.merge_fixture_selections(incoming).unwrap();
             let selected = merged
@@ -20944,7 +21029,7 @@ mod tests {
             assert_eq!(product.source_sha256(), expected_source);
         }
 
-        let altered = CertifiedRecoveryProduct::from_certification(
+        let altered = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             b"changed original payload".to_vec(),
@@ -20953,14 +21038,16 @@ mod tests {
         )
         .with_module_interface(product.module_interface().unwrap().clone())
         .unwrap();
-        let mut conflicting_bytes = cold.clone();
-        conflicting_bytes.payload = ArtifactPayload::Original(altered);
-        assert!(matches!(
-            cold_inventory.admit(&cold_view, vec![conflicting_bytes]),
-            Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
-                    if artifact == cold.descriptor.id)
-        ));
+        assert!(
+            matches!(
+                crate::certified_products::certify_original_draft_with_validation(
+                    altered,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                ),
+                Err(crate::certified_products::CertificationError::Mismatch(_))
+            ),
+            "altered original bytes refuse before a complete product can enter inventory"
+        );
         assert_eq!(cold_view.artifact_ids(), fresh_view.artifact_ids());
     }
 
@@ -22240,11 +22327,10 @@ mod tests {
     #[test]
     fn artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads() {
         let inventory = ArtifactInventory::default();
-        let mut native = issued_native_groups("Root", vec![(7, vec![])], &[], &BTreeMap::new());
-        let ArtifactPayload::Original(product) = &native.payload else {
-            unreachable!()
-        };
-        native.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let (_fixture, _cold, native) = issued_source_admission_pair();
+        let source = native
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let id = native.descriptor.id;
         assert!(native.source_admission_witness().is_some());
         let unused = entry_in_unit("fixture", "Unused", vec![]);
@@ -22287,7 +22373,7 @@ mod tests {
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
         assert_eq!(
             selected.lease.payloads[&id].source_admission_witness(),
-            Some([1; 32])
+            Some(source)
         );
         assert!(selected
             .selection_snapshot()

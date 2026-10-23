@@ -1521,6 +1521,15 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let fixture = Fixture::new();
         let acquired = Arc::new(fixture.load().unwrap());
         let selected = borrow_catalog(&acquired).unwrap();
+        let checked_previous = admit_borrowed_catalog(&fixture, &selected)
+            .unwrap()
+            .recovery_products
+            .remove(0);
+        assert!(acquired.records[0]
+            .certified_original()
+            .unwrap()
+            .source_sha256()
+            .is_none());
         let incoming_root = if relocated {
             let moved = fixture._root.path().join("moved-products");
             fs::rename(&fixture.output, &moved).unwrap();
@@ -1537,12 +1546,23 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
             .unwrap(),
         );
         let incoming_selected = borrow_catalog(&incoming_package).unwrap();
+        let checked_incoming = admit_borrowed_catalog(&fixture, &incoming_selected)
+            .unwrap()
+            .recovery_products
+            .remove(0);
+        assert!(incoming_package.records[0]
+            .certified_original()
+            .unwrap()
+            .source_sha256()
+            .is_none());
         let source = selected.by_owner[&("u".into(), "Library".into())]
             .original_module_interface
             .source_sha256();
         let producer = selected.by_owner[&("u".into(), "Library".into())]
             .original_module_interface
             .producer_sha256();
+        assert_eq!(checked_previous.source_sha256(), Some(source));
+        assert_eq!(checked_incoming.source_sha256(), Some(source));
         for retained_fresh in [false, true] {
             for retained_captured in [false, true] {
                 for warm in [false, true] {
@@ -1552,9 +1572,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
                         .unwrap()
                         .clone();
                     if retained_fresh {
-                        previous = previous.with_source_sha256(source);
+                        previous = checked_previous.clone();
                     } else {
-                        incoming = incoming.with_source_sha256(source);
+                        incoming = checked_incoming.clone();
                     }
                     if !retained_captured {
                         previous = previous.without_catalog_input_custody();
