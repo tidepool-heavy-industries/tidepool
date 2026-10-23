@@ -4757,13 +4757,13 @@ impl NativeInputSelection {
 
 /// Physical launch lowering adds advertised originals without changing semantic roles.
 struct NativeCompilerTransport {
-    inputs: RequestCompilerInputs,
+    inputs: Arc<ExactRequestInputs>,
     metadata: Arc<CompilerArtifactMetadata>,
 }
 
 impl NativeCompilerTransport {
-    fn lower(inputs: RequestCompilerInputs) -> Result<Self, CompileError> {
-        let metadata = Self::lower_metadata(&inputs)?;
+    fn lower(inputs: Arc<ExactRequestInputs>) -> Result<Self, CompileError> {
+        let metadata = Self::lower_metadata(inputs.compiler())?;
         Ok(Self { inputs, metadata })
     }
 
@@ -4790,11 +4790,10 @@ impl NativeCompilerTransport {
 /// Own the physical backing chosen for exactly one lowered compiler view.
 /// Manifest assembly consumes this owner without selecting a view or delivery mode.
 struct PreparedNativeCompilerTransport {
-    context: Arc<ExactDeclarationContext>,
     root: PathBuf,
     producer: CanonicalProducerIdentity,
     authorization: Option<Value>,
-    inputs: RequestCompilerInputs,
+    inputs: Arc<ExactRequestInputs>,
     metadata: Arc<CompilerArtifactMetadata>,
     retained: Arc<RetainedArtifactMaterialization>,
     delivery: RequestInputTransport,
@@ -4804,14 +4803,14 @@ struct PreparedNativeCompilerTransport {
 impl NativeCompilerTransport {
     fn prepare(
         self,
-        context: &Arc<ExactDeclarationContext>,
         root: &Path,
         producer: &[u8],
         authorization: Option<Value>,
         delivery: RequestInputTransport,
     ) -> Result<PreparedNativeCompilerTransport, CompileError> {
         let Self { inputs, metadata } = self;
-        let view = inputs.artifacts();
+        let context = inputs.context();
+        let view = inputs.compiler().artifacts();
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer);
         let admitted_empty = authorization.is_some()
             && context.owner.facts.producer == [0; 32]
@@ -4826,10 +4825,9 @@ impl NativeCompilerTransport {
                 "compile request has a different producer or invalid root",
             ));
         }
-        let reused = view.retained_materialization(&metadata)?.is_some();
         #[cfg(test)]
         if matches!(delivery, RequestInputTransport::DurableFiles)
-            && (reused
+            && (view.retained_materialization(&metadata)?.is_some()
                 || context
                     .artifact_view()
                     .retained_materialization(&metadata)?
@@ -4840,7 +4838,9 @@ impl NativeCompilerTransport {
             ));
         }
         std::fs::create_dir_all(root)?;
+        let mut reused = true;
         let materialize = |parents: Vec<Arc<RetainedArtifactMaterialization>>| {
+            reused = false;
             let directory = match delivery {
                 RequestInputTransport::OwnedArena => tempfile::Builder::new()
                     .prefix("tidepool-exact-artifacts-")
@@ -4894,7 +4894,6 @@ impl NativeCompilerTransport {
             }
         };
         Ok(PreparedNativeCompilerTransport {
-            context: Arc::clone(context),
             root: root.to_path_buf(),
             producer,
             authorization,
@@ -16573,15 +16572,11 @@ impl ExactDeclarationContext {
         producer: &[u8],
     ) -> Result<ExactCompilationRequest, CompileError> {
         let scaffold = ProtectedScaffoldRequirements::default();
-        let prepared = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?)?
-            .prepare(
-                self,
-                root,
-                producer,
-                None,
-                RequestInputTransport::DurableFiles,
-            )?;
-        prepared.into_request(&scaffold, None)
+        let compiler = scaffold.compiler_inputs(self, None)?;
+        let inputs = ExactRequestInputs::issue(self.clone(), scaffold, None, compiler);
+        NativeCompilerTransport::lower(inputs)?
+            .prepare(root, producer, None, RequestInputTransport::DurableFiles)?
+            .into_request()
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -16619,14 +16614,15 @@ impl ExactDeclarationContext {
     ) -> Result<ExactCompilationRequest, CompileError> {
         let inputs = scaffold.compiler_inputs(self, private.as_ref())?;
 
-        let prepared = NativeCompilerTransport::lower(inputs)?.prepare(
-            self,
-            root,
-            producer,
-            authorization,
-            RequestInputTransport::OwnedArena,
-        )?;
-        prepared.into_request(scaffold, private)
+        let inputs = ExactRequestInputs::issue(self.clone(), scaffold.clone(), private, inputs);
+        NativeCompilerTransport::lower(inputs)?
+            .prepare(
+                root,
+                producer,
+                authorization,
+                RequestInputTransport::OwnedArena,
+            )?
+            .into_request()
     }
 
     /// Bind authorization and the request to one observation of this immutable
@@ -16663,14 +16659,15 @@ impl ExactDeclarationContext {
             None => baseline,
         };
 
-        let prepared = NativeCompilerTransport::lower(inputs)?.prepare(
-            self,
-            root,
-            producer,
-            Some(authorization),
-            RequestInputTransport::OwnedArena,
-        )?;
-        prepared.into_request(scaffold, private)
+        let inputs = ExactRequestInputs::issue(self.clone(), scaffold.clone(), private, inputs);
+        NativeCompilerTransport::lower(inputs)?
+            .prepare(
+                root,
+                producer,
+                Some(authorization),
+                RequestInputTransport::OwnedArena,
+            )?
+            .into_request()
     }
 
     fn materialize_retained_artifacts(
@@ -16972,13 +16969,8 @@ impl ExactDeclarationContext {
 }
 
 impl PreparedNativeCompilerTransport {
-    fn into_request(
-        self,
-        scaffold: &ProtectedScaffoldRequirements,
-        private: Option<OriginalCompilerInputs>,
-    ) -> Result<ExactCompilationRequest, CompileError> {
+    fn into_request(self) -> Result<ExactCompilationRequest, CompileError> {
         let PreparedNativeCompilerTransport {
-            context,
             root,
             producer,
             authorization,
@@ -16988,8 +16980,10 @@ impl PreparedNativeCompilerTransport {
             delivery,
             reused,
         } = self;
+        let context = inputs.context();
+        let compiler = inputs.compiler();
         let metadata = &transport_metadata;
-        let compiler_metadata = &inputs.metadata;
+        let compiler_metadata = &compiler.metadata;
         let semantic_sha256 = context.semantic_sha256();
         let selected_rows = retained.selected_rows(metadata);
         let transported_artifacts = metadata
@@ -16997,7 +16991,7 @@ impl PreparedNativeCompilerTransport {
             .values()
             .map(|entry| selected_rows[&entry.descriptor.id].artifact())
             .collect::<Vec<_>>();
-        let selected_bindings = inputs
+        let selected_bindings = compiler
             .artifacts()
             .selected_native_binding_rows()
             .1
@@ -17008,7 +17002,7 @@ impl PreparedNativeCompilerTransport {
             &selected_bindings,
         );
         let groups = Arc::new(CertifiedArtifactGroupBindings::from_issued_rows(
-            inputs.artifacts(),
+            compiler.artifacts(),
             &group_rows,
         )?);
         let artifacts_by_owner = transported_artifacts
@@ -17123,7 +17117,7 @@ impl PreparedNativeCompilerTransport {
                             .map(PendingCertifiedGroup::group)
                             .collect::<Vec<_>>();
                         let availability =
-                            inputs.native_selection.availability.0[&selected].as_ref();
+                            compiler.native_selection.availability.0[&selected].as_ref();
                         let mode = match &availability.mode {
                             NativeTransportMode::Full => Value::Array(vec![text("full-carrier")]),
                             NativeTransportMode::IssuedGroups => Value::Array(vec![
@@ -17253,8 +17247,17 @@ impl PreparedNativeCompilerTransport {
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_request_references",
             reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
+        let generated_scaffold_imports = inputs
+            .protected_scaffold
+            .native
+            .iter()
+            .map(|(role, templates)| GeneratedScaffoldImportAuthority {
+                role: GeneratedScaffoldRole::PlannedDeclaration(Arc::clone(role)),
+                protected_templates: Arc::clone(templates),
+            })
+            .collect();
         Ok(ExactCompilationRequest {
-            inputs: ExactRequestInputs::issue(context, scaffold.clone(), private, inputs),
+            inputs,
             transport_metadata,
             manifest,
             request_sha256: sha256(&bytes),
@@ -17266,14 +17269,7 @@ impl PreparedNativeCompilerTransport {
             program: ProgramSourceSupportState::default(),
             source_search_include: None,
             checked_value_imports: Default::default(),
-            generated_scaffold_imports: scaffold
-                .native
-                .iter()
-                .map(|(role, templates)| GeneratedScaffoldImportAuthority {
-                    role: GeneratedScaffoldRole::PlannedDeclaration(Arc::clone(role)),
-                    protected_templates: Arc::clone(templates),
-                })
-                .collect(),
+            generated_scaffold_imports,
         })
     }
 }
@@ -25818,7 +25814,13 @@ mod tests {
                     .get(owner)
                     .is_some_and(|semantic| semantic.descriptor.id != entry.descriptor.id)
             });
-            let physical = NativeCompilerTransport::lower(inputs).unwrap();
+            let physical = NativeCompilerTransport::lower(ExactRequestInputs::issue(
+                context.clone(),
+                ProtectedScaffoldRequirements::default(),
+                None,
+                inputs,
+            ))
+            .unwrap();
             assert_eq!(
                 NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
                 before + 1
@@ -25828,7 +25830,7 @@ mod tests {
                 &physical.metadata.retained,
                 &expected.metadata.retained
             ));
-            let actual_availability = &physical.inputs.native_selection.availability;
+            let actual_availability = &physical.inputs.compiler().native_selection.availability;
             assert_eq!(actual_availability.0.len(), expected.availability.len());
             assert!(
                 expected.availability.iter().all(|(id, expected)| {
@@ -25842,6 +25844,7 @@ mod tests {
             assert_eq!(
                 physical
                     .inputs
+                    .compiler()
                     .native_selection
                     .candidates
                     .select_all()
@@ -25849,17 +25852,17 @@ mod tests {
                     .0,
                 expected.advertised.0
             );
-            let source = physical.inputs.compiler_source_support();
+            let source = physical.inputs.compiler().compiler_source_support();
             let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
             let issued = NativeInputSelection::issue_checked(
                 source.compiler_roles(),
-                &physical.inputs.metadata,
+                &physical.inputs.compiler().metadata,
                 source.artifacts(),
                 source.native_offers(),
             )
             .unwrap();
             issued
-                .validate_selected_groups(&physical.inputs.metadata)
+                .validate_selected_groups(&physical.inputs.compiler().metadata)
                 .unwrap();
             assert_eq!(
                 NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
@@ -25874,7 +25877,7 @@ mod tests {
             let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
             let expected = reference_native_transport(
                 source.compiler_roles(),
-                &physical.inputs.metadata,
+                &physical.inputs.compiler().metadata,
                 source.artifacts(),
                 invalid.clone(),
                 source.native_offers(),
@@ -25883,7 +25886,7 @@ mod tests {
             .expect("complete proof is mandatory");
             let actual = NativeInputSelection::from_normalized_rows(
                 source.compiler_roles(),
-                &physical.inputs.metadata,
+                &physical.inputs.compiler().metadata,
                 source.artifacts(),
                 invalid,
                 source.native_offers(),
@@ -26217,12 +26220,16 @@ mod tests {
 
     #[test]
     fn fresh_packet_materialization_refuses_arena_winner_after_empty_observation() {
-        let (context, _) = metadata_fixture();
+        let (context, producer) = metadata_fixture();
         let scaffold = ProtectedScaffoldRequirements::default();
-        let lowered =
-            NativeCompilerTransport::lower(scaffold.compiler_inputs(&context, None).unwrap())
-                .unwrap();
-        let view = lowered.inputs.artifacts();
+        let inputs = ExactRequestInputs::issue(
+            context.clone(),
+            scaffold.clone(),
+            None,
+            scaffold.compiler_inputs(&context, None).unwrap(),
+        );
+        let lowered = NativeCompilerTransport::lower(Arc::clone(&inputs)).unwrap();
+        let view = lowered.inputs.compiler().artifacts();
         let metadata = &lowered.metadata;
         assert!(view.retained_materialization(metadata).unwrap().is_none());
         let arena = view
@@ -26246,6 +26253,21 @@ mod tests {
                 &view.retained_materialization(metadata).unwrap().unwrap()
             ),
             "refusal must preserve the winner"
+        );
+        let scratch = tempfile::tempdir().unwrap();
+        let prepared = lowered
+            .prepare(
+                scratch.path(),
+                &producer,
+                None,
+                RequestInputTransport::OwnedArena,
+            )
+            .unwrap();
+        assert!(prepared.reused, "reuse observes the actual cache winner");
+        let request = prepared.into_request().unwrap();
+        assert!(
+            Arc::ptr_eq(&request.inputs, &inputs),
+            "lowering and manifest assembly preserve the exact request input owner"
         );
     }
 
@@ -26716,18 +26738,22 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let prepare =
             |name: &str, inputs: RequestCompilerInputs, private: OriginalCompilerInputs| {
-                NativeCompilerTransport::lower(inputs)
-                    .unwrap()
-                    .prepare(
-                        &context,
-                        &scratch.path().join(name),
-                        producer,
-                        None,
-                        RequestInputTransport::OwnedArena,
-                    )
-                    .unwrap()
-                    .into_request(&scaffold, Some(private))
-                    .unwrap()
+                NativeCompilerTransport::lower(ExactRequestInputs::issue(
+                    context.clone(),
+                    scaffold.clone(),
+                    Some(private),
+                    inputs,
+                ))
+                .unwrap()
+                .prepare(
+                    &scratch.path().join(name),
+                    producer,
+                    None,
+                    RequestInputTransport::OwnedArena,
+                )
+                .unwrap()
+                .into_request()
+                .unwrap()
             };
         let first_request = prepare("first", first_inputs, first_private);
         let second_request = prepare("second", second_inputs, second_private);
