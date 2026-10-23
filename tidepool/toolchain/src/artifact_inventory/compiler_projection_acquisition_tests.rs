@@ -832,8 +832,8 @@ fn assert_world_completed_output_keeps_actual_producer(
                                 .iter()
                                 .filter(|entry| &entry.descriptor.owner == owner)
                             {
-                                if let ArtifactPayload::Original(product) = &entry.payload {
-                                    products.push((product.clone(), Arc::clone(stage)));
+                                if matches!(entry.payload, ArtifactPayload::Original(_)) {
+                                    products.push((Arc::clone(entry), Arc::clone(stage)));
                                 }
                             }
                         },
@@ -956,16 +956,21 @@ fn assert_world_completed_output_keeps_actual_producer(
         };
         let mut actual = products
             .into_iter()
-            .filter(|(product, _)| !product.same_admission_and_transport(prior_product));
-        let (product, stage) = actual
+            .filter(|(entry, _)| !Arc::ptr_eq(entry, prior_offer.original_acquisition()));
+        let (producer, stage) = actual
             .next()
             .expect("B must be a separate actual H completion, not cached A");
         assert!(
-            actual.all(|(other, _)| other.same_admission_and_transport(&product)),
+            actual.all(|(other, _)| Arc::ptr_eq(&other, &producer)),
             "one independent physical H product is carried through later stage projections"
         );
-        // Ordinary A and World B have separate version/replay domains. Their
-        // shared canonical and body facts do not equate their Original owners.
+        let ArtifactPayload::Original(product) = &producer.payload else {
+            unreachable!()
+        };
+        // Ordinary A and retained-Core B have separate version/replay domains.
+        // B's actual output acquisition carries its completed own offer, while
+        // its source identity remains in the authenticated canonical/Core proof.
+        // Shared canonical/body facts do not equate their Original owners.
         // Equal-Original acquisition histories are covered by the independent
         // ordinary requests in authored_promotion_preserves_actual_offered_acquisition.
         assert_eq!(product.owner().unit, prior_product.owner().unit);
@@ -975,42 +980,61 @@ fn assert_world_completed_output_keeps_actual_producer(
             ArtifactEntry::canonical_artifact_id(prior_product.module_interface()),
         );
         assert!(product.module_interface() == prior_product.module_interface());
-        assert_eq!(product.source_sha256(), prior_product.source_sha256());
+        assert_eq!(
+            Some(product.module_interface().source_sha256()),
+            prior_product.source_sha256(),
+        );
+        assert!(product.module_interface().core_bytes().is_some());
+        assert!(product.source_sha256().is_none());
         assert!(product.interface_bytes() == prior_product.interface_bytes());
         assert!(product.product_bytes() == prior_product.product_bytes());
         assert!(product.package_imports_bytes() == prior_product.package_imports_bytes());
         assert_ne!(
             product.owner().module_version,
             prior_product.owner().module_version,
-            "World product versions bind their actual checked source context"
+            "retained-Core versions bind the authenticated canonical/body/dependency graph"
         );
         assert!(product.certification_bytes() != prior_product.certification_bytes());
         assert!(product.execution_source().is_none());
         assert!(prior_product.execution_source().is_some());
-        assert!(product.source_admission().is_some());
-        assert!(!Arc::ptr_eq(
-            product.source_admission().unwrap(),
-            prior_product.source_admission().unwrap()
-        ));
+        assert!(product.source_admission().is_none());
+        assert!(prior_product.source_admission().is_some());
         let offer = stage
             .source_selection()
             .completed_compiler_output_offer(owner)
             .unwrap()
             .expect("the actual physical B receipt retains its own contribution");
         assert_ne!(offer.original(), prior_offer.original());
-        let ArtifactPayload::Original(offered_product) = &offer.original_acquisition().payload
-        else {
-            unreachable!()
-        };
-        assert!(offered_product.same_admission_and_transport(&product));
+        assert!(
+            Arc::ptr_eq(offer.original_acquisition(), &producer),
+            "B's completed receipt retains the actual prebinding producer acquisition"
+        );
+        assert!(offer.matches_direct_canonical_binding(
+            producer.descriptor.id,
+            ArtifactEntry::canonical_artifact_id(product.module_interface()),
+            stage.issued_artifacts(),
+        ));
+        assert!(!producer.native_group_ordinals.is_empty());
+        for ordinal in &producer.native_group_ordinals {
+            assert!(
+                stage
+                    .source_selection()
+                    .current_product(
+                        NativeGroupKey {
+                            artifact: producer.descriptor.id,
+                            original_ordinal: *ordinal,
+                        },
+                        &producer,
+                    )
+                    .unwrap()
+                    .is_some(),
+                "every actual B group belongs to this current physical issuer"
+            );
+        }
         let physical = stage
             .issued_artifacts()
             .observed_payload(&offer.original())
             .expect("the actual physical cohort retains produced B separately from its prefix");
-        let ArtifactPayload::Original(physical_product) = &physical.payload else {
-            unreachable!()
-        };
-        assert!(physical_product.same_admission_and_transport(&product));
         assert!(
             Arc::ptr_eq(physical, offer.original_acquisition()),
             "the physical B scope and its own receipt carry the same acquired entry"
