@@ -9,9 +9,13 @@ pub(crate) enum ArtifactMetadataInvariant {
     CanonicalRequirements,
     OriginalPayloadKind,
     OriginalDurableFacts,
+    NativeAcquisitionOwner,
+    NativeCanonicalCarrier,
+    NativeOwner,
+    NativeInputClassification,
 }
 
-pub(super) fn invariant(
+pub(crate) fn invariant(
     entry: &Arc<ArtifactEntry>,
     invariant: ArtifactMetadataInvariant,
 ) -> CompileError {
@@ -53,7 +57,7 @@ pub(crate) enum ArtifactMetadataField {
     PackageProduct,
 }
 
-pub(super) fn refusal(
+pub(crate) fn refusal(
     existing: &Arc<ArtifactEntry>,
     incoming: &Arc<ArtifactEntry>,
 ) -> CompileError {

@@ -2570,11 +2570,7 @@ impl CompilerArtifactMetadata {
                     .ok_or_else(|| failure("compiler metadata lost its acquired payload owner"))?;
                 if !Arc::ptr_eq(entry, retained) {
                     if entry != retained {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::MetadataConflict {
-                                artifact: entry.descriptor.id,
-                            },
-                        ));
+                        return Err(metadata_conflict::refusal(entry, retained));
                     }
                     changed.push((key.clone(), Arc::clone(retained)));
                 }

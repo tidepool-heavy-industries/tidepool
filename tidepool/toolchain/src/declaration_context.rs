@@ -2580,12 +2580,22 @@ impl RequestNativeAvailability {
                 }
                 _ => false,
             };
-            if original != &row.original
-                || NativeTransportAvailability::canonical_for(original)? != row.canonical
-                || !same_issuer
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::MetadataConflict { artifact: *id },
+            if original != &row.original {
+                return Err(crate::artifact_inventory::metadata_conflict::refusal(
+                    &row.original,
+                    original,
+                ));
+            }
+            if NativeTransportAvailability::canonical_for(original)? != row.canonical {
+                return Err(crate::artifact_inventory::metadata_conflict::invariant(
+                    original,
+                    crate::artifact_inventory::ArtifactMetadataInvariant::NativeCanonicalCarrier,
+                ));
+            }
+            if !same_issuer {
+                return Err(crate::artifact_inventory::metadata_conflict::invariant(
+                    original,
+                    crate::artifact_inventory::ArtifactMetadataInvariant::NativeAcquisitionOwner,
                 ));
             }
             let mut retained = (**row).clone();
@@ -4404,15 +4414,32 @@ impl RequestCompilerInputs {
             } else {
                 NativeInputClassification::PrivateInput
             };
-            if !Arc::ptr_eq(payload, &row.original)
-                || &row.original.descriptor.owner != owner
-                || row.canonical != role.interface()
-                || row.classification != classification
+            use crate::artifact_inventory::ArtifactMetadataInvariant as Invariant;
+            if let Some((_, cause)) = [
+                (
+                    !Arc::ptr_eq(payload, &row.original),
+                    Invariant::NativeAcquisitionOwner,
+                ),
+                (
+                    &row.original.descriptor.owner != owner,
+                    Invariant::NativeOwner,
+                ),
+                (
+                    row.canonical != role.interface(),
+                    Invariant::NativeCanonicalCarrier,
+                ),
+                (
+                    row.classification != classification,
+                    Invariant::NativeInputClassification,
+                ),
+            ]
+            .into_iter()
+            .find(|(failed, _)| *failed)
             {
-                return Err(
-                    admission_failure(ArtifactInventoryFailure::MetadataConflict { artifact: id })
-                        .into(),
-                );
+                return Err(crate::artifact_inventory::metadata_conflict::invariant(
+                    payload, cause,
+                )
+                .into());
             }
             budget.reserve::<(ArtifactId, [usize; 4])>(1)?;
             direct.insert(id);
@@ -4467,16 +4494,28 @@ impl RequestCompilerInputs {
                         artifact: id,
                     })
                 })?;
-                if !Arc::ptr_eq(payload, &row.original)
-                    || row.original.descriptor.owner != owner
-                    || row.canonical != role.interface()
+                use crate::artifact_inventory::ArtifactMetadataInvariant as Invariant;
+                if let Some((_, cause)) = [
+                    (
+                        !Arc::ptr_eq(payload, &row.original),
+                        Invariant::NativeAcquisitionOwner,
+                    ),
+                    (
+                        row.original.descriptor.owner != owner,
+                        Invariant::NativeOwner,
+                    ),
+                    (
+                        row.canonical != role.interface(),
+                        Invariant::NativeCanonicalCarrier,
+                    ),
+                ]
+                .into_iter()
+                .find(|(failed, _)| *failed)
                 {
-                    return Err(
-                        admission_failure(ArtifactInventoryFailure::MetadataConflict {
-                            artifact: id,
-                        })
-                        .into(),
-                    );
+                    return Err(crate::artifact_inventory::metadata_conflict::invariant(
+                        payload, cause,
+                    )
+                    .into());
                 }
                 budget.reserve::<(ArtifactId, [usize; 4])>(1)?;
                 direct.insert(id);

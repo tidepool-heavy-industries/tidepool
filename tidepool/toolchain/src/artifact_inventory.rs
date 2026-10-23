@@ -33,7 +33,7 @@ pub(crate) use native_availability::{
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
-mod metadata_conflict;
+pub(crate) mod metadata_conflict;
 pub(crate) use metadata_conflict::{ArtifactMetadataField, ArtifactMetadataInvariant};
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
