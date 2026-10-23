@@ -983,7 +983,7 @@ pub(crate) fn decode_world_typed_segment_plans(
     decode_typed_segment_plan_facts(
         value,
         reservation.plan().items(),
-        reservation.slots(),
+        &reservation.slots().cloned().collect::<Vec<_>>(),
         *reservation.admission_digest(),
     )
 }
@@ -4548,10 +4548,10 @@ impl PreparedCheckedItemOutput {
                 if let PreparedItemOrigin::World(program) = origin {
                     let expected = program
                         .reservation()
-                        .expected_bindings()
+                        .items()
                         .get(item.index)
                         .ok_or_else(|| failure("World turn has no reserved binding identities"))?;
-                    let bound = decode_world_item_binders(&fields[2], expected)?;
+                    let bound = decode_world_item_binders(&fields[2], expected.bindings())?;
                     if bound.as_slice()
                         != program
                             .item(item.index)
@@ -5108,7 +5108,6 @@ pub(crate) fn admit_world_cell(
     let reserved = program
         .reservation()
         .slots()
-        .iter()
         .filter_map(|slot| match slot {
             CheckedPlannedCellSlot::Prologue { declaration }
             | CheckedPlannedCellSlot::Declaration { declaration } => Some(

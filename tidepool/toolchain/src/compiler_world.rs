@@ -5610,29 +5610,25 @@ fn prepare_world_cell_outputs(
             plan.recipe(),
             plan.operand().map(|operand| operand.request()),
             plan.receipt(),
-            reservation
-                .slots()
-                .iter()
-                .enumerate()
-                .map(|(ordinal, slot)| {
-                    use crate::checked_cell::CheckedPlannedCellSlot as S;
-                    use tidepool_extract_cmd::PlannedCellSlotRef as P;
-                    (
-                        ordinal as u64,
-                        match slot {
-                            S::Prologue { declaration } => P::Prologue(*declaration),
-                            S::Declaration { declaration } => P::Declaration(*declaration),
-                            S::Bind { value } => P::Bind(*value),
-                            S::Expression {
-                                capture,
-                                observation_name,
-                            } => P::Expression {
-                                generation: *capture,
-                                observation: observation_name,
-                            },
+            reservation.slots().enumerate().map(|(ordinal, slot)| {
+                use crate::checked_cell::CheckedPlannedCellSlot as S;
+                use tidepool_extract_cmd::PlannedCellSlotRef as P;
+                (
+                    ordinal as u64,
+                    match slot {
+                        S::Prologue { declaration } => P::Prologue(*declaration),
+                        S::Declaration { declaration } => P::Declaration(*declaration),
+                        S::Bind { value } => P::Bind(*value),
+                        S::Expression {
+                            capture,
+                            observation_name,
+                        } => P::Expression {
+                            generation: *capture,
+                            observation: observation_name,
                         },
-                    )
-                }),
+                    },
+                )
+            }),
             directory.path(),
             &output,
         )
@@ -5720,7 +5716,6 @@ fn world_cell_slots(
     use tidepool_extract_cmd::PlannedCellSlot as P;
     reservation
         .slots()
-        .iter()
         .enumerate()
         .map(|(index, slot)| {
             (
@@ -6336,7 +6331,7 @@ fn admit_world_preparation_response(
     let common_files = world_output_manifest(&fields[6], &validation.inventory)?;
     let stages = decode_world_stages(
         &fields[8],
-        reservation.slots(),
+        &reservation.slots().cloned().collect::<Vec<_>>(),
         &segments,
         &common_files,
         &validation.inventory,
@@ -6486,12 +6481,14 @@ fn admit_world_preparation_response(
                 .charge_value_copies(&observed[11], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             let evidence = answer_array(&observed[11], 2)?;
-            let expected_bindings =
-                reservation.expected_bindings().get(index).ok_or_else(|| {
-                    world_response_error(CompilerResponseRejection::ProvenanceMismatch)
-                })?;
-            let binders =
-                crate::checked_cell::decode_world_item_binders(&evidence[0], expected_bindings)?;
+            let expected_bindings = reservation
+                .items()
+                .get(index)
+                .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
+            let binders = crate::checked_cell::decode_world_item_binders(
+                &evidence[0],
+                expected_bindings.bindings(),
+            )?;
             let captures = typed_item.body().captures();
             let signatures = crate::checked_cell::decode_world_item_signatures(
                 &evidence[1],
