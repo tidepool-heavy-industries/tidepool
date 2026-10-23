@@ -30118,16 +30118,18 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             crate::artifact_inventory::ArtifactKind::CanonicalModuleInterface
         );
         assert_eq!(
-            request
-                .program
-                .program_support
-                .as_ref()
-                .unwrap()
-                .compiler_support
-                .artifacts()
-                .artifact_ids(),
+            context.artifact_view().artifact_ids(),
             support.artifacts().artifact_ids()
         );
+        assert!(context
+            .compiler_input_projection()
+            .snapshot_roles()
+            .get(&owner)
+            .is_some_and(|role| role.original().is_none()));
+        assert!(context.artifact_view().selected_native_groups().is_empty());
+        assert!(request.program.program_support.is_none());
+        assert!(request.program_source_lexical().is_empty());
+        assert!(request.program.source_selected_support.is_empty());
         // These are the two value-interface consumers after checked/program support.
         for context in [
             (*context)
@@ -30196,29 +30198,23 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .select_roots(vec![value.artifact_id()])
                 .unwrap(),
         };
-        let previous = request
-            .program
-            .program_support
-            .as_ref()
-            .unwrap()
-            .compiler_support
-            .artifacts()
-            .artifact_ids();
+        let previous = request.program.clone();
+        let previous_context = context.semantic_sha256();
+        assert!(previous.program_support.is_none());
         let refusal = request
             .admit_fixture_support(context.clone(), &support, &[], None)
             .expect_err("a type certificate alone cannot supply fresh source or reserved outputs");
         assert!(matches!(refusal, CompileError::ExtractFailed(_)));
+        assert!(request.program.program_support.is_none());
         assert_eq!(
-            request
-                .program
-                .program_support
-                .as_ref()
-                .unwrap()
-                .compiler_support
-                .artifacts()
-                .artifact_ids(),
-            previous
+            request.program.program_source_lexical,
+            previous.program_source_lexical
         );
+        assert_eq!(
+            request.program.source_selected_support,
+            previous.source_selected_support
+        );
+        assert_eq!(context.semantic_sha256(), previous_context);
         assert!(!context
             .artifact_view()
             .artifact_ids()
