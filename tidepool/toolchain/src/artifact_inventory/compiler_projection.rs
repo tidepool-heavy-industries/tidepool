@@ -6438,7 +6438,7 @@ mod tests {
                 })
                 .collect::<BTreeMap<_, _>>();
             let context =
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+                crate::declaration_context::ExactDeclarationContext::retained_execution_fixture(
                     [2; 32],
                     &view,
                     projection,

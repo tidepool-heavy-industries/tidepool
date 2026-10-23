@@ -11886,10 +11886,10 @@ mod tests {
         ];
         let projection =
             CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()]).unwrap();
-        // Issue the chosen source through its actual request owner before
+        // Prepare the chosen retained selection through its request owner before
         // joining the broader prefix's independent execution histories.
         let chosen_context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::from_authenticated_execution(
+            crate::declaration_context::ExactDeclarationContext::retained_execution_fixture(
                 producer_sha256,
                 selected,
                 projection,
@@ -11980,7 +11980,7 @@ mod tests {
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
             );
             let before_source_context = inventory.metrics().issued_scope_nodes;
-            let context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
+            let context = crate::declaration_context::ExactDeclarationContext::retained_execution_support_fixture(
                 producer_sha256,
                 CompilerSourceSupport::close_complete_output(fixed.captured_stage().compiler_inputs())
                     .unwrap(),
@@ -15652,7 +15652,7 @@ mod tests {
                     imports: vec![],
                 },
             ];
-            let issued = ExactDeclarationContext::from_authenticated_execution(
+            let issued = ExactDeclarationContext::retained_execution_fixture(
                 [2; 32],
                 issuer,
                 projection.clone(),
@@ -15832,7 +15832,7 @@ mod tests {
                 .roles()
                 .iter()
                 .any(|role| role.original() == Some(child.descriptor.id));
-            let issued = ExactDeclarationContext::from_authenticated_execution(
+            let issued = ExactDeclarationContext::retained_execution_fixture(
                 [2; 32],
                 &original,
                 projection,
@@ -16466,7 +16466,7 @@ mod tests {
             role.is_published_source_original() || role.original() == Some(child.descriptor.id)
         }));
         let make_context = |view: &ArtifactView| {
-            ExactDeclarationContext::from_authenticated_execution(
+            ExactDeclarationContext::retained_execution_fixture(
                 [2; 32],
                 view,
                 projection.clone(),
@@ -16776,7 +16776,7 @@ mod tests {
                 imports: vec![],
             },
         ];
-        let issued = ExactDeclarationContext::from_authenticated_execution(
+        let issued = ExactDeclarationContext::retained_execution_fixture(
             [2; 32],
             &original,
             projection,
@@ -17795,7 +17795,7 @@ mod tests {
                     imports: vec![helper.descriptor.owner.clone()],
                 }];
                 lexical.extend_from_slice(helper_lexical);
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     view,
                     projection.clone(),
@@ -17952,7 +17952,7 @@ mod tests {
                 .unwrap();
             legacy.replace_namespace(&joined.namespace());
             assert!(matches!(
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &legacy,
                     projection.clone(),
@@ -17994,7 +17994,7 @@ mod tests {
                 )
                 .unwrap();
             for view in [&joined, &retained, &support, &restored] {
-                let context = ExactDeclarationContext::from_authenticated_execution(
+                let context = ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     view,
                     projection.clone(),
@@ -19085,7 +19085,7 @@ mod tests {
             .unwrap();
         let projection =
             CompilerInputProjection::from_issued_entries(&[new.clone(), target.clone()]).unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution(
+        let context = ExactDeclarationContext::retained_execution_fixture(
             [2; 32],
             &issuer,
             projection.clone(),
@@ -19802,7 +19802,7 @@ mod tests {
         let support = new_projection
             .source_support(&new, &BTreeSet::from([owner.clone()]))
             .unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution(
+        let context = ExactDeclarationContext::retained_execution_fixture(
             producer_sha256,
             &old,
             old_projection,

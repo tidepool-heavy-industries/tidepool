@@ -385,7 +385,7 @@ impl Catalog {
     }
 
     fn context(&self, view: &ArtifactView, roles: Roles) -> ExactDeclarationContext {
-        ExactDeclarationContext::from_authenticated_execution(
+        ExactDeclarationContext::retained_execution_fixture(
             Sha256::digest(PRODUCER).into(),
             view,
             self.projection(view, roles),
