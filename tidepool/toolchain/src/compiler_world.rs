@@ -3819,6 +3819,10 @@ impl CompilerWorldOpenInputs {
         profile: [u8; 32],
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         let context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
+            1,
+        );
         let primary = context.capture_world_primary_inputs(producer)?;
         let advance =
             primary.with_type_interfaces(self.resources.lexical.observation_type_interfaces())?;
@@ -3864,10 +3868,6 @@ impl WorldInputResources {
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
         let (primary_root, runtime_context_blocks) = Self::materialize_primary(&primary_inputs)?;
         let primary_blocks = ReachableBlocks::default();
-        crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
-            1,
-        );
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
