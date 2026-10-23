@@ -26204,18 +26204,55 @@ mod tests {
             owner.rows[&value_entry.descriptor.id].value_custody,
             ValueRowCustody::Packet
         ));
-        assert!(context
-            .prepare_fixture_compilation(&packet.path().join("second"), &producer)
-            .is_err());
-        assert!(!packet.path().join("second").exists());
+        let second_packet = tempfile::tempdir().unwrap();
+        let second_request = context
+            .prepare_fixture_compilation(second_packet.path(), &producer)
+            .unwrap();
+        let second_owner = second_request.materialization.as_ref().unwrap();
+        assert!(
+            !Arc::ptr_eq(owner, second_owner),
+            "each transformed request owns fresh packet backing"
+        );
+        assert!(matches!(
+            second_owner.rows[&value_entry.descriptor.id].value_custody,
+            ValueRowCustody::Packet
+        ));
+        let second_paths = second_request
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let path = artifact.interface.path.clone();
+                assert!(path.starts_with(second_packet.path()));
+                let digest = sha256(&std::fs::read(&path).unwrap());
+                assert_eq!(digest, artifact.interface.sha256);
+                (path, digest)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(second_paths.len(), paths.len());
+        assert!(paths
+            .iter()
+            .zip(&second_paths)
+            .all(|(first, (second, _))| first != second));
+        let second_weak = Arc::downgrade(second_owner);
         let weak = Arc::downgrade(request.materialization.as_ref().unwrap());
         drop(request);
+        drop(second_request);
         drop(context);
         assert!(weak.upgrade().is_none());
+        assert!(second_weak.upgrade().is_none());
         assert!(paths.iter().all(|path| path.is_file()));
         drop(packet);
         assert!(!owned_root.exists());
         assert!(paths.iter().all(|path| !path.exists()));
+        for (path, digest) in &second_paths {
+            assert_eq!(
+                sha256(&std::fs::read(path).unwrap()),
+                *digest,
+                "releasing the first packet preserves the second packet's files"
+            );
+        }
+        drop(second_packet);
+        assert!(second_paths.iter().all(|(path, _)| !path.exists()));
     }
 
     #[test]
@@ -26282,8 +26319,24 @@ mod tests {
                 |_| b"iface".to_vec(),
                 CanonicalProducerIdentity::from_producer_bytes(producer),
             );
+        assert_eq!(originals.len(), 3);
+        assert_eq!(
+            originals
+                .iter()
+                .map(|original| original.owner.module.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "Input"]
+        );
+        assert!(originals[..2]
+            .iter()
+            .all(|original| graph.eligible_source_replay_root(&original.owner)));
+        assert!(
+            !graph.eligible_source_replay_root(&originals[2].owner),
+            "Input depends on an invocation value and cannot issue a source replay root"
+        );
         let entries = originals
             .into_iter()
+            .take(2)
             .map(|original| {
                 execution_entry_for_producer(original, Arc::clone(&graph), producer_sha256)
             })
