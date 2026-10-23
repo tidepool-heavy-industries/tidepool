@@ -3917,7 +3917,7 @@ impl RuntimeCellAdmission {
                 },
                 RuntimeCellCompilerBasis::World { reservation, .. } => {
                     use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-                    match reservation.slots().get(index) {
+                    match reservation.items().get(index).map(|item| item.slot()) {
                         Some(
                             Slot::Prologue { declaration } | Slot::Declaration { declaration },
                         ) => Some(Generation(*declaration)),
@@ -4320,9 +4320,10 @@ impl PersistentSession {
         let (generation, observation_name) =
             if let Some(reservation) = prefix.admission.world_reservation() {
                 let slot = reservation
-                    .slots()
+                    .items()
                     .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                    .ok_or(SessionError::StaleStagedDeclaration)?
+                    .slot();
                 let (generation, observation) = match (slot, item.kind()) {
                     (
                         Slot::Prologue { declaration } | Slot::Declaration { declaration },
@@ -4456,7 +4457,11 @@ impl PersistentSession {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         let generation = if let Some(reservation) = prefix.admission.world_reservation() {
             use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-            match reservation.slots().get(item.index()) {
+            match reservation
+                .items()
+                .get(item.index())
+                .map(|item| item.slot())
+            {
                 Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
                     Generation(*declaration)
                 }
@@ -5190,7 +5195,10 @@ impl PersistentSession {
         if !admission.belongs_to(self)
             || !Arc::ptr_eq(checked.reservation(), reservation)
             || program.admission_digest() != admission.digest()
-            || program.slots() != reservation.slots()
+            || program
+                .slots()
+                .iter()
+                .ne(reservation.items().iter().map(|item| item.slot()))
             || program.items().len() != checked.items().len()
             || program.items().iter().enumerate().any(|(ordinal, item)| {
                 item.checked_item().index() != ordinal
@@ -7119,7 +7127,7 @@ impl PersistentSession {
         preparation: Option<Arc<PrivatePreparationSnapshot>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+        use tidepool_toolchain::cell_plan::WorldCellReservationRequest as Request;
 
         self.validate_lexical_scope_lease(scope, &retained_scope)?;
         let transaction = self
@@ -7166,25 +7174,10 @@ impl PersistentSession {
         reserved_generations
             .try_reserve_exact(declaration_count)
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let mut slots = Vec::new();
-        slots
+        let mut requests = Vec::new();
+        requests
             .try_reserve_exact(plan.items().len())
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let mut expected_bindings = Vec::new();
-        expected_bindings
-            .try_reserve_exact(plan.items().len())
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        for item in plan.items() {
-            let mut bindings = Vec::new();
-            bindings
-                .try_reserve_exact(if item.kind() == Kind::Expression {
-                    1
-                } else {
-                    item.binders().len()
-                })
-                .map_err(|_| SessionError::StaleStagedDeclaration)?;
-            expected_bindings.push(bindings);
-        }
         {
             let admission = store
                 .as_ref()
@@ -7206,15 +7199,15 @@ impl PersistentSession {
         let (initial_value_generation, _) = self.reserve_value_generations(native_count)?;
         let mut declarations = reserved_generations.iter().copied();
         let mut next_value = initial_value_generation.0;
-        for (item, expected) in plan.items().iter().zip(&mut expected_bindings) {
-            let slot = match item.kind() {
-                Kind::Prologue => Slot::Prologue {
+        for item in plan.items() {
+            let request = match item.kind() {
+                Kind::Prologue => Request::Prologue {
                     declaration: declarations
                         .next()
                         .ok_or(SessionError::StaleStagedDeclaration)?
                         .0,
                 },
-                Kind::Declaration => Slot::Declaration {
+                Kind::Declaration => Request::Declaration {
                     declaration: declarations
                         .next()
                         .ok_or(SessionError::StaleStagedDeclaration)?
@@ -7224,13 +7217,17 @@ impl PersistentSession {
                     let value = next_value;
                     next_value += 1;
                     let module = tidepool_repr::SessionModule::val(Generation(value)).module_name();
+                    let mut bindings = Vec::new();
+                    bindings
+                        .try_reserve_exact(item.binders().len())
+                        .map_err(|_| SessionError::StaleStagedDeclaration)?;
                     for name in item.binders() {
                         let id = tidepool_repr::SessionVarId::from_extract(
                             tidepool_codegen::prepared_program::session_var_id(&module, name),
                         );
-                        expected.push((name.clone(), id));
+                        bindings.push((name.clone(), id));
                     }
-                    Slot::Bind { value }
+                    Request::Bind { value, bindings }
                 }
                 Kind::Expression => {
                     let capture = next_value;
@@ -7247,16 +7244,22 @@ impl PersistentSession {
                             &observation_name,
                         ),
                     );
-                    expected.push((observation_name.clone(), id));
-                    Slot::Expression {
+                    Request::Expression {
                         capture,
-                        observation_name,
+                        binding: (observation_name, id),
                     }
                 }
             };
-            slots.push(slot);
+            requests.push(request);
         }
-        self.validate_new_binding_ids(expected_bindings.iter().flatten().map(|(_, id)| *id))?;
+        self.validate_new_binding_ids(requests.iter().flat_map(|request| {
+            let bindings = match request {
+                Request::Bind { bindings, .. } => bindings.as_slice(),
+                Request::Expression { binding, .. } => std::slice::from_ref(binding),
+                Request::Prologue { .. } | Request::Declaration { .. } => &[],
+            };
+            bindings.iter().map(|(_, id)| *id)
+        }))?;
         let mut authorization = Vec::new();
         purpose.frame_authorization(&mut |bytes| authorization.push(bytes.to_vec()));
         let transaction = self
@@ -7272,7 +7275,7 @@ impl PersistentSession {
                 scope.0,
                 authorization,
             )?;
-        let token = plan.issue_admission_token(subject, slots, expected_bindings)?;
+        let token = plan.issue_admission_token(subject, requests)?;
         let reservation = plan.reserve(token)?;
         let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
             *reservation.admission_digest(),
@@ -7290,8 +7293,8 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.slots().iter().any(|slot| {
-                    matches!(slot,
+                declaration_baseline: if !reservation.items().iter().any(|item| {
+                    matches!(item.slot(),
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
                 }) {
