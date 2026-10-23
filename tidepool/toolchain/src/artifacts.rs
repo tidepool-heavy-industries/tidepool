@@ -13093,9 +13093,15 @@ mod source_proof_pairing_tests {
 }
 
 #[cfg(test)]
+#[path = "artifacts/tests/exact_source_fixture.rs"]
+mod exact_source_fixture;
+
+#[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
     use tidepool_extract_cmd::CompilerTransactionClose;
+
+    pub(crate) use super::exact_source_fixture::ExactSourceFixture;
 
     /// These callers declare an owned-resident compiler, so the isolated runner
     /// owns the input tree through case settlement, independently of automatic

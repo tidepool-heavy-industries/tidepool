@@ -34473,38 +34473,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     #[test]
     fn exact_product_binding_preserves_lexical_evidence_and_request_identity() {
-        use crate::artifact_inventory::CanonicalProducerIdentity;
+        use crate::artifacts::test_support::ExactSourceFixture;
         use tidepool_repr::execution_schema::{InventoryDecodeLimits, InventoryOperation};
 
-        let directory = tempfile::tempdir().unwrap();
-        let first_context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .admit_producer(
-                CanonicalProducerIdentity::from_producer_bytes(b"first producer").sha256(),
-            )
-            .unwrap();
-        let second_context = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .admit_producer(
-                CanonicalProducerIdentity::from_producer_bytes(b"second producer").sha256(),
-            )
-            .unwrap();
-        let roots = [
-            directory.path().join("first"),
-            directory.path().join("second"),
-        ];
-        let first_request = ExactCompileContext::new(Arc::new(first_context))
-            .prepare_compilation(&directory.path().join("first-request"), b"first producer")
-            .unwrap();
-        let second_request = ExactCompileContext::new(Arc::new(second_context))
-            .prepare_compilation(&directory.path().join("second-request"), b"second producer")
-            .unwrap();
-        let (first, source) = generated_source_admission_fixture(&roots[0], &first_request);
-        let (second, second_source) =
-            generated_source_admission_fixture(&roots[1], &second_request);
-        assert_eq!(source, second_source);
-        let input = roots[0].join("Consumer.hs");
-        let second_input = roots[1].join("Consumer.hs");
+        let source =
+            "module Consumer where\nresult :: Int\nresult = 17\n__tidepool_inspect_0 = result\n";
+        let first_fixture = ExactSourceFixture::inspect(None, source, "result").unwrap();
+        let second_fixture = ExactSourceFixture::inspect(None, source, "result").unwrap();
+        let first_request = first_fixture.request();
+        let second_request = second_fixture.request();
+        let first = &first_fixture.admissions()[0];
+        let second = &second_fixture.admissions()[0];
+        let input = first_fixture.source_path();
+        let second_input = second_fixture.source_path();
+        assert_eq!(first_fixture.source(), second_fixture.source());
+        assert_ne!(first_request.request_sha256, second_request.request_sha256);
         let mut evidence: crate::cache::DependencyEvidence =
             serde_json::from_slice(first.evidence_bytes()).unwrap();
         evidence.cache_safe = false;
@@ -34512,7 +34495,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let bytes = serde_json::to_vec(&evidence).unwrap();
         let operation = InventoryOperation::new(Default::default());
         let matched = first
-            .match_product(&first_request, &input, &source, &bytes, &operation)
+            .match_product(first_request, input, source, &bytes, &operation)
             .unwrap();
         assert_eq!(
             matched.exact().product_context_digest(),
@@ -34528,7 +34511,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         );
         assert!(std::ptr::eq(
             matched.exact().physical_request().unwrap(),
-            &first_request,
+            first_request,
         ));
         assert_eq!(operation.work_usage().unwrap().0, bytes.len() * 64);
         let mut second_evidence: crate::cache::DependencyEvidence =
@@ -34538,38 +34521,49 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let second_bytes = serde_json::to_vec(&second_evidence).unwrap();
         second
             .match_product(
-                &second_request,
-                &second_input,
-                &second_source,
+                second_request,
+                second_input,
+                second_fixture.source(),
                 &second_bytes,
                 &operation,
             )
             .unwrap();
         assert!(first
-            .match_product(&second_request, &input, &source, &bytes, &operation)
+            .match_product(second_request, input, source, &bytes, &operation)
             .is_err());
         assert!(first
-            .match_product(&first_request, &second_input, &source, &bytes, &operation)
+            .match_product(first_request, second_input, source, &bytes, &operation)
             .is_err());
         assert!(first
             .match_product(
-                &first_request,
-                &second_input,
-                &source,
+                first_request,
+                second_input,
+                source,
                 &second_bytes,
                 &operation,
             )
             .is_err());
         assert!(first
-            .match_product(&first_request, &input, &source, &second_bytes, &operation)
+            .match_product(first_request, input, source, &second_bytes, &operation)
             .is_err());
+        for changed in 0..3 {
+            let mut foreign = first_request.clone();
+            match changed {
+                0 => foreign.request_sha256 = sha256(b"another request"),
+                1 => foreign.semantic_sha256 = [9; 32],
+                _ => foreign.producer_sha256 = [9; 32],
+            }
+            assert!(first
+                .match_product(&foreign, input, source, &bytes, &operation)
+                .is_err());
+        }
 
         // JSON formatting is not source identity; lexical path spelling is.
         let reordered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let pretty = serde_json::to_vec_pretty(&reordered).unwrap();
         assert_ne!(pretty, bytes);
         first
-            .match_product(&first_request, &input, &source, &pretty, &operation)
+            .match_product(first_request, input, source, &pretty, &operation)
             .unwrap();
         for (cache_safe, selection_complete) in [(true, false), (false, true), (true, true)] {
             let mut changed = evidence.clone();
@@ -34577,25 +34571,41 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             changed.selection_complete = selection_complete;
             let changed = serde_json::to_vec(&changed).unwrap();
             assert!(first
-                .match_product(&first_request, &input, &source, &changed, &operation)
+                .match_product(first_request, input, source, &changed, &operation)
                 .is_err());
         }
         for alias in [
-            roots[0].join(".").join("Consumer.hs"),
-            PathBuf::from(format!("{}//Consumer.hs", roots[0].display())),
+            first_fixture
+                .receipt_directory()
+                .join(".")
+                .join("Consumer.hs"),
+            PathBuf::from(format!(
+                "{}//Consumer.hs",
+                first_fixture.receipt_directory().display()
+            )),
         ] {
             assert_eq!(alias, input);
             assert_eq!(
                 std::fs::canonicalize(&alias).unwrap(),
-                std::fs::canonicalize(&input).unwrap()
+                std::fs::canonicalize(input).unwrap()
             );
             let mut changed = evidence.clone();
-            changed.sources[0].path = alias.clone();
-            changed.modules[0].source = alias;
+            changed
+                .sources
+                .iter_mut()
+                .find(|row| row.path == input)
+                .unwrap()
+                .path = alias.clone();
+            changed
+                .modules
+                .iter_mut()
+                .find(|row| row.source == input)
+                .unwrap()
+                .source = alias;
             let changed = serde_json::to_vec(&changed).unwrap();
             assert_ne!(changed, bytes);
             let refusal = first
-                .match_product(&first_request, &input, &source, &changed, &operation)
+                .match_product(first_request, input, source, &changed, &operation)
                 .err()
                 .expect("lexically different evidence must not match the issued receipt");
             assert!(
@@ -34609,7 +34619,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             ..Default::default()
         });
         assert!(matches!(
-            first.match_product(&first_request, &input, &source, &bytes, &restricted),
+            first.match_product(first_request, input, source, &bytes, &restricted),
             Err(CompileError::CompilerEvidence(_))
         ));
         assert_eq!(restricted.work_usage().unwrap().0, 0);
@@ -34820,39 +34830,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     #[test]
     fn generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let context = Arc::new(
-            ExactDeclarationContext::from_authenticated_interfaces(
-                program_test_producer_sha256(),
-                &ArtifactInventory::default().empty_view(),
-                CompilerInputProjection::default(),
-            )
-            .unwrap(),
-        );
-        let request = context
-            .prepare_compilation(&directory.path().join("request-42"), PROGRAM_TEST_PRODUCER)
-            .unwrap();
-        let source = "module Consumer where\n";
-        let fixture = import_receipt(directory.path(), &request, "Unadmitted");
-        let mut receipt = read_receipt(&fixture);
-        receipt.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
-            .as_array_mut()
-            .unwrap()[3] = Value::Array(vec![]);
-        receipt.as_array_mut().unwrap()[10] = Value::Array(vec![]);
-        let output = directory.path().join("outputs");
-        let receipts = ["first", "second"].map(|name| {
-            let root = output.join(".exact-compilations").join(name);
-            std::fs::create_dir_all(&root).unwrap();
-            let snapshot = root.join("source.hs");
-            std::fs::write(&snapshot, source).unwrap();
-            let mut projected = receipt.clone();
-            projected.as_array_mut().unwrap()[6] = path_value(&snapshot).unwrap();
-            let path = root.join("receipt.cbor");
-            write_receipt(&path, &projected);
-            path
-        });
-        let expected = identity("fixture", "Consumer");
-        let admissions = request.validate_outputs(&output).unwrap();
+        use crate::artifacts::test_support::ExactSourceFixture;
+
+        let source =
+            "module Consumer where\nresult :: Int\nresult = 17\n__tidepool_inspect_0 = result\n";
+        let mut fixture = ExactSourceFixture::inspect(None, source, "result").unwrap();
+        fixture.repeat_same_request().unwrap();
+        let request = fixture.request();
+        let output = fixture.receipt_directory();
+        let receipts = fixture.receipt_paths();
+        let expected = identity("main", "Consumer");
+        let admissions = request.validate_outputs(output).unwrap();
         assert_eq!(admissions.len(), 2);
         assert_eq!(
             ExactSourceAdmission::matching_generated_source_owner(&admissions, source).unwrap(),
@@ -34865,15 +34853,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         )
         .is_err());
 
-        let snapshot = receipts[1].parent().unwrap().join("source.hs");
-        std::fs::write(&snapshot, b"changed after projection").unwrap();
-        assert!(request.validate_outputs(&output).is_err());
-        std::fs::write(&snapshot, source).unwrap();
+        for receipt in receipts {
+            let snapshot = receipt.parent().unwrap().join("source.hs");
+            std::fs::write(&snapshot, b"changed after compilation").unwrap();
+            assert!(request.validate_outputs(output).is_err());
+            std::fs::write(&snapshot, source).unwrap();
+            assert_eq!(request.validate_outputs(output).unwrap().len(), 2);
+        }
         let valid = read_receipt(&receipts[1]);
+        let original = std::fs::read(&receipts[1]).unwrap();
+        write_receipt(&receipts[1], &valid);
+        assert_eq!(std::fs::read(&receipts[1]).unwrap(), original);
         let mut changed_hash = valid.clone();
         changed_hash.as_array_mut().unwrap()[5] = text(sha256(b"different source"));
         write_receipt(&receipts[1], &changed_hash);
-        assert!(request.validate_outputs(&output).is_err());
+        assert!(request.validate_outputs(output).is_err());
 
         let mut malformed = valid.clone();
         let fields = malformed.as_array_mut().unwrap();
@@ -34882,7 +34876,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         evidence.modules[0].unit.clear();
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
         write_receipt(&receipts[1], &malformed);
-        assert!(request.validate_outputs(&output).is_err());
+        assert!(request.validate_outputs(output).is_err());
 
         let mut distinct = valid.clone();
         let fields = distinct.as_array_mut().unwrap();
@@ -34892,16 +34886,19 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         fields[7] = text(serde_json::to_string(&evidence).unwrap());
         fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[0] = text("other");
         write_receipt(&receipts[1], &distinct);
-        let distinct_admissions = request.validate_outputs(&output).unwrap();
-        assert_eq!(distinct_admissions.len(), 2);
-        assert!(ExactSourceAdmission::matching_generated_source_owner(
-            &distinct_admissions,
-            source
+        let distinct = decode_exact_compilation_receipt(
+            &receipts[1],
+            Some((&request.request_sha256, request.semantic_sha256)),
         )
-        .is_err());
+        .unwrap();
+        assert!(distinct
+            .evidence
+            .modules
+            .iter()
+            .any(|module| module.unit == "other"));
 
         write_receipt(&receipts[1], &valid);
-        let restored = request.validate_outputs(&output).unwrap();
+        let restored = request.validate_outputs(output).unwrap();
         assert_eq!(restored.len(), 2);
         assert_eq!(
             ExactSourceAdmission::matching_generated_source_owner(&restored, source).unwrap(),
