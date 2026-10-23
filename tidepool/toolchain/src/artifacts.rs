@@ -2681,77 +2681,13 @@ impl SelectedModuleCandidateOffer {
                         )
                     })?;
                 declaration_timing.advance("source_lexical_and_context_extension");
-                let mut lexical = context
-                    .lexical_graph()
-                    .iter()
-                    .map(|node| (node.owner.clone(), node.imports.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                // The certificate retains complete interface requirements.
-                // Fresh source owners join the lexical graph; captured value
-                // and hidden type owners remain exact hydration dependencies.
-                let selected = lexical
-                    .keys()
-                    .cloned()
-                    .chain(
-                        original
-                            .certificate
-                            .original_home_imports()
-                            .map(|(owner, _)| owner.clone()),
-                    )
-                    .chain(
-                        original
-                            .certificate
-                            .source_lexical_imports()
-                            .iter()
-                            .map(|node| node.owner.clone()),
-                    )
-                    .collect::<BTreeSet<_>>();
-                for (owner, imports) in original.certificate.original_home_imports() {
-                    let imports = imports
-                        .iter()
-                        .filter(|owner| selected.contains(owner))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if lexical
-                        .insert(owner.clone(), imports.clone())
-                        .is_some_and(|old| old != imports)
-                    {
-                        return Err(CompileError::ExtractFailed(
-                            "program changed an admitted original import".into(),
-                        ));
-                    }
-                }
-                for node in original.certificate.source_lexical_imports() {
-                    let imports = node
-                        .imports
-                        .iter()
-                        .filter(|owner| selected.contains(*owner))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if lexical
-                        .insert(node.owner.clone(), imports.clone())
-                        .is_some_and(|old| old != imports)
-                    {
-                        return Err(CompileError::ExtractFailed(
-                            "program changed authenticated inherited source imports".into(),
-                        ));
-                    }
-                }
-                context = Arc::new(
-                    (*context).clone().extend(
-                        std::slice::from_ref(&original.certificate),
-                        &[],
-                        lexical
-                            .into_iter()
-                            .map(
-                                |(owner, imports)| crate::declaration_join::ExactLexicalNode {
-                                    owner,
-                                    imports,
-                                },
-                            )
-                            .collect(),
-                    )?,
-                );
+                let surface = original.certificate.extend_source_surface(
+                    &crate::declaration_join::AdmittedDeclarationSurface::default(),
+                )?;
+                context = Arc::new(context.as_ref().clone().admit_authored_publication(
+                    std::slice::from_ref(&original.certificate),
+                    &surface,
+                )?);
                 declaration_timing.advance("private_input_context_continuation");
                 program_request = program_request.in_program_context_with_private_input(
                     context.clone(),
