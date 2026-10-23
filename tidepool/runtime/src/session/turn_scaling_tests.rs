@@ -1824,6 +1824,20 @@ where
             .filter_map(|item| item.native().map(|native| native.target_owned()))
             .collect();
 
+        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) = program.basis()
+        else {
+            panic!("scaling cells require actual World output observations");
+        };
+        eprintln!(
+            "protected-scale {}",
+            serde_json::json!({
+                "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
+                "phase": format!("{label}.world_output_observation"),
+                "items": output.items().len(),
+                "response_diagnostic_bytes": output.compiler_observation().stderr().len(),
+                "warnings": output.compiler_observation().diagnostics().len(),
+            })
+        );
         let prefix = resident
             .begin_cell_program(program)
             .unwrap()
@@ -2072,16 +2086,6 @@ where
                 "expected source to execute through the native observation path"
             );
         }
-        let work = checked.checked_item(0).unwrap().input_work();
-        eprintln!(
-            "protected-scale {}",
-            serde_json::json!({
-                "schema": 1, "prefix": scenario.0, "baseline": scenario.1, "phase": format!("{label}.checked_input_work"),
-                "initial_files_written": work.initial_files_written,
-                "initial_bytes_written_and_hashed": work.initial_bytes_written_and_hashed,
-                "output_files_hashed": work.output_files_hashed, "output_bytes_hashed": work.output_bytes_hashed,
-            })
-        );
         let private_winners = resident
             .public_visibility_snapshot_in(execution.private_scope())
             .unwrap()
