@@ -425,9 +425,9 @@ fn assert_reconciled_whole_row_precedence(
             assert!(
                 matches!(receiving.checked_program_extension(incoming),
                 Err(CompileError::ArtifactInventory(error))
-                    if matches!(error.failure, ArtifactInventoryFailure::ProgramExtension {
+                    if matches!(&error.failure, ArtifactInventoryFailure::ProgramExtension {
                         owner: refused_owner, reason: refused_reason,
-                    } if &refused_owner == owner && refused_reason == reason)),
+                    } if refused_owner == owner && refused_reason == &reason)),
                 "independent scopes refuse strict append with the exact conflicting binding pair"
             );
         }
