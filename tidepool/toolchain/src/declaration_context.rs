@@ -19013,6 +19013,11 @@ mod tests {
             "no payload or native-body difference can explain refusal"
         );
         assert_ne!(
+            left.support.artifacts().capture_graph_selection().namespace,
+            right.support.artifacts().capture_graph_selection().namespace,
+            "equal role payloads retain distinct issued binding rows"
+        );
+        assert_ne!(
             left.support.artifacts().binding_dependencies(),
             right.support.artifacts().binding_dependencies(),
             "the canonical root retains its actual canonical child binding"
