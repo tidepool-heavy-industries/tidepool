@@ -54,11 +54,6 @@ impl CellRecipe {
     pub fn injected_modules(&self) -> &[String] {
         &self.injected_modules
     }
-    pub(crate) fn template_sources(&self) -> Vec<String> {
-        std::iter::once(self.template_source.clone())
-            .chain(self.turn_templates.iter().map(|(_, source)| source.clone()))
-            .collect()
-    }
     /// Actor admission binds the exact source and compiler recipe inputs.
     /// Runtime view/native identities enter the separate admission digest.
     pub fn specification_digest(&self) -> [u8; 32] {
@@ -523,64 +518,35 @@ pub(crate) struct CheckedItem {
     signatures: Vec<ExactCheckedSignature>,
 }
 
-struct CheckedCellSpecification {
-    program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
-    injected: Vec<String>,
-    reserved: Vec<String>,
-}
-
-impl std::fmt::Debug for CheckedCellSpecification {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_tuple("CheckedCellSpecification")
-            .field(&self.admission_digest())
-            .finish()
-    }
-}
-
-impl CheckedCellSpecification {
-    fn admission_digest(&self) -> [u8; 32] {
-        *self.program.reservation().admission_digest()
-    }
-    fn specification_digest(&self) -> [u8; 32] {
-        *self.program.reservation().plan().digest()
-    }
-    fn template_sources(&self) -> Vec<String> {
-        let recipe = self.program.reservation().plan().recipe();
-        std::iter::once(recipe.template.clone())
-            .chain(
-                recipe
-                    .turn_templates
-                    .iter()
-                    .map(|(_, source)| source.clone()),
-            )
-            .collect()
-    }
-    fn injected_modules(&self) -> &[String] {
-        &self.injected
-    }
-    fn reserved_declaration_modules(&self) -> &[String] {
-        &self.reserved
-    }
-    fn turn_templates(&self) -> &[(String, String)] {
-        &self.program.reservation().plan().recipe().turn_templates
-    }
-}
-
-#[derive(Debug)]
 pub struct ExactCheckedCell {
-    specification: CheckedCellSpecification,
+    world: Arc<crate::compiler_world::CheckedWorldCellProgram>,
     producer: [u8; 32],
-    context: [u8; 32],
     declaration_context: Arc<crate::declaration_context::ExactDeclarationContext>,
     receipt_digest: [u8; 32],
     checked_source: Arc<str>,
-    evidence: Vec<(String, Arc<crate::cache::CompletedSourceEvidence>)>,
     observations: Arc<[u8]>,
     include: Vec<std::path::PathBuf>,
     planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
     typed_segments: Vec<CheckedTypedSegmentPlan>,
     value_inputs: Arc<CheckedValueInputs>,
+}
+
+impl std::fmt::Debug for ExactCheckedCell {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExactCheckedCell")
+            .field("world_certificate", self.world.certificate_sha256())
+            .field("producer", &self.producer)
+            .field("declaration_context", &self.declaration_context)
+            .field("receipt_digest", &self.receipt_digest)
+            .field("checked_source", &self.checked_source)
+            .field("observations", &self.observations)
+            .field("include", &self.include)
+            .field("planned_declarations", &self.planned_declarations)
+            .field("typed_segments", &self.typed_segments)
+            .field("value_inputs", &self.value_inputs)
+            .finish()
+    }
 }
 
 /// Compiler-issued normalization of one ordered inference segment. This
@@ -2179,7 +2145,7 @@ impl CheckedValueInputs {
         support: &crate::declaration_context::PreparedValueSourceSupport,
         produced: &ProducedValueTypeInterfaces,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
-        let templates = cell.specification.template_sources();
+        let templates = cell.template_sources();
         let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
             original_execution,
             &templates,
@@ -2410,6 +2376,17 @@ pub(crate) struct PlannedCheckedDeclaration {
 }
 
 impl ExactCheckedCell {
+    fn template_sources(&self) -> Vec<String> {
+        let recipe = self.world.reservation().plan().recipe();
+        std::iter::once(recipe.template.clone())
+            .chain(
+                recipe
+                    .turn_templates
+                    .iter()
+                    .map(|(_, source)| source.clone()),
+            )
+            .collect()
+    }
     fn checked_item_observation(&self, index: usize) -> Option<&CheckedItem> {
         self.specification
             .program
@@ -2424,10 +2401,10 @@ impl ExactCheckedCell {
             .map(|item| item.checked_item_observation())
     }
     pub fn item_count(&self) -> usize {
-        self.specification.program.items().len()
+        self.world.items().len()
     }
     pub fn admission_digest(&self) -> [u8; 32] {
-        self.specification.admission_digest()
+        *self.world.reservation().admission_digest()
     }
     pub fn checked_source(&self) -> &str {
         &self.checked_source
@@ -2442,26 +2419,6 @@ impl ExactCheckedCell {
             cell: self.clone(),
             index,
         })
-    }
-    pub(crate) fn revalidate(
-        &self,
-        producer: &[u8],
-        context: &[u8; 32],
-    ) -> Result<(), CompileError> {
-        if self.producer
-            != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                .sha256()
-            || &self.context != context
-            || self
-                .evidence
-                .iter()
-                .any(|(source, evidence)| evidence.revalidate(source).is_err())
-        {
-            return Err(failure(
-                "checked cell producer, context or consumed inputs changed",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -3269,25 +3226,6 @@ impl ExactCompiledPrefix {
         next.completed.push(CompletedCheckedItem::Declaration(item));
         Ok(next)
     }
-    pub fn injected_modules(&self) -> Vec<String> {
-        self.cell
-            .specification
-            .injected_modules()
-            .iter()
-            .cloned()
-            .chain(
-                self.completed
-                    .iter()
-                    .filter_map(CompletedCheckedItem::native)
-                    .filter_map(|completed| {
-                        completed
-                            .value_interface
-                            .as_ref()
-                            .map(|artifact| artifact.interface.module.clone())
-                    }),
-            )
-            .collect()
-    }
     pub(crate) fn prepared_value_selection(&self) -> Result<CheckedSettledValues, CompileError> {
         // Requirements keep every original qualified binder, including names
         // shadowed by a later declaration or Val. Runtime leases retain those
@@ -3395,8 +3333,7 @@ impl Eq for ExactCheckedItem {}
 impl ExactCheckedItem {
     pub fn world_stage_dependencies(&self) -> &Arc<crate::compiler_world::SealedStageDependencies> {
         self.cell
-            .specification
-            .program
+            .world
             .item(self.index)
             .expect("exact checked World item belongs to its program")
             .proof()
@@ -3408,35 +3345,16 @@ impl ExactCheckedItem {
         &self,
     ) -> crate::compiler_world::WorldCellRuntimeInputs<'_> {
         self.cell
-            .specification
-            .program
+            .world
             .item(self.index)
             .expect("exact checked World item belongs to its program")
             .selected_runtime_inputs()
-    }
-    pub fn specification_digest(&self) -> [u8; 32] {
-        self.cell.specification.specification_digest()
-    }
-    pub fn reserved_declaration_modules(&self) -> &[String] {
-        self.cell.specification.reserved_declaration_modules()
-    }
-    pub fn injected_modules(&self) -> &[String] {
-        self.cell.specification.injected_modules()
     }
     pub fn include_paths(&self) -> &[std::path::PathBuf] {
         &self.cell.include
     }
     pub fn input_work(&self) -> CheckedInputWork {
         self.cell.value_inputs.work()
-    }
-    pub fn baseline_value_interfaces(
-        &self,
-    ) -> impl Iterator<Item = (&tidepool_repr::SessionModule, &Arc<[u8]>)> {
-        self.cell
-            .value_inputs
-            .baseline
-            .iter()
-            .map(|artifact| (&artifact.input().owner, &artifact.input().bytes))
     }
     /// Exact row owners retained by this checked compilation's demanded inputs.
     pub fn baseline_checked_value_interfaces(
@@ -3468,12 +3386,6 @@ impl ExactCheckedItem {
             .then_some(self.cell.planned_declarations.get(&self.index))
             .flatten()
             .map(|planned| planned.source.as_str())
-    }
-    pub(crate) fn cell_include(&self) -> &[std::path::PathBuf] {
-        &self.cell.include
-    }
-    pub fn turn_templates(&self) -> &[(String, String)] {
-        self.cell.specification.turn_templates()
     }
     pub fn index(&self) -> usize {
         self.index
@@ -3712,7 +3624,7 @@ impl PreparedCheckedItemOutput {
         let program_entry = sealed.typed_entry();
         let source = output.source();
         let target = output.target();
-        if !std::ptr::eq(item.cell.specification.program.as_ref(), program) {
+        if !std::ptr::eq(item.cell.world.as_ref(), program) {
             return Err(failure("World item differs from its captured output owner"));
         }
         timing.advance("validate_typed_entry");
@@ -4146,7 +4058,7 @@ pub(crate) fn admit_world_checked_items(
 }
 
 /// Adapt the already checked World items into the common checked-cell owner.
-/// The reservation and original captured output remain retained in its basis.
+/// The reservation and original captured output remain retained in its World owner.
 pub(crate) fn admit_world_cell(
     program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
     stages: Vec<crate::declaration_context::SealedWorldStage>,
@@ -4161,7 +4073,6 @@ pub(crate) fn admit_world_cell(
     if stages.len() != program.stages().len() {
         return Err(failure("World checked cell lacks its sealed stages"));
     }
-    let mut evidence = Vec::with_capacity(stages.len());
     let mut aliases = std::collections::BTreeSet::new();
     let mut planned_declarations = BTreeMap::new();
     let mut items = Vec::with_capacity(program.items().len());
@@ -4231,7 +4142,6 @@ pub(crate) fn admit_world_cell(
                 }
             }
         }
-        evidence.push((source.text, source.source.evidence().clone()));
         aliases.extend(source.aliases);
     }
     if items.len() != program.items().len() {
@@ -4245,31 +4155,12 @@ pub(crate) fn admit_world_cell(
             .collect(),
         program.demanded_rows(),
     )?;
-    let injected = program
-        .demanded_rows()
-        .iter()
-        .map(|row| row.owner().module_name())
-        .collect();
-    let reserved = program
-        .reservation()
-        .slots()
-        .filter_map(|slot| match slot {
-            CheckedPlannedCellSlot::Prologue { declaration }
-            | CheckedPlannedCellSlot::Declaration { declaration } => Some(
-                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(declaration))
-                    .module_name(),
-            ),
-            _ => None,
-        })
-        .collect();
     Ok((
         Arc::new(ExactCheckedCell {
             producer: *program.producer_sha256(),
-            context: program.primary_context().semantic_sha256(),
             declaration_context: program.primary_context().clone(),
             receipt_digest: *program.certificate_sha256(),
             checked_source: program.checked_source().clone(),
-            evidence,
             observations: program.observations().clone(),
             include: aliases.into_iter().collect(),
             planned_declarations,
@@ -4279,11 +4170,7 @@ pub(crate) fn admit_world_cell(
                 .map(|segment| segment.as_ref().clone())
                 .collect(),
             value_inputs,
-            specification: CheckedCellSpecification {
-                program,
-                injected,
-                reserved,
-            },
+            world: program,
         }),
         items,
     ))
