@@ -1599,20 +1599,14 @@ impl ModuleCandidateOffer {
     /// in `lexical`; import text alone cannot supply either proof.
     pub fn compiler_world_inputs(
         primary: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
-        bindings: crate::compiler_world::CompilerWorldBindings,
+        bindings: crate::compiler_world::VisibleWorldBindings,
         sources: Arc<crate::compiler_world::CapturedCompilerSources>,
         lexical: crate::compiler_world::CompilerWorldLexicalSurface,
     ) -> Result<crate::compiler_world::CompilerWorldOpenInputs, CompileError> {
-        let visible_rows = bindings.cold_rows()?;
         let primary = checked_offer_context(primary)?;
         let directory = Arc::new(compiler_scratch_directory()?);
         crate::compiler_world::CompilerWorldOpenInputs::from_primary_selection(
-            primary,
-            visible_rows,
-            bindings,
-            sources,
-            lexical,
-            directory,
+            primary, bindings, sources, lexical, directory,
         )
     }
 
@@ -8910,7 +8904,7 @@ mod module_product_tests {
         use crate::cell_plan::WorldCellAdmissionSubject;
         use crate::checked_cell::{CellProgramBasis, CheckedPlannedCellSlot};
         use crate::compiler_world::{
-            CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorldBindings,
+            CapturedCompilerSourceRoot, CapturedCompilerSources, VisibleWorldBindings,
             WorldSourceSelection,
         };
         use tidepool_extract_cmd::{
@@ -9160,7 +9154,7 @@ mod module_product_tests {
                     let source = WorldSourceSelection::new(*sources.seal(), "native-world-source")?;
                     let inputs = ModuleCandidateOffer::compiler_world_inputs(
                         initial.clone(),
-                        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+                        VisibleWorldBindings::from_published_bindings(0, std::iter::empty())?,
                         sources,
                         crate::compiler_world::CompilerWorldLexicalSurface::from_import_lines(
                             if mixed {
@@ -9599,7 +9593,7 @@ mod module_product_tests {
         use crate::checked_cell::{CellProgramBasis, CheckedPlannedCellSlot};
         use crate::compiler_world::{
             CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorldBinding,
-            CompilerWorldBindings, CompilerWorldLexicalSurface, PublicModuleQuestion,
+            CompilerWorldLexicalSurface, PublicModuleQuestion, VisibleWorldBindings,
             WorldSourceSelection,
         };
         use tidepool_extract_cmd::{
@@ -9659,7 +9653,7 @@ mod module_product_tests {
                     let world = crate::compiler_world::open_world(
                         ModuleCandidateOffer::compiler_world_inputs(
                             None,
-                            CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+                            VisibleWorldBindings::from_published_bindings(0, std::iter::empty())?,
                             sources,
                             CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
                         )?,
@@ -9828,6 +9822,39 @@ mod module_product_tests {
                     occurrence: binder.name().into(),
                     record_parent: None,
                 };
+                let binding = |name| {
+                    CompilerWorldBinding::from_checked_value(
+                        name,
+                        &symbol,
+                        tidepool_repr::SessionVarId::from_extract(binder.varid()),
+                        1,
+                        row.clone(),
+                    )
+                };
+                assert!(VisibleWorldBindings::from_published_bindings(
+                    1,
+                    [binding(binder.name()), binding(binder.name())]
+                )
+                .is_err());
+                let aliases = VisibleWorldBindings::from_published_bindings(
+                    1,
+                    [binding(binder.name()), binding("sameRowAlias")],
+                )
+                .unwrap();
+                assert_eq!(aliases.names().count(), 2);
+                let mut foreign = symbol.clone();
+                foreign.module.push_str(".Foreign");
+                assert!(VisibleWorldBindings::from_published_bindings(
+                    1,
+                    [CompilerWorldBinding::from_checked_value(
+                        binder.name(),
+                        &foreign,
+                        tidepool_repr::SessionVarId::from_extract(binder.varid()),
+                        1,
+                        row.clone(),
+                    )]
+                )
+                .is_err());
                 current = program
                     .item_successor(
                         &current,
