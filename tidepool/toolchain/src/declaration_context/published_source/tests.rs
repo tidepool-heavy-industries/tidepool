@@ -45,6 +45,7 @@ fn published_source_composition_preserves_sealed_selection_across_repeated_impor
     let role =
         source.compiler_input_projection().snapshot_roles()[&fixture.root.descriptor.owner].clone();
     assert!(role.is_published_source_original());
+    check_publication_foreign_native_scopes(&fixture);
     for start_empty in [false, true] {
         let mut receiver = if start_empty {
             ExactDeclarationContext::new(&[], &[], vec![]).unwrap()
@@ -82,6 +83,257 @@ fn published_source_composition_preserves_sealed_selection_across_repeated_impor
     );
     assert_eq!(source.semantic_sha256(), before);
     assert_eq!(source.artifact_view().capture_graph_selection(), graph);
+}
+
+/// Equal payload custody is not the publication's exact native issuer.
+fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture) {
+    use crate::artifact_inventory::{ArtifactBindingNode, ExactArtifactSelection};
+    use crate::certified_products::PendingImportOwner;
+    use fvm_ipld_blockstore::Blockstore;
+
+    let publication = &fixture.publication;
+    let source = publication.context();
+    let root = &fixture.root;
+    let helper = &fixture.helper;
+    let genuine = source.artifact_view().capture_graph_selection();
+    let producer = root.descriptor.producer_sha256;
+    let mut entries = source
+        .artifact_view()
+        .entries_for_artifacts(&source.artifact_view().artifact_ids())
+        .unwrap();
+    entries.push(Arc::new(ArtifactEntry::canonical(
+        crate::certified_products::fixture_module_interface(
+            producer,
+            "fixture",
+            "IndependentNativeDataScope",
+            BTreeMap::new(),
+        ),
+    )));
+    let independent = ArtifactInventory::default();
+    // This issues native DATA from already certified payloads. It has no
+    // completed output or SOURCE publication authority.
+    let foreign_view = independent
+        .admit_shared(&independent.empty_view(), entries)
+        .unwrap()
+        .select_roots(vec![root.descriptor.id])
+        .unwrap();
+    let foreign = foreign_view.capture_graph_selection();
+    let genuine_groups = genuine
+        .native_groups
+        .iter()
+        .copied()
+        .filter(|group| group.binding.artifact() == root.descriptor.id)
+        .collect::<BTreeSet<_>>();
+    let foreign_groups = foreign
+        .native_groups
+        .iter()
+        .copied()
+        .filter(|group| group.binding.artifact() == root.descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(!genuine_groups.is_empty());
+    assert_eq!(
+        genuine_groups
+            .iter()
+            .map(|group| group.original_ordinal)
+            .collect::<BTreeSet<_>>(),
+        foreign_groups
+            .iter()
+            .map(|group| group.original_ordinal)
+            .collect()
+    );
+    for group in &genuine_groups {
+        let other = foreign_groups
+            .iter()
+            .find(|other| other.original_ordinal == group.original_ordinal)
+            .unwrap();
+        assert_ne!(
+            group.binding, other.binding,
+            "equal native payload and ordinal have distinct issuing scopes"
+        );
+    }
+    let ArtifactPayload::Original(product) = &root.payload else {
+        unreachable!()
+    };
+    let ordinal = fixture.root_ordinals[1];
+    let binder = crate::certified_products::original_native_group_definitions(product, ordinal)
+        .unwrap()
+        .export_contracts()
+        .map(Result::unwrap)
+        .find(|contract| contract.identity.occurrence == "second")
+        .expect("the actual selected group exports second")
+        .identity
+        .clone();
+    let imports = [PendingImportOwner::Source {
+        owner: product.owner().clone(),
+        original_ordinal: ordinal,
+        binder,
+    }];
+    let support = source
+        .compiler_source_support()
+        .retain_custody(&foreign_view)
+        .unwrap();
+    let held = source
+        .as_ref()
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
+        .unwrap();
+    assert_eq!(held.compiler_input_roles(), source.compiler_input_roles());
+    assert_eq!(
+        held.artifact_view().capture_graph_selection().roots,
+        genuine.roots
+    );
+    assert!(
+        foreign_groups
+            .iter()
+            .all(|group| held.artifact_view().contains_issued_native_group(*group)),
+        "foreign proofs are held as DATA custody, not absent from acquisition"
+    );
+    let assert_target_selection = |context: &ExactDeclarationContext| {
+        assert_eq!(
+            context
+                .published_source_original_selections_for_target(&genuine_groups, &imports)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            context
+                .published_source_original_selections_for_target(&foreign_groups, &imports)
+                .unwrap()
+                .is_empty(),
+            "matching source spelling cannot replace the published native issuer"
+        );
+        let mixed = genuine_groups.union(&foreign_groups).copied().collect();
+        assert!(
+            context
+                .published_source_original_selections_for_target(&mixed, &imports)
+                .unwrap()
+                .is_empty(),
+            "one genuine group cannot hide a foreign group of the same payload"
+        );
+    };
+    assert_target_selection(&held);
+    let (_scratch, inventory, _) =
+        super::history_properties::restored_graph_roles(&held, &held.compiler_input_roles())
+            .unwrap();
+    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+    let mut writer = crate::exact_context::Materializer::new(&store);
+    let written = writer.materialize_context(None, &held.snapshot()).unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        store.put_keyed(&cid, &bytes).unwrap();
+    }
+    let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
+    let recovered = inventory
+        .context_for_expected_snapshot(written.root(), &decoded)
+        .unwrap();
+    assert_eq!(
+        recovered.semantic_sha256(),
+        held.semantic_sha256(),
+        "unchanged Context9 cold positive"
+    );
+    assert!(foreign_groups.iter().all(|group| recovered
+        .artifact_view()
+        .contains_issued_native_group(*group)));
+    assert_target_selection(&recovered);
+
+    let published_role =
+        held.compiler_input_projection().snapshot_roles()[&root.descriptor.owner].clone();
+    let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &published_role else {
+        unreachable!()
+    };
+    let birth = selection.graph_selection();
+    let child =
+        held.compiler_input_projection().snapshot_roles()[&helper.descriptor.owner].interface();
+    let mut substitutions = Vec::new();
+    for (name, artifact) in [("carrier", root.descriptor.id), ("child", child)] {
+        let replacement = *foreign
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == artifact)
+            .unwrap();
+        let mut graph = birth.clone();
+        let current = graph
+            .namespace
+            .iter_mut()
+            .find(|binding| binding.artifact == artifact)
+            .unwrap();
+        assert_ne!(
+            *current, replacement,
+            "{name} scope substitution must change the binding"
+        );
+        *current = replacement;
+        graph.namespace.sort();
+        substitutions.push((name, graph));
+    }
+    let mut graph = birth.clone();
+    let parent = graph
+        .native_groups
+        .iter_mut()
+        .find(|group| {
+            group.binding.artifact() == root.descriptor.id && group.original_ordinal == ordinal
+        })
+        .unwrap();
+    let previous = *parent;
+    let replacement = *foreign_groups
+        .iter()
+        .find(|group| group.original_ordinal == ordinal)
+        .unwrap();
+    assert_ne!(previous, replacement);
+    *parent = replacement;
+    graph.native_groups.sort();
+    for node in graph.roots.iter_mut().chain(&mut graph.custody_roots) {
+        if *node == ArtifactBindingNode::Group(previous) {
+            *node = ArtifactBindingNode::Group(replacement);
+        }
+    }
+    graph.roots.sort();
+    graph.custody_roots.sort();
+    substitutions.push(("parent", graph));
+    for (name, mut graph) in substitutions {
+        // Hold both real native graphs in the mutated selection. The selected
+        // slot changes issuer; it must not fail merely from an absent binding
+        // or a missing dependency node in the recorded DATA graph.
+        graph.bindings.extend(foreign.bindings.iter().copied());
+        graph.bindings.sort();
+        graph.bindings.dedup();
+        graph
+            .native_groups
+            .extend(foreign.native_groups.iter().copied());
+        graph.native_groups.sort();
+        graph.native_groups.dedup();
+        graph.custody_roots.extend(foreign.roots.iter().copied());
+        graph
+            .custody_roots
+            .extend(foreign.custody_roots.iter().copied());
+        graph.custody_roots.sort();
+        graph.custody_roots.dedup();
+        let foreign_selection = ExactArtifactSelection::from_recovered_graph_selection(graph);
+        held.artifact_view().select_issued(vec![root.descriptor.id], &foreign_selection)
+            .unwrap_or_else(|error| panic!("{name} foreign DATA selection must authenticate before SOURCE refusal: {error:?}"));
+        let mut role = published_role.clone();
+        let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &mut role else {
+            unreachable!()
+        };
+        *selection = foreign_selection;
+        let mut snapshot = held.snapshot();
+        snapshot.native_fact_owner = None;
+        snapshot
+            .roles
+            .insert(root.descriptor.owner.clone(), role.recorded_fact());
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let mutated = writer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let decoded = crate::exact_context::hydrate_context(&store, mutated.root()).unwrap();
+        let error = inventory
+            .context_for_expected_snapshot(mutated.root(), &decoded)
+            .expect_err(
+                "a retained foreign scope cannot replace the publication's issued selection",
+            );
+        eprintln!("cold publication {name} scope substitution refused: {error:?}");
+    }
 }
 
 #[test]
