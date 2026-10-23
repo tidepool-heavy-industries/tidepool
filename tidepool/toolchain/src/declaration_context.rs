@@ -4787,6 +4787,126 @@ impl NativeCompilerTransport {
     }
 }
 
+/// Own the physical backing chosen for exactly one lowered compiler view.
+/// Manifest assembly consumes this owner without selecting a view or delivery mode.
+struct PreparedNativeCompilerTransport {
+    context: Arc<ExactDeclarationContext>,
+    root: PathBuf,
+    producer: CanonicalProducerIdentity,
+    authorization: Option<Value>,
+    inputs: RequestCompilerInputs,
+    metadata: Arc<CompilerArtifactMetadata>,
+    retained: Arc<RetainedArtifactMaterialization>,
+    delivery: RequestInputTransport,
+    reused: bool,
+}
+
+impl NativeCompilerTransport {
+    fn prepare(
+        self,
+        context: &Arc<ExactDeclarationContext>,
+        root: &Path,
+        producer: &[u8],
+        authorization: Option<Value>,
+        delivery: RequestInputTransport,
+    ) -> Result<PreparedNativeCompilerTransport, CompileError> {
+        let Self { inputs, metadata } = self;
+        let view = inputs.artifacts();
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer);
+        let admitted_empty = authorization.is_some()
+            && context.owner.facts.producer == [0; 32]
+            && metadata.entries.is_empty()
+            && context.owner.facts.lexical.is_empty();
+        if !root.is_absolute()
+            || (!admitted_empty
+                && (context.owner.facts.producer == [0; 32]
+                    || context.owner.facts.producer != producer.sha256()))
+        {
+            return Err(failure(
+                "compile request has a different producer or invalid root",
+            ));
+        }
+        let reused = view.retained_materialization(&metadata)?.is_some();
+        #[cfg(test)]
+        if matches!(delivery, RequestInputTransport::DurableFiles)
+            && (reused
+                || context
+                    .artifact_view()
+                    .retained_materialization(&metadata)?
+                    .is_some())
+        {
+            return Err(failure(
+                "fixture delivery requires a fresh matched artifact owner",
+            ));
+        }
+        std::fs::create_dir_all(root)?;
+        let materialize = |parents: Vec<Arc<RetainedArtifactMaterialization>>| {
+            let directory = match delivery {
+                RequestInputTransport::OwnedArena => tempfile::Builder::new()
+                    .prefix("tidepool-exact-artifacts-")
+                    .tempdir()?,
+                #[cfg(test)]
+                RequestInputTransport::DurableFiles => {
+                    if !parents.is_empty() {
+                        return Err(failure(
+                            "fixture delivery cannot borrow process-local artifact owners",
+                        ));
+                    }
+                    tempfile::Builder::new()
+                        .prefix("tidepool-exact-artifacts-")
+                        .tempdir_in(root)?
+                }
+            };
+            #[cfg(test)]
+            let (directory, packet_root) = {
+                let mut directory = directory;
+                let packet_root = if matches!(delivery, RequestInputTransport::DurableFiles) {
+                    let path = directory.path().to_path_buf();
+                    directory.disable_cleanup(true);
+                    Some(path)
+                } else {
+                    None
+                };
+                (directory, packet_root)
+            };
+            let result = context
+                .materialize_retained_artifacts(view, &metadata, parents, directory, &delivery);
+            #[cfg(test)]
+            if result.is_err() {
+                if let Some(path) = packet_root {
+                    if let Err(error) = std::fs::remove_dir_all(&path) {
+                        tracing::warn!(target: "tidepool_toolchain::artifacts",
+                            phase = "fixture_materialization_cleanup", ?path, %error,
+                            "packet owner retains failed materialization cleanup");
+                    }
+                }
+            }
+            let retained = result?;
+            Ok(retained)
+        };
+        let retained = match delivery {
+            RequestInputTransport::OwnedArena => {
+                view.retain_materialization(&metadata, materialize)?
+            }
+            #[cfg(test)]
+            RequestInputTransport::DurableFiles => {
+                view.retain_fresh_materialization(&metadata, materialize)?
+            }
+        };
+        Ok(PreparedNativeCompilerTransport {
+            context: Arc::clone(context),
+            root: root.to_path_buf(),
+            producer,
+            authorization,
+            inputs,
+            metadata,
+            retained,
+            delivery,
+            reused,
+        })
+    }
+}
+
 /// Materialization may privately contain execution graph bytes for dependency
 /// originals. Only the unchanged compiler roles issue their replay roots.
 fn compiler_execution_scope(
@@ -16453,68 +16573,15 @@ impl ExactDeclarationContext {
         producer: &[u8],
     ) -> Result<ExactCompilationRequest, CompileError> {
         let scaffold = ProtectedScaffoldRequirements::default();
-        let transport = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?)?;
-        let metadata = &transport.metadata;
-        let transported_artifacts = transport.inputs.artifacts();
-        if !root.is_absolute()
-            || self
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .retained_materialization(&metadata)?
-                .is_some()
-            || transported_artifacts
-                .retained_materialization(metadata)?
-                .is_some()
-            || self.owner.facts.producer
-                != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    producer,
-                )
-                .sha256()
-        {
-            return Err(failure(
-                "fixture delivery requires a fresh matched artifact owner",
-            ));
-        }
-        std::fs::create_dir_all(root)?;
-
-        // Lowering may issue a new selected view. Keep the packet's physical
-        // custody on the exact view consumed by request preparation.
-        transported_artifacts.retain_materialization(metadata, |parents| {
-            if !parents.is_empty() {
-                return Err(failure(
-                    "fixture delivery cannot borrow process-local artifact owners",
-                ));
-            }
-            let mut directory = tempfile::Builder::new()
-                .prefix("tidepool-exact-artifacts-")
-                .tempdir_in(root)?;
-            let cleanup_on_failure = directory.path().to_path_buf();
-            // These paths already belong to the packet's scoped directory. Its
-            // owner releases them after the downstream process consumes them.
-            directory.disable_cleanup(true);
-            let result = self.materialize_retained_artifacts(
-                transport.inputs.artifacts(),
-                &metadata,
-                parents,
-                directory,
-                &RequestInputTransport::DurableFiles,
-            );
-            if result.is_err() {
-                let _ = std::fs::remove_dir_all(cleanup_on_failure);
-            }
-            result
-        })?;
-        self.prepare_compilation_from_metadata(
-            root,
-            producer,
-            None,
-            transport,
-            &scaffold,
-            None,
-            RequestInputTransport::DurableFiles,
-        )
+        let prepared = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?)?
+            .prepare(
+                self,
+                root,
+                producer,
+                None,
+                RequestInputTransport::DurableFiles,
+            )?;
+        prepared.into_request(&scaffold, None)
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -16552,15 +16619,14 @@ impl ExactDeclarationContext {
     ) -> Result<ExactCompilationRequest, CompileError> {
         let inputs = scaffold.compiler_inputs(self, private.as_ref())?;
 
-        self.prepare_compilation_from_metadata(
+        let prepared = NativeCompilerTransport::lower(inputs)?.prepare(
+            self,
             root,
             producer,
             authorization,
-            NativeCompilerTransport::lower(inputs)?,
-            scaffold,
-            private,
             RequestInputTransport::OwnedArena,
-        )
+        )?;
+        prepared.into_request(scaffold, private)
     }
 
     /// Bind authorization and the request to one observation of this immutable
@@ -16597,15 +16663,14 @@ impl ExactDeclarationContext {
             None => baseline,
         };
 
-        self.prepare_compilation_from_metadata(
+        let prepared = NativeCompilerTransport::lower(inputs)?.prepare(
+            self,
             root,
             producer,
             Some(authorization),
-            NativeCompilerTransport::lower(inputs)?,
-            scaffold,
-            private,
             RequestInputTransport::OwnedArena,
-        )
+        )?;
+        prepared.into_request(scaffold, private)
     }
 
     fn materialize_retained_artifacts(
@@ -16904,56 +16969,28 @@ impl ExactDeclarationContext {
             payload_work: work,
         })
     }
+}
 
-    fn prepare_compilation_from_metadata(
-        self: &Arc<Self>,
-        root: &Path,
-        producer: &[u8],
-        authorization: Option<Value>,
-        native_transport: NativeCompilerTransport,
+impl PreparedNativeCompilerTransport {
+    fn into_request(
+        self,
         scaffold: &ProtectedScaffoldRequirements,
         private: Option<OriginalCompilerInputs>,
-        transport: RequestInputTransport,
     ) -> Result<ExactCompilationRequest, CompileError> {
-        let NativeCompilerTransport {
+        let PreparedNativeCompilerTransport {
+            context,
+            root,
+            producer,
+            authorization,
             inputs,
             metadata: transport_metadata,
-        } = native_transport;
+            retained,
+            delivery,
+            reused,
+        } = self;
         let metadata = &transport_metadata;
         let compiler_metadata = &inputs.metadata;
-        let semantic_sha256 = self.semantic_sha256();
-        let admitted_empty = authorization.is_some()
-            && self.owner.facts.producer == [0; 32]
-            && metadata.entries.is_empty()
-            && self.owner.facts.lexical.is_empty();
-        if !root.is_absolute()
-            || (!admitted_empty
-                && (self.owner.facts.producer == [0; 32]
-                    || self.owner.facts.producer != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer).sha256()))
-        {
-            return Err(failure(
-                "compile request has a different producer or invalid root",
-            ));
-        }
-        std::fs::create_dir_all(root)?;
-        let reused = inputs
-            .artifacts()
-            .retained_materialization(metadata)?
-            .is_some();
-        let retained = inputs
-            .artifacts()
-            .retain_materialization(&metadata, |parents| {
-                let directory = tempfile::Builder::new()
-                    .prefix("tidepool-exact-artifacts-")
-                    .tempdir()?;
-                self.materialize_retained_artifacts(
-                    inputs.artifacts(),
-                    metadata,
-                    parents,
-                    directory,
-                    &transport,
-                )
-            })?;
+        let semantic_sha256 = context.semantic_sha256();
         let selected_rows = retained.selected_rows(metadata);
         let transported_artifacts = metadata
             .entries
@@ -17010,10 +17047,7 @@ impl ExactDeclarationContext {
             text("TPEXACTSCOPE"),
             text(EXACT_SCOPE_SCHEMA_VERSION),
             text(hex(&semantic_sha256)),
-            text(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                    .hex(),
-            ),
+            text(producer.hex()),
             Value::Array(
                 transported_artifacts
                     .iter()
@@ -17049,7 +17083,8 @@ impl ExactDeclarationContext {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
             Value::Array(
-                self.owner
+                context
+                    .owner
                     .facts
                     .lexical
                     .iter()
@@ -17144,11 +17179,11 @@ impl ExactDeclarationContext {
             })
             .transpose()?
             .unwrap_or_default();
-        let acquisition = match transport {
+        let acquisition = match delivery {
             #[cfg(test)]
             RequestInputTransport::DurableFiles => Value::Array(vec![text("fresh-files")]),
             RequestInputTransport::OwnedArena => {
-                let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+                let image_producer = producer.hex();
                 let mut arenas = original_inputs::OriginalInputArenaTable::default();
                 let images = metadata
                     .entries
@@ -17201,7 +17236,7 @@ impl ExactDeclarationContext {
             fields,
             execution_scope,
             authorization,
-            self.published_scope_value()?,
+            context.published_scope_value()?,
             acquisition,
         )?;
         crate::host_work::record_host_work(
@@ -17219,14 +17254,12 @@ impl ExactDeclarationContext {
             reused_materialization = reused, manifest_written_bytes = bytes.len() as u64,
             selected_artifacts = artifacts.len(), "exact request references retained immutable products");
         Ok(ExactCompilationRequest {
-            inputs: ExactRequestInputs::issue(self.clone(), scaffold.clone(), private, inputs),
+            inputs: ExactRequestInputs::issue(context, scaffold.clone(), private, inputs),
             transport_metadata,
             manifest,
             request_sha256: sha256(&bytes),
             semantic_sha256,
-            producer_sha256:
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                    .sha256(),
+            producer_sha256: producer.sha256(),
             artifacts,
             groups,
             materialization: Some(retained),
@@ -26183,6 +26216,147 @@ mod tests {
     }
 
     #[test]
+    fn fresh_packet_materialization_refuses_arena_winner_after_empty_observation() {
+        let (context, _) = metadata_fixture();
+        let scaffold = ProtectedScaffoldRequirements::default();
+        let lowered =
+            NativeCompilerTransport::lower(scaffold.compiler_inputs(&context, None).unwrap())
+                .unwrap();
+        let view = lowered.inputs.artifacts();
+        let metadata = &lowered.metadata;
+        assert!(view.retained_materialization(metadata).unwrap().is_none());
+        let arena = view
+            .retain_materialization(metadata, |parents| {
+                context.materialize_retained_artifacts(
+                    view,
+                    metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+            })
+            .unwrap();
+        let result = view.retain_fresh_materialization(metadata, |_| {
+            panic!("fresh-only admission must not invoke allocation after an arena winner")
+        });
+        assert!(result.is_err());
+        assert!(
+            Arc::ptr_eq(
+                &arena,
+                &view.retained_materialization(metadata).unwrap().unwrap()
+            ),
+            "refusal must preserve the winner"
+        );
+    }
+
+    #[test]
+    fn fixture_delivery_keeps_transformed_view_interfaces_and_graphs_until_packet_cleanup() {
+        let producer = b"packet execution graph producer";
+        let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
+        let source = tempfile::tempdir().unwrap();
+        let (graph, originals) =
+            crate::execution_source::test_prepared_graph_with_interfaces_for_producer(
+                source.path(),
+                |_| b"iface".to_vec(),
+                CanonicalProducerIdentity::from_producer_bytes(producer),
+            );
+        let entries = originals
+            .into_iter()
+            .map(|original| {
+                execution_entry_for_producer(original, Arc::clone(&graph), producer_sha256)
+            })
+            .collect::<Vec<_>>();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries)
+            .unwrap();
+        let support = issue_fixture_compiler_support(projection, view).unwrap();
+        let context = Arc::new(ExactDeclarationContext::from_facts(
+            DeclarationContextFacts {
+                source_scope: SourceLexicalScope::default(),
+                compiler_support: support,
+                producer: producer_sha256,
+                template_imports: None,
+                lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            },
+        ));
+        let packet = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_fixture_compilation(packet.path(), producer)
+            .unwrap();
+        assert!(
+            context
+                .artifact_view()
+                .retained_materialization(&request.transport_metadata)
+                .unwrap()
+                .is_none(),
+            "request closure must exercise a transformed materialization view"
+        );
+        let owner = request.materialization.as_ref().unwrap();
+        assert!(Arc::ptr_eq(
+            owner,
+            &request
+                .compiler_inputs()
+                .artifacts()
+                .retained_materialization(&request.transport_metadata)
+                .unwrap()
+                .unwrap()
+        ));
+        assert!(
+            request
+                .compiler_inputs()
+                .artifacts()
+                .selected_native_groups()
+                .is_empty(),
+            "physical graph custody does not demand executable groups"
+        );
+        let manifest: Value =
+            ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
+                .unwrap();
+        let fields = row(&manifest, EXACT_SCOPE_SCHEMA_FIELDS).unwrap();
+        let mut downstream = list(&fields[4], 4096)
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let fields = row(value, 8).unwrap();
+                let path = PathBuf::from(string(&fields[2]).unwrap());
+                let digest = string(&fields[3]).unwrap().to_owned();
+                (path, digest)
+            })
+            .collect::<Vec<_>>();
+        let execution = row(&fields[7], 2).unwrap();
+        let graphs = list(&execution[0], 4096).unwrap();
+        assert!(!graphs.is_empty(), "graph custody must be exercised");
+        downstream.extend(graphs.iter().map(|value| {
+            let fields = row(value, 2).unwrap();
+            (
+                PathBuf::from(string(&fields[1]).unwrap()),
+                string(&fields[0]).unwrap().to_owned(),
+            )
+        }));
+        assert!(downstream
+            .iter()
+            .all(|(path, _)| path.starts_with(packet.path())));
+        let weak = Arc::downgrade(owner);
+        drop(request);
+        drop(context);
+        drop(inventory);
+        drop(source);
+        drop(graph);
+        assert!(weak.upgrade().is_none());
+        for (path, digest) in &downstream {
+            assert_eq!(
+                sha256(&std::fs::read(path).unwrap()),
+                *digest,
+                "downstream consumes the manifest's actual files after producer release"
+            );
+        }
+        drop(packet);
+        assert!(downstream.iter().all(|(path, _)| !path.exists()));
+    }
+
+    #[test]
     fn completed_materialization_is_retained_when_producer_stop_arrives_after_validation() {
         use tidepool_extract_cmd::{
             with_compiler_transaction_cancellable, CompilerTransactionCancellation,
@@ -26542,16 +26716,17 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let prepare =
             |name: &str, inputs: RequestCompilerInputs, private: OriginalCompilerInputs| {
-                context
-                    .prepare_compilation_from_metadata(
+                NativeCompilerTransport::lower(inputs)
+                    .unwrap()
+                    .prepare(
+                        &context,
                         &scratch.path().join(name),
                         producer,
                         None,
-                        NativeCompilerTransport::lower(inputs).unwrap(),
-                        &scaffold,
-                        Some(private),
                         RequestInputTransport::OwnedArena,
                     )
+                    .unwrap()
+                    .into_request(&scaffold, Some(private))
                     .unwrap()
             };
         let first_request = prepare("first", first_inputs, first_private);
@@ -33347,6 +33522,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         original: crate::execution_source::PreparedExecutionSourceOriginal,
         graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
     ) -> Arc<ArtifactEntry> {
+        execution_entry_for_producer(original, graph, [7; 32])
+    }
+
+    fn execution_entry_for_producer(
+        original: crate::execution_source::PreparedExecutionSourceOriginal,
+        graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+        producer: [u8; 32],
+    ) -> Arc<ArtifactEntry> {
         let owner = original.owner;
         let mut validation = PackageInterfaceValidation::default();
         let seal =
@@ -33385,9 +33568,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
             .with_execution_source_with_validation(graph, &mut validation)
             .unwrap(),
-            [7; 32],
+            producer,
         );
-        Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
+        Arc::new(ArtifactEntry::original(producer, product).unwrap())
     }
 
     #[test]

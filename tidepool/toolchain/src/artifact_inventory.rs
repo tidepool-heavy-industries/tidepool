@@ -5877,6 +5877,12 @@ type MaterializationCache = Mutex<
     BTreeMap<MaterializationKey, Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
 >;
 
+enum MaterializationReuse {
+    Allowed,
+    #[cfg(test)]
+    FreshOnly,
+}
+
 /// A physical leaf augments inherited custody; only a complete compiler
 /// materialization can replace traversal of its issuing view's parents.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -7145,12 +7151,53 @@ impl ArtifactView {
         >,
     ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
     {
+        self.retain_materialization_with_reuse(metadata, MaterializationReuse::Allowed, prepare)
+    }
+
+    /// Packet delivery cannot reuse a process-owned winner. Refuse that winner
+    /// under the same lock that publishes a successfully prepared owner.
+    #[cfg(test)]
+    pub(crate) fn retain_fresh_materialization(
+        &self,
+        metadata: &CompilerArtifactMetadata,
+        prepare: impl FnOnce(
+            Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        ) -> Result<
+            crate::declaration_context::RetainedArtifactMaterialization,
+            CompileError,
+        >,
+    ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
+    {
+        self.retain_materialization_with_reuse(metadata, MaterializationReuse::FreshOnly, prepare)
+    }
+
+    fn retain_materialization_with_reuse(
+        &self,
+        metadata: &CompilerArtifactMetadata,
+        reuse: MaterializationReuse,
+        prepare: impl FnOnce(
+            Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
+        ) -> Result<
+            crate::declaration_context::RetainedArtifactMaterialization,
+            CompileError,
+        >,
+    ) -> Result<Arc<crate::declaration_context::RetainedArtifactMaterialization>, CompileError>
+    {
         // Waiting for another producer must remain responsive to this scope's
         // stop edge without interrupting that producer or evicting its result.
         let mut retained = self.lease.lock_materialization()?;
         let key = MaterializationKey::Compilation(metadata.materialization_key());
         let leaves = self.checked_value_leaves(&retained, metadata);
         if let Some(complete) = retained.get(&key) {
+            match reuse {
+                MaterializationReuse::Allowed => {}
+                #[cfg(test)]
+                MaterializationReuse::FreshOnly => {
+                    return Err(failure(
+                        "fresh materialization already has a retained owner",
+                    ));
+                }
+            }
             let complete = crate::declaration_context::RetainedArtifactMaterialization::overlay_checked_value_leaves(complete, &leaves, metadata, &self.selected_native_binding_rows().1.into_iter().collect());
             retained.insert(key, complete.clone());
             return Ok(complete);

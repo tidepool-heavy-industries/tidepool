@@ -656,7 +656,23 @@ pub(crate) fn test_prepared_graph_with_interfaces(
     Arc<CertifiedExecutionSourceGraph>,
     Vec<PreparedExecutionSourceOriginal>,
 ) {
-    let (graph, owners) = test_graph_with_interfaces(root, &interface_bytes);
+    test_prepared_graph_with_interfaces_for_producer(
+        root,
+        interface_bytes,
+        crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256([7; 32]),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_prepared_graph_with_interfaces_for_producer(
+    root: &Path,
+    interface_bytes: impl Fn(&str) -> Vec<u8>,
+    producer: crate::artifact_inventory::CanonicalProducerIdentity,
+) -> (
+    Arc<CertifiedExecutionSourceGraph>,
+    Vec<PreparedExecutionSourceOriginal>,
+) {
+    let (graph, owners) = test_graph_with_interfaces_for_producer(root, &interface_bytes, producer);
     let mut wire = GraphWire::decode(graph.bytes()).unwrap();
     let originals = owners
         .into_iter()
@@ -711,6 +727,19 @@ pub(crate) fn test_graph_with_distinct_interfaces(
 fn test_graph_with_interfaces(
     root: &Path,
     interface_bytes: impl Fn(&str) -> Vec<u8>,
+) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
+    test_graph_with_interfaces_for_producer(
+        root,
+        interface_bytes,
+        crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256([7; 32]),
+    )
+}
+
+#[cfg(test)]
+fn test_graph_with_interfaces_for_producer(
+    root: &Path,
+    interface_bytes: impl Fn(&str) -> Vec<u8>,
+    producer: crate::artifact_inventory::CanonicalProducerIdentity,
 ) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
     let source = "module Input where\nvalue = 1\n";
     let input = root.join("Input.hs");
@@ -770,7 +799,7 @@ fn test_graph_with_interfaces(
         }],
     )]);
     let graph = CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
-        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_test_sha256([7; 32]),
+        producer,
         semantic_sha256: Some([8; 32]),
         include: &[],
         source_path: &input,
