@@ -10,7 +10,7 @@ module Tidepool.CheckedCell
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes
-  , NativeParsedModule, nativeParsedModule, nativeImportSyntax, unannotatedModule, mapNativeModule, typecheckNativeModule
+  , NativeParsedModule, nativeParsedModule, nativeImportSyntax, nativeTypeUses, unannotatedModule, mapNativeModule, typecheckNativeModule
   , typecheckNativeModuleWithDiagnostics
   , ResolvedNativeSlots, resolveNativeAnnotations, applyNativeAnnotations, annotateNativeModule
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
