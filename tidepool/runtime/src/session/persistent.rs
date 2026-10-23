@@ -905,7 +905,7 @@ impl PersistentSession {
         })
     }
 
-    fn instantiate_native_plan_in(
+    pub(super) fn instantiate_native_plan_in(
         &mut self,
         scope: ScopeId,
         plan: &Arc<super::prepared::NativeInstantiationPlan>,

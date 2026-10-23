@@ -11635,39 +11635,31 @@ mod authored_publication_tests {
                 .unwrap();
             let before = resident.state.residency().unwrap();
             let mut resolved = Vec::<NativeOccurrenceId>::new();
-            let mut anchors = 0;
-            let result = plan.instantiate(
-                selection,
-                |request, selected| {
-                    let permit = resident
-                        .state
-                        .bindings()
-                        .native_slot_permit_in(resident.state.scope_tree(), scope, request)
-                        .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-                    let witness = resident
-                        .state
-                        .prepared_mut()
-                        .unwrap()
-                        .lookup_world_native_slot(&permit, selected)?;
-                    anchors +=
-                        usize::from(witness.is_some() && parents.contains(&request.binding_key()));
-                    Ok((permit, witness))
-                },
-                |requirement| {
-                    let value = inputs.resolve_native_requirement(execution.item(), requirement)?;
-                    if let RetainedNativeOrigin::Acquired { owner, .. } = requirement.origin() {
-                        let occurrence = owner.occurrence();
-                        assert!(retained_owners.contains(&occurrence));
-                        if !resolved.contains(&occurrence) {
-                            resolved.push(occurrence);
-                            if refuse_second && resolved.len() == 2 {
-                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+            let anchors = selection
+                .roots()
+                .keys()
+                .filter(|key| parents.contains(&key.binding))
+                .count();
+            // The session owns mutable permit bookkeeping and validates the
+            // selected physical witnesses before traversing retained imports.
+            let result =
+                resident
+                    .state
+                    .instantiate_native_plan_in(scope, &plan, selection, |requirement| {
+                        let value =
+                            inputs.resolve_native_requirement(execution.item(), requirement)?;
+                        if let RetainedNativeOrigin::Acquired { owner, .. } = requirement.origin() {
+                            let occurrence = owner.occurrence();
+                            assert!(retained_owners.contains(&occurrence));
+                            if !resolved.contains(&occurrence) {
+                                resolved.push(occurrence);
+                                if refuse_second && resolved.len() == 2 {
+                                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                                }
                             }
                         }
-                    }
-                    Ok(value)
-                },
-            );
+                        Ok(value)
+                    });
             assert_eq!(
                 resident.state.residency().unwrap(),
                 before,
