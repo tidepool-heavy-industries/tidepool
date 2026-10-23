@@ -12029,8 +12029,7 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
     package_imports: Arc<[u8]>,
 }
 
-/// One move-only compiler prefix. Runtime settlement authority remains outside
-/// this owner; it carries only actual input and source-output evidence.
+/// Refusals at the admitted program's ordered stage boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum WorldProgramCursorFailure {
     #[error("World prefix belongs to another request")]
@@ -12061,6 +12060,8 @@ impl From<WorldProgramCursorFailure> for CompileError {
     }
 }
 
+/// One move-only compiler prefix. Runtime settlement authority remains outside
+/// this owner; it carries only actual input and source-output evidence.
 pub(crate) struct WorldProgramContinuation {
     request: Arc<crate::compiler_world::native_demand::WorldNativeDemandCompletion>,
     primary: WorldPrimaryInputs,
@@ -12130,6 +12131,7 @@ impl WorldProgramContinuation {
         validation: &mut PackageInterfaceValidation,
         #[cfg(test)] observe: &mut dyn FnMut(&mut DecodedWorldSourceReceipt<'_>),
     ) -> Result<PendingWorldStage, CompileError> {
+        self.ensure_program(program)?;
         #[allow(unused_mut)]
         let mut decoded = decode_world_source_receipt(program, self.next_stage)?;
         #[cfg(test)]
@@ -12704,14 +12706,16 @@ impl PendingWorldExecutableStage {
                 })
             })?;
         let products = output.sealed_products_shared()?;
-        if products.typed_entry().is_none_or(|entry| {
-            !entry.matches_world_item(
-                program,
-                ordinal,
-                output.target(),
-                &self.segment.source.generated_source_owner(),
-            )
-        }) {
+        if !output.belongs_to_world_item(program, ordinal)
+            || products.typed_entry().is_none_or(|entry| {
+                !entry.matches_world_item(
+                    program,
+                    ordinal,
+                    output.target(),
+                    &self.segment.source.generated_source_owner(),
+                )
+            })
+        {
             return Err(WorldProgramCursorFailure::WrongItemOutput {
                 stage: self.segment.stage.index(),
                 item: ordinal,
@@ -13129,6 +13133,55 @@ pub(crate) fn assert_world_repeated_source_refusals(
             (observation, Ok(_)) => panic!("{observation:?}: altered source was admitted"),
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_world_foreign_output_refusal(
+    program: &Arc<crate::compiler_world::CheckedWorldCellProgram>,
+    foreign: &crate::artifacts::ProgramNativeOutput,
+) {
+    let mut validation =
+        PackageInterfaceValidation::with_inventory(Arc::clone(&program.validation().inventory));
+    let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+        program,
+        &mut validation,
+    )
+    .unwrap()
+    .for_segment(0..1)
+    .unwrap();
+    let PendingWorldStage::Executable(mut pending) = WorldProgramContinuation::begin(program)
+        .open_next(program, &produced, &mut validation, &mut |_| {})
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert!(
+        foreign
+            .sealed_products_shared()
+            .unwrap()
+            .typed_entry()
+            .unwrap()
+            .matches_world_item(
+                program,
+                0,
+                foreign.target(),
+                &pending.segment.source.generated_source_owner(),
+            ),
+        "the independently issued actual output has the same item facts"
+    );
+    assert!(
+        !foreign.belongs_to_world_item(program, 0),
+        "matching facts do not change the actual request issuer"
+    );
+    let error = pending
+        .admit_item(program, foreign.clone(), &produced)
+        .unwrap_err();
+    assert!(
+        matches!(error, CompileError::CompilerEvidence(error) if matches!(error.as_ref(),
+        crate::certified_products::CertificationError::WorldProgramCursor(WorldProgramCursorFailure::WrongItemOutput { stage: 0, item: 0 })))
+    );
+    assert!(pending.items.is_empty());
+    assert_eq!(pending.segment.continuation.next_stage, 0);
 }
 
 #[cfg(test)]
