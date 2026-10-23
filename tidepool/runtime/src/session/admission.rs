@@ -3343,7 +3343,6 @@ impl CheckedTurnCompletion {
         captured: super::resident::CapturedCheckedValueSet,
     ) -> Result<(), SessionError> {
         self.validate_capture_ticket(ticket)?;
-        let value_epoch = captured.prepare_commit(session, ticket)?;
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -3466,13 +3465,14 @@ impl CheckedTurnCompletion {
             Some(&captured),
             successor,
         )?;
+        let captured = captured.prepare_commit(session, ticket)?;
         self.prefix
             .admission
             .with_open_sources(|| -> Result<(), SessionError> {
                 if !self.prefix.admission.belongs_to(session) {
                     return Err(super::SessionTransitionReason::OwnerChanged.into());
                 }
-                captured.commit(session, self.prefix.admission.scope, value_epoch);
+                captured.commit(session);
                 prepared.commit(
                     session,
                     &mut state,
