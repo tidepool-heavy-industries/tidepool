@@ -94,6 +94,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::WrongPublicManifestTicket
         | SessionError::InvalidDurablePublicAdmission { .. }
         | SessionError::InvalidRecoveryInitialization { .. }
+        | SessionError::InitialNotebookFacadesChanged
         | SessionError::InvalidNativeSetupAdmission { .. }
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)

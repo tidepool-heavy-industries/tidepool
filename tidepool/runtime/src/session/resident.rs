@@ -18,7 +18,7 @@ use tidepool_codegen::prepared_program::{
     session_var_id, ImageRegistry, Parcel, PreparedHandle, PreparedOuter, PreparedResult, ProgramId,
 };
 use tidepool_repr::execution_schema::{
-    ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
+    JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
 };
 
 use super::admission::{CheckedCaptureTicket, CheckedTurnCompletion, RunningCheckedTicket};

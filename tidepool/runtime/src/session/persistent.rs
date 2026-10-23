@@ -394,7 +394,7 @@ pub(super) struct WorldDeclarationVisibleBinding {
     pub(super) row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompileViewKey {
     library: uuid::Uuid,
     tip: Generation,
