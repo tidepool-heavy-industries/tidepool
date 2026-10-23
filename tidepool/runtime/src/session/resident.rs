@@ -2647,48 +2647,25 @@ impl Drop for CustodyTransfer {
 
 /// A parked turn's own completion obligation, carried on the token
 /// [`ResidentSession::run_with_sites`]/[`ResidentSession::run_bind_with_sites`]/[`ResidentSession::run_rooted_entry`]
-/// hand back on suspension: a value turn's hole needs nothing extra to resume;
-/// a binding turn's hole must materialize its binder into the persistent binding store on
-/// completion; and a projected hole must atomically materialize every
-/// GHC-reported pattern binder. Binding
-/// obligations retain the SAME binder metadata, generation, and lexical scope
-/// carried by the initiating operation.
-///
-/// None of the hole payloads have public constructors or fields. The session
-/// creates them at suspension time, keeping each completion obligation
-/// inseparable from the token consumed by [`ResidentSession::resume`].
+/// hand back on suspension. The parked continuation retains the actual
+/// completion obligation; public holes identify and describe that continuation.
 #[derive(Clone, Debug)]
 pub struct PlainHole {
     id: String,
-    checked: Option<Arc<CheckedTurnCompletion>>,
-    observation: ResultObservation,
 }
 
-/// See [`ResidentHole`]'s doc — the `Binding` variant's payload.
 #[derive(Clone, Debug)]
 pub struct BindingHole {
     id: String,
-    binder: BoundBinder,
-    generation: Generation,
-    observation: Option<Vec<tidepool_repr::VarId>>,
-    lexical_scope: ScopeId,
-    checked: Option<Arc<CheckedTurnCompletion>>,
 }
 
-/// See [`ResidentHole`]'s doc — a projected pattern bind retains every GHC
-/// binder and its one shared value generation across suspension.
 #[derive(Clone, Debug)]
 pub struct ProjectedBindingHole {
     id: String,
-    binders: Vec<BoundBinder>,
-    generation: Generation,
-    lexical_scope: ScopeId,
-    checked: Option<Arc<CheckedTurnCompletion>>,
 }
 
-/// The public continuation token: a sum over a parked turn's completion
-/// obligation. See the hole payload docs for why no variant is externally
-/// constructible.
+/// An observation of a parked turn. The session's actual parked record owns
+/// the binding, scope and checked completion obligation used on resume.
 #[derive(Clone, Debug)]
 pub enum ResidentHole {
     Plain(PlainHole),
@@ -2697,10 +2674,6 @@ pub enum ResidentHole {
 }
 
 impl ResidentHole {
-    /// The minted continuation id this hole was parked under — the same
-    /// identity [`ResidentSession::pending_continuation`]/[`ResidentSession::parked_holes`]
-    /// read, for display/logging/tree-bookkeeping purposes that don't need
-    /// (and shouldn't carry) the resume obligation itself.
     pub fn cont_id(&self) -> &str {
         match self {
             ResidentHole::Plain(h) => &h.id,
@@ -2709,93 +2682,20 @@ impl ResidentHole {
         }
     }
 
-    fn mint(id: String, seed: HoleSeed) -> Self {
-        let HoleSeed {
-            obligation,
-            checked,
-        } = seed;
-        match obligation {
-            HoleObligation::Plain(observation) => ResidentHole::Plain(PlainHole {
-                id,
-                checked,
-                observation,
-            }),
-            HoleObligation::Binding {
-                binder,
-                generation,
-                observation,
-                lexical_scope,
-            } => ResidentHole::Binding(BindingHole {
-                id,
-                binder,
-                generation,
-                observation,
-                lexical_scope,
-                checked,
-            }),
-            HoleObligation::ProjectedBinding {
-                binders,
-                generation,
-                lexical_scope,
-            } => ResidentHole::ProjectedBinding(ProjectedBindingHole {
-                id,
-                binders,
-                generation,
-                lexical_scope,
-                checked,
-            }),
+    fn mint(id: String, seed: &HoleSeed) -> Self {
+        match &seed.obligation {
+            HoleObligation::Plain(_) => ResidentHole::Plain(PlainHole { id }),
+            HoleObligation::Binding { .. } => ResidentHole::Binding(BindingHole { id }),
+            HoleObligation::ProjectedBinding { .. } => {
+                ResidentHole::ProjectedBinding(ProjectedBindingHole { id })
+            }
         }
     }
 
-    /// This hole's own seed — what [`ResidentSession::resume`] re-mints a
-    /// fresh hole as, should this resume re-suspend: a Binding hole's chain
-    /// of re-suspensions all carry the SAME binder/generation/scope through to
-    /// whichever one finally completes.
-    fn seed(&self) -> HoleSeed {
-        let (obligation, checked) = match self {
-            ResidentHole::Plain(h) => (HoleObligation::Plain(h.observation), h.checked.clone()),
-            ResidentHole::Binding(h) => (
-                HoleObligation::Binding {
-                    binder: h.binder.clone(),
-                    generation: h.generation,
-                    observation: h.observation.clone(),
-                    lexical_scope: h.lexical_scope,
-                },
-                h.checked.clone(),
-            ),
-            ResidentHole::ProjectedBinding(h) => (
-                HoleObligation::ProjectedBinding {
-                    binders: h.binders.clone(),
-                    generation: h.generation,
-                    lexical_scope: h.lexical_scope,
-                },
-                h.checked.clone(),
-            ),
-        };
-        HoleSeed {
-            obligation,
-            checked,
-        }
-    }
-
-    /// Construct a `Plain` hole from a bare continuation id, for a caller
-    /// whose own bookkeeping stores just the id string (the self-iterating
-    /// harness driver's `render`/`loop`/green-thread threads — every one of
-    /// those goes through [`ResidentSession::run`]/[`ResidentSession::run_rooted_entry`],
-    /// never [`ResidentSession::run_bind`]) rather than the [`ResidentHole`]
-    /// this API otherwise hands back. NOT a backdoor around the
-    /// completion-obligation guarantee: the one failure mode this type
-    /// exists to prevent — a `Binding` hole silently resumed as `Plain`,
-    /// dropping its binding-store materialization — is still impossible
-    /// through this constructor, because it can only ever produce `Plain`.
-    /// There is no way to fabricate a `Binding` hole from a bare string; a
-    /// real suspension through `run_bind` is the only source of one.
+    /// Identify a continuation retained by the resident owner. Its original
+    /// completion obligation is recovered from that exact parked record.
     pub fn plain(cont_id: impl Into<String>) -> Self {
-        ResidentHole::Plain(PlainHole {
-            id: cont_id.into(),
-            checked: None,
-            observation: ResultObservation::Presentation,
-        })
+        ResidentHole::Plain(PlainHole { id: cont_id.into() })
     }
 }
 
@@ -2804,8 +2704,14 @@ impl ResidentHole {
 /// accompanies exactly one obligation; it cannot wrap another checked seed.
 #[derive(Clone)]
 struct HoleSeed {
+    lexical_scope: ScopeId,
     obligation: HoleObligation,
     checked: Option<Arc<CheckedTurnCompletion>>,
+}
+
+enum ResumeObservation {
+    Original,
+    ToolPresentation,
 }
 
 #[derive(Clone)]
@@ -2815,12 +2721,10 @@ enum HoleObligation {
         binder: BoundBinder,
         generation: Generation,
         observation: Option<Vec<tidepool_repr::VarId>>,
-        lexical_scope: ScopeId,
     },
     ProjectedBinding {
         binders: Vec<BoundBinder>,
         generation: Generation,
-        lexical_scope: ScopeId,
     },
 }
 
@@ -3366,7 +3270,6 @@ fn hole_seed_of(
             binder: (*binder).clone(),
             generation: *generation,
             observation: observation.clone(),
-            lexical_scope,
         },
         PreparedTurnMode::Projected {
             binders,
@@ -3374,10 +3277,10 @@ fn hole_seed_of(
         } => HoleObligation::ProjectedBinding {
             binders: binders.to_vec(),
             generation: *generation,
-            lexical_scope,
         },
     };
     HoleSeed {
+        lexical_scope,
         obligation,
         checked,
     }
@@ -4015,6 +3918,7 @@ struct ParkedContinuation {
     name: String,
     id: ContinuationId,
     provenance: Arc<ProgramProvenance>,
+    seed: HoleSeed,
     // The native frame owns this lease until exact retirement or machine loss.
     resource_owners: Vec<ContinuationResourceOwner>,
 }
@@ -6335,7 +6239,6 @@ where
             .checked_handle(&self.custody_cleanup)
             .map_err(ResidentResumeError::Rejected)?;
         self.settle_dropped_custody();
-        let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
             ResidentHole::Binding(hole) => hole.id,
@@ -6345,15 +6248,6 @@ where
         tracing::debug!(
             continuation = %cont_id,
             handle = ?transfer.handle,
-            obligation = if seed.checked.is_some() {
-                "checked"
-            } else {
-                match &seed.obligation {
-                    HoleObligation::Plain(_) => "plain",
-                    HoleObligation::Binding { .. } => "binding",
-                    HoleObligation::ProjectedBinding { .. } => "projected-binding",
-                }
-            },
             actor_scope = ?self.run_context.lexical_scope,
             actor_realm = ?self.run_context.resource_scope,
             "resuming resident continuation with rooted value"
@@ -6362,7 +6256,6 @@ where
         let result = self.reenter(
             &cont_id,
             ResidentResumeInput::Handle(transfer.handle),
-            seed,
             Some(&provenance),
             settlement,
         );
@@ -7766,7 +7659,6 @@ where
         let handle = custody
             .checked_handle(&self.custody_cleanup)
             .map_err(ResidentResumeError::Rejected)?;
-        let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
             ResidentHole::Binding(hole) => hole.id,
@@ -7779,7 +7671,6 @@ where
                 constructor,
                 prefix,
             },
-            seed,
             Some(&custody.provenance),
             settlement,
         )
@@ -7803,7 +7694,6 @@ where
         let handle = custody
             .checked_handle(&self.custody_cleanup)
             .map_err(ResidentResumeError::Rejected)?;
-        let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
             ResidentHole::Binding(hole) => hole.id,
@@ -7819,7 +7709,6 @@ where
                     .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
                     .collect(),
             },
-            seed,
             Some(&custody.provenance),
             settlement,
         )
@@ -7837,7 +7726,6 @@ where
         let handle = custody
             .checked_handle(&self.custody_cleanup)
             .map_err(ResidentResumeError::Rejected)?;
-        let seed = hole.seed();
         let cont_id = hole.cont_id().to_owned();
         self.reenter(
             &cont_id,
@@ -7845,7 +7733,6 @@ where
                 handle,
                 constructors,
             },
-            seed,
             Some(&custody.provenance),
             settlement,
         )
@@ -9831,19 +9718,12 @@ where
         answer: Response,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
-        let seed = hole.seed();
         let id = match hole {
             ResidentHole::Plain(h) => h.id,
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
-        self.reenter(
-            &id,
-            ResidentResumeInput::Response(answer),
-            seed,
-            None,
-            settlement,
-        )
+        self.reenter(&id, ResidentResumeInput::Response(answer), None, settlement)
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -9878,7 +9758,23 @@ where
         &mut self,
         cont_id: &str,
         input: ResidentResumeInput,
-        seed: HoleSeed,
+        additional_provenance: Option<&ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
+        self.reenter_with_observation(
+            cont_id,
+            input,
+            ResumeObservation::Original,
+            additional_provenance,
+            settlement,
+        )
+    }
+
+    fn reenter_with_observation(
+        &mut self,
+        cont_id: &str,
+        input: ResidentResumeInput,
+        observation: ResumeObservation,
         additional_provenance: Option<&ProgramProvenance>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
@@ -9894,6 +9790,32 @@ where
             ));
         };
         let frame_id = entry.id;
+        let mut seed = entry.seed.clone();
+        if !self.state.scope_tree().is_live(seed.lexical_scope) {
+            return Err(ResidentResumeError::Rejected(
+                SessionError::from(super::SessionTransitionReason::ScopeRevoked).into(),
+            ));
+        }
+        if let Some(checked) = &seed.checked {
+            checked
+                .validate_reentry(&self.state, seed.lexical_scope)
+                .map_err(ResidentError::from)
+                .map_err(ResidentResumeError::Rejected)?;
+        }
+        if let ResumeObservation::ToolPresentation = observation {
+            match &mut seed.obligation {
+                HoleObligation::Plain(original)
+                    if matches!(original, ResultObservation::Protocol) =>
+                {
+                    *original = ResultObservation::Presentation;
+                }
+                _ => {
+                    return Err(ResidentResumeError::Rejected(
+                        ResidentError::InvalidPresentationContinuation,
+                    ));
+                }
+            }
+        }
         let mut provenance = (*entry.provenance).clone();
         if let Some(additional) = additional_provenance {
             provenance
@@ -10149,10 +10071,12 @@ where
                 // ids are never reused) and the new one replaces it.
                 self.retire_resumed(resumed);
                 let cont_id = self.next_cont_id();
+                let hole = ResidentHole::mint(cont_id.clone(), &seed);
                 self.parked.push(ParkedContinuation {
                     name: cont_id.clone(),
                     id,
                     provenance,
+                    seed,
                     resource_owners,
                 });
                 if let Some(observer) = &self.continuation_observer {
@@ -10161,17 +10085,19 @@ where
                 let output = self.captured.snapshot();
                 ResidentOutcome::Suspended {
                     output,
-                    hole: ResidentHole::mint(cont_id, seed),
+                    hole,
                     request,
                 }
             }
             ParkedRun::Deferred { id, request, work } => {
                 self.retire_resumed(resumed);
                 let cont_id = self.next_cont_id();
+                let hole = ResidentHole::mint(cont_id.clone(), &seed);
                 self.parked.push(ParkedContinuation {
                     name: cont_id.clone(),
                     id,
                     provenance,
+                    seed,
                     resource_owners,
                 });
                 if let Some(observer) = &self.continuation_observer {
@@ -10179,7 +10105,7 @@ where
                 }
                 ResidentOutcome::Deferred {
                     output: self.captured.snapshot(),
-                    hole: ResidentHole::mint(cont_id, seed),
+                    hole,
                     request,
                     work,
                 }
@@ -10208,22 +10134,16 @@ where
     /// presentation observation contract. The caller has retained semantics.
     pub fn resume_tool_presentation(
         &mut self,
-        mut hole: ResidentHole,
+        hole: ResidentHole,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
-        match &mut hole {
-            ResidentHole::Plain(plain)
-                if matches!(plain.observation, ResultObservation::Protocol) =>
-            {
-                plain.observation = ResultObservation::Presentation
-            }
-            _ => {
-                return Err(ResidentResumeError::Rejected(
-                    ResidentError::InvalidPresentationContinuation,
-                ))
-            }
-        }
-        self.resume_classified(hole, (), settlement)
+        self.reenter_with_observation(
+            hole.cont_id(),
+            ResidentResumeInput::Response(Response::new(())),
+            ResumeObservation::ToolPresentation,
+            None,
+            settlement,
+        )
     }
 
     /// The prepared arm of [`Self::reenter`]. A host-built `Answer` is
@@ -10246,40 +10166,30 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let HoleSeed {
+            lexical_scope,
             obligation,
             checked,
         } = seed;
-        // The hole's own obligation says how the resumed run completes; the
-        // frame carries the runner whose entry re-enters the continuation.
-        let (lexical_scope, mode) = match &obligation {
-            HoleObligation::Plain(observation) => (
-                self.run_context.lexical_scope,
-                PreparedTurnMode::Value(*observation),
-            ),
+        // The actual parked owner's obligation determines completion; the
+        // external hole supplies no binder, scope or checked authority.
+        let mode = match &obligation {
+            HoleObligation::Plain(observation) => PreparedTurnMode::Value(*observation),
             HoleObligation::Binding {
                 binder,
                 generation,
                 observation,
-                lexical_scope,
-            } => (
-                *lexical_scope,
-                PreparedTurnMode::Binding {
-                    binder,
-                    generation: *generation,
-                    observation: observation.clone(),
-                },
-            ),
+            } => PreparedTurnMode::Binding {
+                binder,
+                generation: *generation,
+                observation: observation.clone(),
+            },
             HoleObligation::ProjectedBinding {
                 binders,
                 generation,
-                lexical_scope,
-            } => (
-                *lexical_scope,
-                PreparedTurnMode::Projected {
-                    binders,
-                    generation: *generation,
-                },
-            ),
+            } => PreparedTurnMode::Projected {
+                binders,
+                generation: *generation,
+            },
         };
         let plan = settle_plan_of(&mode);
         let park = ParkPolicy {
@@ -10443,7 +10353,6 @@ where
         else {
             return Ok(None);
         };
-        let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => &hole.id,
             ResidentHole::Binding(hole) => &hole.id,
@@ -10459,7 +10368,6 @@ where
                     .map(|field| Box::new(field) as Box<dyn tidepool_bridge::ToHaskell + Send>)
                     .collect(),
             },
-            seed,
             Some(&provenance),
             settlement,
         )
@@ -10621,13 +10529,7 @@ mod custody_release_tests {
             foreign.handle, local.handle,
             "native handles are process-unique; ownership is still checked before hole access"
         );
-        let hole = ResidentHole::mint(
-            "not-a-parked-hole".into(),
-            HoleSeed {
-                obligation: HoleObligation::Plain(ResultObservation::Presentation),
-                checked: None,
-            },
-        );
+        let hole = ResidentHole::plain("not-a-parked-hole");
         let before = destination.value_handle_count();
         for outcome in [
             tidepool_testing::with_settlement(|settlement| {
@@ -10826,13 +10728,7 @@ mod custody_release_tests {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        let hole = ResidentHole::mint(
-            "not-a-parked-hole".into(),
-            HoleSeed {
-                obligation: HoleObligation::Plain(ResultObservation::Presentation),
-                checked: None,
-            },
-        );
+        let hole = ResidentHole::plain("not-a-parked-hole");
         let before = session.value_handle_count();
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| session
