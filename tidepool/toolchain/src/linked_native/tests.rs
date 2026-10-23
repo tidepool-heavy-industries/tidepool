@@ -45,7 +45,7 @@ pub(crate) fn assert_actual_target_authentication(
         .values()
         .map(|node| node.as_ref().clone())
         .collect::<Vec<_>>();
-    let reissued = AcquiredNativeClosure::issue(
+    let reissued = AcquiredNativeClosure::from_occurrences(
         nodes.clone(),
         actual.artifacts().inventory().empty_view(),
         &operation,
@@ -55,9 +55,9 @@ pub(crate) fn assert_actual_target_authentication(
 
     if let Some(package) = nodes
         .iter()
-        .find(|node| matches!(node.occurrence, NativeOccurrenceId::Package { .. }))
+        .find(|node| matches!(node.occurrence(), NativeOccurrenceId::Package { .. }))
     {
-        let mut data = serde_json::to_value(package.occurrence).unwrap();
+        let mut data = serde_json::to_value(package.occurrence()).unwrap();
         data["Package"]["unrecognized"] = serde_json::Value::Bool(true);
         assert!(
             serde_json::from_value::<NativeOccurrenceId>(data).is_err(),
@@ -146,55 +146,81 @@ pub(crate) fn assert_actual_target_authentication(
         );
     }
 
-    if let Some(home) = nodes
+    // Mutated records remain DATA until they enter the authenticated restore
+    // owner. Recommit each mutation so a stale outer digest cannot mask a
+    // missing exact-scope, slot or product check.
+    let refuse_record = |mut facts: NativeAcquiredClosureFacts| {
+        facts.occurrences.sort_by_key(|row| row.occurrence);
+        let bytes = encode_record(&facts, &operation).unwrap();
+        let mut hash = Sha256::new();
+        hash.update(b"Tidepool acquired native closure v1\0");
+        hash.update(&bytes);
+        let records = BTreeMap::from([(hash.finalize().into(), Arc::new(facts))]);
+        assert!(
+            restore_acquired_native_closures(
+                &components,
+                &records,
+                actual.artifacts(),
+                &packages,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .is_err(),
+            "altered exact acquisition must refuse with a valid outer commitment"
+        );
+    };
+    if let Some(home) = actual
+        .recorded_facts()
+        .occurrences
         .iter()
-        .find(|node| matches!(node.acquisition, NativeAcquisition::Home { .. }))
+        .find(|row| matches!(row.occurrence, NativeOccurrenceId::Home(_)))
     {
         coverage.home_scope = true;
-        // Corrupt DATA while preserving the original acquired product and body.
-        // An equal executable body cannot authorize another issuing scope.
-        let mut forged = nodes.clone();
+        let mut forged = actual.recorded_facts().as_ref().clone();
         let node = forged
+            .occurrences
             .iter_mut()
-            .find(|node| node.occurrence == home.occurrence)
+            .find(|row| row.occurrence == home.occurrence)
             .unwrap();
-        let NativeOccurrenceId::Home(binding) = node.occurrence else {
+        let NativeOccurrenceId::Home(mut binding) = node.occurrence else {
             unreachable!()
         };
         let mut data = serde_json::to_value(binding).unwrap();
+        let unchanged: NativeGroupBinding = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&unchanged).unwrap(),
+            serde_json::to_vec(&binding).unwrap()
+        );
         let byte = data["binding"]["selection"][0].as_u64().unwrap();
         data["binding"]["selection"][0] = serde_json::Value::from(byte ^ 1);
-        node.occurrence = NativeOccurrenceId::Home(serde_json::from_value(data).unwrap());
-        assert!(
-            AcquiredNativeClosure::issue(
-                forged,
-                actual.artifacts().inventory().empty_view(),
-                &operation
-            )
-            .is_err(),
-            "foreign scope with identical product/body must refuse at the acquisition issuer"
-        );
+        binding = serde_json::from_value(data).unwrap();
+        node.occurrence = NativeOccurrenceId::Home(binding);
+        refuse_record(forged);
     }
     for selector_kind in [false, true] {
-        let slot = nodes.iter().enumerate().find_map(|(node_index, node)| {
-            if !matches!(node.acquisition, NativeAcquisition::Home { .. }) {
-                return None;
-            }
-            node.imports
-                .iter()
-                .enumerate()
-                .find_map(|(slot, selector)| {
-                    let matches = if selector_kind {
-                        matches!(selector, NativeGrantSelector::Retained { .. })
-                    } else {
-                        matches!(
-                            selector,
-                            NativeGrantSelector::Code(NativeOccurrenceId::Home(_))
-                        )
-                    };
-                    matches.then_some((node_index, slot))
-                })
-        });
+        let slot = actual
+            .recorded_facts()
+            .occurrences
+            .iter()
+            .enumerate()
+            .find_map(|(node_index, node)| {
+                if !matches!(node.occurrence, NativeOccurrenceId::Home(_)) {
+                    return None;
+                }
+                node.imports
+                    .iter()
+                    .enumerate()
+                    .find_map(|(slot, selector)| {
+                        let matches = if selector_kind {
+                            matches!(selector, NativeGrantSelector::Retained { .. })
+                        } else {
+                            matches!(
+                                selector,
+                                NativeGrantSelector::Code(NativeOccurrenceId::Home(_))
+                            )
+                        };
+                        matches.then_some((node_index, slot))
+                    })
+            });
         let Some((node_index, slot)) = slot else {
             continue;
         };
@@ -203,59 +229,40 @@ pub(crate) fn assert_actual_target_authentication(
         } else {
             coverage.source_selector = true;
         }
-        let mut forged = nodes.clone();
-        let mut selectors = forged[node_index].imports.to_vec();
+        let mut forged = actual.recorded_facts().as_ref().clone();
+        let mut selectors = forged.occurrences[node_index].imports.to_vec();
         match &mut selectors[slot] {
             NativeGrantSelector::Code(NativeOccurrenceId::Home(binding)) => {
                 binding.original_ordinal ^= 1
             }
             NativeGrantSelector::Retained { binding } => binding.selection.0[0] ^= 1,
-            _ => continue,
+            _ => unreachable!(),
         }
-        forged[node_index].imports = selectors.into();
-        assert!(
-            AcquiredNativeClosure::issue(
-                forged,
-                actual.artifacts().inventory().empty_view(),
-                &operation
-            )
-            .is_err(),
-            "an exact HOME source or retained selector cannot be rebound through equal code"
-        );
+        forged.occurrences[node_index].imports = selectors.into();
+        refuse_record(forged);
     }
-    if let Some(index) = nodes.iter().position(|node| {
-        matches!(&node.acquisition,
-        NativeAcquisition::Package{product,..} if product.code().globals().is_empty())
-    }) {
+    if let Some(package) = nodes
+        .iter()
+        .filter_map(NativeAcquiredOccurrence::package_grant)
+        .find(|grant| grant.product().code().globals().is_empty())
+    {
         coverage.package_leaf = true;
-        let mut forged = nodes.clone();
-        let node = &mut forged[index];
-        let NativeAcquisition::Package {
-            receipt,
-            occurrence,
-            ..
-        } = &mut node.acquisition
-        else {
-            unreachable!()
-        };
-        let mut facts = receipt.facts.as_ref().clone();
+        let mut forged = actual.recorded_facts().as_ref().clone();
+        let receipt = forged
+            .package_receipts
+            .iter_mut()
+            .find(|receipt| receipt.stage_id == *package.stage_id())
+            .unwrap();
+        let mut facts = receipt.as_ref().clone();
         facts
             .occurrences
             .iter_mut()
-            .find(|row| row.occurrence == *occurrence)
+            .find(|row| row.occurrence == package.index())
             .unwrap()
             .children
-            .push(*occurrence);
-        *receipt = NativePackageReceipt::from_facts(Arc::new(facts), None, &operation).unwrap();
-        assert!(
-            AcquiredNativeClosure::issue(
-                forged,
-                actual.artifacts().inventory().empty_view(),
-                &operation
-            )
-            .is_err(),
-            "a leaf's forged receipt child must refuse even though no import loop executes"
-        );
+            .push(package.index());
+        *receipt = Arc::new(facts);
+        refuse_record(forged);
     }
     coverage
 }
@@ -282,52 +289,39 @@ pub(crate) fn assert_borrowed_cohort_witnesses(
         }
         let original = held.selected_occurrences();
         if !original.iter().any(|node| {
-            matches!(node.occurrence,
+            matches!(node.occurrence(),
             NativeOccurrenceId::Package {stage_id,..} if stage_id != incoming_manifest_stage)
         }) {
             continue;
         }
         for node in original {
-            let borrowed = &incoming.closure().occurrences[&node.occurrence];
-            assert_eq!(
-                borrowed.code, node.code,
-                "borrowing cannot change a historical code choice"
+            let borrowed = &incoming.closure().occurrences[&node.occurrence()];
+            assert!(
+                borrowed.same_linkage(&node),
+                "borrowing preserves code and ordered exact slots"
             );
-            assert_eq!(
-                borrowed.imports, node.imports,
-                "borrowing preserves ordered exact selectors"
-            );
-            match (&node.acquisition, &borrowed.acquisition) {
-                (
-                    NativeAcquisition::Home { grant: old },
-                    NativeAcquisition::Home { grant: new },
-                ) => {
-                    assert_eq!(old.binding(), new.binding());
-                    assert!(old.product().same_issuance(new.product()));
-                }
-                (
-                    NativeAcquisition::Package {
-                        product: old,
-                        receipt: old_receipt,
-                        occurrence: old_occ,
-                    },
-                    NativeAcquisition::Package {
-                        product: new,
-                        receipt: new_receipt,
-                        occurrence: new_occ,
-                    },
-                ) => {
-                    assert!(
-                        Arc::ptr_eq(old, new),
-                        "borrow the actual immutable package product owner"
-                    );
-                    assert!(
-                        Arc::ptr_eq(old_receipt, new_receipt),
-                        "preserve the original receipt rather than rebinding the same code"
-                    );
-                    assert_eq!(old_occ, new_occ);
-                }
-                _ => panic!("borrowed acquired witness changed grant kind"),
+            if let Some(old) = node.home_grant() {
+                let new = borrowed.home_grant().expect("borrowed HOME grant kind");
+                assert_eq!(old.binding(), new.binding());
+                assert!(old.product().same_issuance(new.product()));
+            } else {
+                let old = node.package_grant().expect("actual package grant");
+                let new = borrowed
+                    .package_grant()
+                    .expect("borrowed package grant kind");
+                assert!(
+                    Arc::ptr_eq(old.product(), new.product()),
+                    "borrow the actual immutable package product owner"
+                );
+                assert!(
+                    Arc::ptr_eq(&old.receipt, &new.receipt),
+                    "preserve the original receipt rather than rebinding equal code"
+                );
+                assert!(
+                    Arc::ptr_eq(&old.row, &new.row),
+                    "preserve the actual acquired package row owner"
+                );
+                assert_eq!(old.index(), new.index());
             }
         }
         witnessed += 1;

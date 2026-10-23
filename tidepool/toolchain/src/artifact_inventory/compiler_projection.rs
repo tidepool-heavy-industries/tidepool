@@ -887,15 +887,12 @@ pub(crate) fn link_native_target(
 ) -> Result<Arc<crate::linked_native::LinkedNativeTarget>, CompileError> {
     use crate::certified_products::{SelectedNativeImport, SelectedNativeTargetImport};
     use crate::linked_native::{
-        resolve_package_export, resolve_package_import, AcquiredNativeClosure, AcquiredNativeCode,
-        LinkedNativeTarget, LinkedNativeTargetImport, NativeAcquiredOccurrence, NativeAcquisition,
-        NativeCodeGrant, NativeGrantSelector, NativeOccurrenceId, NativePackageReceipt,
+        resolve_package_export, AcquiredNativeClosure, AcquiredNativeCode, LinkedNativeTarget,
+        LinkedNativeTargetImport, NativeAcquiredOccurrence, NativeCodeGrant, NativeOccurrenceId,
+        NativeOccurrencePlan, NativePackageChoice, NativePackageReceipt,
     };
-    use tidepool_repr::execution_schema::{CertifiedGroupCode, ValueId};
-    use tidepool_repr::native_code::{
-        NativeCodeBody, NativeCodeComponent, NativeCodePlan, NativeCodePlanImport,
-        NativeRetainedRequirement,
-    };
+    use tidepool_repr::execution_schema::ValueId;
+    use tidepool_repr::native_code::NativeRetainedRequirement;
 
     if !std::ptr::eq(output.operation().as_ref(), operation) {
         return Err(failure(
@@ -951,14 +948,9 @@ pub(crate) fn link_native_target(
         }
         occurrence_products.push(Arc::clone(product));
     }
-    enum DraftImport {
-        Home(NativeGroupBinding, ValueId),
-        Fresh(u32, ValueId),
-        Held(AcquiredNativeCode, ValueId),
-        Retained {
-            binding: ArtifactBinding,
-            requirement: NativeRetainedRequirement,
-        },
+    enum DraftPackage {
+        Fresh(u32),
+        Held(AcquiredNativeCode),
     }
     enum DraftTarget {
         Home(NativeGroupBinding, ValueId),
@@ -1027,28 +1019,16 @@ pub(crate) fn link_native_target(
                 "HOME ordered slots differ from their physical definitions",
             ));
         }
-        let mut drafts = Vec::new();
+        let mut drafts = BTreeMap::new();
         let mut package_cursor = 0;
         for (slot, (link, global)) in row.imports().iter().zip(definitions.globals()).enumerate() {
-            let draft = match link {
-                SelectedNativeImport::Source { binding, value } => {
+            match link {
+                SelectedNativeImport::Source { binding, .. } => {
                     if !homes.contains_key(binding) {
                         return Err(failure("selected HOME child is absent"));
                     }
-                    DraftImport::Home(*binding, *value)
                 }
-                SelectedNativeImport::Retained {
-                    binding,
-                    identity,
-                    generation,
-                } => DraftImport::Retained {
-                    binding: *binding,
-                    requirement: NativeRetainedRequirement::new(
-                        identity.clone(),
-                        *generation,
-                        Some(binding.artifact.0),
-                    ),
-                },
+                SelectedNativeImport::Retained { .. } => {}
                 SelectedNativeImport::Package {
                     identity,
                     interface_digest,
@@ -1082,13 +1062,11 @@ pub(crate) fn link_native_target(
                             "HOME and Original choices conflict on one exact slot",
                         ));
                     }
-                    if let Some(selected) = home.or(original) {
+                    let draft = if let Some(selected) = home.or(original) {
                         let occurrence = selected.occurrence();
-                        let product = package_product(occurrence)?;
-                        let value =
-                            resolve_package_export(product, global, definitions, interface_digest)?;
+                        package_product(occurrence)?;
                         fresh_roots.insert(occurrence);
-                        DraftImport::Fresh(occurrence, value)
+                        DraftPackage::Fresh(occurrence)
                     } else {
                         let old = previous
                             .as_ref()
@@ -1096,8 +1074,7 @@ pub(crate) fn link_native_target(
                             .ok_or_else(|| {
                                 failure("HOME package slot lacks current or exact held occurrence")
                             })?;
-                        let crate::linked_native::AcquiredNativeImport::Code { acquired, value } =
-                            old
+                        let crate::linked_native::AcquiredNativeImport::Code { acquired, .. } = old
                         else {
                             return Err(failure("held HOME package slot changed its import kind"));
                         };
@@ -1107,30 +1084,23 @@ pub(crate) fn link_native_target(
                             ));
                         };
                         check_product(product)?;
-                        if resolve_package_export(product, global, definitions, interface_digest)?
-                            != *value
-                        {
-                            return Err(failure(
-                                "held HOME package export changed its exact selector",
-                            ));
-                        }
                         artifacts = artifacts.retain_custody(acquired.closure().artifacts())?;
                         for retained in acquired.selected_occurrences() {
-                            if let Some(old) = held_nodes.get(&retained.occurrence) {
-                                if old.code != retained.code || old.imports != retained.imports {
+                            if let Some(old) = held_nodes.get(&retained.occurrence()) {
+                                if !old.same_linkage(&retained) {
                                     return Err(failure(
                                         "held acquired occurrence has competing exact linkage",
                                     ));
                                 }
                             } else {
-                                held_nodes.insert(retained.occurrence, retained);
+                                held_nodes.insert(retained.occurrence(), retained);
                             }
                         }
-                        DraftImport::Held(acquired.clone(), *value)
-                    }
+                        DraftPackage::Held(acquired.clone())
+                    };
+                    drafts.insert(slot, draft);
                 }
-            };
-            drafts.push(draft);
+            }
         }
         if home_links.is_some_and(|links| package_cursor != links.len()) {
             return Err(failure(
@@ -1222,11 +1192,6 @@ pub(crate) fn link_native_target(
             .ok_or_else(|| failure("package occurrence edge is out of range"))?;
         pending.extend(row.imports().iter().map(|link| link.occurrence()));
     }
-    let packages = reached
-        .iter()
-        .enumerate()
-        .map(|(index, occurrence)| (*occurrence, home_rows.len() + index))
-        .collect::<BTreeMap<_, _>>();
     let acquired_products = reached
         .iter()
         .map(|occurrence| {
@@ -1238,138 +1203,70 @@ pub(crate) fn link_native_target(
         .collect::<BTreeMap<_, _>>();
     let receipt = NativePackageReceipt::issue(manifest, &acquired_products, operation)?;
     let mut plans = Vec::new();
-    let mut selectors = Vec::new();
-    for (row, drafts) in home_rows.iter().zip(&home_drafts) {
-        let body = NativeCodeBody::Home(CertifiedGroupCode::admit(
-            row.group().owner().clone(),
-            row.group().group().clone(),
-        )?);
-        let mut imports = Vec::new();
-        let mut selected = Vec::new();
-        for draft in drafts {
-            let (edge, grant) = match draft {
-                DraftImport::Home(binding, value) => (
-                    NativeCodePlanImport::Local {
-                        occurrence: homes[binding],
-                        value: *value,
-                    },
-                    NativeGrantSelector::Code(NativeOccurrenceId::Home(*binding)),
-                ),
-                DraftImport::Fresh(occurrence, value) => (
-                    NativeCodePlanImport::Local {
-                        occurrence: packages[occurrence],
-                        value: *value,
-                    },
-                    NativeGrantSelector::Code(NativeOccurrenceId::Package {
-                        stage_id,
-                        occurrence: *occurrence,
-                    }),
-                ),
-                DraftImport::Held(acquired, value) => (
-                    NativeCodePlanImport::External {
-                        code: acquired.code().clone(),
-                        value: *value,
-                    },
-                    NativeGrantSelector::Code(acquired.occurrence()),
-                ),
-                DraftImport::Retained {
-                    binding,
-                    requirement,
-                } => (
-                    NativeCodePlanImport::Retained(requirement.clone()),
-                    NativeGrantSelector::Retained { binding: *binding },
-                ),
-            };
-            imports.push(edge);
-            selected.push(grant);
-        }
-        plans.push(NativeCodePlan { body, imports });
-        selectors.push(selected);
+    for (row, drafts) in home_rows.iter().zip(home_drafts) {
+        operation
+            .reserve::<(usize, NativePackageChoice)>(drafts.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let packages = drafts
+            .into_iter()
+            .map(|(slot, draft)| {
+                let choice = match draft {
+                    DraftPackage::Fresh(occurrence) => NativePackageChoice::Receipt(
+                        receipt
+                            .occurrence(occurrence)
+                            .ok_or_else(|| failure("selected package acquisition is absent"))?,
+                    ),
+                    DraftPackage::Held(acquired) => NativePackageChoice::Held(acquired),
+                };
+                Ok((slot, choice))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        let grant = home_grants
+            .get(&row.binding())
+            .cloned()
+            .ok_or_else(|| failure("selected HOME grant is absent"))?;
+        plans.push(NativeOccurrencePlan::home(grant, packages, operation)?);
     }
     for occurrence in &reached {
-        let product = &occurrence_products[*occurrence as usize];
-        let row = &occurrences[*occurrence as usize];
-        let mut imports = Vec::new();
-        let mut selected = Vec::new();
-        for (slot, link) in row.imports().iter().enumerate() {
-            let child = link.occurrence();
-            let target = package_product(child)?;
-            let value = resolve_package_import(product, slot, target)?;
-            imports.push(NativeCodePlanImport::Local {
-                occurrence: packages[&child],
-                value,
-            });
-            selected.push(NativeGrantSelector::Code(NativeOccurrenceId::Package {
-                stage_id,
-                occurrence: child,
-            }));
-        }
-        plans.push(NativeCodePlan {
-            body: NativeCodeBody::Package(product.code().clone()),
-            imports,
-        });
-        selectors.push(selected);
+        plans.push(NativeOccurrencePlan::package(
+            receipt
+                .occurrence(*occurrence)
+                .ok_or_else(|| failure("selected package acquisition is absent"))?,
+            operation,
+        )?);
     }
     crate::host_work::checkpoint()?;
-    let roots = (0..plans.len()).collect::<Vec<_>>();
-    let linked = NativeCodeComponent::link(&plans, &roots, operation)
-        .map_err(crate::linked_native::linked_code_error)?;
+    let linked = NativeOccurrencePlan::link(plans, operation)?;
     crate::host_work::checkpoint()?;
     let mut nodes = held_nodes;
-    for (index, row) in home_rows.iter().enumerate() {
+    for index in 0..home_rows.len() {
         if let Some(prior) = &prior_owners[index] {
-            if prior.code() != &linked[index] {
+            if prior.code() != linked[index].code() {
                 return Err(failure("selected HOME head changed its exact closed code"));
             }
             // Equal code does not reissue its authorizing child occurrences.
             // Current source correlation is borrowed separately by this target.
             artifacts = artifacts.retain_custody(prior.closure().artifacts())?;
             for original in prior.selected_occurrences() {
-                if let Some(previous) = nodes.get(&original.occurrence) {
-                    if previous.code != original.code || previous.imports != original.imports {
+                if let Some(previous) = nodes.get(&original.occurrence()) {
+                    if !previous.same_linkage(&original) {
                         return Err(failure(
                             "selected HOME history has competing exact occurrence grants",
                         ));
                     }
                 } else {
-                    nodes.insert(original.occurrence, original);
+                    nodes.insert(original.occurrence(), original);
                 }
             }
         } else {
-            nodes.insert(
-                NativeOccurrenceId::Home(row.binding()),
-                NativeAcquiredOccurrence {
-                    occurrence: NativeOccurrenceId::Home(row.binding()),
-                    code: linked[index].clone(),
-                    acquisition: NativeAcquisition::Home {
-                        grant: home_grants
-                            .get(&row.binding())
-                            .cloned()
-                            .ok_or_else(|| failure("selected HOME grant is absent"))?,
-                    },
-                    imports: selectors[index].clone().into(),
-                },
-            );
+            nodes.insert(linked[index].occurrence(), linked[index].clone());
         }
     }
-    for occurrence in &reached {
-        let index = packages[occurrence];
-        let id = NativeOccurrenceId::Package {
-            stage_id,
-            occurrence: *occurrence,
-        };
-        let node = NativeAcquiredOccurrence {
-            occurrence: id,
-            code: linked[index].clone(),
-            acquisition: NativeAcquisition::Package {
-                product: Arc::clone(&occurrence_products[*occurrence as usize]),
-                receipt: Arc::clone(&receipt),
-                occurrence: *occurrence,
-            },
-            imports: selectors[index].clone().into(),
-        };
+    for (offset, _) in reached.iter().enumerate() {
+        let node = linked[home_rows.len() + offset].clone();
+        let id = node.occurrence();
         if let Some(prior) = nodes.get(&id) {
-            if prior.code != node.code || prior.imports != node.imports {
+            if !prior.same_linkage(&node) {
                 return Err(failure(
                     "package receipt occurrence changed its closed code",
                 ));
@@ -1401,14 +1298,14 @@ pub(crate) fn link_native_target(
         let node = nodes
             .get(&occurrence)
             .ok_or_else(|| failure("selected exact occurrence is absent"))?;
-        pending.extend(node.imports.iter().filter_map(|selector| match selector {
-            NativeGrantSelector::Code(child) => Some(*child),
-            _ => None,
-        }));
+        pending.extend(node.children());
     }
     nodes.retain(|occurrence, _| selected.contains(occurrence));
-    let closure =
-        AcquiredNativeClosure::issue(nodes.into_values().collect(), artifacts, operation)?;
+    let closure = AcquiredNativeClosure::from_occurrences(
+        nodes.into_values().collect(),
+        artifacts,
+        operation,
+    )?;
     let current = Arc::new(current);
     let target_imports = target_drafts
         .into_iter()
