@@ -1547,7 +1547,7 @@ impl SessionLib {
     }
 }
 #[cfg(test)]
-mod semantic_currency_tests;
+pub(in crate::session) mod semantic_currency_tests;
 
 #[cfg(test)]
 pub(in crate::session) mod tests {
