@@ -30796,16 +30796,44 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         wire.as_array_mut().unwrap()[3] = text(hex(&request.semantic_sha256));
         write_receipt(&receipt, &wire);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
-        let retained = request
+        assert_eq!(admission.selected_originals.len(), 2);
+        let unchanged = request
             .admit_fixture_support(
                 Arc::clone(&context),
                 &support_offer(&[]),
-                &[admission],
+                std::slice::from_ref(&admission),
+                None,
+            )
+            .unwrap();
+        assert!(request.program_source_lexical().is_empty());
+        assert!(unchanged.same_authenticated_context(&context));
+        let canonical_support = CompilerSupportFixture::Complete(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        );
+        let retained = request
+            .admit_fixture_support(
+                Arc::clone(&context),
+                &canonical_support,
+                std::slice::from_ref(&admission),
                 None,
             )
             .unwrap();
         assert!(original_products(&retained.artifact_view().entries()).is_empty());
-        assert_eq!(request.program_source_lexical().len(), 2);
+        assert_eq!(
+            request.program_source_lexical(),
+            &[
+                ExactLexicalNode {
+                    owner: identity("main", "A"),
+                    imports: vec![identity("main", "B")],
+                },
+                ExactLexicalNode {
+                    owner: identity("main", "B"),
+                    imports: vec![],
+                },
+            ]
+        );
         assert!(context.lexical_graph().is_empty());
         request.validate_receipt(&receipt, None, &retained).unwrap();
     }
@@ -34766,6 +34794,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             "Consumer",
             b"changed canonical interface".to_vec(),
         )]);
+        let owner = identity("fixture", "Consumer");
+        let existing_original = support.projection().snapshot_roles()[&owner]
+            .original()
+            .expect("the held support selects its actual Original");
+        let incoming_original = changed.projection().snapshot_roles()[&owner]
+            .original()
+            .expect("the changed support selects its actual Original");
+        assert_ne!(existing_original, incoming_original);
         let changed_refusal = {
             let fixture = &changed;
             let selection = fixture.source_selection().unwrap();
@@ -34778,10 +34814,16 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
         }
         .unwrap_err();
-        assert_context_refusal(
-            &changed_refusal,
-            "projected segment source changed its admitted canonical owner",
-        );
+        assert!(matches!(&changed_refusal, CompileError::ArtifactInventory(error)
+            if matches!(&error.failure,
+                ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                    owner: actual_owner,
+                    existing,
+                    incoming,
+                } if actual_owner == &owner
+                    && *existing == existing_original
+                    && *incoming == incoming_original)),
+            "replacement must refuse the exact competing Original acquisitions: {changed_refusal:?}");
         assert_eq!(projected.context().semantic_sha256(), before);
         assert!(segment
             .product_admission(
