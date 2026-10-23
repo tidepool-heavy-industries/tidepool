@@ -752,13 +752,18 @@ fn replay_native_transport_history(
         issued_mode(if overlap { &[7] } else { &[7, 9001] }),
         "a union of issued dependency groups never issues Full"
     );
+    // The compiler census exports only selected Original owners. The TYPE
+    // child's exact groups stay in executable dependency closure and private
+    // availability; they are not independent compiler replay roots.
     let expected_wire = entries
         .iter()
         .map(|entry| {
-            let ordinals = expected_native
+            let ordinals = expected_parent_roots
                 .iter()
-                .filter(|group| group.artifact == entry.descriptor.id)
+                .filter(|group| group.binding.artifact() == entry.descriptor.id)
                 .map(|group| group.original_ordinal)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>();
             (entry.descriptor.owner.module.clone(), ordinals)
         })
@@ -1181,7 +1186,11 @@ fn replay_native_transport_history(
         .unwrap();
     let continued_inputs = continued_request.compiler_inputs();
     assert_eq!(
-        continued_inputs.metadata().retained.selected_native_groups.as_ref(),
+        continued_inputs
+            .metadata()
+            .retained
+            .selected_native_groups
+            .as_ref(),
         &produced
             .compiler_inputs()
             .issued_artifacts()
