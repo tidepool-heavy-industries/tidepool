@@ -760,7 +760,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   aliasClosure <- readVerifiedExactIfaceClosureWithCheckedValues environment
     [iface | (iface,_,_) <- originals] [alias] >>= either fail pure
   selected <- either fail pure (selectVerifiedValueInterfaces aliasClosure [alias])
-  aliasInputs <- either fail pure (selectCapturedInterfaceInputs aliasClosure
+  aliasInputs <- either throwIO pure (selectCapturedInterfaceInputs aliasClosure
     ([iface | (iface,_,_) <- originals] ++ [alias]))
   aliasOwner <- hydrateInterfaceInputs environment aliasInputs
   let symbol = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "cmd" Nothing

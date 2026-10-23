@@ -4,7 +4,7 @@ module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 
-import Control.Exception (bracket, IOException, try)
+import Control.Exception (bracket, IOException, throwIO, try)
 import Control.Monad (forM_, unless)
 import Data.List (isInfixOf, isPrefixOf, nub)
 import Data.ByteString qualified as BS
@@ -25,7 +25,7 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Id (idType)
-import GHC.Core.Type (eqType)
+import GHC.Core.TyCo.Compare (eqType)
 import qualified Data.Text as T
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import GHC.Types.Name.Occurrence (mkVarOcc, mkTcOcc, mkDataOcc, mkRecFieldOcc)
@@ -277,7 +277,7 @@ checkCompletedValueRefinement work baseEnv original = do
       request = ("selectedId",symbol,value)
       hydrate env artifacts = do
         inputs <- readVerifiedExactIfaceClosure env artifacts >>= either fail pure
-        selected <- either fail pure (selectCapturedInterfaceInputs inputs artifacts)
+        selected <- either throwIO pure (selectCapturedInterfaceInputs inputs artifacts)
         hydrateInterfaceInputs env selected
       checkType aliases = unless
         (maybe False (\identifier -> eqType (idType identifier) intTy)

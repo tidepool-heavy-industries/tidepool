@@ -96,7 +96,7 @@ import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource
   ( extractModuleName, generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, literalImportRendering
-  , importRenderingSource
+  , importRenderingSource, replaceTemplateMarker
   , qualifyCompilerDefaultRendering, spliceImportRendering )
 import Tidepool.DependencyEvidence
   ( validateDependencyEvidence, writeDependencyEvidence)
@@ -230,11 +230,11 @@ runActivationPreviewMode bound request = do
         opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
         basePurpose = HostActivationPreviewCompile (previewInputSignature admission)
         render body = do
-          source <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body original
+          source <- either fail pure (replaceTemplateMarker "{{ACTIVATION_PREVIEW}}" body original)
           let owner = generatedScaffoldModuleName
                 ["activation-renderer-scaffold-v1", previewOriginalContextDigest admission, source]
           protected <- either fail pure (renameScaffoldModuleHeader selectedFlags owner original)
-          named <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body protected
+          named <- either fail pure (replaceTemplateMarker "{{ACTIVATION_PREVIEW}}" body protected)
           (_, moduleName', modulePath) <- writeSplicedModule selectedFlags outDir lastAttempt named
           recipe <- generatedActivationPreviewRecipe parserFlags (previewOriginalInterfaces admission)
             (previewOriginalTarget admission) protected named modulePath moduleName' >>= either fail pure

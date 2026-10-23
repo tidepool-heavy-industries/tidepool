@@ -459,6 +459,8 @@ test-suite planned-declaration-test
     filepath,
     ghc >= 9.12 && < 9.13,
     mtl,
+    text,
+    tidepool-execution-schema,
     tidepool-extract-internal
   default-language: GHC2024
   ghc-options: -Wall
