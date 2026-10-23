@@ -106,6 +106,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/activation_input_tests/finite_source_world_history.rs',
         'tidepool/runtime/src/session/activation_input_tests/world_disposal_history.rs',
         'tidepool/runtime/src/session/world_cell_test_support.rs',
+        'tidepool/runtime/src/session/world_cell_test_support/source_hidden_join.rs',
         'tidepool/runtime/src/session/resident_paired_publication_tests.rs',
         'tidepool/runtime/src/session/package_runtime_tests.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',

@@ -1341,6 +1341,8 @@ def runtime_world_publication_test_cases(binary):
         "paired_first_authored_publication_preserves_atomic_visibility",
         "paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
     )]
+    tests.append("session::resident::world_cell_test_support::source_hidden_join::"
+                 "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")
     env, resources, worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_world_publication_histories"
     )
