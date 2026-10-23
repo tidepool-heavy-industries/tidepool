@@ -159,7 +159,10 @@ impl SelectedTypeInterfaces {
             .get_or_init(|| self.materialization_context().semantic_sha256())
     }
     pub fn same_authenticated_interfaces(&self, other: &Self) -> bool {
-        self == other
+        std::ptr::eq(self, other)
+            || (self == other
+                && self.support.artifacts().binding_dependencies()
+                    == other.support.artifacts().binding_dependencies())
     }
     pub fn select(
         &self,
