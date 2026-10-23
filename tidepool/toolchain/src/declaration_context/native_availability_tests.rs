@@ -9489,7 +9489,7 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
         .admit_shared_with_demand(
             &inventory.empty_view(),
             entries.clone(),
-            NativeArtifactDemand::ScopeInterfaces,
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
     let full = inventory
@@ -9946,11 +9946,13 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
                 .unwrap(),
             crate::artifact_inventory::InputNativeDecision::IssuedChoices(_)
         ));
-        let crossed = support.checked_native_input_decision(
-            old.descriptor.id,
-            historical_canonical,
-            historical.owner(),
-        );
+        let crossed = support
+            .checked_native_input_decision(
+                old.descriptor.id,
+                historical_canonical,
+                historical.owner(),
+            )
+            .map(|_| ());
         assert!(
             matches!(crossed,
             Err(crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch(ref mismatch))
