@@ -133,11 +133,11 @@ pub(in crate::session) fn state_source_action<T>(
 /// are the same production transitions used by resident callers.
 pub(in crate::session) fn begin_state_fixture_execution(
     state: &mut PersistentSession,
-    public: ScopeId,
+    source: &Arc<RuntimeLexicalScopeLease>,
     recipe: &InputRecipe,
 ) -> Arc<PrivateExecutionAdmission> {
-    let source = state.retain_lexical_scope(public).unwrap();
-    bootstrap_state_world_for(state, recipe, &source);
+    let public = source.scope();
+    bootstrap_state_world_for(state, recipe, source);
     let original = source.original_source().clone();
     let settled = state
         .with_source_compiler_transaction(
