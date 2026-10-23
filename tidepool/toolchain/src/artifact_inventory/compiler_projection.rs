@@ -9642,31 +9642,23 @@ mod tests {
                 kernel.capture_graph_selection(),
                 prior_constructor.capture_graph_selection()
             );
-            type_query_work::take();
-            let mut prior_support = winner
-                .rebuild(
-                    kernel_projection,
-                    prior_constructor,
-                    winner
-                        .native_offers
-                        .iter()
-                        .chain(historical.native_offers.iter())
-                        .cloned(),
-                )
+            // The independent reference supplies graph and role facts. It cannot
+            // issue acquired rows absent from the receiving owner; compare live
+            // selections separately with their original issuers below.
+            let expected_offers = winner
+                .native_offer_observations()
                 .unwrap()
-                .retain_normalized_availability(historical.native_availability())
+                .into_iter()
+                .chain(historical.native_offer_observations().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(joined.native_offer_observations().unwrap(), expected_offers);
+            let expected_availability = winner
+                .native_availability
+                .merge(&historical.native_availability)
+                .unwrap()
+                .into_rows()
+                .for_compiler_roles(joined.compiler_roles(), &prior_constructor)
                 .unwrap();
-            let prior_work = type_query_work::take();
-            assert!(
-                prior_work.resolved_rows > 0,
-                "the reference rebuild calibrates removed work"
-            );
-            prior_support.input_decisions = kernel_decisions;
-            assert!(joined.selected.same_recorded_facts(&prior_support.selected));
-            assert_eq!(
-                joined.native_offer_observations().unwrap(),
-                prior_support.native_offer_observations().unwrap()
-            );
             for (owner, row) in joined.selected.iter() {
                 let issuer = winner
                     .selected
@@ -9685,18 +9677,21 @@ mod tests {
             }
             assert_eq!(
                 joined.artifacts.capture_graph_selection(),
-                prior_support.artifacts.capture_graph_selection(),
+                prior_constructor.capture_graph_selection(),
             );
-            assert_eq!(joined.projection, prior_support.projection);
+            assert_eq!(
+                joined.projection.snapshot_roles(),
+                kernel_projection.snapshot_roles()
+            );
             assert_eq!(
                 joined.input_decisions.recorded_facts(),
-                prior_support.input_decisions.recorded_facts()
+                kernel_decisions.recorded_facts()
             );
             assert!(joined
                 .native_availability
-                .same_recorded_facts(&prior_support.native_availability));
+                .same_recorded_facts(&expected_availability));
             let current_metadata = joined.artifacts.metadata_snapshot();
-            let prior_metadata = prior_support.artifacts.metadata_snapshot();
+            let prior_metadata = prior_constructor.metadata_snapshot();
             assert_eq!(current_metadata.entries, prior_metadata.entries);
             assert_eq!(current_metadata.artifacts, prior_metadata.artifacts);
             assert_eq!(
@@ -9707,7 +9702,7 @@ mod tests {
                 current_metadata.ambiguous_native_owners,
                 prior_metadata.ambiguous_native_owners
             );
-            drop(prior_support);
+            drop(prior_constructor);
             drop(kernel);
             assert_eq!(pair(&joined), pair(&winner));
             assert_eq!(joined.input_decisions.facts[owner].groups, winner_choices);
