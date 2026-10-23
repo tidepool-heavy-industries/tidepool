@@ -453,7 +453,7 @@ fn assert_offer_retention_matches_ordered_fold(
         let prefix = &offers[..end];
         assert_retention_result_matches(
             ordered_offer_retention(context, &eager_custody[..end]),
-            retain_native_offers(context, prefix),
+            context.retain_issued_offer_custody(prefix.iter().cloned()),
         );
         assert_retention_result_matches(
             ordered_offer_retention(context, &eager_custody[..end]),
@@ -500,14 +500,14 @@ fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool
         let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
             .unwrap()
             .unwrap();
-        let full = IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap();
+        let full = IssuedNativeOffer::issue(&entry, &source, Some(proof)).unwrap();
         assert!(full.is_full());
         let partial = full
             .within_projection(&projection, &issuer.empty_view())
             .unwrap()
             .unwrap();
         assert!(!partial.is_full());
-        let empty = IssuedNativeOffer::issue(entry.descriptor.id, &source, None).unwrap();
+        let empty = IssuedNativeOffer::issue(&entry, &source, None).unwrap();
         for offer in [&full, &partial, &empty] {
             eager_custody.push(eager_artifact_custody_reference(&source, offer));
         }
@@ -617,7 +617,7 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
             let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
                 .unwrap()
                 .unwrap();
-            IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap()
+            IssuedNativeOffer::issue(&entry, &source, Some(proof)).unwrap()
         })
         .collect::<Vec<_>>();
     let eager_custody = offers
@@ -663,7 +663,9 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
     expected.entries();
     let old = inventory.metrics();
     let before_batch = inventory.metrics();
-    let actual = retain_native_offers(&source, &offers).unwrap();
+    let actual = source
+        .retain_issued_offer_custody(offers.iter().cloned())
+        .unwrap();
     actual.entries();
     let batched = inventory.metrics();
     assert_retention_result_matches(Ok(expected), Ok(actual));
@@ -711,7 +713,7 @@ fn issued_offer_retention_preserves_historical_canonical_custody() {
         let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, source)
             .unwrap()
             .unwrap();
-        IssuedNativeOffer::issue(entry.descriptor.id, source, Some(proof)).unwrap()
+        IssuedNativeOffer::issue(&entry, source, Some(proof)).unwrap()
     };
     let current_offer = issue(&context, &current_entry);
     let other_inventory = ArtifactInventory::default();
@@ -822,8 +824,7 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
                 )
             })
             .unwrap();
-        let offer =
-            IssuedNativeOffer::issue(entry.descriptor.id, &issuer, Some(proof.clone())).unwrap();
+        let offer = IssuedNativeOffer::issue(&entry, &issuer, Some(proof.clone())).unwrap();
         eager_custody.push(eager_artifact_custody_reference(&issuer, &offer));
         offers.push(offer);
         completed.push(owner);
@@ -852,7 +853,9 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
             .map(|index| eager_custody[*index].clone())
             .collect::<Vec<_>>();
         let expected = ordered_offer_retention(&source, &selected_custody).unwrap();
-        let actual = retain_native_offers(&source, &selected).unwrap();
+        let actual = source
+            .retain_issued_offer_custody(selected.iter().cloned())
+            .unwrap();
         let expected_parents = observe_parents(&expected);
         let actual_parents = observe_parents(&actual);
         assert_eq!(actual_parents.len(), expected_parents.len());
@@ -1280,7 +1283,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             [offer] if !offer.is_full() && offer.proof() == Some(&left_proof)
         ));
         let full = crate::artifact_inventory::IssuedNativeOffer::issue(
-            native_entry.descriptor.id,
+            &native_entry,
             &left,
             Some(left_proof.clone()),
         )
@@ -1450,11 +1453,11 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         )
         .unwrap()
         .unwrap();
-        IssuedNativeOffer::issue(entries[index].descriptor.id, &full, Some(proof)).unwrap()
+        IssuedNativeOffer::issue(&entries[index], &full, Some(proof)).unwrap()
     };
     let ancestor_offer = complete(0);
     let unrelated_offer = complete(2);
-    let dependency_offer = IssuedNativeOffer::issue(entries[1].descriptor.id, &base, None).unwrap();
+    let dependency_offer = IssuedNativeOffer::issue(&entries[1], &base, None).unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
     let transport_metadata = projection
         .project_metadata(base.metadata_snapshot())
@@ -2051,7 +2054,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         )
         .unwrap()
         .unwrap();
-        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap();
+        let offer = IssuedNativeOffer::issue(&entry, &source, Some(proof)).unwrap();
         (offer, source)
     };
     let (left, left_source) = issue("OptionalCensusLeft", 103);
@@ -2074,7 +2077,9 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
         } else {
             [left.clone(), right.clone()]
         };
-        let opaque_custody = retain_native_offers(&base, &alternatives).unwrap();
+        let opaque_custody = base
+            .retain_issued_offer_custody(alternatives.iter().cloned())
+            .unwrap();
         assert!(opaque_custody
             .capture_graph_selection()
             .native_groups
@@ -2141,7 +2146,9 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
             "a real demand without an exact choice must still refuse"
         );
         for chosen in [&left, &right] {
-            let artifacts = retain_native_offers(&base, std::slice::from_ref(chosen)).unwrap();
+            let artifacts = base
+                .retain_issued_offer_custody(std::iter::once(chosen.clone()))
+                .unwrap();
             let support =
                 fixture_support_with_issued_offers(projection.clone(), artifacts, [chosen.clone()])
                     .unwrap();
@@ -2272,7 +2279,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let proof = NativeOriginalRequirement::from_issued_group_custody(a_id, canonical, &full)
         .unwrap()
         .unwrap();
-    let a_offer = IssuedNativeOffer::issue(a_id, &full, Some(proof)).unwrap();
+    let a_offer = IssuedNativeOffer::issue(&entries[0], &full, Some(proof)).unwrap();
     let dependency_groups = a_offer
         .dependency_group_carriers(&BTreeSet::from([b_id]))
         .unwrap();
@@ -2284,13 +2291,14 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
         BTreeSet::from([(b_id, 7), (a_id, 9001)]),
         "the independently authored B closure includes its real backedge only",
     );
-    let b_offer = IssuedNativeOffer::issue(b_id, &base, None).unwrap();
+    let b_offer = IssuedNativeOffer::issue(&entries[1], &base, None).unwrap();
     let projection = CompilerInputProjection::from_issued_entries(&[entries[1].clone()]).unwrap();
     let b = base.select_roots(vec![b_id]).unwrap();
     let offers = vec![a_offer, b_offer];
     let support = fixture_support_with_issued_offers(
         projection.clone(),
-        retain_native_offers(&b, &offers).unwrap(),
+        b.retain_issued_offer_custody(offers.iter().cloned())
+            .unwrap(),
         offers,
     )
     .unwrap();
@@ -2530,7 +2538,7 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
     let proof = NativeOriginalRequirement::from_selected_view(a_id, &current)
         .unwrap()
         .unwrap();
-    let offer = IssuedNativeOffer::issue(a_id, &current, Some(proof)).unwrap();
+    let offer = IssuedNativeOffer::issue(&entries[0], &current, Some(proof)).unwrap();
     assert!(
         !offer.is_full(),
         "competing same-carrier groups cannot issue Full"
@@ -2789,8 +2797,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, target.artifacts())
                 .unwrap()
                 .unwrap();
-        let offer =
-            IssuedNativeOffer::issue(entry.descriptor.id, target.artifacts(), Some(proof)).unwrap();
+        let offer = IssuedNativeOffer::issue(&entry, target.artifacts(), Some(proof)).unwrap();
         let retained_offers = context
             .compiler_source_support()
             .retain_offers([offer.clone()])
@@ -2849,7 +2856,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full)
         .unwrap()
         .unwrap();
-    let offer = IssuedNativeOffer::issue(entry.descriptor.id, &full, Some(proof)).unwrap();
+    let offer = IssuedNativeOffer::issue(&entry, &full, Some(proof)).unwrap();
     assert!(offer.is_full());
     let reusable_support = fixture_support_with_issued_offers(
         CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
@@ -3302,7 +3309,7 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
     let proof = NativeOriginalRequirement::from_selected_view(native_entry.descriptor.id, &full)
         .unwrap()
         .unwrap();
-    let offer = IssuedNativeOffer::issue(native_entry.descriptor.id, &full, Some(proof)).unwrap();
+    let offer = IssuedNativeOffer::issue(&native_entry, &full, Some(proof)).unwrap();
     let issued = recover_fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[native_entry.clone(), plain_entry.clone()])
             .unwrap(),
@@ -3408,11 +3415,11 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
         let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &selected)
             .unwrap()
             .unwrap();
-        let offer = IssuedNativeOffer::issue(entry.descriptor.id, &selected, Some(proof)).unwrap();
+        let offer = IssuedNativeOffer::issue(&entry, &selected, Some(proof)).unwrap();
         assert!(!offer.is_full());
         partials.push(offer);
     }
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &full, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &full, None).unwrap();
     for offers in [vec![], vec![empty], vec![partials[0].clone()], partials] {
         let metadata = projection
             .project_metadata(full.metadata_snapshot())
@@ -4289,7 +4296,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, view)
                 .unwrap()
                 .unwrap();
-            let offer = IssuedNativeOffer::issue(entry.descriptor.id, view, Some(proof)).unwrap();
+            let offer = IssuedNativeOffer::issue(&entry, view, Some(proof)).unwrap();
             assert!(offer.is_full());
             offer
         })
@@ -4561,7 +4568,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             .unwrap()
     });
     let offers = views.each_ref().map(|view| {
-        let offer = IssuedNativeOffer::issue(entry.descriptor.id, view, None).unwrap();
+        let offer = IssuedNativeOffer::issue(&entry, view, None).unwrap();
         assert!(!offer.is_full());
         assert!(offer.proof().is_none());
         offer
@@ -4759,8 +4766,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                 )
                 .unwrap()
                 .unwrap();
-                let offer =
-                    IssuedNativeOffer::issue(entry.descriptor.id, view, Some(proof)).unwrap();
+                let offer = IssuedNativeOffer::issue(&entry, view, Some(proof)).unwrap();
                 assert!(offer.is_full());
                 offer
             })
@@ -4936,19 +4942,12 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         original: entry.descriptor.id,
         selection: ExactArtifactSelection::capture(&base),
     };
-    let unqualified = crate::artifact_inventory::IssuedNativeOffer::issue(
-        entry.descriptor.id,
-        &full,
-        Some(no_groups),
-    )
-    .unwrap();
+    let unqualified =
+        crate::artifact_inventory::IssuedNativeOffer::issue(&entry, &full, Some(no_groups))
+            .unwrap();
     assert!(!unqualified.is_full());
-    let complete = crate::artifact_inventory::IssuedNativeOffer::issue(
-        entry.descriptor.id,
-        &full,
-        Some(issued),
-    )
-    .unwrap();
+    let complete =
+        crate::artifact_inventory::IssuedNativeOffer::issue(&entry, &full, Some(issued)).unwrap();
     assert!(complete.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
     let no_demand = projection
@@ -4968,8 +4967,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         assert!(!offers[0].is_full());
     }
     let empty_offer =
-        crate::artifact_inventory::IssuedNativeOffer::issue(entry.descriptor.id, &full, None)
-            .unwrap();
+        crate::artifact_inventory::IssuedNativeOffer::issue(&entry, &full, None).unwrap();
     let empty = NativeInputSelection::issue_checked(&projection, &no_demand, &full, &[empty_offer])
         .unwrap();
     assert!(!empty.availability.0[&entry.descriptor.id].permits(7));
@@ -5313,12 +5311,8 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
                     )
                     .unwrap()
                     .unwrap();
-                crate::artifact_inventory::IssuedNativeOffer::issue(
-                    entry.descriptor.id,
-                    &issued,
-                    Some(proof),
-                )
-                .unwrap()
+                crate::artifact_inventory::IssuedNativeOffer::issue(&entry, &issued, Some(proof))
+                    .unwrap()
             })
             .collect::<Vec<_>>();
         let prior =
@@ -5334,7 +5328,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
             .unwrap()
             .unwrap();
         let current_offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-            entries[2].descriptor.id,
+            &entries[2],
             &current,
             Some(current_proof),
         )
@@ -5370,7 +5364,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
             &metadata,
             &view,
             &[crate::artifact_inventory::IssuedNativeOffer::issue(
-                entries[1].descriptor.id,
+                &entries[1],
                 &issued,
                 Some(proof),
             )
@@ -5510,12 +5504,11 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     let full = inventory
         .admit_shared(&inventory.empty_view(), entries.clone())
         .unwrap();
-    let authored_id = entries
+    let authored_entry = entries
         .iter()
         .find(|entry| entry.descriptor.owner.module == module)
-        .unwrap()
-        .descriptor
-        .id;
+        .unwrap();
+    let authored_id = authored_entry.descriptor.id;
     let helper_id = entries
         .iter()
         .find(|entry| entry.descriptor.owner.module == "TypeOnlyHelper")
@@ -5541,7 +5534,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
     .unwrap()
     .expect("complete authored census was issued before demotion");
     let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-        authored_id,
+        authored_entry,
         &full,
         Some(proof.clone()),
     )
@@ -6274,15 +6267,15 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             }]),
         )
         .unwrap();
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &full, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &full, None).unwrap();
     let partial = IssuedNativeOffer::issue(
-        entry.descriptor.id,
+        &entry,
         &sparse,
         NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &sparse).unwrap(),
     )
     .unwrap();
     let complete = IssuedNativeOffer::issue(
-        entry.descriptor.id,
+        &entry,
         &full,
         NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full).unwrap(),
     )
@@ -7686,7 +7679,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         )
         .unwrap();
         let offer = crate::artifact_inventory::IssuedNativeOffer::issue(
-            entry.descriptor.id,
+            &entry,
             &selected,
             requirements.first().cloned(),
         )
@@ -7871,14 +7864,14 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
         .unwrap()
         .unwrap();
-    let full = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, Some(proof)).unwrap();
+    let full = IssuedNativeOffer::issue(&entry, &artifacts, Some(proof)).unwrap();
     assert!(full.is_full());
     let partial = full
         .within_projection(&projection, &inventory.empty_view())
         .unwrap()
         .unwrap();
     assert!(!partial.is_full());
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &artifacts, None).unwrap();
 
     for offer in [&full, &partial, &empty] {
         let expected = offer.snapshot_facts();
@@ -7955,8 +7948,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
         .unwrap()
         .unwrap();
-    let full =
-        IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, Some(proof.clone())).unwrap();
+    let full = IssuedNativeOffer::issue(&entry, &artifacts, Some(proof.clone())).unwrap();
     assert!(full.is_full());
     // Namespace withdrawal narrows an actual issuance. Restoring the original
     // complete namespace later must not reverse that decision.
@@ -7966,7 +7958,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         .unwrap();
     assert!(!partial.is_full());
     assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &artifacts, None).unwrap();
     let canonical = ArtifactEntry::canonical(match &entry.payload {
         ArtifactPayload::Original(product) => product.module_interface().clone(),
         _ => unreachable!(),
@@ -8253,8 +8245,8 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
     };
     let left = issue("EmptyLeft", 89);
     let right = issue("EmptyRight", 90);
-    let left_offer = IssuedNativeOffer::issue(entry.descriptor.id, &left, None).unwrap();
-    let right_offer = IssuedNativeOffer::issue(entry.descriptor.id, &right, None).unwrap();
+    let left_offer = IssuedNativeOffer::issue(&entry, &left, None).unwrap();
+    let right_offer = IssuedNativeOffer::issue(&entry, &right, None).unwrap();
     let left_graph = left_offer.custody_snapshot().graph_selection().unwrap();
     let right_graph = right_offer.custody_snapshot().graph_selection().unwrap();
     assert_eq!(
@@ -8518,7 +8510,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 .unwrap();
             let projection = baseline.projection().clone();
             let full_offer = IssuedNativeOffer::issue(
-                id,
+                &entry,
                 &full,
                 NativeOriginalRequirement::from_selected_view(id, &full).unwrap(),
             )
@@ -8551,7 +8543,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 )
                 .unwrap();
             let available_offer = IssuedNativeOffer::issue(
-                id,
+                &entry,
                 &chosen,
                 NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
             )
@@ -8918,7 +8910,7 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let artifacts = support.artifacts().clone();
     assert!(artifacts.selected_native_groups().is_empty());
     let full = issued.owner.facts.compiler_support.native_offers()[0].clone();
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &artifacts, None).unwrap();
     for (index, offer) in [full, empty].into_iter().enumerate() {
         let support = fixture_support_with_issued_offers(
             projection.clone(),
@@ -9044,12 +9036,8 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         )
                         .unwrap()
                         .unwrap();
-                        let full = IssuedNativeOffer::issue(
-                            entries[0].descriptor.id,
-                            &sources[0],
-                            Some(proof),
-                        )
-                        .unwrap();
+                        let full = IssuedNativeOffer::issue(&entries[0], &sources[0], Some(proof))
+                            .unwrap();
                         let partial_view = sources[0]
                             .inventory()
                             .admit_recovery_selection(
@@ -9068,7 +9056,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         .unwrap()
                         .unwrap();
                         let partial = IssuedNativeOffer::issue(
-                            entries[0].descriptor.id,
+                            &entries[0],
                             &partial_view,
                             Some(partial_proof),
                         )
@@ -9085,12 +9073,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         );
                         assert!(full.is_full());
                         let offer = match mode {
-                            0 => IssuedNativeOffer::issue(
-                                entries[0].descriptor.id,
-                                &sources[0],
-                                None,
-                            )
-                            .unwrap(),
+                            0 => IssuedNativeOffer::issue(&entries[0], &sources[0], None).unwrap(),
                             1 => partial,
                             _ => full,
                         };
@@ -9200,8 +9183,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         }
                         // A covered prefix followed by another authenticated scope.
                         let auxiliary =
-                            IssuedNativeOffer::issue(entries[1].descriptor.id, &sources[1], None)
-                                .unwrap();
+                            IssuedNativeOffer::issue(&entries[1], &sources[1], None).unwrap();
                         if reverse {
                             offers.insert(0, auxiliary);
                         } else {
@@ -9471,7 +9453,7 @@ fn namespace_empty_full_offer_restores_its_own_exact_qualification() {
         .unwrap()
         .unwrap();
     assert!(proof.selection.graph_selection().namespace.is_empty());
-    let full = IssuedNativeOffer::issue(entry.descriptor.id, &source, Some(proof)).unwrap();
+    let full = IssuedNativeOffer::issue(&entry, &source, Some(proof)).unwrap();
     assert!(full.is_full());
     let facts = full.snapshot_facts();
     let support = recover_fixture_compiler_support(
@@ -9521,7 +9503,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     let old_source = inventory
         .admit_shared(&inventory.empty_view(), vec![old_entry.clone()])
         .unwrap();
-    let offer = IssuedNativeOffer::issue(old_entry.descriptor.id, &old_source, None).unwrap();
+    let offer = IssuedNativeOffer::issue(&old_entry, &old_source, None).unwrap();
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), changed).unwrap());
     let current_source = inventory
         .admit_shared(&inventory.empty_view(), vec![entry.clone()])
@@ -9763,12 +9745,9 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             let projection =
                 CompilerInputProjection::from_issued_entries(&[entries[selected].clone()]).unwrap();
             let expected = projection.snapshot_roles().get(&owner).unwrap().interface();
-            let historical = IssuedNativeOffer::issue(
-                entries[1 - selected].descriptor.id,
-                &views[1 - selected],
-                None,
-            )
-            .unwrap();
+            let historical =
+                IssuedNativeOffer::issue(&entries[1 - selected], &views[1 - selected], None)
+                    .unwrap();
             let support = recover_fixture_compiler_support(
                 projection,
                 views[selected].clone(),
@@ -9965,7 +9944,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &issued)
         .unwrap()
         .unwrap();
-    let full = IssuedNativeOffer::issue(entry.descriptor.id, &issued, Some(proof)).unwrap();
+    let full = IssuedNativeOffer::issue(&entry, &issued, Some(proof)).unwrap();
     assert!(full.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
     let partial = full
@@ -9973,7 +9952,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
         .unwrap()
         .unwrap();
     assert!(!partial.is_full());
-    let empty = IssuedNativeOffer::issue(entry.descriptor.id, &issued, None).unwrap();
+    let empty = IssuedNativeOffer::issue(&entry, &issued, None).unwrap();
     let baseline = type_context(&[historical, fresh.clone()]);
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-manifest-not-consumed-by-native-issuance"),
@@ -11108,12 +11087,8 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
         NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &historical_view)
             .unwrap()
             .unwrap();
-    let historical = IssuedNativeOffer::issue(
-        entry.descriptor.id,
-        &historical_view,
-        Some(historical_proof),
-    )
-    .unwrap();
+    let historical =
+        IssuedNativeOffer::issue(&entry, &historical_view, Some(historical_proof)).unwrap();
     assert!(historical.is_full());
     let group3 = |offer: &IssuedNativeOffer| {
         *offer
@@ -11341,7 +11316,7 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
     .unwrap()
     .unwrap();
     let offer =
-        crate::artifact_inventory::IssuedNativeOffer::issue(*root_id, &root_view, Some(proof))
+        crate::artifact_inventory::IssuedNativeOffer::issue(&entries[3], &root_view, Some(proof))
             .unwrap();
     let shared = Arc::new(
         offer
@@ -11749,7 +11724,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         // The selected groups issue this mode. Broader Full proofs are retained
         // afterward without widening the normalized permission row.
         let offer = IssuedNativeOffer::issue(
-            entry.descriptor.id,
+            &entry,
             &chosen,
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen).unwrap(),
         )
