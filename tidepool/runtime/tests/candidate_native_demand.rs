@@ -1,14 +1,19 @@
 //! Optional originals satisfy native demand without expanding fresh work.
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::compiler_test_support::{selected_lexical_closure, OwnedEnvironment};
+use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 use tidepool_testing::eval_harness::{prelude_path, EvalHarness};
+use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
 use tidepool_toolchain::artifacts::{CompileInvocation, CompiledArtifacts};
 use tidepool_toolchain::cache::ProductAvailability;
 use tidepool_toolchain::certified_products::ProductOrigin;
-use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
-use tidepool_toolchain::recovery_artifacts::materialize_certified_products;
+use tidepool_toolchain::declaration_join::{
+    ExactModuleIdentity, RecoveredArtifactAcquisition, RecoveryPayloadReference,
+};
+use tidepool_toolchain::exact_context::{hydrate_context, Materializer};
 
 const CONSUMER: &str = include_str!("fixtures/CandidateDemandConsumer.hs");
 const WARMER: &str = include_str!("fixtures/CandidateDemandWarmer.hs");
@@ -220,45 +225,88 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         expected
     );
 
-    // Preserve the issued native inventory, including the sibling that neither
-    // consumer demanded. Recovery uses public certified-product admission.
+    // Preserve the actual completed entry's exact selection, including the
+    // sibling that neither consumer demanded. No inventory subset issues roles.
     let instance = ExactModuleIdentity {
         unit: "main".into(),
         module: "CandidateDemandInstance".into(),
     };
     let lexical = selected_lexical_closure(original.artifacts(), vec![instance]);
-    let products = original
-        .artifacts()
-        .recovery_products
-        .iter()
-        .filter(|product| {
-            lexical.contains_key(&ExactModuleIdentity {
-                unit: product.owner().unit.clone(),
-                module: product.owner().module.clone(),
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(products.len(), 2, "complete class and instance originals");
-    let producer = original
-        .artifacts()
-        .artifact_view
-        .descriptors()
-        .into_iter()
-        .find(|descriptor| descriptor.owner.module == "CandidateDemandInstance")
-        .expect("original artifact carries its authenticated producer")
-        .producer_sha256;
     let recovery = tempfile::tempdir().unwrap();
-    let references = materialize_certified_products(recovery.path(), producer, &products)
-        .expect("retain genuine original native products");
-    let context = ExactDeclarationContext::capture_recovery(
-        recovery.path(),
-        &references,
-        &[],
-        &[],
-        lexical.values().cloned().collect(),
-    )
-    .expect("admit the original product and canonical interface closure");
+    let source = work.path().join("CandidateDemandWarmer.hs");
+    std::fs::write(&source, WARMER).unwrap();
+    let frozen =
+        tidepool_toolchain::artifacts::FrozenEntrySources::capture(&include, &source).unwrap();
+    let entry = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::prepare_frozen_production_entry(
+            &frozen,
+            recovery.path(),
+            &recovery.path().join("entry"),
+            settlement,
+        )
+    })
+    .expect("the production entry owns the completed original selection");
+    let issued = entry.products().original_execution_context().unwrap();
+    let snapshot = issued.snapshot();
+    let blocks = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&blocks);
+    let persisted = writer.materialize_context(None, &snapshot).unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        blocks.put_keyed(&cid, &bytes).unwrap();
+    }
+    let acquired = hydrate_context(&blocks, persisted.root()).unwrap();
+    let selection = acquired.snapshot().graph_selection().unwrap();
+    let mut ids = selection
+        .bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    ids.extend(snapshot.native_package_artifacts_introduced(None));
+    let payloads = issued
+        .materialize_recovery_artifacts(recovery.path(), &ids)
+        .unwrap();
+    let descriptors = payloads
+        .iter()
+        .map(|reference| match reference {
+            RecoveryPayloadReference::Original(reference) => {
+                ArtifactDescriptor::from_recovery_product(reference)
+            }
+            RecoveryPayloadReference::Canonical(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference)
+            }
+            RecoveryPayloadReference::Join(reference) => {
+                ArtifactDescriptor::from_recovery_join(reference)
+            }
+            RecoveryPayloadReference::Value(reference) => {
+                ArtifactDescriptor::from_recovery_value_interface(reference)
+            }
+            RecoveryPayloadReference::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference)
+            }
+        })
+        .collect::<Vec<_>>();
+    let context = RecoveredArtifactAcquisition::new(recovery.path())
+        .capture_payloads_bound(
+            &payloads,
+            &descriptors,
+            &selection.bindings,
+            &acquired.snapshot().binding_dependencies().unwrap(),
+        )
+        .unwrap()
+        .context_for_expected_snapshot(persisted.root(), &acquired)
+        .expect("restore the exact completed entry's full retained selection");
+    assert_eq!(
+        context.artifact_view().capture_graph_selection(),
+        issued.artifact_view().capture_graph_selection()
+    );
+    assert_eq!(
+        context.compiler_input_roles(),
+        issued.compiler_input_roles()
+    );
+    assert_eq!(context.lexical_graph(), issued.lexical_graph());
+    drop(issued);
+    drop(entry);
+    drop(frozen);
     for owner in lexical.keys() {
         std::fs::remove_file(work.path().join(format!("{}.hs", owner.module))).unwrap();
     }
