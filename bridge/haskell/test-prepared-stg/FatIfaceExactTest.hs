@@ -1,11 +1,12 @@
 module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
+import Test.Tasty qualified as Tasty
 
 import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
 import Control.Concurrent.MVar
   ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
-import Control.Exception (SomeException, ErrorCall, try, bracket, finally, throwIO, evaluate)
+import Control.Exception (SomeException, ErrorCall, try, bracket, onException, throwIO, evaluate)
 import Control.Monad (forM, forM_, foldM, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Bits (shiftL, testBit)
@@ -15,21 +16,27 @@ import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC
-import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
+import GHC.Core (CoreBind, CoreExpr, Bind(..), maybeUnfoldingTemplate)
 import GHC.Builtin.Types (intTy, intTyCon)
 import GHC.Core.TyCon (tyConName)
 import GHC.Core.FVs (exprSomeFreeVars)
-import GHC.Driver.Env (HscEnv, hsc_HPT)
-import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
+import GHC.Driver.Env (HscEnv, hsc_HPT, hscUpdateHPT)
+import GHC.Driver.Session (gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding, isFCallId)
-import GHC.Tc.Types (tcg_rdr_env)
+import GHC.IfaceToCore (tcTopIfaceBindings, typecheckIface)
+import GHC.Tc.Utils.Monad (initIfaceCheck, initIfaceLcl)
+import GHC.Types.Avail (availNames)
+import GHC.Types.TypeEnv (emptyTypeEnv, typeEnvIds)
+import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Types (unitString)
+import GHC.Utils.Outputable (text)
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameModule, nameOccName, isExternalName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
-import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
-import GHC.Unit.Module.ModIface (mi_extra_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_extra_decls, mi_exports)
 import System.Directory
   ( createDirectoryIfMissing
   , getTemporaryDirectory
@@ -39,7 +46,6 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
-import System.Process (callProcess, readProcess)
 import System.Timeout (timeout)
 import System.Mem.StableName (makeStableName)
 import Tidepool.FatIface
@@ -52,7 +58,7 @@ import Tidepool.FatIface
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , lookupFatIfaceComponents, privateOriginalDependencies
   , readHomeInterface, readPackageInterface, newFatIfaceCache
-  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
+  , ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, sameOwnerInterfaceContext, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
 import Tidepool.FatIface.Internal
@@ -62,7 +68,7 @@ import Tidepool.FatIface.Internal
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceArtifact(..), hydrateExactScope,
-  newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
+  RequestIfaceDecoder, CapturedInterfaceInputs, verifiedInterfaceProducts, newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
@@ -72,10 +78,11 @@ import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
   , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
   , capturedSessionInterfaceBody, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner )
-import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactSha256)
+import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.PackageWitness (PackageImportEvidence(..), packageImportRoot, encodePackageImports)
 import qualified Data.ByteString as BS
-import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
+import GHC.Unit.Home.ModInfo (HomePackageTable, lookupHpt, hm_iface, filterHpt)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
@@ -90,7 +97,25 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "test-prepared-stg"
-  [ testCase "exact interface cache lifecycle" scenario
+  [ Tasty.withResource acquireProducedFixtures releaseProducedFixtures $ \produced ->
+      testGroup "exact interface cache lifecycle"
+        [ Tasty.withResource (produced >>= checkPrivateFixture) (const (pure ())) $ \private ->
+            testGroup "private fat Core"
+              [ testCase "captured HOME survives unlink" (private >>= verifyCapturedHome)
+              , testCase "exact closure and genuine dangling GlobalId" (private >>= verifyPrivateClosure)
+              , testCase "independent component selection oracle" (private >>= verifyComponentSelection)
+              , testCase "prepared component reuse and context isolation" (private >>= verifyPreparedReuse)
+              ]
+        , Tasty.withResource (produced >>= checkThinFixture) (const (pure ())) $ \thin ->
+            testGroup "thin TYPE"
+              [ testCase "captured aliases and NameCache isolation" (thin >>= verifyCapturedThin)
+              , testCase "genuine INLINE cannot supply defining Core" (thin >>= verifyThinInlineRefusal)
+              ]
+        , Tasty.withResource (produced >>= checkInlineFixture) (const (pure ())) $ \inline ->
+            testCase "retained HOME and absent-owner INLINE refusal" (inline >>= verifyRetainedHome)
+        ]
+  , testCase "completed interface capture ownership" verifyCompletedCaptures
+  , testCase "concurrent interface cache lifecycle" verifyCacheConcurrency
   , testCase "selected completed cache merge" verifyCacheMerges
   , testCase "canonical private component graphs" verifyPrivateComponents
   ]
@@ -213,359 +238,495 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case competing of Left _ -> True; Right () -> False)
     "original artifact retention selected between competing completed session issuers"
 
-scenario :: IO ()
-scenario = do
-  tmp <- getTemporaryDirectory
-  withTempDirectory tmp $ \work -> do
-    let fixtures = "test-prepared-stg" </> "fat-iface-fixtures"
-        thinSource = work </> "ThinFixture.hs"
-        thinPath = work </> "ThinFixture.hi"
-        useSource = work </> "FatIfaceUse.hs"
-    mapM_ (copyFixture fixtures work)
-      ["FatFixture.hs", "ThinFixture.hs", "MissingFixture.hs", "FatIfaceUse.hs"]
-    let ghc = "ghc"
-    compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fno-write-if-simplified-core"] thinSource
-    -- Capture this producer's actual thin bytes before the later fat-mode
-    -- load can rebuild its dependency under different interface flags.
-    thinBytes <- BS.readFile thinPath >>= evaluate . captureArtifactBytes
-    libdir <- trim <$> readProcess ghc ["--print-libdir"] ""
-    runGhc (Just libdir) $ do
+-- The resource owns only successful producer outputs. Module-local flags keep
+-- Core visibility and optimizer metadata independent of the consumer profile.
+data ProducedFixtures = ProducedFixtures
+  { fixtureDirectory :: FilePath
+  , fixtureLibdir :: FilePath
+  , fixtureBoot :: HscEnv
+  , fixtureHomes :: HomePackageTable
+  , fixtureThinBody :: ArtifactBytes
+  }
+
+data PrivateNames = PrivateNames Name Name Name Name Name Name
+-- Constructors stay in this fixture owner. Consumers require the checked role,
+-- rather than accepting a generic environment that might have another profile.
+data PrivateOriginalFixture = PrivateOriginalFixture ProducedFixtures PrivateNames [CoreBind]
+data ThinTypeFixture = ThinTypeFixture ProducedFixtures ExactIfaceArtifact Id
+data InlineOriginalFixture = InlineOriginalFixture ProducedFixtures Id
+
+acquireProducedFixtures :: IO ProducedFixtures
+acquireProducedFixtures = do
+  parent <- getTemporaryDirectory
+  work <- newFixtureDirectory parent
+  produce work `onException` removePathForcibly work
+  where
+    produce work = do
+      let sources = "test-prepared-stg" </> "fat-iface-fixtures"
+      mapM_ (copyFixture sources work)
+        ["FatFixture.hs", "ThinFixture.hs", "MissingFixture.hs", "FatIfaceUse.hs"]
+      libdir <- getLibdir
+      runGhc (Just libdir) $ do
+        flags <- getSessionDynFlags
+        let consumerFlags = (gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas)
+              { importPaths=work:importPaths flags, hiDir=Just work, objectDir=Just work }
+        _ <- setSessionDynFlags consumerFlags
+        target <- guessTarget (work </> "FatIfaceUse.hs") Nothing Nothing
+        setTargets [target]
+        loaded <- load LoadAllTargets
+        case loaded of
+          Failed -> fail "fixture producer failed its actual GHC load"
+          Succeeded -> pure ()
+        actual <- getSession
+        let homes = filterHpt (\home -> moduleNameString (moduleName (mi_module (hm_iface home)))
+              `elem` ["FatFixture", "ThinFixture", "MissingFixture"]) (hsc_HPT actual)
+        liftIO $ forM_ ["FatFixture", "ThinFixture", "MissingFixture"] $ \name ->
+          unless (maybe False ((== mkModuleName name) . moduleName . mi_module . hm_iface)
+              (lookupHpt homes (mkModuleName name)))
+            (fail ("successful fixture producer omitted " ++ name))
+        body <- liftIO (BS.readFile (work </> "ThinFixture.hi") >>= evaluate . captureArtifactBytes)
+        boot <- liftIO (freshExactContext actual)
+        pure (ProducedFixtures work libdir boot homes body)
+
+releaseProducedFixtures :: ProducedFixtures -> IO ()
+releaseProducedFixtures = removePathForcibly . fixtureDirectory
+
+-- Share immutable producer HMI/byte owners and their NameCache; each consumer
+-- receives independent package/finder cells and creates its own mutable caches.
+freshFixtureEnvironment :: ProducedFixtures -> IO HscEnv
+freshFixtureEnvironment fixture = do
+  fresh <- freshExactContext (fixtureBoot fixture)
+  pure (hscUpdateHPT (const (fixtureHomes fixture)) fresh)
+
+fixtureInterface :: HscEnv -> String -> IO ModIface
+fixtureInterface environment module' = maybe
+  (fail ("fixture producer has no actual HMI for " ++ module')) (pure . hm_iface)
+  (lookupHpt (hsc_HPT environment) (mkModuleName module'))
+
+fixtureExport :: ModIface -> String -> IO Name
+fixtureExport iface occurrence = case
+    [name | name <- concatMap availNames (mi_exports iface)
+      , nameModule_maybe name == Just (mi_module iface)
+      , occNameString (nameOccName name) == occurrence] of
+  [name] -> pure name
+  names -> fail ("fixture export " ++ occurrence ++ " has " ++ show (length names) ++ " actual Names")
+
+-- Upstream GHC decoding supplies the premise independently of Tidepool's
+-- private-component index and selected-body closure.
+fixtureWholeCore :: HscEnv -> ModIface -> IO [CoreBind]
+fixtureWholeCore environment iface = do
+  encoded <- maybe (fail "private fixture producer omitted defining Core") pure (mi_extra_decls iface)
+  let doc = text "fat interface fixture premise"
+  initIfaceCheck doc environment $ do
+    types <- liftIO (newIORef emptyTypeEnv)
+    initIfaceLcl (mi_module iface) doc NotBoot (tcTopIfaceBindings types encoded)
+
+fixtureInlineId :: HscEnv -> ModIface -> String -> IO Id
+fixtureInlineId environment iface occurrence = do
+  name <- fixtureExport iface occurrence
+  details <- initIfaceCheck (text "INLINE fixture premise") environment (typecheckIface iface)
+  identifier <- case [value | value <- typeEnvIds (md_types details),varName value == name] of
+    [value] -> pure value
+    _ -> fail ("actual INLINE fixture omitted its defining Id: " ++ occurrence)
+  requireInlineEnvelope occurrence identifier
+  pure identifier
+
+requireInlineEnvelope :: String -> Id -> IO ()
+requireInlineEnvelope label identifier = case maybeUnfoldingTemplate (realIdUnfolding identifier) of
+  Just _ -> pure ()
+  Nothing -> fail (label ++ " producer omitted its genuine optimizer INLINE envelope")
+
+checkPrivateFixture :: ProducedFixtures -> IO PrivateOriginalFixture
+checkPrivateFixture fixture = do
+  environment <- freshFixtureEnvironment fixture
+  iface <- fixtureInterface environment "FatFixture"
+  names <- PrivateNames <$> fixtureExport iface "fatIdentity" <*> fixtureExport iface "privateCaller"
+    <*> fixtureExport iface "privateDiamond" <*> fixtureExport iface "foreignAbs"
+    <*> fixtureExport iface "recA" <*> fixtureExport iface "recB"
+  whole <- fixtureWholeCore environment iface
+  let PrivateNames _ caller _ _ _ _ = names
+      binders = concatMap groupBinders whole
+      helpers = [value | value <- binders,occNameString (nameOccName (varName value)) == "privateHelper"]
+      diagnostic = "actual whole-Core binders=" ++ show (map binderPremise binders)
+  helper <- case helpers of
+    [value] -> pure value
+    _ -> fail ("private producer requires exactly one privateHelper; " ++ diagnostic)
+  assert (not (isExternalName (varName helper)))
+    ("private producer helper has an External Name; " ++ diagnostic)
+  assert (not (isLocalId helper))
+    ("private producer helper is not a decoded GlobalId; " ++ diagnostic)
+  let callerBodies = [body | group <- whole,(identifier,body) <- groupPairs group,varName identifier == caller]
+      references = [varName free | body <- callerBodies
+        , free <- nonDetEltsUniqSet (exprSomeFreeVars isId body)]
+  assert (varName helper `elem` references)
+    ("private producer caller has no actual RHS edge to its helper; " ++ diagnostic)
+  pure (PrivateOriginalFixture fixture names whole)
+
+binderPremise :: Id -> (String,Bool,Bool)
+binderPremise identifier = (occNameString (nameOccName (varName identifier)),
+  isExternalName (varName identifier),isLocalId identifier)
+
+groupPairs :: CoreBind -> [(Id,CoreExpr)]
+groupPairs (NonRec identifier body) = [(identifier,body)]
+groupPairs (Rec pairs) = pairs
+
+admitThinFixture :: ProducedFixtures -> HscEnv -> RequestIfaceDecoder -> String
+  -> IO (ExactIfaceArtifact,CapturedInterfaceInputs)
+admitThinFixture fixture environment decoder alias = do
+  home <- maybe (fail "actual thin producer HMI is absent") pure
+    (lookupHpt (fixtureHomes fixture) (mkModuleName "ThinFixture"))
+  let artifact = ExactIfaceArtifact (unitString (moduleUnit (mi_module (hm_iface home)))) "ThinFixture" alias
+        (artifactSha256 (fixtureThinBody fixture)) []
+  inputs <- readCapturedExactIfaceClosureWithCheckedValues decoder
+    (\requested -> if requested == artifact then pure (fixtureThinBody fixture) else fail "unexpected captured fixture input")
+    environment [artifact] [] >>= either fail pure
+  products <- either fail pure (selectVerifiedExactInterfaceProducts inputs [artifact])
+  assert (length products == 1 && all
+      (maybe True (const False) . mi_extra_decls . snd . verifiedExactInterface) products)
+    "the actual admitted thin fixture contains defining Core or lost its selected owner"
+  pure (artifact,inputs)
+
+checkThinFixture :: ProducedFixtures -> IO ThinTypeFixture
+checkThinFixture fixture = do
+  environment <- freshFixtureEnvironment fixture
+  decoder <- newRequestIfaceDecoder
+  (artifact,inputs) <- admitThinFixture fixture environment decoder "primary-1/iface"
+  fresh <- freshExactContext environment
+  hydrated <- hydrateInterfaceInputs fresh inputs
+  iface <- fixtureInterface (hydratedExactEnvironment hydrated) "ThinFixture"
+  identifier <- fixtureInlineId (hydratedExactEnvironment hydrated) iface "thinIdentity"
+  pure (ThinTypeFixture fixture artifact identifier)
+
+checkInlineFixture :: ProducedFixtures -> IO InlineOriginalFixture
+checkInlineFixture fixture = do
+  environment <- freshFixtureEnvironment fixture
+  iface <- fixtureInterface environment "MissingFixture"
+  assert (maybe False (const True) (mi_extra_decls iface))
+    "public INLINE producer omitted its defining Core"
+  identifier <- fixtureInlineId environment iface "missingIdentity"
+  pure (InlineOriginalFixture fixture identifier)
+
+withFixtureFileRemoved :: ProducedFixtures -> String -> IO a -> IO a
+withFixtureFileRemoved fixture module' action = do
+  let path = fixtureDirectory fixture </> module' ++ ".hi"
+  bytes <- BS.readFile path
+  bracket (removeFile path) (\() -> BS.writeFile path bytes) (const action)
+
+verifyCapturedHome :: PrivateOriginalFixture -> IO ()
+verifyCapturedHome (PrivateOriginalFixture fixture (PrivateNames _ privateCallerName _ _ _ _) _) = do
+  environment <- freshFixtureEnvironment fixture
+  original <- fixtureInterface environment "FatFixture"
+  packageRead <- readPackageInterface environment (mi_module original)
+  assert (case packageRead of Left _ -> True; Right _ -> False)
+    "package interface reader accepted a HOME input"
+  absent <- freshExactContext environment
+  absentCache <- newFatIfaceCache
+  missing <- lookupFatIfaceExact absent absentCache privateCallerName
+  assert (case missing of FatIfaceLoadFailure{} -> True; _ -> False)
+    "missing HOME owner reopened an existing physical interface"
+  withFixtureFileRemoved fixture "FatFixture" $ do
+    _ <- foldM (\current alias -> do
+      let artifact = ExactIfaceArtifact (unitString (moduleUnit (mi_module original))) "FatFixture" alias "" []
+      hydrated <- hydrateExactScope current [(artifact,original)]
+      resolved <- readHomeInterface hydrated (mi_module original)
+      assert (case resolved of Right iface -> mi_module iface == mi_module original; Left _ -> False)
+        "retained HOME interface lost its owner"
+      isolated <- newFatIfaceCache
+      recovered <- lookupFatIfaceExact hydrated isolated privateCallerName
+      assertPrivateScope privateCallerName recovered
+      pure hydrated) environment ["primary-0/iface", "primary-0/iface", "primary-7/iface"]
+    pure ()
+
+verifyCapturedThin :: ThinTypeFixture -> IO ()
+verifyCapturedThin (ThinTypeFixture fixture _ identifier) = do
+  environment <- freshFixtureEnvironment fixture
+  decoder <- newRequestIfaceDecoder
+  withFixtureFileRemoved fixture "ThinFixture" $ do
+    let capture selected alias = snd <$> admitThinFixture fixture selected decoder alias
+    forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
+      inputs <- capture environment alias
+      fresh <- freshExactContext environment
+      hydrated <- hydrateInterfaceInputs fresh inputs
+      cache <- newFatIfaceCache
+      result <- lookupFatIfaceExact (hydratedExactEnvironment hydrated) cache (varName identifier)
+      assert (isNoExtra result) "captured TYPE attempted a defining-file read"
+    first <- capture environment "primary-1/iface"
+    other <- runGhc (Just (fixtureLibdir fixture)) $ do
       flags <- getSessionDynFlags
-      let fatFlags =
-            (`gopt_set` Opt_WriteInterface)
-            $ (`gopt_set` Opt_WriteIfSimplifiedCore)
-            $ (`gopt_set` Opt_ExposeAllUnfoldings)
-            $ (`gopt_unset` Opt_OmitInterfacePragmas)
-            $ gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas
-      _ <- setSessionDynFlags fatFlags
-        { importPaths = work : importPaths flags
-        , hiDir = Just work
-        , objectDir = Just work
-        }
-      target <- guessTarget useSource Nothing Nothing
-      setTargets [target]
-      _ <- load LoadAllTargets
-      summary <- getModSummary (mkModuleName "FatIfaceUse")
-      parsed <- parseModule summary
-      typed <- typecheckModule parsed
-      let (tcEnv, _) = tm_internals_ typed
-          names = map greName (globalRdrEnvElts (tcg_rdr_env tcEnv))
-          fatIdentityName = findName "FatFixture" "fatIdentity" names
-          privateCallerName = findName "FatFixture" "privateCaller" names
-          privateDiamondName = findName "FatFixture" "privateDiamond" names
-          foreignAbsName = findName "FatFixture" "foreignAbs" names
-          recAName = findName "FatFixture" "recA" names
-          recBName = findName "FatFixture" "recB" names
-          thinIdentityName = findName "ThinFixture" "thinIdentity" names
-          missingIdentityName = findName "MissingFixture" "missingIdentity" names
-      hsc <- getSession
-      thinId <- lookupName thinIdentityName >>= \case
-        Just (AnId identifier) -> pure identifier
-        _ -> fail "thin identity has no genuine exported Id"
-      missingId <- lookupName missingIdentityName >>= \case
-        Just (AnId identifier) -> pure identifier
-        _ -> fail "missing-interface identity has no genuine exported Id"
-      -- Production input aliases name captured bytes, never physical files.
-      -- Retain the decoded owner after its original file is removed; private
-      -- original lookup must consume HPT rather than reopening that alias.
-      thinContext <- liftIO $ do
-        verifyCompletedInterfaceMerges libdir work hsc
-        home <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
-          (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
-        let original = home
-        packageRead <- readPackageInterface hsc (mi_module original)
-        assert (case packageRead of Left _ -> True; Right _ -> False)
-          "package interface reader accepted a HOME input"
-        empty <- freshExactContext hsc
-        missingCache <- newFatIfaceCache
-        missing <- lookupFatIfaceExact empty missingCache privateCallerName
-        assert (case missing of FatIfaceLoadFailure{} -> True; _ -> False)
-          "missing HOME owner reopened an existing physical interface"
-        let mutable = work </> "FatFixture.hi"
-            artifact = ExactIfaceArtifact "main" "FatFixture" "primary-0/iface" "" []
-        bytes <- BS.readFile mutable
-        removeFile mutable
-        (do
-          _ <- foldM (\environment alias -> do
-              let selected = artifact { exactPath = alias }
-              hydrated <- hydrateExactScope environment [(selected, original)]
-              resolved <- readHomeInterface hydrated (mi_module original)
-              case resolved of
-                Right iface -> assert (mi_module iface == mi_module original)
-                  "in-memory HOME interface lost its owner"
-                Left failure -> fail ("captured HOME interface unreadable: " ++ show failure)
-              isolated <- newFatIfaceCache
-              recovered <- lookupFatIfaceExact hydrated isolated privateCallerName
-              assertPrivateScope privateCallerName recovered
-              pure hydrated) hsc ["primary-0/iface", "primary-0/iface", "primary-7/iface"]
-          pure ()) `finally` BS.writeFile mutable bytes
-        -- Exercise the captured input owner and its NameCache-bound decoder
-        -- with the same logical alias shape used by World TYPE input transport.
-        loadedThinRaw <- BS.readFile thinPath
-        decoder <- newRequestIfaceDecoder
-        removeFile thinPath
-        (do
-          let capture environment alias = do
-                let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" alias
-                      (artifactSha256 thinBytes) []
-                closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
-                  (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
-                  environment [thinArtifact] [] >>= either fail pure
-                products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
-                assert (all (maybe True (const False) . mi_extra_decls . snd . verifiedExactInterface) products)
-                  "the admitted captured TYPE fixture contains defining Core"
-                pure products
-          forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
-            products <- capture hsc alias
-            fresh <- forkExactContext hsc
-            inputs <- either throwIO pure (capturedInterfaceInputs products)
-            hydrated <- hydrateInterfaceInputs fresh inputs
-            let captured = hydratedExactEnvironment hydrated
-            isolated <- newFatIfaceCache
-            thin <- lookupFatIfaceExact captured isolated thinIdentityName
-            assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
-              "captured thin TYPE interface attempted a defining-file read"
-          first <- capture hsc "primary-1/iface"
-          other <- runGhc (Just libdir) getSession
-          _ <- capture other "primary-1/iface"
-          repeated <- capture hsc "primary-1/iface"
-          firstObjects <- mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName) first
-          repeatedObjects <- mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName) repeated
-          assert (firstObjects == repeatedObjects)
-            "interleaving another NameCache discarded an admitted decoded owner"
-          inputs <- either throwIO pure (capturedInterfaceInputs first)
-          crossed <- try (hydrateInterfaceInputs other inputs >> pure ()) :: IO (Either SomeException ())
-          assert (case crossed of Left _ -> True; Right () -> False)
-            "TYPE hydration accepted an interface from another NameCache"
-          fresh <- freshExactContext hsc
-          installed <- hydrateInterfaceInputs fresh inputs
-          foreignPhase <- try (restoreHydratedInterfaceEnvironment installed other >> pure ()) :: IO (Either SomeException ())
-          assert (case foreignPhase of Left _ -> True; Right () -> False)
-            "interface phase restoration accepted another NameCache"
-          pure (hydratedExactEnvironment installed))
-          `finally` BS.writeFile thinPath loadedThinRaw
-      cache <- liftIO newFatIfaceCache
-      liftIO verifyCacheConcurrency
-      localResult <- liftIO (lookupFatIfaceExact hsc cache
-        (mkSystemName (mkUnique 'v' 983450) (mkVarOcc "localOnly")))
-      liftIO (assert (isNameWithoutModule localResult)
-        "name without a module was not reported as typed absence")
-      fatIdentityResult <- liftIO (lookupFatIfaceExact hsc cache fatIdentityName)
-      liftIO (assert (isFound fatIdentityResult) "fat identity was not recovered")
-      privateResult <- liftIO (lookupFatIfaceExact hsc cache privateCallerName)
-      liftIO $ assertPrivateScope privateCallerName privateResult
-      privateOwner <- maybe (fail "private scope fixture has no owner") pure
-        (nameModule_maybe privateCallerName)
-      foreignResult <- liftIO (lookupFatIfaceExact hsc cache foreignAbsName)
-      liftIO $ case foreignResult of
-        FatIfaceFound groups -> do
-          let calls = [identifier | group <- groups
-                , rhs <- case group of NonRec _ body -> [body]; Rec pairs -> map snd pairs
-                , identifier <- nonDetEltsUniqSet (exprSomeFreeVars (\identifier -> isId identifier && isFCallId identifier) rhs)]
-          assert (not (null calls) && all (not . isExternalName . varName) calls)
-            "compiled FFI fixture did not decode a genuine internal-name operation Id"
-          _ <- evaluate (sum (map Set.size (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] groups))))))
-          pure ()
-        other -> fail ("compiled FFI original failed admission: " ++ showLookup other)
-      privateGroups <- case privateResult of
-        FatIfaceFound groups -> pure groups
-        _ -> fail "private defining closure disappeared"
-      liftIO $ do
-        let withoutHelper = [group | group <- privateGroups
-              , all ((/= "privateHelper") . occNameString . nameOccName . varName) (groupBinders group)]
-        assert (length withoutHelper < length privateGroups) "orphan control did not remove the genuine private group"
-        refused <- try (evaluate (sum (map Set.size
-          (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] withoutHelper))))))) :: IO (Either ErrorCall Int)
-        case refused of
-          Left _ -> pure ()
-          Right _ -> fail "private original census accepted a genuinely dangling decoded GlobalId"
-      componentResult <- liftIO (lookupFatIfaceComponents hsc cache privateOwner [privateCallerName])
-      liftIO $ case componentResult of
-        FatIfaceComponents selection -> do
-          let components = fatSelectionComponents selection
-              census = case components of
-                component : _ -> fatComponentAllBinders component
-                [] -> []
-              componentBinders = concatMap
-                (concatMap groupBinders . IntMap.elems . fatComponentBindings) components
-              censusNames = map varName census
-              componentNames = map varName componentBinders
-              selectedGroupCount = sum
-                (map (length . fatComponentOrdinals) components)
-              originalGroups = IntMap.toAscList (IntMap.unions
-                (map fatComponentBindings components))
-          assert (fatOriginalOwner (fatSelectionVersion selection) == privateOwner)
-            "component selection changed its full defining owner"
-          assert (fatSelectionDemandedGroupCount selection ==
-              demandedOriginalGroups privateCallerName originalGroups)
-            "component demand count disagreed with actual local Core references"
-          assert (fatSelectionPreparedGroupCount selection == selectedGroupCount)
-            "prepared group count disagreed with the canonical component roster"
-          assert (privateCallerName `elem` censusNames && privateCallerName `elem` componentNames)
-            "component selection lost its original actual binder"
-          assert (any ((== "privateHelper") . occNameString . nameOccName) censusNames
-              && any ((== "privateHelper") . occNameString . nameOccName) componentNames)
-            "component selection lost the original private helper binder"
-        FatIfaceComponentsMissing reason -> fail ("component selection refused fixture root: " ++ show reason)
-        FatIfaceComponentsLoadFailure owner reason -> fail
-          ("component selection could not load " ++ moduleNameString (moduleName owner) ++ ": " ++ reason)
-      privateOwners <- liftIO newOwnerInterfaceCache
-      privateBodies <- liftIO newPreparedBodyCache
-      privatePrepared <- liftIO $ prepareRecoveredBodies hsc privateOwners privateBodies
-        privateOwner privateGroups >>= either (fail . show) pure
-      liftIO $ do
-        componentCache <- newPreparedBodyCache
-        acquireComponents <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
-        let prepare roots = do
-              selected <- lookupFatIfaceComponents hsc cache privateOwner roots >>= \case
-                FatIfaceComponents selection -> pure selection
-                _ -> fail "canonical package growth lost its genuine interface selection"
-              task <- acquireComponents Nothing selected >>= either (fail . show) pure
-              preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
-            spellings = Map.unions . map pmStableTopSpellings
-            physicalBindings prepared = fmap Map.fromList $ fmap concat $ forM (concatMap pmBindings prepared) $ \(binding,_) -> do
-              identity <- evaluate binding >>= makeStableName
-              pure [(varName binder,identity) | binder <- topBinders binding]
-        first <- prepare [privateCallerName]
-        firstBindings <- physicalBindings first
-        grown <- prepare [privateCallerName,fatIdentityName,privateDiamondName]
-        grownBindings <- physicalBindings grown
-        assert (all (\(name,identity) -> Map.lookup name grownBindings == Just identity)
-          (Map.toList firstBindings))
-          "package demand growth re-lowered a completed private component"
-        assert (all (\(name,spelling) -> Map.lookup name (spellings grown) == Just spelling)
-          (Map.toList (spellings first)))
-          "package demand growth renamed an already prepared private top"
-        shuffled <- prepare [privateDiamondName,fatIdentityName,privateCallerName,privateCallerName]
-        shuffledBindings <- physicalBindings shuffled
-        assert (grownBindings == shuffledBindings && spellings grown == spellings shuffled)
-          "root permutation or duplication changed canonical prepared component identities"
-        bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
-          (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
-            setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
-            acquireDisabled <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
-            disabledSelection <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
-              FatIfaceComponents selection -> pure selection
-              _ -> fail "body-disable control lost its canonical component"
-            disabledTask <- acquireDisabled Nothing disabledSelection >>= either (fail . show) pure
-            disabledPrepared <- preparedComponentModules <$> (runPreparedComponentTask disabledTask >>= either (fail . show) pure)
-            disabledBindings <- physicalBindings disabledPrepared
-            assert (any (\(name,identity) -> Map.lookup name disabledBindings /= Just identity)
-              (Map.toList firstBindings))
-              "component body-disable calibration returned completed STG instead of lowering"
-            assert (Set.fromList (Map.elems (spellings disabledPrepared))
-                == Set.fromList (Map.elems (spellings first)))
-              "component body-disable calibration changed canonical private spellings"
-        selectedCache <- selectPreparedBodyCaches [(componentCache,Set.singleton privateOwner)]
-        acquireSelected <- newPreparedComponentUnitsPreparer hsc privateOwners selectedCache
-        selected <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
+      _ <- setSessionDynFlags flags
+      getSession
+    _ <- capture other "primary-1/iface"
+    repeated <- capture environment "primary-1/iface"
+    let objects inputs = mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName)
+          (verifiedInterfaceProducts inputs)
+    initialObjects <- objects first
+    repeatedObjects <- objects repeated
+    assert (initialObjects == repeatedObjects)
+      "interleaving another NameCache discarded the actual decoded owner"
+    crossed <- try (hydrateInterfaceInputs other first >> pure ()) :: IO (Either SomeException ())
+    assert (case crossed of Left _ -> True; Right () -> False)
+      "TYPE hydration accepted another NameCache"
+    fresh <- freshExactContext environment
+    installed <- hydrateInterfaceInputs fresh first
+    foreignPhase <- try (restoreHydratedInterfaceEnvironment installed other >> pure ()) :: IO (Either SomeException ())
+    assert (case foreignPhase of Left _ -> True; Right () -> False)
+      "phase restoration accepted another NameCache"
+
+verifyThinInlineRefusal :: ThinTypeFixture -> IO ()
+verifyThinInlineRefusal (ThinTypeFixture fixture artifact identifier) = do
+  environment <- freshFixtureEnvironment fixture
+  decoder <- newRequestIfaceDecoder
+  (_,inputs) <- admitThinFixture fixture environment decoder (exactPath artifact)
+  fresh <- freshExactContext environment
+  hydrated <- hydrateInterfaceInputs fresh inputs
+  let selected = hydratedExactEnvironment hydrated
+  genuine <- declaringId selected identifier
+  cache <- newFatIfaceCache
+  result <- lookupFatIfaceExact selected cache (varName identifier)
+  assert (isNoExtra result) "thin interface was confused with an absent binding"
+  repeated <- lookupFatIfaceExact selected cache (missingNameIn (varName identifier))
+  assert (isNoExtra repeated) "typed no-extra outcome was not retained"
+  recovered <- recoverExactBody selected cache genuine
+  case recovered of
+    MissingExactBody name NoExtraDeclarations -> assert (name == varName identifier)
+      "thin recovery refusal changed the exact defining identity"
+    _ -> fail "optimizer unfolding bypassed missing defining Core"
+
+verifyRetainedHome :: InlineOriginalFixture -> IO ()
+verifyRetainedHome (InlineOriginalFixture fixture identifier) = do
+  environment <- freshFixtureEnvironment fixture
+  genuine <- declaringId environment identifier
+  withFixtureFileRemoved fixture "MissingFixture" $ do
+    retainedCache <- newFatIfaceCache
+    retained <- lookupFatIfaceExact environment retainedCache (varName identifier)
+    assert (isFound retained) "unlink invalidated its retained HOME interface owner"
+    absent <- freshExactContext environment
+    cache <- newFatIfaceCache
+    result <- lookupFatIfaceExact absent cache (varName identifier)
+    assertLoadFailure "MissingFixture" result
+    repeated <- lookupFatIfaceExact absent cache (varName identifier)
+    assertLoadFailure "MissingFixture" repeated
+    recovered <- recoverExactBody absent cache genuine
+    case recovered of
+      BodyInterfaceFailure owner reason -> do
+        assert (Just owner == nameModule_maybe (varName identifier)) "refusal changed its defining owner"
+        assert (not (null reason)) "HOME owner refusal lost its reason"
+      _ -> fail "optimizer unfolding bypassed the absent HOME owner"
+
+verifyCompletedCaptures :: IO ()
+verifyCompletedCaptures = do
+  libdir <- getLibdir
+  parent <- getTemporaryDirectory
+  withTempDirectory parent $ \work -> do
+    environment <- runGhc (Just libdir) $ do
+      flags <- getSessionDynFlags
+      _ <- setSessionDynFlags flags
+      getSession
+    verifyCompletedInterfaceMerges libdir work environment
+
+verifyPrivateClosure :: PrivateOriginalFixture -> IO ()
+verifyPrivateClosure (PrivateOriginalFixture fixture (PrivateNames fatIdentityName privateCallerName _ foreignAbsName recAName recBName) _) = do
+  hsc <- freshFixtureEnvironment fixture
+  cache <- newFatIfaceCache
+  localResult <- lookupFatIfaceExact hsc cache
+    (mkSystemName (mkUnique 'v' 983450) (mkVarOcc "localOnly"))
+  assert (isNameWithoutModule localResult)
+    "name without a module was not reported as typed absence"
+  fatIdentityResult <- lookupFatIfaceExact hsc cache fatIdentityName
+  assert (isFound fatIdentityResult) "fat identity was not recovered"
+  privateResult <- lookupFatIfaceExact hsc cache privateCallerName
+  assertPrivateScope privateCallerName privateResult
+  privateOwner <- maybe (fail "private scope fixture has no owner") pure
+    (nameModule_maybe privateCallerName)
+  foreignResult <- lookupFatIfaceExact hsc cache foreignAbsName
+  case foreignResult of
+    FatIfaceFound groups -> do
+      let calls = [identifier | group <- groups
+            , rhs <- case group of NonRec _ body -> [body]; Rec pairs -> map snd pairs
+            , identifier <- nonDetEltsUniqSet (exprSomeFreeVars (\identifier -> isId identifier && isFCallId identifier) rhs)]
+      assert (not (null calls) && all (not . isExternalName . varName) calls)
+        "compiled FFI fixture did not decode a genuine internal-name operation Id"
+      _ <- evaluate (sum (map Set.size (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] groups))))))
+      pure ()
+    other -> fail ("compiled FFI original failed admission: " ++ showLookup other)
+  privateGroups <- case privateResult of
+    FatIfaceFound groups -> pure groups
+    _ -> fail "private defining closure disappeared"
+  do
+    let withoutHelper = [group | group <- privateGroups
+          , all ((/= "privateHelper") . occNameString . nameOccName . varName) (groupBinders group)]
+    assert (length withoutHelper < length privateGroups) "orphan control did not remove the genuine private group"
+    refused <- try (evaluate (sum (map Set.size
+      (IntMap.elems (privateOriginalDependencies privateOwner (IntMap.fromList (zip [0..] withoutHelper))))))) :: IO (Either ErrorCall Int)
+    case refused of
+      Left _ -> pure ()
+      Right _ -> fail "private original census accepted a genuinely dangling decoded GlobalId"
+  forward <- lookupFatIfaceBodies hsc cache privateOwner [privateCallerName, fatIdentityName]
+  reverseRoots <- lookupFatIfaceBodies hsc cache privateOwner
+    [fatIdentityName, privateCallerName, privateCallerName]
+  case (forward, reverseRoots) of
+    (FatIfaceFound{}, FatIfaceFound{}) -> assert (foundNames forward == foundNames reverseRoots)
+      "root permutation/duplication changed original group membership or defining order"
+    _ -> fail "aggregate private-scope roots lost their defining bodies"
+  recAResult <- lookupFatIfaceExact hsc cache recAName
+  recBResult <- lookupFatIfaceExact hsc cache recBName
+  assertRecGroup ["recA", "recB"] recAResult
+  assertRecGroup ["recA", "recB"] recBResult
+  absentResult <- lookupFatIfaceExact hsc cache (missingNameIn fatIdentityName)
+  assert (isBindingAbsent absentResult)
+    "loaded fat interface did not distinguish an absent binding"
+
+verifyComponentSelection :: PrivateOriginalFixture -> IO ()
+verifyComponentSelection (PrivateOriginalFixture fixture (PrivateNames _ privateCallerName _ _ _ _) wholeCore) = do
+  hsc <- freshFixtureEnvironment fixture
+  cache <- newFatIfaceCache
+  privateOwner <- maybe (fail "private fixture lost its actual owner") pure (nameModule_maybe privateCallerName)
+  componentResult <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName]
+  case componentResult of
+    FatIfaceComponents selection -> do
+      let components = fatSelectionComponents selection
+          census = case components of
+            component : _ -> fatComponentAllBinders component
+            [] -> []
+          componentBinders = concatMap
+            (concatMap groupBinders . IntMap.elems . fatComponentBindings) components
+          censusNames = map varName census
+          componentNames = map varName componentBinders
+          selectedGroupCount = sum
+            (map (length . fatComponentOrdinals) components)
+      assert (fatOriginalOwner (fatSelectionVersion selection) == privateOwner)
+        "component selection changed its full defining owner"
+      assert (fatSelectionDemandedGroupCount selection ==
+          demandedOriginalGroups privateCallerName (zip [0..] wholeCore))
+        "component demand count disagreed with actual local Core references"
+      assert (fatSelectionPreparedGroupCount selection == selectedGroupCount)
+        "prepared group count disagreed with the canonical component roster"
+      assert (privateCallerName `elem` censusNames && privateCallerName `elem` componentNames)
+        "component selection lost its original actual binder"
+      assert (any ((== "privateHelper") . occNameString . nameOccName) censusNames
+          && any ((== "privateHelper") . occNameString . nameOccName) componentNames)
+        "component selection lost the original private helper binder"
+    FatIfaceComponentsMissing reason -> fail ("component selection refused fixture root: " ++ show reason)
+    FatIfaceComponentsLoadFailure owner reason -> fail
+      ("component selection could not load " ++ moduleNameString (moduleName owner) ++ ": " ++ reason)
+
+verifyPreparedReuse :: PrivateOriginalFixture -> IO ()
+verifyPreparedReuse (PrivateOriginalFixture fixture (PrivateNames fatIdentityName privateCallerName privateDiamondName _ _ _) _) = do
+  hsc <- freshFixtureEnvironment fixture
+  cache <- newFatIfaceCache
+  privateOwner <- maybe (fail "private fixture lost its actual owner") pure (nameModule_maybe privateCallerName)
+  privateResult <- lookupFatIfaceExact hsc cache privateCallerName
+  privateGroups <- case privateResult of
+    FatIfaceFound groups -> pure groups
+    _ -> fail "checked private fixture lost its selected defining body"
+  privateOwners <- newOwnerInterfaceCache
+  privateBodies <- newPreparedBodyCache
+  privatePrepared <- prepareRecoveredBodies hsc privateOwners privateBodies
+    privateOwner privateGroups >>= either (fail . show) pure
+  do
+    componentCache <- newPreparedBodyCache
+    acquireComponents <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
+    let prepare roots = do
+          selected <- lookupFatIfaceComponents hsc cache privateOwner roots >>= \case
+            FatIfaceComponents selection -> pure selection
+            _ -> fail "canonical package growth lost its genuine interface selection"
+          task <- acquireComponents Nothing selected >>= either (fail . show) pure
+          preparedComponentModules <$> (runPreparedComponentTask task >>= either (fail . show) pure)
+        spellings = Map.unions . map pmStableTopSpellings
+        physicalBindings prepared = fmap Map.fromList $ fmap concat $ forM (concatMap pmBindings prepared) $ \(binding,_) -> do
+          identity <- evaluate binding >>= makeStableName
+          pure [(varName binder,identity) | binder <- topBinders binding]
+    first <- prepare [privateCallerName]
+    firstBindings <- physicalBindings first
+    grown <- prepare [privateCallerName,fatIdentityName,privateDiamondName]
+    grownBindings <- physicalBindings grown
+    assert (all (\(name,identity) -> Map.lookup name grownBindings == Just identity)
+      (Map.toList firstBindings))
+      "package demand growth re-lowered a completed private component"
+    assert (all (\(name,spelling) -> Map.lookup name (spellings grown) == Just spelling)
+      (Map.toList (spellings first)))
+      "package demand growth renamed an already prepared private top"
+    shuffled <- prepare [privateDiamondName,fatIdentityName,privateCallerName,privateCallerName]
+    shuffledBindings <- physicalBindings shuffled
+    assert (grownBindings == shuffledBindings && spellings grown == spellings shuffled)
+      "root permutation or duplication changed canonical prepared component identities"
+    bracket (lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
+      (maybe (unsetEnv "TIDEPOOL_DISABLE_BODY_REUSE") (setEnv "TIDEPOOL_DISABLE_BODY_REUSE")) $ \_ -> do
+        setEnv "TIDEPOOL_DISABLE_BODY_REUSE" "1"
+        acquireDisabled <- newPreparedComponentUnitsPreparer hsc privateOwners componentCache
+        disabledSelection <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
           FatIfaceComponents selection -> pure selection
-          _ -> fail "selected cache fixture lost its exact component"
-        selectedTask <- acquireSelected Nothing selected >>= either (fail . show) pure
-        selectedPrepared <- preparedComponentModules <$> (runPreparedComponentTask selectedTask >>= either (fail . show) pure)
-        selectedBindings <- physicalBindings selectedPrepared
-        assert (selectedBindings == firstBindings)
-          "owner-indexed completed cache selection discarded a prepared private unit"
-        originalContext <- lookupOwnerInterface privateOwners privateOwner >>= maybe
-          (fail "prepared original lacks its declaring context") pure
-        independentOwners <- newOwnerInterfaceCache
-        independentEnvironment <- forkExactContext hsc
-        acquireIndependent <- newPreparedComponentUnitsPreparer independentEnvironment independentOwners componentCache
-        independentTask <- acquireIndependent Nothing selected >>= either (fail . show) pure
-        independent <- preparedComponentModules <$> (runPreparedComponentTask independentTask >>= either (fail . show) pure)
-        independentContext <- lookupOwnerInterface independentOwners privateOwner >>= maybe
-          (fail "independently loaded original lacks its declaring context") pure
-        assert (not (sameOwnerInterfaceContext originalContext independentContext))
-          "independent defining-context issuers aliased the same interface"
-        independentBindings <- physicalBindings independent
-        assert (any (\(name,identity) -> Map.lookup name independentBindings /= Just identity)
+          _ -> fail "body-disable control lost its canonical component"
+        disabledTask <- acquireDisabled Nothing disabledSelection >>= either (fail . show) pure
+        disabledPrepared <- preparedComponentModules <$> (runPreparedComponentTask disabledTask >>= either (fail . show) pure)
+        disabledBindings <- physicalBindings disabledPrepared
+        assert (any (\(name,identity) -> Map.lookup name disabledBindings /= Just identity)
           (Map.toList firstBindings))
-          "prepared component cache crossed independently retained declaring contexts"
-        independentBodies <- prepareRecoveredBodies independentEnvironment independentOwners privateBodies
-          privateOwner privateGroups >>= either (fail . show) pure
-        oldBodies <- physicalBindings [privatePrepared]
-        newBodies <- physicalBindings [independentBodies]
-        assert (any (\(name,identity) -> Map.lookup name newBodies /= Just identity)
-          (Map.toList oldBodies))
-          "prepared body cache crossed independently retained declaring contexts"
-        retainedAgain <- runPreparedComponentTask =<< (acquireSelected Nothing selected >>= either (fail . show) pure)
-        retained <- either (fail . show) (physicalBindings . preparedComponentModules) retainedAgain
-        assert (retained == firstBindings)
-          "another context's completion displaced the retained original context"
-      privateOwnerClone <- liftIO (copyOwnerInterfaceCache privateOwners)
-      privateOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
-      liftIO (assert (maybe False (const True) privateOwnerContext)
-        "owner cache copy omitted a completed interface context")
-      selectedOwners <- liftIO (mergeOwnerInterfaceCaches
-        [(privateOwners,const False),(privateOwnerClone,(== privateOwner))])
-      selectedOwnerContext <- liftIO (lookupOwnerInterface selectedOwners privateOwner)
-      liftIO (assert (maybe False (const True) selectedOwnerContext)
-        "owner selection excluded the earlier map but lost a later selected context")
-      excludedOwners <- liftIO (mergeOwnerInterfaceCaches [(privateOwnerClone,const False)])
-      excludedOwnerContext <- liftIO (lookupOwnerInterface excludedOwners privateOwner)
-      liftIO (assert (maybe True (const False) excludedOwnerContext)
-        "owner merge retained an excluded context")
-      indexedOwners <- liftIO (selectOwnerInterfaceCaches
-        [(privateOwners,Set.empty),(privateOwnerClone,Set.singleton privateOwner)])
-      indexedOwnerContext <- liftIO (lookupOwnerInterface indexedOwners privateOwner)
-      liftIO (assert (maybe False (const True) indexedOwnerContext)
-        "owner-indexed selection lost the requested later context")
-      liftIO (evictOwnerInterfaceMatching privateOwners (== privateOwner))
-      clonedOwnerContext <- liftIO (lookupOwnerInterface privateOwnerClone privateOwner)
-      liftIO (assert (maybe False (const True) clonedOwnerContext)
-        "evicting the source owner cache changed its independent copy")
-      liftIO $ assert (any ((== "privateHelper") . occNameString . nameOccName . varName)
-        (concatMap (topBinders . fst) (pmBindings privatePrepared)))
-        "native preparation omitted the defining private helper"
-      forward <- liftIO (lookupFatIfaceBodies hsc cache privateOwner [privateCallerName, fatIdentityName])
-      reverseRoots <- liftIO (lookupFatIfaceBodies hsc cache privateOwner
-        [fatIdentityName, privateCallerName, privateCallerName])
-      liftIO $ case (forward, reverseRoots) of
-        (FatIfaceFound{}, FatIfaceFound{}) -> assert (foundNames forward == foundNames reverseRoots)
-          "root permutation/duplication changed original group membership or defining order"
-        _ -> fail "aggregate private-scope roots lost their defining bodies"
-      recAResult <- liftIO (lookupFatIfaceExact hsc cache recAName)
-      recBResult <- liftIO (lookupFatIfaceExact hsc cache recBName)
-      liftIO (assertRecGroup ["recA", "recB"] recAResult)
-      liftIO (assertRecGroup ["recA", "recB"] recBResult)
-      absentResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn fatIdentityName))
-      liftIO (assert (isBindingAbsent absentResult)
-        "loaded fat interface did not distinguish an absent binding")
-      -- These actual defining interfaces retain genuine optimizer INLINE
-      -- envelopes. Their recovery outcomes depend on their selected HPT,
-      -- independently of later filesystem changes.
-      (thinDeclaring, missingDeclaring) <- liftIO $ (,)
-        <$> declaringId thinContext thinId <*> declaringId hsc missingId
-      thinResult <- liftIO (lookupFatIfaceExact thinContext cache thinIdentityName)
-      liftIO (assert (isNoExtra thinResult)
-        "thin interface was not distinguished from an absent binding")
-      thinCachedResult <- liftIO (lookupFatIfaceExact thinContext cache (missingNameIn thinIdentityName))
-      liftIO (assert (isNoExtra thinCachedResult)
-        "typed no-extra outcome was not retained in the cache")
-      thinRecovery <- liftIO (recoverExactBody thinContext cache thinDeclaring)
-      liftIO $ case thinRecovery of
-        MissingExactBody name NoExtraDeclarations -> assert (name == thinIdentityName)
-          "thin recovery refusal changed the exact defining identity"
-        _ -> fail "optimizer unfolding bypassed missing original fat Core"
-      liftIO (removeFile (work </> "MissingFixture.hi"))
-      retainedCache <- liftIO newFatIfaceCache
-      retained <- liftIO (lookupFatIfaceExact hsc retainedCache missingIdentityName)
-      liftIO (assert (isFound retained)
-        "removing a physical HOME file invalidated its retained interface owner")
-      missingContext <- liftIO (freshExactContext hsc)
-      missingCache <- liftIO newFatIfaceCache
-      missingResult <- liftIO (lookupFatIfaceExact missingContext missingCache missingIdentityName)
-      liftIO (assertLoadFailure "MissingFixture" missingResult)
-      missingCachedResult <- liftIO (lookupFatIfaceExact missingContext missingCache missingIdentityName)
-      liftIO (assertLoadFailure "MissingFixture" missingCachedResult)
-      missingRecovery <- liftIO (recoverExactBody missingContext missingCache missingDeclaring)
-      liftIO $ case missingRecovery of
-        BodyInterfaceFailure owner reason -> do
-          assert (Just owner == nameModule_maybe missingIdentityName)
-            "read failure changed the exact defining owner"
-          assert (not (null reason)) "read failure lost its reason"
-        _ -> fail "optimizer unfolding bypassed the absent HOME interface owner"
-  pure ()
+          "component body-disable calibration returned completed STG instead of lowering"
+        assert (Set.fromList (Map.elems (spellings disabledPrepared))
+            == Set.fromList (Map.elems (spellings first)))
+          "component body-disable calibration changed canonical private spellings"
+    selectedCache <- selectPreparedBodyCaches [(componentCache,Set.singleton privateOwner)]
+    acquireSelected <- newPreparedComponentUnitsPreparer hsc privateOwners selectedCache
+    selected <- lookupFatIfaceComponents hsc cache privateOwner [privateCallerName] >>= \case
+      FatIfaceComponents selection -> pure selection
+      _ -> fail "selected cache fixture lost its exact component"
+    selectedTask <- acquireSelected Nothing selected >>= either (fail . show) pure
+    selectedPrepared <- preparedComponentModules <$> (runPreparedComponentTask selectedTask >>= either (fail . show) pure)
+    selectedBindings <- physicalBindings selectedPrepared
+    assert (selectedBindings == firstBindings)
+      "owner-indexed completed cache selection discarded a prepared private unit"
+    originalContext <- lookupOwnerInterface privateOwners privateOwner >>= maybe
+      (fail "prepared original lacks its declaring context") pure
+    independentOwners <- newOwnerInterfaceCache
+    independentEnvironment <- forkExactContext hsc
+    acquireIndependent <- newPreparedComponentUnitsPreparer independentEnvironment independentOwners componentCache
+    independentTask <- acquireIndependent Nothing selected >>= either (fail . show) pure
+    independent <- preparedComponentModules <$> (runPreparedComponentTask independentTask >>= either (fail . show) pure)
+    independentContext <- lookupOwnerInterface independentOwners privateOwner >>= maybe
+      (fail "independently loaded original lacks its declaring context") pure
+    assert (not (sameOwnerInterfaceContext originalContext independentContext))
+      "independent defining-context issuers aliased the same interface"
+    independentBindings <- physicalBindings independent
+    assert (any (\(name,identity) -> Map.lookup name independentBindings /= Just identity)
+      (Map.toList firstBindings))
+      "prepared component cache crossed independently retained declaring contexts"
+    independentBodies <- prepareRecoveredBodies independentEnvironment independentOwners privateBodies
+      privateOwner privateGroups >>= either (fail . show) pure
+    oldBodies <- physicalBindings [privatePrepared]
+    newBodies <- physicalBindings [independentBodies]
+    assert (any (\(name,identity) -> Map.lookup name newBodies /= Just identity)
+      (Map.toList oldBodies))
+      "prepared body cache crossed independently retained declaring contexts"
+    retainedAgain <- runPreparedComponentTask =<< (acquireSelected Nothing selected >>= either (fail . show) pure)
+    retained <- either (fail . show) (physicalBindings . preparedComponentModules) retainedAgain
+    assert (retained == firstBindings)
+      "another context's completion displaced the retained original context"
+  privateOwnerClone <- copyOwnerInterfaceCache privateOwners
+  privateOwnerContext <- lookupOwnerInterface privateOwnerClone privateOwner
+  assert (maybe False (const True) privateOwnerContext)
+    "owner cache copy omitted a completed interface context"
+  selectedOwners <- mergeOwnerInterfaceCaches
+    [(privateOwners,const False),(privateOwnerClone,(== privateOwner))]
+  selectedOwnerContext <- lookupOwnerInterface selectedOwners privateOwner
+  assert (maybe False (const True) selectedOwnerContext)
+    "owner selection excluded the earlier map but lost a later selected context"
+  excludedOwners <- mergeOwnerInterfaceCaches [(privateOwnerClone,const False)]
+  excludedOwnerContext <- lookupOwnerInterface excludedOwners privateOwner
+  assert (maybe True (const False) excludedOwnerContext)
+    "owner merge retained an excluded context"
+  indexedOwners <- selectOwnerInterfaceCaches
+    [(privateOwners,Set.empty),(privateOwnerClone,Set.singleton privateOwner)]
+  indexedOwnerContext <- lookupOwnerInterface indexedOwners privateOwner
+  assert (maybe False (const True) indexedOwnerContext)
+    "owner-indexed selection lost the requested later context"
+  evictOwnerInterfaceMatching privateOwners (== privateOwner)
+  clonedOwnerContext <- lookupOwnerInterface privateOwnerClone privateOwner
+  assert (maybe False (const True) clonedOwnerContext)
+    "evicting the source owner cache changed its independent copy"
+  assert (any ((== "privateHelper") . occNameString . nameOccName . varName)
+    (concatMap (topBinders . fst) (pmBindings privatePrepared)))
+    "native preparation omitted the defining private helper"
 
 -- Generic outcomes exercise loading mechanics without constructing executable
 -- Core or allowing tests to insert invented interface facts into FatIfaceCache.
@@ -784,29 +945,16 @@ declaringId env requested = do
 copyFixture :: FilePath -> FilePath -> FilePath -> IO ()
 copyFixture fixtures work name = readFile (fixtures </> name) >>= writeFile (work </> name)
 
-withTempDirectory :: FilePath -> (FilePath -> IO a) -> IO a
-withTempDirectory parent action = do
+newFixtureDirectory :: FilePath -> IO FilePath
+newFixtureDirectory parent = do
   (path, handle) <- openTempFile parent "tidepool-fat-iface-exact-"
   hClose handle
   removeFile path
   createDirectoryIfMissing True path
-  action path `finally` removePathForcibly path
+  pure path
 
-compileFixture :: FilePath -> FilePath -> [String] -> FilePath -> IO ()
-compileFixture ghc work extra source = callProcess ghc
-  (["-v0", "-fforce-recomp", "-c", source, "-odir", work, "-hidir", work] ++ extra)
-
-findName :: String -> String -> [Name] -> Name
-findName wantedModule wantedOccurrence names = case
-    [ name
-    | name <- names
-    , Just modl <- [nameModule_maybe name]
-    , moduleNameString (moduleName modl) == wantedModule
-    , occNameString (nameOccName name) == wantedOccurrence
-    ] of
-  [name] -> name
-  found -> error ("expected one " ++ wantedModule ++ "." ++ wantedOccurrence
-    ++ ", got " ++ show (length found))
+withTempDirectory :: FilePath -> (FilePath -> IO a) -> IO a
+withTempDirectory parent = bracket (newFixtureDirectory parent) removePathForcibly
 
 missingNameIn :: Name -> Name
 missingNameIn name = case nameModule_maybe name of
@@ -849,10 +997,13 @@ assertPrivateScope requested result = case result of
           occNameString (nameOccName (varName identifier)) == "privateHelper"]
     assert (any ((== requested) . varName) identifiers)
       "private closure omitted its selected exported body"
-    assert (length helpers == 1 && all (not . isExternalName . varName) helpers)
-      "private closure did not retain exactly its genuine internal top helper"
+    let diagnostic = "actual selected binders=" ++ show (map binderPremise identifiers)
+    assert (length helpers == 1)
+      ("private closure did not retain exactly one privateHelper; " ++ diagnostic)
+    assert (all (not . isExternalName . varName) helpers)
+      ("private closure helper has an External Name; " ++ diagnostic)
     assert (all (not . isLocalId) helpers)
-      "private helper control no longer exercises fat-interface GlobalId scope"
+      ("private closure helper is not a decoded GlobalId; " ++ diagnostic)
     assert (not (any ((== "fatIdentity") . occNameString . nameOccName . varName) identifiers))
       "private closure admitted an unrelated exported group"
   other -> fail ("private defining scope was unavailable: " ++ showLookup other)
@@ -899,6 +1050,3 @@ showLookup found@FatIfaceFound{} = "original groups " ++ show (map (map (occName
 showLookup (FatIfaceMissing missing) = show missing
 showLookup (FatIfaceLoadFailure modl reason) =
   moduleNameString (moduleName modl) ++ ": " ++ reason
-
-trim :: String -> String
-trim = reverse . dropWhile (== '\n') . reverse
