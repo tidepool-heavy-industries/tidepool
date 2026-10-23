@@ -1098,7 +1098,7 @@ fn prepare_world_cell_program_inner(
         let native = match admission.output {
             None => None,
             Some(output) => {
-                let (generation, observation) = match &program.reservation().slots()[index] {
+                let (generation, observation) = match &program.reservation().items()[index].slot() {
                     CheckedPlannedCellSlot::Bind { value } => (*value, None),
                     CheckedPlannedCellSlot::Expression {
                         capture,
@@ -1126,7 +1126,7 @@ fn prepare_world_cell_program_inner(
             native,
         });
     }
-    let slots = program.reservation().slots().to_vec();
+    let slots = program.reservation().slots().collect();
     Ok(PreparedCellProgram {
         root_owner: Some(program.directory().clone()),
         checked,
