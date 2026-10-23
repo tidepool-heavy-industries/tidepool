@@ -683,11 +683,14 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     // Custody without a selected native package edge does not grant a target
     // package witness, even when the original still owns that witness.
     let unselected_validation = &mut PackageInterfaceValidation::default();
-    let unselected =
-        package_availability_with_validation(&BTreeMap::new(), &issued, unselected_validation)
-            .unwrap()
-            .select(&[], &[], &unselected_validation.inventory)
-            .unwrap();
+    let unselected = package_availability_with_validation(
+        &BTreeMap::new(),
+        issued.data(),
+        unselected_validation,
+    )
+    .unwrap()
+    .select(&[], &[], &unselected_validation.inventory)
+    .unwrap();
     assert!(unselected.is_empty());
 
     // Empty demand retains package custody without granting Source execution.
@@ -768,7 +771,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let empty_packages = BTreeMap::new();
     let catalog = package_availability_with_validation(
         &empty_packages,
-        &issued,
+        issued.data(),
         &mut PackageInterfaceValidation::default(),
     )
     .unwrap();
@@ -895,7 +898,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .cloned()
         .collect::<Vec<_>>();
     let selected =
-        package_availability_with_validation(&BTreeMap::new(), &subset, selected_validation)
+        package_availability_with_validation(&BTreeMap::new(), subset.data(), selected_validation)
             .unwrap()
             .select(&subset_groups, &[], &selected_validation.inventory)
             .unwrap();

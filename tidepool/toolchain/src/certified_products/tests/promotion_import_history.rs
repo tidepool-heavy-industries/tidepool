@@ -493,7 +493,8 @@ fn check_retained_core_promotion_history(item_count: usize) {
     )
     .unwrap();
     let initial_output = initial.captured_stage().output();
-    assert!(initial_output
+    assert!(initial
+        .compiler_inputs()
         .issued_artifacts()
         .selected_native_groups()
         .is_empty());
@@ -507,7 +508,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         };
         let receipt = initial
             .source_selection()
-            .produced_source_receipt(&owner, initial_output.issued_artifacts())
+            .produced_source_receipt(&owner, initial.compiler_inputs().issued_artifacts())
             .unwrap()
             .unwrap();
         let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
