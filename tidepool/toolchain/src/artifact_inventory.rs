@@ -10144,7 +10144,7 @@ mod tests {
         let owner = native.descriptor.owner.clone();
         let canonical = match &native.payload {
             ArtifactPayload::Original(product) => {
-                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap())
+                ArtifactEntry::canonical_artifact_id(product.module_interface())
             }
             _ => unreachable!(),
         };
@@ -11134,7 +11134,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone())
             .descriptor
             .id;
         let proof = NativeOriginalRequirement::from_issued_group_custody(
@@ -11331,7 +11331,7 @@ mod tests {
                     (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
                 let id = original.descriptor.id;
                 let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let canonical = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
                 let owner = ExactModuleIdentity { unit: product.owner().unit.clone(), module: product.owner().module.clone() };
                 let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
                 let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
@@ -11368,9 +11368,9 @@ mod tests {
                     (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
                 let id = original.descriptor.id;
                 let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let canonical = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
                 let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
-                let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().unwrap().clone()));
+                let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
                 let base = inventory.admit_shared(&inventory.empty_view(), vec![canonical_entry]).unwrap();
                 let canonical_binding = base.namespace()[&canonical];
                 let capture = |range: std::ops::Range<u32>, name: &str| inventory.admit_recovery_selection(
@@ -11426,7 +11426,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let base = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical])
@@ -12416,7 +12416,7 @@ mod tests {
             assert_eq!(left_child.artifact, old_child_id);
             assert_eq!(right_child.artifact, new_child_id);
             let canonical = ArtifactEntry::canonical(match &native.payload {
-                ArtifactPayload::Original(product) => product.module_interface().unwrap().clone(),
+                ArtifactPayload::Original(product) => product.module_interface().clone(),
                 _ => unreachable!(),
             })
             .descriptor
@@ -12671,7 +12671,7 @@ mod tests {
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
             let canonical =
-                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+                ArtifactEntry::canonical_artifact_id(product.module_interface());
             let InputNativeDecision::IssuedChoices(choices) = inputs
                 .compiler_source_support()
                 .checked_native_input_decision(key.artifact, canonical, product.owner())
@@ -12952,7 +12952,7 @@ mod tests {
                 unreachable!()
             };
             let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             ));
             let canonical_id = canonical.descriptor.id;
             let base = inventory
@@ -13056,7 +13056,7 @@ mod tests {
             unreachable!()
         };
         let native_canonical_id =
-            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(product.module_interface().clone())
                 .descriptor
                 .id;
         let child_id = child.descriptor.id;
@@ -13119,7 +13119,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let canonical_id = canonical.descriptor.id;
         let base = inventory
@@ -14110,7 +14110,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            first_product.module_interface().unwrap().clone(),
+            first_product.module_interface().clone(),
         ));
         let standalone = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
@@ -14128,10 +14128,10 @@ mod tests {
             unreachable!()
         };
         assert!(Arc::ptr_eq(
-            product.module_interface().unwrap().facts(),
+            product.module_interface().facts(),
             facts
         ));
-        assert!(product.original_native().unwrap().matches_original(product));
+        assert!(product.original_native().matches_original(product));
         let before = inventory.metrics();
         inventory.admit_shared(&view, vec![owner]).unwrap();
         let after = inventory.metrics();
@@ -14519,7 +14519,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &owner.payload else {
             panic!("original owner");
         };
-        let witness = product.original_native().unwrap();
+        let witness = product.original_native();
         assert!(witness.matches_original(product));
         let before = inventory.metrics();
         inventory.admit_shared(&adopted, vec![owner]).unwrap();
@@ -15232,7 +15232,7 @@ mod tests {
         };
         let projection = CompilerInputProjection::from_issued_entries(&[
             Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             )),
             Arc::new(next.clone()),
         ])
@@ -17418,7 +17418,7 @@ mod tests {
             let old_values_id = values.descriptor.id;
             let new_child_id = next.descriptor.id;
             let ArtifactPayload::Original(product) = &native.payload else { unreachable!() };
-            let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            let canonical_id = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
             proptest::prop_assert_ne!(old_values_id, new_child_id);
             let old = inventory.admit(&inventory.empty_view(), vec![native.clone(), values]).unwrap();
             let old_graph = old.capture_graph_selection();
@@ -17672,7 +17672,7 @@ mod tests {
                     unreachable!()
                 };
                 let canonical =
-                    ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+                    ArtifactEntry::canonical(product.module_interface().clone());
                 let carrier = ArtifactBindingNode::Artifact(namespace[&original.descriptor.id]);
                 let canonical = ArtifactBindingNode::Artifact(namespace[&canonical.descriptor.id]);
                 model
@@ -18578,7 +18578,7 @@ mod tests {
                             unreachable!()
                         };
                         let canonical = ArtifactEntry::canonical_artifact_id(
-                            product.module_interface().unwrap(),
+                            product.module_interface(),
                         );
                         let expected_canonical = model
                             .rows
@@ -19323,9 +19323,9 @@ mod tests {
         let ArtifactPayload::Original(product) = &old_native.payload else {
             unreachable!()
         };
-        let old_carrier = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let old_carrier = ArtifactEntry::canonical(product.module_interface().clone());
         let new_carrier = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
-            product.module_interface().unwrap(),
+            product.module_interface(),
             b"fresh Epoch Core".to_vec(),
         ));
         let old_id = old_carrier.descriptor.id;
@@ -19496,7 +19496,7 @@ mod tests {
                 unreachable!()
             };
             let canonical_id =
-                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(product.module_interface().clone())
                     .descriptor
                     .id;
             let proof =
@@ -19740,7 +19740,7 @@ mod tests {
                 inspection.clone(),
                 Arc::new(ArtifactEntry::canonical(match &wire.payload {
                     ArtifactPayload::Original(product) => {
-                        product.module_interface().unwrap().clone()
+                        product.module_interface().clone()
                     }
                     _ => unreachable!(),
                 })),
@@ -20135,7 +20135,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let mut issuers = (0..branches)
             .map(|index| {
@@ -20305,7 +20305,7 @@ mod tests {
                 unreachable!()
             };
             let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             ));
             let original = inventory
                 .admit_recovery_selection(
@@ -20411,7 +20411,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &original.payload else {
             unreachable!()
         };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone());
         let issue = |label: &str| {
             inventory
                 .admit_recovery_selection(
@@ -21195,7 +21195,7 @@ mod tests {
             .contains(&original_owner));
         let carrier = match &first.payload {
             ArtifactPayload::Original(product) => {
-                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(product.module_interface().clone())
                     .descriptor
                     .id
             }
@@ -21521,7 +21521,7 @@ mod tests {
             .admit(
                 &empty,
                 vec![ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone(),
+                    product.module_interface().clone(),
                 )],
             )
             .unwrap();
@@ -22885,7 +22885,7 @@ mod tests {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 panic!("native fixture")
             };
-            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(product.module_interface().clone())
         };
         let original_interface = canonical(&original);
         let consumer_interface = canonical(&consumer);
