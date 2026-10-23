@@ -906,6 +906,8 @@ pub(crate) struct OriginalCompilerInputs {
 }
 
 pub(crate) struct CapturedCompilerStage {
+    _producer_certificates: Arc<[Arc<ArtifactEntry>]>,
+    physical_artifacts: ArtifactView,
     output: IssuedOriginalOutput,
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     facts: BTreeMap<ArtifactId, crate::artifact_inventory::ArtifactFactsHandle>,
@@ -1051,7 +1053,7 @@ impl CapturedCompilerStage {
     }
 
     pub(crate) fn issued_artifacts(&self) -> &ArtifactView {
-        self.output.artifacts()
+        &self.physical_artifacts
     }
 
     pub(crate) fn source_selection(&self) -> &crate::certified_products::CertifiedSourceSelection {
@@ -1070,6 +1072,7 @@ impl CapturedCompilerStage {
             "products.segment_native_availability",
             "initial_admission",
         );
+        let producer_certificates = entries.clone().into();
         let mut facts = BTreeMap::new();
         for entry in &entries {
             if entry.descriptor.kind != crate::artifact_inventory::ArtifactKind::ValueInterface {
@@ -1081,12 +1084,13 @@ impl CapturedCompilerStage {
                 .map_err(|error| compiler_evidence_failure(error.into()))?;
             facts.insert(entry.descriptor.id, entry.fact_owner().clone());
         }
-        let physical = baseline.inventory().admit_certified_with_demand(
+        let admission = baseline.inventory().admit_product_artifacts(
             baseline,
             entries,
             crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-            selection,
+            Some(selection),
         )?;
+        let physical = admission.artifacts.clone();
         let projection = selection
             .compiler_projection(&physical)
             .map_err(compiler_evidence_failure)?;
@@ -1103,6 +1107,7 @@ impl CapturedCompilerStage {
         selection
             .finish_new_product_availability(&issued)
             .map_err(compiler_evidence_failure)?;
+        selection.capture_compiler_rows(&admission, &projection)?;
         timing.advance("carry_completed_availability");
         let inputs = Arc::new(OriginalCompilerInputs::normalize_selection(
             selection,
@@ -1116,6 +1121,8 @@ impl CapturedCompilerStage {
         };
         timing.finish(true);
         Ok(Self {
+            _producer_certificates: producer_certificates,
+            physical_artifacts: physical,
             output,
             operation: Arc::clone(&validation.inventory),
             facts,

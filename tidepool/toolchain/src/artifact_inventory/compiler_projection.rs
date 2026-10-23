@@ -2335,6 +2335,38 @@ pub(crate) struct SelectedCompilerRows {
 }
 
 impl SelectedCompilerRows {
+    fn derived_projection(&self) -> CompilerInputProjection {
+        CompilerInputProjection {
+            roles: self
+                .rows
+                .iter()
+                .map(|(owner, row)| (owner.clone(), row.assembly_role()))
+                .collect(),
+            recorded_roles: self
+                .rows
+                .iter()
+                .map(|(owner, row)| (owner.clone(), row.recorded_row()))
+                .collect(),
+        }
+    }
+
+    fn derived_decisions(&self) -> RecordedInputNativeDecisions {
+        RecordedInputNativeDecisions {
+            facts: self
+                .rows
+                .iter()
+                .filter_map(|(owner, row)| {
+                    row.recorded_decision()
+                        .map(|decision| (owner.clone(), decision))
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn empty() -> Self {
+        Self::from_admitted(BTreeMap::new())
+    }
+
     pub(crate) fn admitted_roles(&self) -> AdmittedCompilerRoles<'_> {
         AdmittedCompilerRoles { selected: self }
     }
@@ -2956,6 +2988,59 @@ impl CompilerSourceSupport {
         &self.native_fact_owner.roles
     }
 
+    pub(crate) fn carry_selected_compiler_rows(&self) -> SelectedCompilerRows {
+        self.selected.as_ref().clone()
+    }
+
+    pub(crate) fn capture_compiler_output_rows(
+        inherited: &SelectedCompilerRows,
+        admission: &ArtifactAdmission,
+        projection: &CompilerInputProjection,
+    ) -> Result<SelectedCompilerRows, CompileError> {
+        let mut selected = inherited.clone();
+        for (owner, role) in projection.snapshot_roles() {
+            let Some(canonical) = admission.supplied.get(&role.interface()) else {
+                if selected.get(owner).is_none() {
+                    return Err(failure(
+                        "compiler output lacks its actual canonical producer",
+                    ));
+                }
+                continue;
+            };
+            let original = role.original().and_then(|id| admission.supplied.get(&id));
+            if let Some(original) = original {
+                let state = admission
+                    .artifacts
+                    .lease
+                    .inventory
+                    .0
+                    .lock()
+                    .expect("inventory lock");
+                ResolvedCompilerRole::validate_original_pair(
+                    &state,
+                    canonical.binding,
+                    original.binding,
+                )?;
+            }
+            let row = ResolvedCompilerRole::from_issued_bindings(
+                (canonical.binding, Arc::clone(&canonical.entry)),
+                original.map(|original| (original.binding, Arc::clone(&original.entry))),
+            );
+            let issuer = match selected.get(owner) {
+                Some(previous) => CompilerInputProjection::choose_role(
+                    owner,
+                    &previous.assembly_role(),
+                    &row.assembly_role(),
+                )?,
+                None => CompilerRoleIssuer::Incoming,
+            };
+            if matches!(issuer, CompilerRoleIssuer::Incoming) {
+                selected.insert_incoming(owner.clone(), row);
+            }
+        }
+        Ok(selected)
+    }
+
     pub(super) fn fork_selected_rows(&self) -> SelectedCompilerRows {
         self.selected.as_ref().clone()
     }
@@ -2994,10 +3079,8 @@ impl CompilerSourceSupport {
                 "current native products lack physical cohort issuance",
             ));
         }
-        let projection = selection
-            .compiler_projection(artifacts)
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let selected = Self::certified_output_rows(selection, &projection, artifacts)?;
+        let selected = selection.selected_compiler_rows().clone();
+        let projection = selected.derived_projection();
         let availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
             selection.issued_native_availability().cloned(),
         )?;
@@ -3022,8 +3105,7 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        let input_decisions =
-            RecordedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
+        let input_decisions = selected.derived_decisions();
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.output_fragment",
             "retain_issuance",
@@ -3032,7 +3114,7 @@ impl CompilerSourceSupport {
             ResolvedCompilerInputs {
                 artifacts: artifacts.clone(),
                 projection,
-                selected: SelectedCompilerRows::from_admitted(selected),
+                selected,
                 input_decisions,
             },
             offers,
@@ -3049,98 +3131,29 @@ impl CompilerSourceSupport {
     fn certified_output_rows(
         selection: &crate::certified_products::CertifiedSourceSelection,
         projection: &CompilerInputProjection,
-        artifacts: &ArtifactView,
-    ) -> Result<BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
-        let mut selected = BTreeMap::new();
+        _artifacts: &ArtifactView,
+    ) -> Result<SelectedCompilerRows, CompileError> {
+        let mut selected = selection.selected_compiler_rows().clone();
+        let removed = selected
+            .rows
+            .keys()
+            .filter(|owner| !projection.roles.contains_key(*owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        for owner in removed {
+            selected.rows.remove(&owner);
+            selected.changed_owners.insert(owner);
+        }
         for (owner, role) in projection.snapshot_roles() {
-            if let Some(source) = selection.compiler_input_support(owner) {
-                let prior = source
-                    .selected
-                    .get(owner)
-                    .ok_or_else(|| failure("compiler continuation lost its actual selected row"))?;
-                if prior.interface().0.artifact != role.interface()
-                    || role.original().is_some_and(|original| {
-                        prior
-                            .original()
-                            .is_none_or(|(binding, _)| binding.artifact != original)
-                    })
-                {
-                    return Err(failure(
-                        "compiler continuation differs from its actual selected row",
-                    ));
-                }
-                let mut row = prior.clone();
-                if role.original().is_none() {
-                    row.select_type_only();
-                }
-                selected.insert(owner.clone(), row.with_issued_provenance(role)?);
-                continue;
+            let row = selected
+                .rows
+                .get(owner)
+                .ok_or_else(|| failure("compiler output lacks its captured selected row"))?;
+            if row.interface().0.artifact != role.interface() {
+                return Err(failure(
+                    "compiler output differs from its selected canonical row",
+                ));
             }
-            let canonical = *artifacts
-                .lease
-                .selection
-                .namespace
-                .get(&role.interface())
-                .ok_or_else(|| failure("completed output lacks its exact canonical binding"))?;
-            let row = if let Some(original) = role.original() {
-                let mut candidates = Vec::new();
-                let offer = selection
-                    .completed_compiler_output_offer(owner)
-                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                    .ok_or_else(|| failure("completed output lacks its actual physical issuer"))?;
-                if offer.original() != original
-                    || !offer.matches_direct_canonical_binding(
-                        original,
-                        role.interface(),
-                        artifacts,
-                    )
-                {
-                    return Err(failure(
-                        "completed output differs from its actual canonical carrier",
-                    ));
-                }
-                for carrier in offer
-                    .artifact_carriers()
-                    .iter()
-                    .filter(|carrier| carrier.artifact == original)
-                {
-                    let state = offer
-                        .custody_lease()
-                        .inventory
-                        .0
-                        .lock()
-                        .expect("inventory lock");
-                    if ResolvedCompilerRole::validate_original_pair(&state, canonical, *carrier)
-                        .is_ok()
-                    {
-                        candidates.push((*carrier, offer));
-                    }
-                }
-                let [(carrier, offer)] = candidates.as_slice() else {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
-                    ));
-                };
-                let interface = offer
-                    .custody_lease()
-                    .payloads
-                    .get(&role.interface())
-                    .ok_or_else(|| {
-                        failure("completed output offer lost its actual canonical acquisition")
-                    })?;
-                ResolvedCompilerRole::from_issued_bindings(
-                    (canonical, Arc::clone(interface)),
-                    Some((*carrier, Arc::clone(offer.original_acquisition()))),
-                )
-            } else {
-                let interface = artifacts
-                    .lease
-                    .payloads
-                    .get(&role.interface())
-                    .ok_or_else(|| failure("completed TYPE output lacks its produced interface"))?;
-                ResolvedCompilerRole::from_issued_bindings((canonical, Arc::clone(interface)), None)
-            };
-            selected.insert(owner.clone(), row.with_issued_provenance(role)?);
         }
         Ok(selected)
     }
@@ -5477,7 +5490,7 @@ impl CompilerSourceSupport {
         let fragment = Self::from_authenticated_rows(
             incoming,
             artifacts.clone(),
-            selected,
+            selected.rows.into_iter().collect(),
             selection
                 .issued_native_availability()
                 .flat_map(|row| row.offers().cloned()),

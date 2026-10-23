@@ -22,7 +22,7 @@ mod native_availability;
 pub(crate) use compiler_projection::RecordedCompilerRole;
 pub(crate) use compiler_projection::{
     AcquiredNativeClosures, CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection,
-    InputNativeDecision, RecordedInputNativeDecisions,
+    InputNativeDecision, RecordedInputNativeDecisions, SelectedCompilerRows,
 };
 pub use compiler_projection::{
     AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
@@ -871,6 +871,7 @@ impl ResolvedNativeTarget<'_> {
 
 pub(crate) struct ArtifactAdmission {
     pub(crate) artifacts: ArtifactView,
+    supplied: BTreeMap<ArtifactId, SuppliedArtifactOutcome>,
 }
 
 /// Ownership issued by the admission solver, before deriving a selected view.
@@ -890,6 +891,7 @@ impl IssuedArtifactCustody {
     fn into_view(self) -> ArtifactAdmission {
         ArtifactAdmission {
             artifacts: ArtifactView::from_custody(self.lease),
+            supplied: self.supplied,
         }
     }
 }

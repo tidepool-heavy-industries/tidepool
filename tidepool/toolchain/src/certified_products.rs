@@ -4752,6 +4752,7 @@ fn duplicate_source_binder(
 /// that request's validated output rows. Full retained custody is not an offer.
 #[derive(Clone, Debug)]
 pub(crate) struct CertifiedSourceSelection {
+    compiler_rows: crate::artifact_inventory::SelectedCompilerRows,
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
     private_native: crate::declaration_context::RequestNativeAvailability,
@@ -5773,35 +5774,24 @@ impl CertifiedSourceSelection {
         }))
     }
 
-    /// Only input rows retain the actual request's selected compiler owner.
-    /// Equal fresh output identities cannot borrow a historical acquisition.
-    pub(crate) fn compiler_input_support(
+    pub(crate) fn selected_compiler_rows(
         &self,
-        owner: &crate::declaration_join::ExactModuleIdentity,
-    ) -> Option<&crate::artifact_inventory::CompilerSourceSupport> {
-        let selected = self
-            .modules
-            .get(&(owner.unit.clone(), owner.module.clone()))?;
-        match selected {
-            ReceiptSourceSelection::Native { native, .. }
-                if !matches!(native.origin, ReceiptNativeOrigin::Input) =>
-            {
-                return None
-            }
-            ReceiptSourceSelection::InterfaceOnly { interface }
-                if self
-                    .produced_types
-                    .as_ref()
-                    .is_some_and(|outputs| outputs.owns_artifact(*interface)) =>
-            {
-                return None
-            }
-            _ => {}
-        }
-        match &self.input_origin {
-            CertifiedInputOrigin::Continuation(source) => Some(source),
-            CertifiedInputOrigin::NewProducts => None,
-        }
+    ) -> &crate::artifact_inventory::SelectedCompilerRows {
+        &self.compiler_rows
+    }
+
+    pub(crate) fn capture_compiler_rows(
+        &mut self,
+        admission: &crate::artifact_inventory::ArtifactAdmission,
+        projection: &crate::artifact_inventory::CompilerInputProjection,
+    ) -> Result<(), crate::CompileError> {
+        self.compiler_rows =
+            crate::artifact_inventory::CompilerSourceSupport::capture_compiler_output_rows(
+                &self.compiler_rows,
+                admission,
+                projection,
+            )?;
+        Ok(())
     }
 
     /// Fresh and prior-stage compiler rows borrow their exact physical issuer.
@@ -5908,6 +5898,7 @@ impl CertifiedSourceSelection {
 
     fn new_product_ingress() -> Self {
         Self {
+            compiler_rows: crate::artifact_inventory::SelectedCompilerRows::empty(),
             modules: Arc::new(BTreeMap::new()),
             produced_types: None,
             private_native: Default::default(),
@@ -5991,6 +5982,9 @@ impl CertifiedSourceSelection {
         }
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
+        selected.compiler_rows = inputs
+            .compiler_source_support()
+            .carry_selected_compiler_rows();
         selected.input_origin =
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         selected.original_bindings = inputs.original_bindings().cloned();
