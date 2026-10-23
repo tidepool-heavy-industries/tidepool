@@ -1346,6 +1346,9 @@ RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests:
     "checked_capture_completes_issued_binding_through_resident",
     "checked_capture_stage_requires_its_actual_issued_ticket_and_session",
     "checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair",
+    "produced_native_capture_requires_its_actual_acquired_slot_and_row",
+    "native_retained_resolution_visits_distinct_acquisitions_and_anchored_descendants",
+    "checked_snapshot_retains_expired_observation_until_its_last_owner_drops",
 )]
 RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
     "checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects",
@@ -1510,20 +1513,20 @@ def runtime_test_cases(binary):
         runtime_arguments(staged_env, staged_resources, staged_worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
-    finite_tests = ["session::turn::scaling_tests::typed_segment_tests::finite_component_controls::" + name for name in (
-        "finite_receipts_refuse_cross_item_mutations_before_effects",
-        "finite_inference_ledgers_record_single_pass_segments",
-        "finite_warm_emission_excludes_previously_issued_owners",
+    world_tests = ["session::turn::scaling_tests::typed_segment_tests::world_component_controls::" + name for name in (
+        "world_checked_items_refuse_cross_item_mutations_before_effects",
+        "world_inference_ledgers_record_single_pass_segments",
+        "world_warm_emission_excludes_previously_issued_owners",
     )]
-    finite_env, finite_resources, finite_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
+    world_env, world_resources, world_worker = test_runtime_inputs("tidepool-runtime", "", unit=True)
     rules.append("\n".join([
         "tidepool_rust_test_cases(",
-        '    name = "runtime_finite_segment_component_tests",',
+        '    name = "runtime_world_segment_component_tests",',
         f"    binary = {json.dumps(':' + binary)},",
-        "    exact_tests = [", render_strings(finite_tests, 8), "    ],",
-        f"    expected_count = {len(finite_tests)},", "    jobs = 1,", "    timeout = 1200,",
-        f"    test_rule_timeout_ms = {(len(finite_tests) * 1200 + 60) * 1000},",
-        runtime_arguments(finite_env, finite_resources, finite_worker),
+        "    exact_tests = [", render_strings(world_tests, 8), "    ],",
+        f"    expected_count = {len(world_tests)},", "    jobs = 1,", "    timeout = 1200,",
+        f"    test_rule_timeout_ms = {(len(world_tests) * 1200 + 60) * 1000},",
+        runtime_arguments(world_env, world_resources, world_worker),
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
     for name, test in (
@@ -2030,6 +2033,7 @@ tidepool_buildscript_run(
                 'artifact_inventory::tests::artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads',
             ]
             toolchain_existing_resident_cases = [
+                'module_candidates::publication_refusal_tests::refused_completed_output_keeps_candidate_store_empty_before_valid_followup',
                 'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground',
                 'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof',
                 'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes',

@@ -18,6 +18,8 @@ mod properties;
 
 mod compiler_projection;
 mod native_availability;
+#[cfg(test)]
+pub(crate) use compiler_projection::RecordedCompilerRole;
 pub(crate) use compiler_projection::{
     AcquiredNativeClosures, CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection,
     InputNativeDecision, IssuedInputNativeDecisions,

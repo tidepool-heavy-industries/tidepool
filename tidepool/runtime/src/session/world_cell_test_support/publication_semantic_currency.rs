@@ -6,9 +6,9 @@ use crate::session::paired_publication::semantic_currency_tests::{
 };
 use crate::session::paired_publication::ExecutionPublication;
 use crate::session::{
-    CertifiedDeclarationPublication, CertifiedPublication, ModuleEnv, PublicManifestCommit,
-    PublicationAttempt, PublicationDecision, PublicationPhase, RecoveryDomainId,
-    RecoveryPublicOwner, RunRecoveryStore, SessionError, SessionId, SessionLib,
+    recovery, CertifiedDeclarationPublication, CertifiedPublication, ModuleEnv,
+    PublicManifestCommit, PublicationAttempt, PublicationDecision, PublicationPhase,
+    RecoveryDomainId, RecoveryPublicOwner, RunRecoveryStore, SessionError, SessionId, SessionLib,
 };
 use std::collections::BTreeSet;
 

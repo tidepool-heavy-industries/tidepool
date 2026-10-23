@@ -1898,8 +1898,9 @@ fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
                             .filter(|item| item.native().is_some())
                             .flat_map(|item| {
                                 item.checked_item()
-                                    .world_selected_dependency_terminals()
+                                    .world_stage_dependencies()
                                     .unwrap()
+                                    .terminals()
                             })
                             .collect::<Vec<_>>();
                         assert!(

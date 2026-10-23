@@ -7652,7 +7652,7 @@ mod tests {
             let historical_projection =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&historical)]).unwrap();
             let historical_source = crate::declaration_context::issue_fixture_compiler_support(
-                historical_projection,
+                historical_projection.clone(),
                 view.clone(),
             )
             .unwrap();
