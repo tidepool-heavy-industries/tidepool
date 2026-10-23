@@ -3460,6 +3460,21 @@ pub(super) fn assert_actual_emitted_dependency_policy(
         artifact: helper.descriptor.id,
         original_ordinal: expected_group.original_ordinal,
     };
+    assert_eq!(expected_group.binding.artifact(), key.artifact);
+    assert_eq!(
+        parent.native_owners.get(&helper.descriptor.owner),
+        Some(&NativeOwnerKey::from_owner(product.owner())),
+        "the emitted edge names this actual dependency's native owner"
+    );
+    for source in [available, missing] {
+        let contribution = source
+            .native_availability()
+            .dependency_support(key, product.owner())
+            .expect("both policy variants retain actual normalized Full dependency availability");
+        assert!(contribution
+            .offer_for_group(expected_group)
+            .is_some_and(|offer| offer.same_issuance(expected_offer)));
+    }
     let catalog = NativeDependencyCatalog::from_source(available).unwrap();
     assert!(matches!(catalog.decision(&helper.descriptor.owner),
         InputNativeDecision::IssuedChoices(choices) if choices.is_empty()));

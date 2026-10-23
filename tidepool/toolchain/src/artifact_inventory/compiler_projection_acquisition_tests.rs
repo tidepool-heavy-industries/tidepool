@@ -1091,7 +1091,7 @@ fn assert_fresh_world_original_selection(
             }
             _ => None,
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<imbl::OrdMap<_, _>>();
     let InputNativeDecision::IssuedChoices(groups) =
         selected.compiler_roles().native_decision(owner)
     else {
