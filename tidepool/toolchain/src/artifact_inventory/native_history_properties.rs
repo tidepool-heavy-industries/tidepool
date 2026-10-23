@@ -131,11 +131,7 @@ impl Catalog {
             .collect::<Vec<_>>();
         let interfaces = finalized
             .iter()
-            .map(|product| {
-                Arc::new(ArtifactEntry::canonical(
-                    product.module_interface().clone(),
-                ))
-            })
+            .map(|product| Arc::new(ArtifactEntry::canonical(product.module_interface().clone())))
             .collect();
         let originals = finalized
             .into_iter()
@@ -962,6 +958,7 @@ struct Coverage {
     absent_slots: usize,
     recoveries: usize,
     custody_namespace_conflicts: usize,
+    nominal_peer_custody_bindings: usize,
     carrier_qualified_refusals: usize,
     duplicate_scope_views: usize,
     cross_scope_group_carriers: usize,
@@ -1413,34 +1410,36 @@ fn run_history_observed(
                             }
                         }
                         physical = rows.close(physical);
-                        // A byte obligation already supplied by the chosen exact
-                        // closure needs no additional peer carrier for that ID.
-                        // Missing byte obligations retain every prior issuer,
-                        // without replacing the chosen namespace or root set.
-                        let initial_ids =
+                        // Complete native payloads require nominal owners, not
+                        // just the chosen group's exact dependency edges. Every
+                        // prior carrier for a required owner retains its bytes;
+                        // equal artifact IDs do not erase distinct issuances.
+                        let initial_physical = physical.clone();
+                        let mut reachable_ids =
                             carrier_ids(&physical.iter().map(|row| row.fact).collect());
-                        let mut required_ids = initial_ids.clone();
+                        let mut required_providers = BTreeSet::new();
                         loop {
-                            let prior = required_ids.clone();
+                            let prior = reachable_ids.clone();
                             for ((source, _), targets) in &catalog.edges {
                                 if prior.contains(&catalog.originals[*source].descriptor.id) {
-                                    required_ids.extend(targets.iter().map(|(target, _)| {
+                                    required_providers.extend(targets.iter().map(|(target, _)| {
                                         catalog.originals[*target].descriptor.id
                                     }));
                                 }
                             }
-                            if prior == required_ids {
+                            reachable_ids.extend(&required_providers);
+                            if prior == reachable_ids {
                                 break;
                             }
                         }
-                        let missing_bytes = required_ids
-                            .difference(&initial_ids)
-                            .copied()
-                            .collect::<BTreeSet<_>>();
                         physical.extend(view.physical.iter().filter(|row| {
-                            matches!(row.fact, Fact::Carrier(id) if missing_bytes.contains(&id))
+                            matches!(row.fact, Fact::Carrier(id) if required_providers.contains(&id))
                         }).copied());
                         physical = rows.close(physical);
+                        coverage.nominal_peer_custody_bindings += physical
+                            .difference(&initial_physical)
+                            .filter(|row| matches!(row.fact, Fact::Carrier(_)))
+                            .count();
                         // Already-issued bodies follow only the exact carriers
                         // justified above. Their immutable descendants add no
                         // new publication or execution choice.
@@ -2371,6 +2370,21 @@ fn raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand() {
     let mut missing_edge = actual.clone();
     assert!(missing_edge.edges.pop_first().is_some());
     assert!(check_graph_observation(&expected, &missing_edge, 0, 0).is_err());
+}
+
+#[test]
+fn projected_nominal_native_owners_keep_six_peer_custody_bindings() {
+    let catalog = Catalog::new(&[0; MODULES], &[0; 2 * MODULES], 1);
+    let history = prefix();
+    assert!(matches!(history[20], Op::Project { from: 5, to: 5, .. }));
+    let coverage = run_history(&catalog, &history[..=20]).unwrap();
+    assert_eq!(coverage.projections, 1);
+    // History1, History2 and History3 each require their peer Original and
+    // canonical carrier. Their scopes differ, even though payload IDs agree.
+    assert_eq!(coverage.nominal_peer_custody_bindings, 6, "{coverage:?}");
+    // The same complete graph comparator must still reject unrelated custody
+    // and promoted execution roots; adding required peers is not a subset test.
+    raw_graph_oracle_rejects_extra_bindings_edges_roots_and_demand();
 }
 
 #[test]
