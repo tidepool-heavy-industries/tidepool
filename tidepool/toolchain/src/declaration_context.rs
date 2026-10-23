@@ -2556,59 +2556,6 @@ impl RequestNativeAvailability {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// Keep issued permissions paired with the final acquired payload owner.
-    /// Custody merges may replace the outer entry, but not its native issuer.
-    pub(crate) fn retain_acquisitions(
-        &self,
-        artifacts: &ArtifactView,
-    ) -> Result<Self, CompileError> {
-        let payloads = artifacts.retained_payloads();
-        let mut changed = None;
-        for (id, row) in self.0.iter() {
-            crate::host_work::checkpoint()?;
-            let original = payloads.get(id).ok_or_else(|| {
-                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: *id })
-            })?;
-            if Arc::ptr_eq(original, &row.original) {
-                continue;
-            }
-            let same_issuer = match (&original.payload, &row.original.payload) {
-                (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) => {
-                    first.source_sha256() == second.source_sha256()
-                        && first
-                            .original_native()
-                            .zip(second.original_native())
-                            .is_some_and(|(first, second)| Arc::ptr_eq(first, second))
-                }
-                _ => false,
-            };
-            if original != &row.original {
-                return Err(crate::artifact_inventory::metadata_conflict::refusal(
-                    &row.original,
-                    original,
-                ));
-            }
-            if NativeTransportAvailability::canonical_for(original)? != row.canonical {
-                return Err(crate::artifact_inventory::metadata_conflict::invariant(
-                    original,
-                    crate::artifact_inventory::ArtifactMetadataInvariant::NativeCanonicalCarrier,
-                ));
-            }
-            if !same_issuer {
-                return Err(crate::artifact_inventory::metadata_conflict::invariant(
-                    original,
-                    crate::artifact_inventory::ArtifactMetadataInvariant::NativeAcquisitionOwner,
-                ));
-            }
-            let mut retained = (**row).clone();
-            retained.original = Arc::clone(original);
-            changed
-                .get_or_insert_with(|| (*self.0).clone())
-                .insert(*id, Arc::new(retained));
-        }
-        Ok(changed.map_or_else(|| self.clone(), |rows| Self(Arc::new(rows), self.1.clone())))
-    }
-
     pub(crate) fn from_issued_rows(
         rows: impl IntoIterator<Item = Arc<NativeTransportAvailability>>,
     ) -> Result<Self, CompileError> {
@@ -4492,9 +4439,6 @@ impl RequestCompilerInputs {
                         artifact: id,
                     })
                 })?;
-            let payload = self.metadata.retained.artifacts.get(&id).ok_or_else(|| {
-                admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
-            })?;
             let classification = if role.original().is_some() {
                 NativeInputClassification::CompilerRole
             } else {
@@ -4502,10 +4446,6 @@ impl RequestCompilerInputs {
             };
             use crate::artifact_inventory::ArtifactMetadataInvariant as Invariant;
             if let Some((_, cause)) = [
-                (
-                    !Arc::ptr_eq(payload, &row.original),
-                    Invariant::NativeAcquisitionOwner,
-                ),
                 (
                     &row.original.descriptor.owner != owner,
                     Invariant::NativeOwner,
@@ -4523,7 +4463,8 @@ impl RequestCompilerInputs {
             .find(|(failed, _)| *failed)
             {
                 return Err(crate::artifact_inventory::metadata_conflict::invariant(
-                    payload, cause,
+                    &row.original,
+                    cause,
                 )
                 .into());
             }
@@ -4575,17 +4516,8 @@ impl RequestCompilerInputs {
                             artifact: id,
                         })
                     })?;
-                let payload = self.metadata.retained.artifacts.get(&id).ok_or_else(|| {
-                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
-                        artifact: id,
-                    })
-                })?;
                 use crate::artifact_inventory::ArtifactMetadataInvariant as Invariant;
                 if let Some((_, cause)) = [
-                    (
-                        !Arc::ptr_eq(payload, &row.original),
-                        Invariant::NativeAcquisitionOwner,
-                    ),
                     (
                         row.original.descriptor.owner != owner,
                         Invariant::NativeOwner,
@@ -4599,7 +4531,8 @@ impl RequestCompilerInputs {
                 .find(|(failed, _)| *failed)
                 {
                     return Err(crate::artifact_inventory::metadata_conflict::invariant(
-                        payload, cause,
+                        &row.original,
+                        cause,
                     )
                     .into());
                 }
@@ -4721,18 +4654,8 @@ impl NativeInputSelection {
                 support.native_offers(),
             )
         } else {
-            self.retain_acquisitions(support)
+            Ok(self.clone())
         }
-    }
-
-    fn retain_acquisitions(
-        &self,
-        support: &crate::artifact_inventory::CompilerSourceSupport,
-    ) -> Result<Self, CompileError> {
-        Ok(Self {
-            availability: self.availability.retain_acquisitions(support.artifacts())?,
-            candidates: self.candidates.clone(),
-        })
     }
 
     fn receive(
@@ -5189,9 +5112,8 @@ impl WorldPrimaryInputs {
         let metadata = CompilerArtifactMetadata {
             entries: self.inputs.metadata.entries.clone(),
             retained: Arc::clone(&self.inputs.metadata.retained),
-        }
-        .retain_acquisitions(support.artifacts())?;
-        let native_selection = self.inputs.native_selection.retain_acquisitions(&support)?;
+        };
+        let native_selection = self.inputs.native_selection.clone();
         let inputs = Arc::new(RequestCompilerInputs {
             source_support: Arc::new(support),
             metadata,
@@ -5370,7 +5292,7 @@ impl WorldPrimaryInputs {
         facts.compiler_support = support.clone();
 
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let native_selection = self.inputs.native_selection.retain_acquisitions(&support)?;
+        let native_selection = self.inputs.native_selection.clone();
         Ok(Self {
             inputs: Arc::new(RequestCompilerInputs {
                 source_support: Arc::new(support),

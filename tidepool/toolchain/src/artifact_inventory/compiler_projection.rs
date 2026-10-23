@@ -1364,10 +1364,9 @@ struct SupportDraft {
 }
 
 impl SupportDraft {
-    /// The only constructor of a usable compiler support. Re-pairs selected
-    /// rows against the final acquired entries and maintains the mandatory
-    /// native fact owner. Completion custody is already retained in
-    /// `artifacts` and is never re-merged here.
+    /// Close assembly without changing any selected acquisition. Completion
+    /// custody is already retained in `artifacts`; native facts are maintained
+    /// from the explicit selected owners.
     fn close(self) -> Result<CompilerSourceSupport, CompileError> {
         let SupportDraft {
             projection,
@@ -1377,31 +1376,9 @@ impl SupportDraft {
             native_closures,
             native_offer_facts,
             native_availability,
-            mut selected,
+            selected,
             input_decisions,
         } = self;
-        let mut repaired = None;
-        for (owner, row) in selected.rows.iter() {
-            crate::host_work::checkpoint()?;
-            if row.bindings().any(|(binding, entry)| {
-                artifacts
-                    .lease
-                    .payloads
-                    .get(&binding.artifact)
-                    .is_none_or(|retained| !Arc::ptr_eq(entry, retained))
-            }) {
-                let mut retained = row.clone();
-                retained.retain_acquisitions(&artifacts)?;
-                repaired
-                    .get_or_insert_with(|| selected.as_ref().clone())
-                    .rows
-                    .insert(owner.clone(), retained);
-            }
-        }
-        if let Some(repaired_selected) = repaired {
-            selected = Arc::new(repaired_selected);
-        }
-        let native_availability = native_availability.retain_acquisitions(&artifacts)?;
         let native_fact_owner = crate::exact_context::PublicationNativeFacts::maintain(
             native_fact_owner.as_ref(),
             crate::exact_context::PublicationNativeMaps {
@@ -1897,17 +1874,6 @@ impl ResolvedCompilerRole {
         std::iter::once(self.interface()).chain(self.original())
     }
 
-    fn bindings_mut(&mut self) -> impl Iterator<Item = &mut AcquiredCompilerBinding> {
-        let (interface, original) = match self {
-            Self::InterfaceOnly { interface } => (interface, None),
-            Self::Original {
-                interface,
-                original,
-            } => (interface, Some(original)),
-        };
-        std::iter::once(interface).chain(original)
-    }
-
     fn select_type_only(&mut self) {
         if let Self::Original { interface, .. } = self {
             *self = Self::InterfaceOnly {
@@ -1931,19 +1897,6 @@ impl ResolvedCompilerRole {
             return Err(failure(
                 "compiler fragment canonical pair differs from its issuing bindings",
             ));
-        }
-        Ok(())
-    }
-
-    fn retain_acquisitions(&mut self, retained: &ArtifactView) -> Result<(), CompileError> {
-        for (binding, entry) in self.bindings_mut() {
-            *entry = Arc::clone(
-                retained
-                    .lease
-                    .payloads
-                    .get(&binding.artifact)
-                    .ok_or_else(|| failure("retained compiler role lost its payload owner"))?,
-            );
         }
         Ok(())
     }
@@ -2032,20 +1985,6 @@ impl AdmittedCompilerRoles {
             rows: rows.into_iter().collect(),
             home_units: Arc::new(home_units.into_iter().collect()),
         }
-    }
-
-    fn retain_acquisitions(
-        &self,
-        artifacts: &ArtifactView,
-    ) -> Result<imbl::OrdMap<ExactModuleIdentity, ResolvedCompilerRole>, CompileError> {
-        self.rows
-            .iter()
-            .map(|(owner, row)| {
-                let mut row = row.clone();
-                row.retain_acquisitions(artifacts)?;
-                Ok((owner.clone(), row))
-            })
-            .collect()
     }
 }
 
@@ -2223,9 +2162,6 @@ impl SelectedCompilerInterfaces<'_> {
                 }
             }
         };
-        for row in selected.values_mut() {
-            row.retain_acquisitions(&artifacts)?;
-        }
         SupportDraft {
             native_availability: Default::default(),
             projection,
@@ -2572,48 +2508,6 @@ impl crate::declaration_context::RequestCompilerInputs {
             owners,
             work,
         })
-    }
-}
-
-impl CompilerArtifactMetadata {
-    pub(crate) fn retain_acquisitions(
-        mut self,
-        artifacts: &ArtifactView,
-    ) -> Result<Self, CompileError> {
-        fn retain<K: Ord + Clone>(
-            entries: &mut imbl::OrdMap<K, Arc<ArtifactEntry>>,
-            artifacts: &ArtifactView,
-        ) -> Result<bool, CompileError> {
-            let mut changed = Vec::new();
-            for (key, entry) in entries.iter() {
-                crate::host_work::checkpoint()?;
-                let retained = artifacts
-                    .lease
-                    .payloads
-                    .get(&entry.descriptor.id)
-                    .ok_or_else(|| failure("compiler metadata lost its acquired payload owner"))?;
-                if !Arc::ptr_eq(entry, retained) {
-                    if entry != retained {
-                        return Err(metadata_conflict::refusal(entry, retained));
-                    }
-                    changed.push((key.clone(), Arc::clone(retained)));
-                }
-            }
-            let updated = !changed.is_empty();
-            for (key, entry) in changed {
-                entries.insert(key, entry);
-            }
-            Ok(updated)
-        }
-        retain(&mut self.entries, artifacts)?;
-        let mut retained = self.retained.as_ref().clone();
-        let mut changed = retain(&mut retained.artifacts, artifacts)?;
-        changed |= retain(&mut retained.entries, artifacts)?;
-        changed |= retain(&mut retained.interface_representatives, artifacts)?;
-        if changed {
-            self.retained = Arc::new(retained);
-        }
-        Ok(self)
     }
 }
 
@@ -3065,7 +2959,7 @@ impl CompilerSourceSupport {
         let ResolvedCompilerInputs {
             artifacts,
             projection,
-            mut selected,
+            selected,
             input_decisions,
         } = inputs;
         let artifacts = native_closures
@@ -3122,10 +3016,6 @@ impl CompilerSourceSupport {
         }
         // Custody-only retention preserves these exact selected bindings while
         // it may acquire additional immutable sources for their payloads.
-        timing.advance("retain_selected_acquisitions");
-        for row in selected.values_mut() {
-            row.retain_acquisitions(&retained)?;
-        }
         timing.advance("qualify_canonical_availability");
         let native_availability = native_availability.for_compiler_roles(&projection, &retained)?;
         timing.advance("assemble_support");
@@ -3523,7 +3413,11 @@ impl CompilerSourceSupport {
             if matches!(issuer, CompilerRoleIssuer::Receiving) {
                 continue;
             }
-            projection.retain_role_selection(&SelectedCompilerRole { owner, role, issuer });
+            projection.retain_role_selection(&SelectedCompilerRole {
+                owner,
+                role,
+                issuer,
+            });
             if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
                 home_units.extend(interface.home_units().iter().cloned());
             }
@@ -3731,11 +3625,10 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        CompilerArtifactMetadata {
+        Ok(CompilerArtifactMetadata {
             entries,
             retained: Arc::new(retained),
-        }
-        .retain_acquisitions(&self.artifacts)
+        })
     }
 
     pub(crate) fn type_interface_metadata(
@@ -3786,11 +3679,10 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        CompilerArtifactMetadata {
+        Ok(CompilerArtifactMetadata {
             entries,
             retained: Arc::new(retained),
-        }
-        .retain_acquisitions(&self.artifacts)
+        })
     }
 
     /// Observe issued canonical interfaces while preserving compiler roles and
@@ -4578,9 +4470,8 @@ impl CompilerSourceSupport {
         let artifacts = self.artifacts.retain_custody(incoming)?;
         let artifacts =
             artifacts.retain_issued_offer_custody(self.native_offers.iter().cloned())?;
-        let selected = self.selected.retain_acquisitions(&artifacts)?;
         // Custody attachment preserves the exact namespace and executable
-        // roots. Its acquisition owners may change; its qualified rows cannot.
+        // roots and the actual selected acquisition owners.
         SupportDraft {
             projection: self.projection.clone(),
             artifacts,
@@ -4589,10 +4480,7 @@ impl CompilerSourceSupport {
             native_offer_facts: self.native_offer_facts.clone(),
             native_closures: self.native_closures.clone(),
             native_availability: self.native_availability.clone(),
-            selected: Arc::new(AdmittedCompilerRoles {
-                rows: selected,
-                home_units: Arc::clone(&self.selected.home_units),
-            }),
+            selected: Arc::clone(&self.selected),
             input_decisions: self.input_decisions.clone(),
         }
         .close()
@@ -4634,7 +4522,6 @@ impl CompilerSourceSupport {
                     }
                 }),
         )?;
-        let selected = self.selected.retain_acquisitions(&artifacts)?;
         // Raw offers add checked custody only. They cannot change the admitted
         // namespace, normalized permissions or recorded execution decisions.
         SupportDraft {
@@ -4645,10 +4532,7 @@ impl CompilerSourceSupport {
             native_closures: self.native_closures.clone(),
             native_offers: offers.into(),
             native_availability: self.native_availability.clone(),
-            selected: Arc::new(AdmittedCompilerRoles {
-                rows: selected,
-                home_units: Arc::clone(&self.selected.home_units),
-            }),
+            selected: Arc::clone(&self.selected),
             input_decisions: self.input_decisions.clone(),
         }
         .close()
@@ -5172,9 +5056,6 @@ impl CompilerSourceSupport {
             .collect::<Result<Vec<_>, _>>()?;
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
         let artifacts = artifacts.retain_issued_offer_custody(offers.iter().cloned())?;
-        for row in selected.values_mut() {
-            row.retain_acquisitions(&artifacts)?;
-        }
         SupportDraft {
             native_availability: self
                 .native_availability
@@ -7731,7 +7612,7 @@ mod tests {
     }
 
     #[test]
-    fn program_fragment_pairs_native_rows_with_final_payload_acquisitions() {
+    fn program_fragment_keeps_selected_acquisitions_across_equal_witness_allocations() {
         use crate::declaration_context::NativeTransportMode;
 
         for distinct_witness in [false, true] {
@@ -7869,14 +7750,6 @@ mod tests {
                 })
                 .collect::<BTreeMap<_, _>>();
             let appended = receiving.append_program_fragment(&incoming);
-            if distinct_witness {
-                assert!(
-                    matches!(appended, Err(CompileError::ArtifactInventory(error))
-                    if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
-                        if receiving_entries.iter().any(|entry| entry.descriptor.id == artifact)))
-                );
-                continue;
-            }
             let delta = appended.unwrap();
             let support = delta.support;
             let metadata = support
@@ -7912,34 +7785,24 @@ mod tests {
                     .collect::<BTreeMap<_, _>>(),
                 expected_offers
             );
-            for entry in metadata
-                .entries
-                .values()
-                .chain(metadata.retained.artifacts.values())
-                .chain(metadata.retained.entries.values())
-                .chain(metadata.retained.interface_representatives.values())
-            {
-                assert!(Arc::ptr_eq(
-                    entry,
-                    &support.artifacts.lease.payloads[&entry.descriptor.id]
-                ));
-            }
-            for row in support.selected.values() {
-                for (binding, entry) in row.bindings() {
-                    assert!(Arc::ptr_eq(
-                        entry,
-                        &support.artifacts.lease.payloads[&binding.artifact]
-                    ));
+            for (owner, row) in support.selected.iter() {
+                let issued = &receiving.selected[owner];
+                for ((binding, entry), (issued_binding, issued_entry)) in
+                    row.bindings().zip(issued.bindings())
+                {
+                    assert_eq!(binding, issued_binding);
+                    assert!(Arc::ptr_eq(entry, issued_entry));
                 }
             }
             for row in support.native_availability.rows() {
-                let id = row.original_artifact_id();
-                let payload = &support.artifacts.lease.payloads[&id];
+                let issued = receiving
+                    .native_availability
+                    .issued_row(row.original_artifact_id())
+                    .unwrap();
                 assert!(Arc::ptr_eq(
                     row.target_original(row.original_owner()).unwrap(),
-                    payload
+                    issued.target_original(issued.original_owner()).unwrap(),
                 ));
-                assert!(Arc::ptr_eq(payload, &metadata.retained.artifacts[&id]));
             }
             let closed = support.close_request(None, &Default::default()).unwrap();
             assert_eq!(
@@ -7951,18 +7814,18 @@ mod tests {
                 let id = row.original_artifact_id();
                 assert!(Arc::ptr_eq(
                     row.target_original(row.original_owner()).unwrap(),
-                    &closed.artifacts.lease.payloads[&id],
+                    support
+                        .native_availability
+                        .issued_row(id)
+                        .unwrap()
+                        .target_original(row.original_owner())
+                        .unwrap(),
                 ));
                 assert!(Arc::ptr_eq(
                     row,
                     support.native_availability.issued_row(id).unwrap()
                 ));
             }
-            let unchanged = closed
-                .native_availability
-                .retain_acquisitions(&closed.artifacts)
-                .unwrap();
-            assert!(unchanged.same_acquisition(&closed.native_availability));
             assert_eq!(receiving.artifacts.capture_graph_selection(), old_graph);
             assert_eq!(
                 receiving.native_availability.snapshot_facts().unwrap(),
