@@ -3088,8 +3088,8 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .complete_native_entries(&inputs.artifacts(), &validation.inventory)
         .unwrap()
         .is_empty());
-    assert!(!cloned.has_native_group_support(ArtifactId([255; 32]), native.owner(), 9001));
-    assert!(!cloned.has_native_group_support(
+    assert!(!cloned.permits_native_group(ArtifactId([255; 32]), native.owner(), 9001));
+    assert!(!cloned.permits_native_group(
         entry.descriptor.id,
         product("WrongPrivateOwner", 128).owner(),
         9001
@@ -3123,7 +3123,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         &validation.inventory,
     )
     .unwrap();
-    assert!(next_selection.has_native_group_support(entry.descriptor.id, native.owner(), 9001));
+    assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
     let group = crate::certified_products::original_available_groups(&native)
         .unwrap()
         .find(|group| group.original_ordinal() == 9001)
@@ -6807,7 +6807,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
     )
     .unwrap();
     for group in &authored_groups {
-        assert!(available.has_native_group_support(
+        assert!(available.permits_native_group(
             authored_root,
             certificate.product().owner(),
             group.original_ordinal,
@@ -7240,7 +7240,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             )
             .unwrap();
         let permissions = [7, 9001].map(|ordinal| {
-            selection.has_native_group_support(entry.descriptor.id, native.owner(), ordinal)
+            selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
         });
         // This target has no fresh native products. Empty physical issuance
         // records that cohort without changing its request's input permissions.
@@ -7253,7 +7253,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         .unwrap();
         assert_eq!(
             [7, 9001].map(|ordinal| {
-                selection.has_native_group_support(entry.descriptor.id, native.owner(), ordinal)
+                selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
             }),
             permissions,
         );
@@ -7657,7 +7657,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     unreachable!()
                 };
                 assert_eq!(
-                    selection.has_native_group_support(entry.descriptor.id, native.owner(), 9001),
+                    selection.permits_native_group(entry.descriptor.id, native.owner(), 9001),
                     index == 0
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
@@ -9677,7 +9677,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
             // Full availability supplies exact body/dependency support in both
             // requests. Executable demand remains the separate carried choice.
             for ordinal in &fixture.own_ordinals {
-                assert!(selection.has_native_group_support(
+                assert!(selection.permits_native_group(
                     entry.descriptor.id,
                     native.owner(),
                     *ordinal,
