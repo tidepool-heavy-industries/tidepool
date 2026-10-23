@@ -5804,7 +5804,8 @@ impl RecoveredCompilerSelection {
 }
 
 impl RecoveredArtifactInventory {
-    pub fn capture(
+    #[cfg(test)]
+    pub(crate) fn capture(
         root: &Path,
         products: &[RecoveryArtifactRef],
         module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
@@ -5829,7 +5830,8 @@ impl RecoveredArtifactInventory {
 
     /// Authenticate payload custody once and retain its exact selection-bound
     /// graph. Payload identity never reconstructs a dependency selection.
-    pub fn capture_bound(
+    #[cfg(test)]
+    pub(crate) fn capture_bound(
         root: &Path,
         products: &[RecoveryArtifactRef],
         module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
@@ -5952,6 +5954,7 @@ impl RecoveredArtifactInventory {
 
     /// Restore a versioned publication's exact bound graph after authenticating
     /// all immutable custody. A fresh inventory makes refusal failure-atomic.
+    #[cfg(test)]
     pub(crate) fn authenticate_graph_selection(
         &self,
         selection: &ArtifactGraphSelection,
@@ -6074,7 +6077,10 @@ impl RecoveredArtifactInventory {
         Ok(authenticated)
     }
 
-    pub fn context_with_graph_selection(
+    /// Exercise raw graph and role authentication inside the owning tests.
+    /// Production restoration requires an acquired exact snapshot owner.
+    #[cfg(test)]
+    pub(crate) fn context_with_graph_selection(
         &self,
         selection: &ArtifactGraphSelection,
         roles: &[CompilerInputRole],
@@ -6190,6 +6196,7 @@ impl RecoveredArtifactInventory {
         Ok(context)
     }
 
+    #[cfg(test)]
     fn capture_inputs(
         root: &Path,
         products: &[RecoveryArtifactRef],
@@ -6431,24 +6438,10 @@ impl RecoveredArtifactInventory {
         })
     }
 
-    /// Restore persisted selection only after full products were authenticated.
-    /// The raw keys grant no checked-entry or live binding authority.
-    pub fn context(
-        &self,
-        ids: &[crate::artifact_inventory::ArtifactId],
-        groups: &[crate::artifact_inventory::NativeGroupKey],
-        lexical: Vec<ExactLexicalNode>,
-    ) -> Result<ExactDeclarationContext, CompileError> {
-        let selected = groups.iter().copied().collect::<BTreeSet<_>>();
-        if selected.len() != groups.len() {
-            return Err(failure("duplicate recovered native group selection"));
-        }
-        self.context_with_selection(ids, Some(&selected), None, lexical)
-    }
-
     /// Restore explicit compiler roles after all referenced immutable inventory
     /// proofs have been authenticated. Serialized roles alone grant no reuse.
-    pub fn context_with_roles(
+    #[cfg(test)]
+    pub(crate) fn context_with_roles(
         &self,
         ids: &[ArtifactId],
         groups: &[NativeGroupKey],
@@ -6470,9 +6463,10 @@ impl RecoveredArtifactInventory {
         self.context_with_selection(ids, Some(&selected), Some(roles), lexical)
     }
 
-    /// Standalone callers explicitly request every authenticated original group.
-    /// Exact durable restoration uses `context_with_graph_selection`.
-    pub fn context_all_groups(
+    /// Parser fixtures explicitly request every authenticated original group.
+    /// Production restoration uses `context_for_expected_snapshot`.
+    #[cfg(test)]
+    pub(crate) fn context_all_groups(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
         lexical: Vec<ExactLexicalNode>,
@@ -6480,6 +6474,7 @@ impl RecoveredArtifactInventory {
         self.context_with_selection(ids, None, None, lexical)
     }
 
+    #[cfg(test)]
     pub(crate) fn authenticate_unbound_selection(
         &self,
         ids: &[ArtifactId],
@@ -6559,6 +6554,7 @@ impl RecoveredArtifactInventory {
         })
     }
 
+    #[cfg(test)]
     fn context_with_selection(
         &self,
         ids: &[crate::artifact_inventory::ArtifactId],
@@ -13573,9 +13569,11 @@ impl ExactDeclarationContext {
         .extend(authored, joins, lexical)
     }
 
-    /// Admit original references with their embedded canonical proofs, plus
-    /// separately supplied canonical type owners and joined interfaces.
-    pub fn capture_recovery(
+    /// Exercise raw recovery references in the owning parser tests. Production
+    /// restoration acquires the recorded exact selection through
+    /// `RecoveredArtifactInventory::context_for_expected_snapshot`.
+    #[cfg(test)]
+    pub(crate) fn capture_recovery(
         root: &Path,
         products: &[RecoveryArtifactRef],
         module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
@@ -13592,7 +13590,8 @@ impl ExactDeclarationContext {
         )
     }
 
-    pub fn capture_recovery_with_value_interfaces(
+    #[cfg(test)]
+    pub(crate) fn capture_recovery_with_value_interfaces(
         root: &Path,
         products: &[RecoveryArtifactRef],
         module_interfaces: &[recovery_artifacts::RecoveryModuleInterfaceRef],
