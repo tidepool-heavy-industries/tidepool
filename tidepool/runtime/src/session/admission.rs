@@ -1753,7 +1753,6 @@ enum RuntimeCellPurpose {
     #[cfg(test)]
     Observation,
     PrivateExecution(Arc<PrivateExecutionAdmission>),
-    NativeSetup,
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
@@ -1784,7 +1783,6 @@ impl RuntimeCellPurpose {
             #[cfg(test)]
             Self::Observation => {}
             Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
-            Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
             Self::HostCarrier {
                 binding,
                 expected,
@@ -4114,9 +4112,9 @@ impl RuntimeCellAdmission {
         match &self.purpose {
             #[cfg(test)]
             RuntimeCellPurpose::Observation => false,
-            RuntimeCellPurpose::PrivateExecution(_)
-            | RuntimeCellPurpose::NativeSetup
-            | RuntimeCellPurpose::HostCarrier { .. } => true,
+            RuntimeCellPurpose::PrivateExecution(_) | RuntimeCellPurpose::HostCarrier { .. } => {
+                true
+            }
         }
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
@@ -5222,55 +5220,7 @@ impl PersistentSession {
                 return Err(SessionError::WorldCellRequiresServicePreparation);
             }
         }
-        if admission.world_reservation().is_some() {
-            return self.begin_world_cell_program(admission, program, settled);
-        }
-        let finite = admission.finite_inputs()?;
-        let planned = admission
-            .plan_reservation()?
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        let program_plan = match program.basis() {
-            tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => plan,
-            tidepool_toolchain::checked_cell::CellProgramBasis::World(_) => {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        };
-        program
-            .validate_typed_entries()
-            .map_err(SessionError::Compile)?;
-        if program.admission_digest() != admission.digest()
-            || !Arc::ptr_eq(program_plan, planned.plan())
-            || program.slots() != planned.compiler_specification().slots.as_slice()
-            || program.items().len() != planned.items().len()
-            || program
-                .items()
-                .iter()
-                .enumerate()
-                .any(|(index, item)| item.checked_item().index() != index)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let Some(first) = program.items().first() else {
-            if !admission.belongs_to(self)
-                || self.public_visibility_snapshot_in(admission.scope).as_ref()
-                    != Some(&finite.visibility)
-                || self.compile_view_digest_in(admission.scope) != Some(finite.view_digest)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            admission
-                .prefix_started
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .map_err(|_| SessionError::StaleStagedDeclaration)?;
-            return Ok(None);
-        };
-        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program, settled)
-            .map(Some)
+        self.begin_world_cell_program(admission, program, settled)
     }
 
     fn begin_world_cell_program(
@@ -5407,84 +5357,6 @@ impl PersistentSession {
         })))
     }
 
-    fn begin_cell_program_prefix(
-        &self,
-        admission: Arc<RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
-        settled: super::SettledCellProgram,
-    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
-        if admission.world_reservation().is_some() {
-            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
-        }
-        let finite = admission.finite_inputs()?;
-        if !admission.belongs_to(self)
-            || first_item.admission_digest() != admission.digest()
-            || first_item.specification_digest() != admission.specification_digest()?
-            || first_item.include_paths().len() != admission.include_paths()?.len()
-            || !first_item
-                .include_paths()
-                .iter()
-                .zip(admission.include_paths()?)
-                .all(|(consumed, admitted)| consumed.as_os_str() == admitted.as_os_str())
-            || first_item.reserved_declaration_modules().len()
-                != admission.reserved_generations.len()
-            || !admission
-                .reserved_generations
-                .iter()
-                .zip(first_item.reserved_declaration_modules())
-                .all(|(generation, module)| {
-                    tidepool_repr::SessionModule::lib(*generation)
-                        .module_name()
-                        .eq(module)
-                })
-            || first_item.injected_modules().len() != finite.view.injected_values.len()
-            || !finite
-                .view
-                .injected_values
-                .iter()
-                .zip(first_item.injected_modules())
-                .all(|(module, supplied)| module.module_name().eq(supplied))
-            || !initial_interfaces_match(&finite.interfaces, first_item.baseline_value_interfaces())
-            || self.public_visibility_snapshot_in(admission.scope).as_ref()
-                != Some(&finite.visibility)
-            || self.compile_view_digest_in(admission.scope) != Some(finite.view_digest)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let (interfaces, interface_index) = CheckedInterfaces::base(&finite.interfaces);
-        let snapshot = Arc::new(checked_snapshot(
-            finite.view.clone(),
-            finite.view_digest,
-            finite.visibility.clone(),
-            interfaces,
-            first_item.initial_prefix()?,
-            admission.digest(),
-            admission._retained_scope.clone(),
-            finite.scoped_inputs.as_ref().clone(),
-        ));
-        admission
-            .prefix_started
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let compile_inputs = finite.compile_inputs.clone();
-        Ok(Arc::new(RuntimeCheckedPrefix {
-            settled,
-            admission,
-            first_item,
-            program,
-            state: parking_lot::Mutex::new(RuntimeCheckedState {
-                phase: CellPhase::Ready(snapshot),
-                interface_index,
-                compile_inputs: Some(compile_inputs),
-            }),
-        }))
-    }
     /// Capsule drops happen outside checkout. The next owner entry retires
     /// their detached lease scopes through the same binding/native owner.
     pub(crate) fn reap_admission_leases(&mut self) {
@@ -6112,97 +5984,6 @@ impl PersistentSession {
         )
     }
 
-    /// Admit trusted setup under its existing scope with the same ordered
-    /// parser and exact environment seals used by private authored execution.
-    pub fn admit_native_setup_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        if plan.items().len() != 1
-            || plan.items()[0].kind() != Kind::Bind
-            || !plan.items()[0].binders().is_empty()
-        {
-            return Err(self.native_setup_refusal(
-                scope,
-                NativeSetupAdmissionFailure::Shape {
-                    items: plan.items().len(),
-                    first: plan.items().first().map(|item| item.kind()),
-                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
-                },
-            ));
-        }
-        self.admit_cell_with_plan(
-            scope,
-            0,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::NativeSetup,
-            compile_inputs,
-        )
-    }
-
-    pub(super) fn admit_host_carrier_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        binding: String,
-        expected: super::resident::HostBindingType,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        if self
-            .source_lease_in(scope)?
-            .private_lifecycle
-            .get()
-            .is_some()
-        {
-            return Err(SessionError::WorldCellRequiresServicePreparation);
-        }
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        if plan.items().len() != 1
-            || plan.items()[0].kind() != Kind::Bind
-            || plan.items()[0].binders() != [binding.as_str()]
-        {
-            return Err(self.native_setup_refusal(
-                scope,
-                NativeSetupAdmissionFailure::HostCarrierShape {
-                    items: plan.items().len(),
-                    first: plan.items().first().map(|item| item.kind()),
-                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
-                },
-            ));
-        }
-        self.admit_cell_with_plan(
-            scope,
-            0,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::HostCarrier {
-                binding,
-                expected,
-                authority_digest,
-                private_preparation: None,
-            },
-            compile_inputs,
-        )
-    }
-
     fn native_setup_refusal(
         &self,
         scope: ScopeId,
@@ -6216,6 +5997,7 @@ impl PersistentSession {
         }
     }
 
+    #[cfg(test)]
     fn admit_cell_with_plan(
         &mut self,
         scope: ScopeId,
@@ -6301,11 +6083,8 @@ impl PersistentSession {
                     })
             };
             if let Some(reason) = refusal {
-                return Err(if matches!(purpose, RuntimeCellPurpose::NativeSetup) {
-                    self.native_setup_refusal(scope, reason)
-                } else {
-                    SessionError::StaleStagedDeclaration
-                });
+                let _ = reason;
+                return Err(SessionError::StaleStagedDeclaration);
             }
         }
         let view_digest = self
@@ -6605,40 +6384,6 @@ impl PersistentSession {
             None,
             RuntimeCellPurpose::PrivateExecution(execution),
             None,
-        )
-    }
-
-    /// Reserve every ordered source item under the original private admission.
-    /// The parser capability supplies kinds and order; callers cannot guess a
-    /// declaration count or assign generations. Authoritative checking must
-    /// subsequently bind this exact reservation before prefix creation.
-    pub fn admit_planned_cell_for_execution(
-        &mut self,
-        execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        self.compile_view_for_execution(&execution)?;
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        let declaration_count = plan
-            .items()
-            .iter()
-            .filter(|item| matches!(item.kind(), Kind::Prologue | Kind::Declaration))
-            .count();
-        self.admit_cell_with_plan(
-            execution.private_scope(),
-            declaration_count,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::PrivateExecution(execution),
-            compile_inputs,
         )
     }
 

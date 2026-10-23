@@ -4711,33 +4711,6 @@ where
         )
     }
 
-    /// Admit one compiler-issued binder reserved for a native host payload.
-    pub fn admit_host_carrier_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        binding: String,
-        expected: HostBindingType,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_host_carrier_cell_in(
-            scope,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            binding,
-            expected,
-            compile_inputs,
-        )
-    }
-
     pub fn begin_durable_private_execution(
         &mut self,
         owner: &super::RecoveryPublicOwner,
@@ -4753,50 +4726,6 @@ where
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
         self.state.begin_cell_program(settled)
-    }
-
-    pub fn admit_native_setup_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_native_setup_cell_in(
-            scope,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            compile_inputs,
-        )
-    }
-
-    pub fn admit_planned_cell_for_execution(
-        &mut self,
-        execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_planned_cell_for_execution(
-            execution,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            compile_inputs,
-        )
     }
 
     pub fn admit_world_planned_cell_for_execution(
