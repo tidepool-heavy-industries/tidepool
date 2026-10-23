@@ -1603,8 +1603,8 @@ where
     H: crate::DispatchEffect<QuietOutput> + Send,
 {
     use crate::session::resident::world_cell_test_support::{
-        bootstrap_world_for, plan_fixture_specification_for, source_action_with_original,
-        InputRecipe,
+        bootstrap_world_for, fixture_cell_recipe, plan_fixture_specification_for,
+        source_action_with_original, InputRecipe,
     };
     let cell_started = Instant::now();
     let previous_context = resident.run_context();
@@ -1642,19 +1642,9 @@ where
         },
     )?);
     let result = (|| {
-        let view = execution.view().unwrap();
-        let imports = view.turn_imports(template_imports);
-        let template = resident_cell_check_template(preamble, effects.row(), &imports);
-        let templates = resident_workbench_templates(preamble, effects.row(), &imports);
-        let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
-            source: source.to_owned(),
-            template,
-            turn_templates: templates
-                .into_iter()
-                .map(|template| (template.kind.wire_name().to_owned(), template.source))
-                .collect(),
-            inject_modules: view.injected_module_names(),
-        });
+        // The plan helper supplies the actual predecessor and captured inputs
+        // from this execution's prepared snapshot.
+        let specification = fixture_cell_recipe(&recipe, source, template_imports);
         let admission = measured(
             resident,
             images,
