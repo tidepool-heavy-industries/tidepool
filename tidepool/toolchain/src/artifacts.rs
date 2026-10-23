@@ -9386,7 +9386,13 @@ mod module_product_tests {
             if mixed {
                 if let Some(foreign) = &prior_world_output {
                     crate::declaration_context::assert_world_foreign_output_refusal(
-                        &checked, foreign,
+                        &checked,
+                        foreign,
+                        &prepared.items[0]
+                            .native
+                            .as_ref()
+                            .expect("actual first native item")
+                            .output,
                     );
                 } else {
                     prior_world_output = Some(

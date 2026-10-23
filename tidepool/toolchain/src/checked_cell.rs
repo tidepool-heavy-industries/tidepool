@@ -3590,30 +3590,6 @@ impl CheckedTypedEntry {
         Arc::ptr_eq(&self.target, target)
     }
 
-    pub(crate) fn matches_world_item(
-        &self,
-        program: &crate::compiler_world::CheckedWorldCellProgram,
-        ordinal: usize,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        owner: &crate::declaration_join::ExactModuleIdentity,
-    ) -> bool {
-        let Some(item) = program.item(ordinal) else {
-            return false;
-        };
-        let Some(executable) = item.executable() else {
-            return false;
-        };
-        self.belongs_to_target(target)
-            && self.plan_digest == executable.segment_digest()
-            && self.entry == *executable.symbol()
-            && self.original_ordinal == executable.native_ordinal()
-            && self.origin.unit == owner.unit
-            && self.origin.module == owner.module
-            && program.segments().iter().any(|plan| {
-                plan.digest() == self.plan_digest && plan.root() == self.origin.occurrence
-            })
-    }
-
     pub fn plan_digest(&self) -> &str {
         &self.plan_digest
     }
