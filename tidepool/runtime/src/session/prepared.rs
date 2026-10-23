@@ -16,7 +16,8 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 mod closed;
 pub(super) use closed::{
     ClosedInstantiationPlan, ClosedNativeDefinition, ClosedPackageDefinition,
-    NativeInstallationSources, NativeInstantiation, NativeInstantiationPlan, ResolvedNativeCapture,
+    NativeInstallationSources, NativeInstantiation, NativeInstantiationPlan, RetainedNativeOrigin,
+    RetainedNativeRequirement,
 };
 
 use super::binding_table::BindingIndex;
@@ -294,6 +295,8 @@ impl Default for PackageOwnerDiagnosticLimits {
 pub enum PreparedRuntimeError {
     #[error(transparent)]
     SourceAdmission(#[from] super::SourceAdmissionError),
+    #[error("checked runtime inputs refused: {0}")]
+    CheckedInputs(#[source] Box<super::SessionError>),
     #[error(transparent)]
     ConstructorMetadata(#[from] tidepool_repr::datacon_table::ConstructorMetadataMismatch),
     #[error(transparent)]
@@ -558,6 +561,7 @@ impl PreparedRuntimeError {
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
             Self::SourceAdmission(_)
+            | Self::CheckedInputs(_)
             | Self::Parse(_)
             | Self::ConstructorMetadata(_)
             | Self::ConstructorMetadataCollision(_)
@@ -675,9 +679,10 @@ impl PreparedRuntimeError {
                 PreparedFailureKind::Integrity
             }
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Compile(_) | Self::NativeSourceEvidence(_) | Self::SourceAdmission(_) => {
-                PreparedFailureKind::Rejected
-            }
+            Self::Compile(_)
+            | Self::NativeSourceEvidence(_)
+            | Self::SourceAdmission(_)
+            | Self::CheckedInputs(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Install(error) | Self::Run(error) => match error {
@@ -4924,6 +4929,25 @@ pub(super) mod tests {
     use super::*;
     use tidepool_codegen::prepared_program::DemandedImage;
     use tidepool_repr::execution_schema::CertifiedGroup;
+
+    #[test]
+    fn checked_input_refusal_preserves_its_typed_transition_cause() {
+        use super::super::{SessionError, SessionTransitionReason};
+        use std::error::Error;
+        let error = PreparedRuntimeError::CheckedInputs(Box::new(
+            SessionTransitionReason::PreparedValueChanged.into(),
+        ));
+        assert_eq!(error.stage(), PreparedFailureStage::Install);
+        assert_eq!(error.kind(), PreparedFailureKind::Rejected);
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<SessionError>()),
+            Some(SessionError::TransitionRefused(
+                SessionTransitionReason::PreparedValueChanged
+            ))
+        ));
+    }
 
     #[test]
     fn physical_current_source_requires_its_actual_runtime_output_owner() {

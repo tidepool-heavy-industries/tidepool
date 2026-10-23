@@ -283,23 +283,6 @@ impl NativeSourceCustody {
     }
 }
 
-/// Compiler/display metadata follows exact retained binding identities. Runtime
-/// source custody is resolved independently by the actual native installation.
-fn retained_import_metadata<'a>(
-    imports: impl IntoIterator<Item = &'a ImportOwner>,
-    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
-) -> Vec<&'a Arc<ProgramProvenance>> {
-    let mut retained = BTreeMap::new();
-    for owner in imports {
-        if let ImportOwner::Retained { id, .. } = owner {
-            if let Some(provenance) = bindings.get(&id.raw()) {
-                retained.entry(id.raw()).or_insert(provenance);
-            }
-        }
-    }
-    retained.into_values().collect()
-}
-
 impl PartialEq for RuntimeSourceOrigin {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -2540,6 +2523,20 @@ impl Drop for BindingLease {
     }
 }
 
+impl PersistentSession {
+    /// Retain exact values, including reserved IDs that will materialize at
+    /// capture commit. Drop uses the resident owner's existing cleanup queue.
+    pub(super) fn lease_binding_ids(
+        &mut self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> BindingLease {
+        BindingLease {
+            retained: self.acquire_binding_leases(ids).into_iter().collect(),
+            cleanup: CustodyLease::new(Arc::clone(&self.custody_cleanup)),
+        }
+    }
+}
+
 /// Counts external ownership independently of temporary Arc references. Drop
 /// implementations enqueue their cleanup first; this field then releases the
 /// count before waking the owner, including committed transfers.
@@ -2575,7 +2572,7 @@ impl Drop for CustodyLease {
 }
 
 #[derive(Default)]
-struct CustodyCleanup {
+pub(super) struct CustodyCleanup {
     abandoned: Mutex<Vec<ValueHandle>>,
     binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -3176,10 +3173,17 @@ impl CapturedCheckedValueSet {
 
 pub(crate) struct CapturedCheckedValue {
     entry: BindingEntry,
+    binding_lease: Arc<BindingLease>,
     custody: RootCustody,
 }
 
 impl CapturedCheckedValue {
+    pub(crate) fn defining_scope(&self) -> ScopeId {
+        self.entry.scope
+    }
+    pub(crate) fn binding_lease(&self) -> &Arc<BindingLease> {
+        &self.binding_lease
+    }
     pub(crate) fn name(&self) -> &str {
         &self.entry.name.0
     }
@@ -4316,6 +4320,7 @@ where
     }
 
     fn with_state(handlers: H, captured: O, state: PersistentSession) -> Self {
+        let custody_cleanup = Arc::clone(&state.custody_cleanup);
         ResidentSession {
             state,
             handlers,
@@ -4328,7 +4333,7 @@ where
             hidden_host_bindings: HashMap::new(),
             host_binding_prototypes: Vec::new(),
             run_context: SessionRunContext::ROOT,
-            custody_cleanup: Arc::new(CustodyCleanup::default()),
+            custody_cleanup,
             display_owners: Arc::default(),
         }
     }
@@ -4711,33 +4716,6 @@ where
         )
     }
 
-    /// Admit one compiler-issued binder reserved for a native host payload.
-    pub fn admit_host_carrier_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        binding: String,
-        expected: HostBindingType,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_host_carrier_cell_in(
-            scope,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            binding,
-            expected,
-            compile_inputs,
-        )
-    }
-
     pub fn begin_durable_private_execution(
         &mut self,
         owner: &super::RecoveryPublicOwner,
@@ -4749,54 +4727,10 @@ where
     }
 
     pub fn begin_cell_program(
-        &self,
+        &mut self,
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
         self.state.begin_cell_program(settled)
-    }
-
-    pub fn admit_native_setup_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_native_setup_cell_in(
-            scope,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            compile_inputs,
-        )
-    }
-
-    pub fn admit_planned_cell_for_execution(
-        &mut self,
-        execution: Arc<super::PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn std::any::Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<super::RuntimeCellAdmission>, SessionError> {
-        self.settle_dropped_custody();
-        self.state.admit_planned_cell_for_execution(
-            execution,
-            plan,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            compile_inputs,
-        )
     }
 
     pub fn admit_world_planned_cell_for_execution(
@@ -5258,15 +5192,8 @@ where
     /// Reserved future bindings can be leased before they materialize.
     pub fn lease_bindings(&mut self, referenced: &[tidepool_repr::VarId]) -> BindingLease {
         self.settle_dropped_custody();
-        let retained = self
-            .state
-            .acquire_binding_leases(referenced.iter().copied().map(SessionVarId::from_var))
-            .into_iter()
-            .collect();
-        BindingLease {
-            retained,
-            cleanup: CustodyLease::new(Arc::clone(&self.custody_cleanup)),
-        }
+        self.state
+            .lease_binding_ids(referenced.iter().copied().map(SessionVarId::from_var))
     }
 
     pub fn retain_lexical_scope(
@@ -7703,6 +7630,7 @@ where
                 None => PreparedBindingInstall::Turn(None),
             },
             &Arc::new(ProgramProvenance::default()),
+            &[],
             settlement,
         )?;
         Ok(())
@@ -7746,6 +7674,7 @@ where
                 private_input,
             }),
             &provenance,
+            &[],
             settlement,
         )?;
         Ok(())
@@ -8306,10 +8235,7 @@ where
             .instantiate(&self.display_owners);
         let mut retained = Vec::new();
         if let NativeTurnAdmission::Native(resolved) = &admission.resolved {
-            retained = resolved
-                .retained_ids()
-                .filter_map(|id| self.state.binding_provenance(id.raw()))
-                .collect();
+            retained = resolved.retained_provenance().collect();
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
@@ -9097,6 +9023,7 @@ where
                             &[(binder, handle)],
                             PreparedBindingInstall::Turn(checked.as_deref()),
                             &provenance,
+                            observation.as_deref().unwrap_or(&[]),
                             settlement,
                         )?;
                         if let Some(dependencies) = observation {
@@ -9166,6 +9093,7 @@ where
                     &bound,
                     PreparedBindingInstall::Turn(checked.as_deref()),
                     &provenance,
+                    &[],
                     settlement,
                 )?;
                 self.classify_parked(ParkedRun::CompletedProject, resumed, seed, provenance)
@@ -9239,6 +9167,7 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
         install: PreparedBindingInstall<'_>,
         provenance: &Arc<ProgramProvenance>,
+        observation_dependencies: &[tidepool_repr::VarId],
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<CapturedCheckedValues>, ResidentError> {
         if let PreparedBindingInstall::Host(host) = &install {
@@ -9381,6 +9310,16 @@ where
             let values = entries
                 .into_iter()
                 .map(|entry| CapturedCheckedValue {
+                    binding_lease: Arc::new(
+                        self.state.lease_binding_ids(
+                            std::iter::once(entry.id).chain(
+                                observation_dependencies
+                                    .iter()
+                                    .copied()
+                                    .map(SessionVarId::from_var),
+                            ),
+                        ),
+                    ),
                     custody: RootCustody::new(
                         entry.value.handle.raw(),
                         self.custody_cleanup.clone(),
@@ -10840,6 +10779,52 @@ mod custody_release_tests {
     }
 
     #[test]
+    fn exact_reserved_binding_lease_survives_observation_eviction_then_releases() {
+        let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        let source = session.adopt_initial_notebook_scope(scope).unwrap();
+        let dependency = bind_fixture(&mut session, &source, scope, 600);
+        session.state.save_observation(dependency, &[]);
+        // The future observation has no dependency edges yet. Its issuing
+        // owner carries both the reserved ID and exact already-selected roots.
+        let reserved = SessionVarId::from_extract(601);
+        assert!(session.state.bindings().get(reserved).is_none());
+        let lease = Arc::new(session.state.lease_binding_ids([reserved, dependency]));
+        let shared = Arc::clone(&lease);
+        let actual = bind_fixture(&mut session, &source, scope, 601);
+        assert_eq!(actual, reserved);
+        session.state.save_observation(actual, &[dependency.var()]);
+        for generation in 602..611 {
+            let id = bind_fixture(&mut session, &source, scope, generation);
+            session.state.save_observation(id, &[]);
+        }
+        major_collect(&mut session);
+        for id in [actual, dependency] {
+            let entry = session
+                .state
+                .bindings()
+                .get(id)
+                .expect("exact leased observation");
+            let handle = entry.value.handle.raw();
+            assert!(session
+                .state
+                .prepared_mut()
+                .unwrap()
+                .inspect_retained(handle)
+                .is_ok());
+        }
+        assert_eq!(session.outstanding_custody(), 1);
+        drop(lease);
+        assert_eq!(session.outstanding_custody(), 1);
+        assert!(session.state.bindings().get(actual).is_some());
+        drop(shared);
+        assert_eq!(session.outstanding_custody(), 0);
+        assert!(session.state.bindings().get(actual).is_none());
+        assert!(session.state.bindings().get(dependency).is_none());
+        major_collect(&mut session);
+    }
+
+    #[test]
     fn foreign_custody_never_enters_destination() {
         let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
         let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
@@ -11423,6 +11408,212 @@ mod authored_publication_tests {
         reservation: Arc<super::super::RuntimeCheckedItemAdmission>,
         bound: Vec<BoundBinder>,
         compiled: super::super::turn::CompiledTurn,
+    }
+
+    #[test]
+    fn produced_native_capture_requires_its_actual_acquired_slot_and_row() {
+        use super::super::turn::{consume_cell_program_item, TurnResult};
+        use tidepool_toolchain::linked_native::AcquiredNativeImport;
+        let CheckedCaptureFixture {
+            root: _root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture_from(
+            SessionId(1013),
+            include_str!("fixtures/checked-produced-native-capture.hs"),
+        );
+        let source_module = SessionModule::val(reservation.generation());
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+                report,
+            )
+        })
+        .unwrap();
+        let produced = resident
+            .state
+            .retained_checked_value_artifact(source_module)
+            .unwrap()
+            .clone();
+        let declaration = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), checked.checked_item(1).unwrap())
+        })
+        .unwrap();
+        source_action(&mut resident, &original, |resident, _| {
+            resident.adopt_checked_declaration(declaration)
+        })
+        .unwrap();
+        let next = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), checked.checked_item(2).unwrap())
+        })
+        .unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = consume_cell_program_item(next.clone()).unwrap()
+        else {
+            panic!("the native capture consumer must be a checked binding");
+        };
+        let target = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .linked_target
+            .as_ref()
+            .unwrap();
+        let retained = target
+            .acquired()
+            .find_map(|owner| {
+                owner
+                    .imports()
+                    .enumerate()
+                    .find_map(|(index, import)| match import {
+                        AcquiredNativeImport::Retained {
+                            requirement,
+                            binding,
+                        } if requirement.identity().occurrence == "capturedForNative" => {
+                            Some((owner.clone(), u32::try_from(index).unwrap(), binding))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("NOINLINE must retain a real acquired native import of the produced value");
+        assert!(retained
+            .0
+            .matches_retained_checked_value(retained.1, retained.2, &produced)
+            .unwrap());
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(u32::MAX, retained.2, &produced)
+            .unwrap());
+        let mut foreign_binding = retained.2;
+        foreign_binding.selection.0[0] ^= 0x80;
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(retained.1, foreign_binding, &produced)
+            .unwrap());
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                next.generation(),
+                report,
+            )
+        })
+        .unwrap();
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 3);
+        let unrelated = resident
+            .state
+            .retained_checked_value_artifact(SessionModule::val(next.generation()))
+            .unwrap();
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(retained.1, retained.2, unrelated)
+            .unwrap());
+        resident.freeze_private_execution(&execution).unwrap();
+    }
+
+    #[test]
+    fn checked_snapshot_retains_expired_observation_until_its_last_owner_drops() {
+        use super::super::turn::{consume_cell_program_item, TurnResult};
+        let CheckedCaptureFixture {
+            root: _root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture_from(
+            SessionId(1012),
+            include_str!("fixtures/checked-observation-custody.hs"),
+        );
+        let scope = execution.private_scope();
+        let first_id = SessionVarId::from_extract(bound[0].var_id);
+        let first_name = bound[0].name.clone();
+        let generation = reservation.generation();
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_observation_with_sites(
+                compiled.code(),
+                &bound[0],
+                generation,
+                true,
+                report,
+            )
+        })
+        .unwrap();
+        let held = prefix.snapshot();
+        let first = resident.state.bindings().get(first_id).unwrap();
+        let identity = first.value.identity.clone();
+        let handle = first.value.handle;
+        assert!(resident.state.bindings().lease_count(first_id) > 0);
+        drop(compiled);
+        drop(reservation);
+        for index in 1..11 {
+            let reservation = source_action(&mut resident, &original, |resident, _| {
+                resident.admit_checked_item(prefix.clone(), checked.checked_item(index).unwrap())
+            })
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = consume_cell_program_item(reservation.clone()).unwrap()
+            else {
+                panic!("observation history must contain actual checked bindings");
+            };
+            source_action(&mut resident, &original, |resident, report| {
+                resident.run_observation_with_sites(
+                    compiled.code(),
+                    &bound[0],
+                    reservation.generation(),
+                    true,
+                    report,
+                )
+            })
+            .unwrap();
+        }
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 11);
+        assert!(resident.current_binding_in(scope, &first_name).is_none());
+        let exact = resident
+            .state
+            .bindings()
+            .resolve_exact_prepared_in(resident.state.scope_tree(), scope, &identity, generation.0)
+            .expect("the scoped owner retains the exact expired observation");
+        assert_eq!(exact.id, first_id);
+        assert_eq!(exact.value.handle, handle);
+        assert!(matches!(
+            resident.state.prepared_mut().unwrap().inspect_retained(handle.raw()).unwrap(),
+            PreparedOuter::Constructor { fields, .. }
+                if matches!(fields.as_slice(), [PreparedResult::Scalar(23)])
+        ));
+        drop(prefix);
+        drop(checked);
+        resident.settle_dropped_custody();
+        assert!(resident.state.scope_tree().is_live(scope));
+        assert!(resident.state.bindings().get(first_id).is_some());
+        assert!(resident.state.bindings().lease_count(first_id) > 0);
+        drop(held);
+        resident.settle_dropped_custody();
+        assert!(resident.state.scope_tree().is_live(scope));
+        assert!(resident.state.bindings().get(first_id).is_none());
+        assert_eq!(resident.state.bindings().lease_count(first_id), 0);
+        assert!(resident.state.binding_provenance(first_id.raw()).is_none());
+        assert!(resident
+            .state
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
     }
 
     fn checked_capture_fixture(session: SessionId) -> CheckedCaptureFixture {
@@ -14964,67 +15155,21 @@ mod source_origin_tests {
     }
 
     #[test]
-    fn import_metadata_keeps_runtime_sources_pending() {
+    fn metadata_merge_keeps_runtime_sources_pending() {
         let mut owner = PersistentSession::new(None, 1024);
         let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
         let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
-        assert_ne!(source.scope(), ScopeId::ROOT);
-        let binder = SymbolIdentity {
-            unit: "Source".into(),
-            module: "Source".into(),
-            namespace: "value".into(),
-            occurrence: "f".into(),
-            record_parent: None,
-        };
-        let selected_binding = SessionVarId::from_extract(7);
-        let known = Arc::new(issued(17, &source));
-        let bindings = HashMap::from([(selected_binding.raw(), known.clone())]);
-        let retained = ImportOwner::Retained {
-            id: selected_binding,
-            generation: 1,
-        };
-        let missing_owners = [
-            ImportOwner::Retained {
-                id: SessionVarId::from_extract(8),
-                generation: 1,
-            },
-            ImportOwner::Source {
-                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
-                binder: binder.clone(),
-            },
-            ImportOwner::Package {
-                unit: binder.unit.clone(),
-                module: binder.module.clone(),
-                binder,
-                interface_digest: [2; 32],
-            },
-        ];
-        for missing in &missing_owners {
-            for missing_first in [false, true] {
-                let imports = if missing_first {
-                    [missing, &retained]
-                } else {
-                    [&retained, missing]
-                };
-                let retained_refs = retained_import_metadata(
-                    imports
-                        .into_iter()
-                        .chain([&retained, missing, &retained, missing]),
-                    &bindings,
-                );
-                assert_eq!(retained_refs.len(), 1, "one unique retained binding");
-                let mut metadata = ProgramProvenance::default();
-                for original in retained_refs {
-                    metadata.merge_metadata(original).unwrap();
-                }
-                assert_eq!(metadata.sites.keys().copied().collect::<Vec<_>>(), [17]);
-                assert!(
-                    metadata.original_sources.sites.is_empty(),
-                    "compiler metadata preflight does not select runtime sources"
-                );
-            }
+        let known = issued(17, &source);
+        let mut metadata = ProgramProvenance::default();
+        for _ in 0..3 {
+            metadata.merge_metadata(&known).unwrap();
         }
+        assert_eq!(metadata.sites.keys().copied().collect::<Vec<_>>(), [17]);
+        assert!(
+            metadata.original_sources.sites.is_empty(),
+            "compiler metadata preflight does not select runtime sources"
+        );
     }
 
     #[test]

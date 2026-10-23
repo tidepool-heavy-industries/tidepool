@@ -141,7 +141,7 @@ fn released_compiler_world_restores_while_retained_native_custody_executes() {
         execution.clone(),
         0,
     );
-    let world = checked.prefix.snapshot().world().unwrap().clone();
+    let world = checked.prefix.snapshot().world().clone();
     let logical = *world.logical_id();
     let world_name = logical
         .iter()

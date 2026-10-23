@@ -16,6 +16,9 @@ use tidepool_toolchain::compiler_world::{
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
+mod scoped_inputs;
+pub(super) use scoped_inputs::{ScopedResolvedInputs, ScopedResolvedValue};
+
 /// Native execution admission for one originally admitted durable public owner.
 /// The attachment owns its lifetime. A surviving shared run store does not
 /// keep a dropped or replaced machine attachment ready.
@@ -1735,7 +1738,7 @@ pub(super) struct RuntimeFiniteCellInputs {
     view_digest: [u8; 32],
     planned: Option<Arc<super::RuntimeCellPlanReservation>>,
     native_shares: Vec<SourceLeaseKey>,
-    native_imports: Arc<AdmittedNativeImports>,
+    scoped_inputs: Arc<ScopedResolvedInputs>,
     interfaces: Vec<AdmittedValueInterface>,
     specification: Arc<dyn Any + Send + Sync>,
     specification_digest: [u8; 32],
@@ -1752,7 +1755,6 @@ enum RuntimeCellPurpose {
     #[cfg(test)]
     Observation,
     PrivateExecution(Arc<PrivateExecutionAdmission>),
-    NativeSetup,
     HostCarrier {
         binding: String,
         expected: super::resident::HostBindingType,
@@ -1783,7 +1785,6 @@ impl RuntimeCellPurpose {
             #[cfg(test)]
             Self::Observation => {}
             Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
-            Self::NativeSetup => frame(b"TidepoolNativeSetupAdmission1"),
             Self::HostCarrier {
                 binding,
                 expected,
@@ -2416,179 +2417,6 @@ impl AsRef<ValueInterfaceSnapshot> for ValueInterfaceSnapshot {
     }
 }
 
-/// The original native import ledger remains fixed for the whole cell.
-/// Completed items add only their sealed compiler-owned native identities.
-#[derive(Debug)]
-struct AdmittedNativeImports {
-    entries: Vec<(SymbolIdentity, u64)>,
-    owners: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
-    commitment: [u8; 32],
-}
-
-/// A checked cell borrows its immutable admission ledger and indexes only
-/// native owners added by its own settled items. Snapshots retain the ledger
-/// independently; this mutable suffix remains under the prefix state lock.
-#[derive(Debug)]
-struct CheckedNativeIndex {
-    base: Arc<AdmittedNativeImports>,
-    added: std::collections::BTreeMap<(SymbolIdentity, u64), u64>,
-}
-
-impl CheckedNativeIndex {
-    fn new(base: Arc<AdmittedNativeImports>) -> Self {
-        Self {
-            base,
-            added: std::collections::BTreeMap::new(),
-        }
-    }
-
-    fn get(&self, key: &(SymbolIdentity, u64)) -> Option<&u64> {
-        self.added.get(key).or_else(|| self.base.owners.get(key))
-    }
-
-    fn extend(&mut self, added: Vec<((SymbolIdentity, u64), u64)>) {
-        // append has already checked every identity, generation, and root.
-        // Existing owners are never replaced, including package generation 0.
-        for (key, root) in added {
-            debug_assert!(self.get(&key).is_none());
-            self.added.insert(key, root);
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CheckedNativeImports {
-    base: Arc<AdmittedNativeImports>,
-    tail: Option<Arc<CheckedNativeDelta>>,
-    commitment: [u8; 32],
-}
-
-#[derive(Debug)]
-struct CheckedNativeDelta {
-    previous: Option<Arc<CheckedNativeDelta>>,
-    imports: Vec<SettledNativeImport>,
-    bindings: Vec<SettledNativeBinding>,
-}
-
-impl Drop for CheckedNativeDelta {
-    fn drop(&mut self) {
-        let mut previous = self.previous.take();
-        while let Some(parent) = previous {
-            let Some(mut delta) = Arc::into_inner(parent) else {
-                break;
-            };
-            previous = delta.previous.take();
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SettledNativeImport {
-    identity: SymbolIdentity,
-    generation: u64,
-    root_id: u64,
-}
-
-#[derive(Debug)]
-struct SettledNativeBinding {
-    name: String,
-    id: tidepool_repr::SessionVarId,
-    import: SettledNativeImport,
-}
-
-#[derive(Debug, Default)]
-struct CapturedNativeDelta {
-    imports: Vec<SettledNativeImport>,
-    bindings: Vec<SettledNativeBinding>,
-}
-
-impl CheckedNativeImports {
-    fn base(base: Arc<AdmittedNativeImports>) -> Self {
-        Self {
-            commitment: base.commitment,
-            base,
-            tail: None,
-        }
-    }
-
-    fn deltas(&self) -> impl Iterator<Item = &CheckedNativeDelta> {
-        let mut suffix = Vec::new();
-        let mut node = self.tail.as_deref();
-        while let Some(delta) = node {
-            suffix.push(delta);
-            node = delta.previous.as_deref();
-        }
-        suffix.into_iter().rev()
-    }
-
-    fn imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
-        self.base
-            .entries
-            .iter()
-            .map(|(identity, generation)| (identity, *generation))
-            .chain(
-                self.deltas()
-                    .flat_map(|delta| delta.imports.iter())
-                    .map(|import| (&import.identity, import.generation)),
-            )
-    }
-
-    fn append(
-        &self,
-        delta: CapturedNativeDelta,
-        index: &CheckedNativeIndex,
-    ) -> Result<(Self, Vec<((SymbolIdentity, u64), u64)>), SessionError> {
-        let mut added = Vec::new();
-        let mut imports = Vec::new();
-        for import in delta.imports {
-            let key = (import.identity.clone(), import.generation);
-            match index.get(&key) {
-                Some(root) if *root != import.root_id => {
-                    return Err(SessionError::StaleStagedDeclaration)
-                }
-                Some(_) => {}
-                None => {
-                    added.push((key, import.root_id));
-                    imports.push(import);
-                }
-            }
-        }
-        if imports.is_empty() && delta.bindings.is_empty() {
-            return Ok((self.clone(), added));
-        }
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"TidepoolSettledNativeDelta1");
-        hash.update(&self.commitment);
-        hash.update(&(imports.len() as u64).to_le_bytes());
-        for import in &imports {
-            frame_native_identity(&mut hash, &import.identity);
-            hash.update(&import.generation.to_le_bytes());
-            hash.update(&import.root_id.to_le_bytes());
-        }
-        hash.update(&(delta.bindings.len() as u64).to_le_bytes());
-        for binding in &delta.bindings {
-            hash.update(&(binding.name.len() as u64).to_le_bytes());
-            hash.update(binding.name.as_bytes());
-            hash.update(&binding.id.raw().to_le_bytes());
-            frame_native_identity(&mut hash, &binding.import.identity);
-            hash.update(&binding.import.generation.to_le_bytes());
-            hash.update(&binding.import.root_id.to_le_bytes());
-        }
-        Ok((
-            Self {
-                base: self.base.clone(),
-                tail: Some(Arc::new(CheckedNativeDelta {
-                    previous: self.tail.clone(),
-                    imports,
-                    bindings: delta.bindings,
-                })),
-                commitment: *hash.finalize().as_bytes(),
-            },
-            added,
-        ))
-    }
-}
-
 fn frame_native_identity(hash: &mut blake3::Hasher, identity: &SymbolIdentity) {
     for part in [
         identity.unit.as_bytes(),
@@ -2713,86 +2541,94 @@ pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
-    retained_inputs: Option<BoundRetainedInputs>,
     state: parking_lot::Mutex<RuntimeCheckedState>,
-}
-
-/// Runtime access is issued only after the stage's selected dependency
-/// occurrence is paired with this lease's actual scoped checked value.
-#[derive(Debug)]
-struct BoundRetainedInput {
-    terminal: tidepool_toolchain::compiler_world::SelectedDependencyTerminal,
-    id: tidepool_repr::SessionVarId,
-    defining_scope: ScopeId,
-    handle: tidepool_codegen::prepared_program::PreparedHandle,
-    row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
-}
-
-#[derive(Debug)]
-struct BoundRetainedInputs {
-    scope: Arc<RuntimeLexicalScopeLease>,
-    stages: BTreeMap<usize, Vec<BoundRetainedInput>>,
-}
-
-impl BoundRetainedInputs {
-    fn validate_item(
-        &self,
-        session: &PersistentSession,
-        item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
-    ) -> Result<(), SessionError> {
-        session.validate_lexical_scope_lease(self.scope.scope, &self.scope)?;
-        let stage = item
-            .world_selected_runtime_inputs()
-            .ok_or(SessionError::StaleStagedDeclaration)?
-            .stage_first_ordinal();
-        let bound = self
-            .stages
-            .get(&stage)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        if bound.is_empty() {
-            return Ok(());
-        }
-        let reachable = session
-            .bindings()
-            .scope_reachable_binding_ids(session.scope_tree(), self.scope.scope)
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        for input in bound {
-            let entry = session
-                .bindings()
-                .get(input.id)
-                .filter(|entry| {
-                    reachable.contains(&entry.id)
-                        && entry.scope == input.defining_scope
-                        && entry.value.identity == *input.terminal.identity()
-                        && entry.module
-                            == tidepool_repr::SessionModule::val(Generation(
-                                input.terminal.generation(),
-                            ))
-                        && entry.value.handle == input.handle
-                })
-                .ok_or(SessionError::StaleStagedDeclaration)?;
-            if session
-                .prepared()
-                .and_then(|engine| engine.prepared_handle_of(input.handle.raw()))
-                != Some(input.handle)
-                || session
-                    .retained_checked_value_artifact(entry.module)
-                    .is_none_or(|row| !Arc::ptr_eq(row, &input.row))
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
 struct RuntimeCheckedState {
     phase: CellPhase,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
-    native_index: CheckedNativeIndex,
-    compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
+}
+
+#[derive(Debug)]
+enum CellPhase {
+    Ready(Arc<RuntimeCheckedPrefixSnapshot>),
+    Reserved(Arc<CheckedItemReservation>),
+    Running(Arc<RunningCheckedItem>),
+    Parked(Arc<RunningCheckedItem>),
+    Capturing(Arc<RunningCheckedItem>),
+    Complete(Arc<RuntimeCheckedPrefixSnapshot>),
+    HostConstructorConsumed(Arc<RuntimeCheckedPrefixSnapshot>),
+    Failed(Arc<RuntimeCheckedPrefixSnapshot>),
+}
+
+#[derive(Debug)]
+struct RunningCheckedItem {
+    reservation: Arc<CheckedItemReservation>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+
+impl RuntimeCheckedState {
+    fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
+        match &self.phase {
+            CellPhase::Ready(snapshot)
+            | CellPhase::Complete(snapshot)
+            | CellPhase::HostConstructorConsumed(snapshot)
+            | CellPhase::Failed(snapshot) => snapshot,
+            CellPhase::Reserved(ticket) => &ticket.snapshot,
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => &ticket.reservation.snapshot,
+        }
+    }
+
+    fn reservation(&self) -> Option<&Arc<CheckedItemReservation>> {
+        match &self.phase {
+            CellPhase::Reserved(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn running(&self) -> Option<&Arc<RunningCheckedItem>> {
+        match &self.phase {
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.phase, CellPhase::Ready(_))
+    }
+
+    fn begin_running(
+        &mut self,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    ) -> Result<Arc<RunningCheckedItem>, SessionError> {
+        let ticket = self
+            .reservation()
+            .cloned()
+            .ok_or(super::SessionTransitionReason::WrongPhase)?;
+        let running = Arc::new(RunningCheckedItem {
+            reservation: ticket,
+            execution,
+        });
+        self.phase = CellPhase::Running(Arc::clone(&running));
+        Ok(running)
+    }
+
+    fn commit(
+        &mut self,
+        snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+        program: &tidepool_toolchain::checked_cell::CellProgram,
+    ) {
+        self.phase = if snapshot.compiler_prefix.next_item() == program.items().len() {
+            CellPhase::Complete(snapshot)
+        } else {
+            CellPhase::Ready(snapshot)
+        };
+    }
 }
 
 #[derive(Debug)]
@@ -2923,66 +2759,27 @@ impl RuntimeCheckedItemAdmission {
 
 #[derive(Clone, Debug)]
 pub struct RuntimeCheckedPrefixSnapshot {
-    basis: RuntimeCheckedPrefixBasis,
+    world: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+    key: super::persistent::CompileViewKey,
     session_root: PathBuf,
     visibility: PublicVisibilitySnapshot,
     interfaces: CheckedInterfaces,
-    _retained_scope: Arc<RuntimeLexicalScopeLease>,
     native_shares: Vec<SourceLeaseKey>,
-    native_imports: CheckedNativeImports,
+    scoped_inputs: ScopedResolvedInputs,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     digest: [u8; 32],
 }
 
-#[derive(Clone)]
-enum RuntimeCheckedPrefixBasis {
-    Finite {
-        view: SessionCompileView,
-        digest: [u8; 32],
-    },
-    World {
-        world: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-        key: super::persistent::CompileViewKey,
-    },
-}
-
-impl std::fmt::Debug for RuntimeCheckedPrefixBasis {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Finite { digest, .. } => f.debug_tuple("Finite").field(digest).finish(),
-            Self::World { world, .. } => f.debug_tuple("World").field(world.logical_id()).finish(),
-        }
-    }
-}
-
 impl RuntimeCheckedPrefixSnapshot {
-    pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
-        match &self.basis {
-            RuntimeCheckedPrefixBasis::Finite { view, .. } => Ok(view),
-            RuntimeCheckedPrefixBasis::World { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
-    }
-    pub fn world(&self) -> Option<&Arc<tidepool_toolchain::compiler_world::CompilerWorld>> {
-        match &self.basis {
-            RuntimeCheckedPrefixBasis::World { world, .. } => Some(world),
-            RuntimeCheckedPrefixBasis::Finite { .. } => None,
-        }
+    pub fn world(&self) -> &Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
+        &self.world
     }
     pub fn session_root(&self) -> &std::path::Path {
         &self.session_root
     }
     fn is_current(&self, session: &PersistentSession, scope: ScopeId) -> bool {
         session.public_visibility_snapshot_in(scope).as_ref() == Some(&self.visibility)
-            && match &self.basis {
-                RuntimeCheckedPrefixBasis::Finite { digest, .. } => {
-                    session.compile_view_digest_in(scope) == Some(*digest)
-                }
-                RuntimeCheckedPrefixBasis::World { key, .. } => {
-                    session.compile_view_key_in(scope).as_ref() == Some(key)
-                }
-            }
+            && session.compile_view_key_in(scope).as_ref() == Some(&self.key)
     }
     fn is_current_predecessor(
         &self,
@@ -2999,9 +2796,6 @@ impl RuntimeCheckedPrefixSnapshot {
         if !continuing {
             return self.is_current(session, scope);
         }
-        let RuntimeCheckedPrefixBasis::World { world, .. } = &self.basis else {
-            return self.is_current(session, scope);
-        };
         let (Ok(original), Ok(source)) = (
             admission.original_source(),
             admission.world_source_reference(),
@@ -3014,7 +2808,7 @@ impl RuntimeCheckedPrefixSnapshot {
             .get(&scope)
             .and_then(|tip| tip.inspection_world.as_ref())
             .is_some_and(|association| {
-                Arc::ptr_eq(&association.world, world)
+                Arc::ptr_eq(&association.world, &self.world)
                     && session.inspection_world_base_is_current(
                         &association.base,
                         source,
@@ -3031,30 +2825,20 @@ impl RuntimeCheckedPrefixSnapshot {
         &self.native_shares
     }
     /// The original baseline remains available independently of settlements.
-    pub fn admitted_retained_imports(&self) -> &[(SymbolIdentity, u64)] {
-        &self.native_imports.base.entries
+    pub fn admitted_retained_imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
+        self.scoped_inputs.admitted_imports()
     }
     /// Only the admitted baseline and exports actually installed by this
     /// prefix's sealed native targets.
     pub fn actual_retained_imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
-        self.native_imports.imports()
+        self.scoped_inputs.imports()
     }
     /// Actual same-prefix bindings in completion order, for selecting native
     /// lexical winners from the exact installed targets.
     pub fn settled_native_bindings(
         &self,
     ) -> impl Iterator<Item = (&str, &SymbolIdentity, u64, u64)> {
-        self.native_imports
-            .deltas()
-            .flat_map(|delta| delta.bindings.iter())
-            .map(|binding| {
-                (
-                    binding.name.as_str(),
-                    &binding.import.identity,
-                    binding.import.generation,
-                    binding.id.raw(),
-                )
-            })
+        self.scoped_inputs.settled_bindings()
     }
     pub fn compiler_prefix(&self) -> &tidepool_toolchain::checked_cell::ExactCompiledPrefix {
         &self.compiler_prefix
@@ -3147,9 +2931,10 @@ impl RuntimeCheckedPrefix {
                 );
                 error
             })?;
-        if let Some(retained) = &self.retained_inputs {
-            retained.validate_item(session, execution.item())?;
-        }
+        state
+            .snapshot()
+            .scoped_inputs
+            .validate_item(session, execution.item())?;
         execution
             .validate_required_native_imports(state.snapshot().actual_retained_imports())
             .map_err(|error| {
@@ -3441,9 +3226,10 @@ impl CheckedTurnCompletion {
         ) {
             return Err(super::SessionTransitionReason::PublicBaselineChanged.into());
         }
-        if let Some(retained) = &self.prefix.retained_inputs {
-            retained.validate_item(session, self.running.execution.item())?;
-        }
+        state
+            .snapshot()
+            .scoped_inputs
+            .validate_item(session, self.running.execution.item())?;
         Ok(())
     }
 
@@ -3507,35 +3293,33 @@ impl CheckedTurnCompletion {
             {
                 return Err(SessionError::StaleStagedDeclaration.into());
             }
-            match state.snapshot().world() {
-                None => None,
-                Some(predecessor) => {
-                    let association = session
-                        .lib()
-                        .tips
-                        .get(&scope)
-                        .and_then(|tip| tip.inspection_world.as_ref())
-                        .ok_or(SessionError::MissingPublishedCompilerWorld(scope))?;
-                    let source = self.prefix.admission.world_source_reference()?;
-                    let original = self.prefix.admission.original_source()?;
-                    if !Arc::ptr_eq(&association.world, predecessor)
-                        || !session.inspection_world_base_is_current(
-                            &association.base,
-                            source,
-                            &original,
-                        )
-                    {
-                        return Err(SessionError::StaleStagedDeclaration.into());
-                    }
-                    Some(association.clone())
+            let predecessor = state.snapshot().world();
+            {
+                let association = session
+                    .lib()
+                    .tips
+                    .get(&scope)
+                    .and_then(|tip| tip.inspection_world.as_ref())
+                    .ok_or(SessionError::MissingPublishedCompilerWorld(scope))?;
+                let source = self.prefix.admission.world_source_reference()?;
+                let original = self.prefix.admission.original_source()?;
+                if !Arc::ptr_eq(&association.world, predecessor)
+                    || !session.inspection_world_base_is_current(
+                        &association.base,
+                        source,
+                        &original,
+                    )
+                {
+                    return Err(SessionError::StaleStagedDeclaration.into());
                 }
+                association.clone()
             }
         };
         // This owner earns and retains the actual source transaction claims.
         // They permit finishing an admitted installation across a later fence;
         // an outer gate lock here would recursively lock the same admissions.
         let installed = install(session)?;
-        if let Some(association) = association {
+        {
             let refreshed = session.compile_view_key_in(scope).map(|key| {
                 let mut base = association.base.clone();
                 base.key = key;
@@ -3633,30 +3417,6 @@ impl CheckedTurnCompletion {
             .snapshot()
             .compiler_prefix
             .append(self.running.execution.clone())?;
-        let native = CapturedNativeDelta {
-            imports: captured
-                .values()
-                .iter()
-                .map(|value| SettledNativeImport {
-                    identity: value.identity().clone(),
-                    generation: value.generation().0,
-                    root_id: value.handle().raw().0,
-                })
-                .collect(),
-            bindings: captured
-                .values()
-                .iter()
-                .map(|value| SettledNativeBinding {
-                    name: value.name().to_owned(),
-                    id: value.id(),
-                    import: SettledNativeImport {
-                        identity: value.identity().clone(),
-                        generation: value.generation().0,
-                        root_id: value.handle().raw().0,
-                    },
-                })
-                .collect(),
-        };
         let completed_values = self.prefix.admission.private_execution().map(|private| {
             let values = captured
                 .values()
@@ -3679,7 +3439,8 @@ impl CheckedTurnCompletion {
                 .collect::<Vec<_>>();
             (private, values)
         });
-        let successor = if let Some(predecessor) = state.snapshot().world() {
+        let successor = {
+            let predecessor = state.snapshot().world();
             let mut bindings = Vec::with_capacity(captured.values().len());
             for value in captured.values() {
                 let row = captured
@@ -3695,19 +3456,17 @@ impl CheckedTurnCompletion {
                     ),
                 );
             }
-            Some(self.prefix.program.item_successor(
+            self.prefix.program.item_successor(
                 predecessor,
                 self.running.execution.item(),
                 bindings,
-            )?)
-        } else {
-            None
+            )?
         };
-        let predecessor_world = state.snapshot().world().map(|world| *world.logical_id());
-        let bound_binding_ids = native
-            .bindings
+        let predecessor_world = *state.snapshot().world().logical_id();
+        let bound_binding_ids = captured
+            .values()
             .iter()
-            .map(|binding| binding.id.raw())
+            .map(|value| value.id().raw())
             .collect::<Vec<_>>();
         let cell_complete = compiler_prefix.next_item() == self.prefix.program.items().len();
         let private = self.prefix.admission.private_execution();
@@ -3721,12 +3480,7 @@ impl CheckedTurnCompletion {
                 )?;
                 if cell_complete {
                     Ok(Some(
-                        frontier.complete_program(
-                            &self.prefix.program,
-                            successor
-                                .as_ref()
-                                .ok_or(SessionError::StaleStagedDeclaration)?,
-                        )?,
+                        frontier.complete_program(&self.prefix.program, &successor)?,
                     ))
                 } else {
                     Ok(None)
@@ -3739,7 +3493,7 @@ impl CheckedTurnCompletion {
             &self.prefix.admission,
             compiler_prefix,
             captured.row().cloned(),
-            Some(native),
+            &captured,
             successor,
         )?;
         let captured = captured.prepare_commit(session, ticket)?;
@@ -3765,11 +3519,7 @@ impl CheckedTurnCompletion {
                             if let PrivateAuthoredProgram::Active { predecessor, .. } =
                                 &mut lifecycle.authored
                             {
-                                *predecessor = state
-                                    .snapshot()
-                                    .world()
-                                    .expect("World active successor")
-                                    .clone();
+                                *predecessor = state.snapshot().world().clone();
                             }
                         }
                     }
@@ -3779,15 +3529,10 @@ impl CheckedTurnCompletion {
                 }
                 Ok(())
             })??;
-        if let (
-            Some(predecessor_world),
-            Some(successor),
-            tidepool_toolchain::checked_cell::CellProgramBasis::World(output),
-        ) = (
-            predecessor_world,
-            state.snapshot().world(),
-            self.prefix.program.basis(),
-        ) {
+        if let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
+            self.prefix.program.basis()
+        {
+            let successor = state.snapshot().world();
             tracing::debug!(target: "exomonad_harness::timing",
                 base_logical_world = ?output.logical().logical_id(),
                 predecessor_world = ?predecessor_world,
@@ -3807,20 +3552,11 @@ struct PreparedCheckedSnapshot {
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     interfaces: CheckedInterfaces,
     added_interface: Option<(u64, [u8; 32])>,
-    retained: Arc<RuntimeLexicalScopeLease>,
-    native_imports: CheckedNativeImports,
-    added_native: Vec<((SymbolIdentity, u64), u64)>,
-    basis: PreparedCheckedSnapshotBasis,
-}
-
-enum PreparedCheckedSnapshotBasis {
-    World {
-        successor: tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
-        original_source: Arc<RuntimeOriginalSource>,
-        source: Arc<super::GenerationArtifactReference>,
-        target: Arc<RuntimeLexicalScopeLease>,
-    },
-    Finite(SessionCompileView),
+    scoped_inputs: ScopedResolvedInputs,
+    successor: tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
+    original_source: Arc<RuntimeOriginalSource>,
+    source: Arc<super::GenerationArtifactReference>,
+    target: Arc<RuntimeLexicalScopeLease>,
 }
 
 fn prepare_checked_snapshot(
@@ -3829,8 +3565,8 @@ fn prepare_checked_snapshot(
     admission: &RuntimeCellAdmission,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
-    native_delta: Option<CapturedNativeDelta>,
-    successor: Option<tidepool_toolchain::compiler_world::CheckedWorldSuccessor>,
+    captured: &super::resident::CapturedCheckedValueSet,
+    successor: tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
 ) -> Result<PreparedCheckedSnapshot, SessionError> {
     let scope = admission.scope;
     session
@@ -3855,62 +3591,33 @@ fn prepare_checked_snapshot(
             }
         }
     }
-    let retained = session.retain_current_lexical_scope(scope)?;
-    let (native_imports, added_native) = match native_delta {
-        Some(delta) => state
-            .snapshot()
-            .native_imports
-            .append(delta, &state.native_index)?,
-        None => (state.snapshot().native_imports.clone(), Vec::new()),
-    };
-    let basis = match (&state.snapshot().basis, successor) {
-        (RuntimeCheckedPrefixBasis::World { world, .. }, Some(successor)) => {
-            session
-                .compile_view_key_in(scope)
-                .ok_or(SessionError::DeadScope(scope))?;
-            if session
-                .lib()
-                .tips
-                .get(&scope)
-                .and_then(|tip| tip.inspection_world.as_ref())
-                .is_none_or(|association| !Arc::ptr_eq(&association.world, world))
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            PreparedCheckedSnapshotBasis::World {
-                successor,
-                original_source: admission.original_source()?,
-                source: admission.world_source_reference()?.clone(),
-                target: admission._retained_scope.clone(),
-            }
-        }
-        (RuntimeCheckedPrefixBasis::Finite { .. }, None) => {
-            let view = session
-                .compile_view_in(scope)
-                .ok_or(SessionError::DeadScope(scope))?
-                .with_scoped_injection()
-                .with_compile_inputs(
-                    state
-                        .compile_inputs
-                        .as_ref()
-                        .ok_or(SessionError::StaleStagedDeclaration)?,
-                )?;
-            session
-                .compile_view_digest_in(scope)
-                .ok_or(SessionError::DeadScope(scope))?;
-            PreparedCheckedSnapshotBasis::Finite(view)
-        }
-        _ => return Err(SessionError::StaleStagedDeclaration),
-    };
+    let retained = Arc::clone(&admission._retained_scope);
+    let scoped_inputs = state
+        .snapshot()
+        .scoped_inputs
+        .with_captured(Arc::clone(&retained), captured)?;
+    session
+        .compile_view_key_in(scope)
+        .ok_or(SessionError::DeadScope(scope))?;
+    if session
+        .lib()
+        .tips
+        .get(&scope)
+        .and_then(|tip| tip.inspection_world.as_ref())
+        .is_none_or(|association| !Arc::ptr_eq(&association.world, state.snapshot().world()))
+    {
+        return Err(SessionError::StaleStagedDeclaration);
+    }
     Ok(PreparedCheckedSnapshot {
         scope,
         compiler_prefix,
         interfaces,
         added_interface,
-        retained,
-        native_imports,
-        added_native,
-        basis,
+        scoped_inputs,
+        successor,
+        original_source: admission.original_source()?,
+        source: admission.world_source_reference()?.clone(),
+        target: admission._retained_scope.clone(),
     })
 }
 
@@ -3929,116 +3636,65 @@ impl PreparedCheckedSnapshot {
         let visibility = session
             .public_visibility_snapshot_in(scope)
             .expect("prepared capture visibility");
-        let snapshot = match self.basis {
-            PreparedCheckedSnapshotBasis::World {
-                successor,
-                original_source,
-                source,
-                target,
-            } => {
-                let key = session
-                    .compile_view_key_in(scope)
-                    .expect("prepared capture compiler witness");
-                let association = Arc::new(super::inspection::InspectionWorldAssociation {
-                    base: super::inspection::InspectionWorldBase {
-                        scope,
-                        key: key.clone(),
-                        owner: session.admission_owner().clone(),
-                        epoch: session.admission_owner().epoch(),
-                        source,
-                        original_source: super::inspection::InspectionWorldSourceObservation::new(
-                            &original_source,
-                        ),
-                        target: super::inspection::InspectionWorldLeaseObservation::new(&target),
-                    },
-                    world: successor.world().clone(),
-                });
-                let tip = session
-                    .lib_mut()
-                    .tips
-                    .get_mut(&scope)
-                    .expect("prepared capture scope");
-                tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(
-                    successor.compiler_context().clone(),
-                ));
-                tip.inspection_world = Some(association);
-                session.invalidate_compile_view_in(scope);
-                Arc::new(world_checked_snapshot(
-                    successor.world().clone(),
-                    key,
-                    state.snapshot().session_root.clone(),
-                    visibility,
-                    self.interfaces,
-                    self.compiler_prefix,
-                    admission.digest(),
-                    self.retained,
-                    self.native_imports,
-                ))
-            }
-            PreparedCheckedSnapshotBasis::Finite(view) => {
-                let view_digest = session
-                    .compile_view_digest_in(scope)
-                    .expect("prepared finite capture view");
-                let current = session
-                    .compile_view_in(scope)
-                    .expect("prepared finite capture scope")
-                    .with_scoped_injection();
-                let view = view.with_committed_values(current);
-                Arc::new(checked_snapshot(
-                    view,
-                    view_digest,
-                    visibility,
-                    self.interfaces,
-                    self.compiler_prefix,
-                    admission.digest(),
-                    self.retained,
-                    self.native_imports,
-                ))
-            }
+        let successor = self.successor;
+        let original_source = self.original_source;
+        let source = self.source;
+        let target = self.target;
+        let snapshot = {
+            let key = session
+                .compile_view_key_in(scope)
+                .expect("prepared capture compiler witness");
+            let association = Arc::new(super::inspection::InspectionWorldAssociation {
+                base: super::inspection::InspectionWorldBase {
+                    scope,
+                    key: key.clone(),
+                    owner: session.admission_owner().clone(),
+                    epoch: session.admission_owner().epoch(),
+                    source,
+                    original_source: super::inspection::InspectionWorldSourceObservation::new(
+                        &original_source,
+                    ),
+                    target: super::inspection::InspectionWorldLeaseObservation::new(&target),
+                },
+                world: successor.world().clone(),
+            });
+            let tip = session
+                .lib_mut()
+                .tips
+                .get_mut(&scope)
+                .expect("prepared capture scope");
+            tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(
+                successor.compiler_context().clone(),
+            ));
+            tip.inspection_world = Some(association);
+            session.invalidate_compile_view_in(scope);
+            Arc::new(world_checked_snapshot(
+                successor.world().clone(),
+                key,
+                state.snapshot().session_root.clone(),
+                visibility,
+                self.interfaces,
+                self.compiler_prefix,
+                admission.digest(),
+                self.scoped_inputs,
+            ))
         };
         if let Some((generation, digest)) = self.added_interface {
             state.interface_index.insert(generation, digest);
         }
-        state.native_index.extend(self.added_native);
         state.commit(snapshot, program);
     }
 }
 
-fn checked_snapshot(
-    view: SessionCompileView,
-    view_digest: [u8; 32],
-    visibility: PublicVisibilitySnapshot,
-    interfaces: CheckedInterfaces,
-    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
-    admission: [u8; 32],
-    retained_scope: Arc<RuntimeLexicalScopeLease>,
-    native_imports: CheckedNativeImports,
-) -> RuntimeCheckedPrefixSnapshot {
-    let session_root = view.session_root().to_path_buf();
-    checked_snapshot_with_basis(
-        RuntimeCheckedPrefixBasis::Finite {
-            view,
-            digest: view_digest,
-        },
-        session_root,
-        visibility,
-        interfaces,
-        compiler_prefix,
-        admission,
-        retained_scope,
-        native_imports,
-    )
-}
-
-fn checked_snapshot_with_basis(
-    basis: RuntimeCheckedPrefixBasis,
+fn world_checked_snapshot(
+    world: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
+    key: super::persistent::CompileViewKey,
     session_root: PathBuf,
     visibility: PublicVisibilitySnapshot,
     interfaces: CheckedInterfaces,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: [u8; 32],
-    retained_scope: Arc<RuntimeLexicalScopeLease>,
-    native_imports: CheckedNativeImports,
+    scoped_inputs: ScopedResolvedInputs,
 ) -> RuntimeCheckedPrefixSnapshot {
     let native_shares = visibility.source_instances.clone();
     let mut digest = blake3::Hasher::new();
@@ -4049,16 +3705,8 @@ fn checked_snapshot_with_basis(
     frame(b"TidepoolRuntimeCheckedPrefix2");
     frame(&admission);
     frame(&(compiler_prefix.next_item() as u64).to_le_bytes());
-    match &basis {
-        RuntimeCheckedPrefixBasis::Finite { digest, .. } => {
-            frame(b"finite");
-            frame(digest);
-        }
-        RuntimeCheckedPrefixBasis::World { world, .. } => {
-            frame(b"world");
-            frame(world.logical_id());
-        }
-    }
+    frame(b"world");
+    frame(world.logical_id());
     frame(&visibility.epoch.to_le_bytes());
     frame(&visibility.declaration_tip.0.to_le_bytes());
     match visibility.machine_incarnation {
@@ -4076,7 +3724,7 @@ fn checked_snapshot_with_basis(
     frame(b"interfaces");
     frame(&interfaces.commitment);
     frame(b"actual-native-imports");
-    frame(&native_imports.commitment);
+    frame(&scoped_inputs.commitment);
     for key in &native_shares {
         frame(b"native");
         frame(&key.instance.raw().to_le_bytes());
@@ -4084,38 +3732,15 @@ fn checked_snapshot_with_basis(
     }
     RuntimeCheckedPrefixSnapshot {
         session_root,
-        basis,
+        world,
+        key,
         visibility,
         interfaces,
-        _retained_scope: retained_scope,
         native_shares,
-        native_imports,
+        scoped_inputs,
         compiler_prefix,
         digest: *digest.finalize().as_bytes(),
     }
-}
-
-fn world_checked_snapshot(
-    world: Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-    key: super::persistent::CompileViewKey,
-    session_root: PathBuf,
-    visibility: PublicVisibilitySnapshot,
-    interfaces: CheckedInterfaces,
-    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
-    admission: [u8; 32],
-    retained_scope: Arc<RuntimeLexicalScopeLease>,
-    native_imports: CheckedNativeImports,
-) -> RuntimeCheckedPrefixSnapshot {
-    checked_snapshot_with_basis(
-        RuntimeCheckedPrefixBasis::World { world, key },
-        session_root,
-        visibility,
-        interfaces,
-        compiler_prefix,
-        admission,
-        retained_scope,
-        native_imports,
-    )
 }
 
 impl AdmittedValueInterface {
@@ -4142,27 +3767,6 @@ impl AdmittedValueInterface {
     pub fn bytes_owned(&self) -> &Arc<[u8]> {
         &self.snapshot.bytes
     }
-}
-
-fn initial_interfaces_match<'a, I: AsRef<ValueInterfaceSnapshot>>(
-    admitted: &[I],
-    consumed: impl IntoIterator<Item = (&'a tidepool_repr::SessionModule, &'a Arc<[u8]>)>,
-) -> bool {
-    let mut inventory = consumed.into_iter();
-    let mut seen = std::collections::BTreeSet::new();
-    for interface in admitted {
-        let interface = interface.as_ref();
-        let Some((module, bytes)) = inventory.next() else {
-            return false;
-        };
-        if !seen.insert(interface.module.module_name())
-            || interface.module != *module
-            || (!Arc::ptr_eq(&interface.bytes, bytes) && interface.bytes.as_ref() != bytes.as_ref())
-        {
-            return false;
-        }
-    }
-    inventory.next().is_none()
 }
 
 impl std::fmt::Debug for RuntimeCellAdmission {
@@ -4225,6 +3829,17 @@ impl RuntimeCellAdmission {
             RuntimeCellCompilerBasis::Finite(_) => {
                 Err(SessionError::WorldCellRequiresServicePreparation)
             }
+        }
+    }
+
+    /// The source owner captured for this compiler preparation. World requests
+    /// retain their original source independently of the target placement lease.
+    pub(super) fn compiler_preparation_source(&self) -> Arc<RuntimeOriginalSource> {
+        match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World {
+                original_source, ..
+            } => original_source.clone(),
+            RuntimeCellCompilerBasis::Finite(_) => self._retained_scope.original_source().clone(),
         }
     }
 
@@ -4392,9 +4007,9 @@ impl RuntimeCellAdmission {
         match &self.purpose {
             #[cfg(test)]
             RuntimeCellPurpose::Observation => false,
-            RuntimeCellPurpose::PrivateExecution(_)
-            | RuntimeCellPurpose::NativeSetup
-            | RuntimeCellPurpose::HostCarrier { .. } => true,
+            RuntimeCellPurpose::PrivateExecution(_) | RuntimeCellPurpose::HostCarrier { .. } => {
+                true
+            }
         }
     }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
@@ -4455,8 +4070,10 @@ impl RuntimeCellAdmission {
     pub fn native_shares(&self) -> Result<&[SourceLeaseKey], SessionError> {
         Ok(&self.finite_inputs()?.native_shares)
     }
-    pub fn admitted_retained_imports(&self) -> Result<&[(SymbolIdentity, u64)], SessionError> {
-        Ok(&self.finite_inputs()?.native_imports.entries)
+    pub fn admitted_retained_imports(
+        &self,
+    ) -> Result<impl Iterator<Item = (&SymbolIdentity, u64)>, SessionError> {
+        Ok(self.finite_inputs()?.scoped_inputs.imports())
     }
     pub fn interfaces(&self) -> Result<&[AdmittedValueInterface], SessionError> {
         Ok(&self.finite_inputs()?.interfaces)
@@ -4645,9 +4262,10 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
-        if let Some(retained) = &prefix.retained_inputs {
-            retained.validate_item(self, execution.item())?;
-        }
+        state
+            .snapshot()
+            .scoped_inputs
+            .validate_item(self, execution.item())?;
         execution.validate_required_native_imports(state.snapshot().actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot().settled_native_bindings())?;
         let admission = store
@@ -4907,10 +4525,7 @@ impl PersistentSession {
             binders: observation.verdict.binders.clone(),
             items: observation.verdict.items.clone(),
         };
-        let external = match state.snapshot().world() {
-            Some(_) => self.lib().workbench_imports_in(scope),
-            None => state.snapshot().view()?.persistent_imports().clone(),
-        };
+        let external = self.lib().workbench_imports_in(scope);
         let (external_imports, _, visible_values) =
             self.declaration_staging_context_in(scope, &receipt, &external)?;
         let base_tip = self.lib().scope_tip(scope);
@@ -4968,7 +4583,8 @@ impl PersistentSession {
                     .cloned()
             })
             .transpose()?;
-        let commit = if let Some(predecessor) = state.snapshot().world().cloned() {
+        let commit = {
+            let predecessor = state.snapshot().world().clone();
             let source = prefix.admission.world_source_reference()?.clone();
             let original_source = prefix.admission.original_source()?;
             original_source.validate_source_issuer()?;
@@ -4988,8 +4604,7 @@ impl PersistentSession {
             let import_lines = imports.source_lines();
             let prior = state.snapshot().clone();
             let interfaces = prior.interfaces.clone();
-            let native_imports = prior.native_imports.clone();
-            let retained = prior._retained_scope.clone();
+            let scoped_inputs = prior.scoped_inputs.clone();
             let owner = self.admission_owner().clone();
             let epoch = owner.epoch();
             // Direct stage observations are checked independently. Lifetime
@@ -4997,9 +4612,7 @@ impl PersistentSession {
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            if let Some(retained) = &prefix.retained_inputs {
-                retained.validate_item(self, item)?;
-            }
+            prior.scoped_inputs.validate_item(self, item)?;
             for input in selected.inputs() {
                 let entry = self
                     .bindings()
@@ -5068,8 +4681,7 @@ impl PersistentSession {
                         interfaces,
                         compiler_prefix,
                         prefix.admission.digest(),
-                        retained,
-                        native_imports,
+                        scoped_inputs,
                     ));
                     Ok(move |lib: &mut super::SessionLib| {
                         let tip = lib.tips.get_mut(&scope).expect("prepared declaration scope");
@@ -5080,39 +4692,12 @@ impl PersistentSession {
                             if let Some(frontier) = terminal {
                                 lifecycle.authored = PrivateAuthoredProgram::Ready(frontier);
                             } else if let PrivateAuthoredProgram::Active { predecessor, .. } = &mut lifecycle.authored {
-                                *predecessor = state.snapshot().world().expect("World declaration successor").clone();
+                                *predecessor = state.snapshot().world().clone();
                             }
                         }
                     })
                 },
             )?
-        } else {
-            let compile_inputs = state
-                .compile_inputs
-                .clone()
-                .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
-            let interfaces = state.snapshot().interfaces.clone();
-            let native_imports = state.snapshot().native_imports.clone();
-            self.adopt_staged_declaration_with_activation(staged, |view, visibility, retained| {
-                let view_digest = view.admission_commitment().0;
-                let view = view
-                    .with_scoped_injection()
-                    .with_compile_inputs(&compile_inputs)
-                    .map_err(SessionError::Compile)?;
-                let next = Arc::new(checked_snapshot(
-                    view,
-                    view_digest,
-                    visibility,
-                    interfaces,
-                    compiler_prefix,
-                    prefix.admission.digest(),
-                    retained,
-                    native_imports,
-                ));
-                Ok(move |_: &mut super::SessionLib| {
-                    state.commit(next, &prefix.program);
-                })
-            })?
         };
         Ok(commit)
     }
@@ -5484,7 +5069,7 @@ impl PersistentSession {
     }
 
     pub fn begin_cell_program(
-        &self,
+        &mut self,
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
         settled.checkpoint()?;
@@ -5499,59 +5084,11 @@ impl PersistentSession {
                 return Err(SessionError::WorldCellRequiresServicePreparation);
             }
         }
-        if admission.world_reservation().is_some() {
-            return self.begin_world_cell_program(admission, program, settled);
-        }
-        let finite = admission.finite_inputs()?;
-        let planned = admission
-            .plan_reservation()?
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        let program_plan = match program.basis() {
-            tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => plan,
-            tidepool_toolchain::checked_cell::CellProgramBasis::World(_) => {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        };
-        program
-            .validate_typed_entries()
-            .map_err(SessionError::Compile)?;
-        if program.admission_digest() != admission.digest()
-            || !Arc::ptr_eq(program_plan, planned.plan())
-            || program.slots() != planned.compiler_specification().slots.as_slice()
-            || program.items().len() != planned.items().len()
-            || program
-                .items()
-                .iter()
-                .enumerate()
-                .any(|(index, item)| item.checked_item().index() != index)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let Some(first) = program.items().first() else {
-            if !admission.belongs_to(self)
-                || self.public_visibility_snapshot_in(admission.scope).as_ref()
-                    != Some(&finite.visibility)
-                || self.compile_view_digest_in(admission.scope) != Some(finite.view_digest)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            admission
-                .prefix_started
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .map_err(|_| SessionError::StaleStagedDeclaration)?;
-            return Ok(None);
-        };
-        self.begin_cell_program_prefix(admission, first.checked_item().clone(), program, settled)
-            .map(Some)
+        self.begin_world_cell_program(admission, program, settled)
     }
 
     fn begin_world_cell_program(
-        &self,
+        &mut self,
         admission: Arc<RuntimeCellAdmission>,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
         settled: super::SettledCellProgram,
@@ -5642,10 +5179,8 @@ impl PersistentSession {
             .map(AdmittedValueInterface::from_checked)
             .collect::<Vec<_>>();
         let (interfaces, interface_index) = CheckedInterfaces::base(&baseline);
-        let retained_inputs =
-            self.bind_world_retained_inputs(&program, Arc::clone(&admission._retained_scope))?;
-        let native_imports =
-            Arc::new(self.capture_world_native_imports(scope, &program, &retained_inputs)?);
+        let scoped_inputs =
+            self.bind_world_scoped_inputs(&program, Arc::clone(&admission._retained_scope))?;
         let snapshot = Arc::new(world_checked_snapshot(
             reservation.plan().world_owned().clone(),
             private_key.clone(),
@@ -5655,8 +5190,7 @@ impl PersistentSession {
             interfaces,
             first_item.initial_prefix()?,
             admission.digest(),
-            admission._retained_scope.clone(),
-            CheckedNativeImports::base(native_imports.clone()),
+            scoped_inputs.clone(),
         ));
         admission.with_open_sources(|| {
             if !snapshot.is_current(self, scope) {
@@ -5678,97 +5212,13 @@ impl PersistentSession {
             admission,
             first_item,
             program,
-            retained_inputs: Some(retained_inputs),
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 phase: CellPhase::Ready(snapshot),
                 interface_index,
-                native_index: CheckedNativeIndex::new(native_imports),
-                compile_inputs: None,
             }),
         })))
     }
 
-    fn begin_cell_program_prefix(
-        &self,
-        admission: Arc<RuntimeCellAdmission>,
-        first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-        program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
-        settled: super::SettledCellProgram,
-    ) -> Result<Arc<RuntimeCheckedPrefix>, SessionError> {
-        if admission.world_reservation().is_some() {
-            return Err(SessionError::WorldCellCheckedProgramCapabilityMissing);
-        }
-        let finite = admission.finite_inputs()?;
-        if !admission.belongs_to(self)
-            || first_item.admission_digest() != admission.digest()
-            || first_item.specification_digest() != admission.specification_digest()?
-            || first_item.include_paths().len() != admission.include_paths()?.len()
-            || !first_item
-                .include_paths()
-                .iter()
-                .zip(admission.include_paths()?)
-                .all(|(consumed, admitted)| consumed.as_os_str() == admitted.as_os_str())
-            || first_item.reserved_declaration_modules().len()
-                != admission.reserved_generations.len()
-            || !admission
-                .reserved_generations
-                .iter()
-                .zip(first_item.reserved_declaration_modules())
-                .all(|(generation, module)| {
-                    tidepool_repr::SessionModule::lib(*generation)
-                        .module_name()
-                        .eq(module)
-                })
-            || first_item.injected_modules().len() != finite.view.injected_values.len()
-            || !finite
-                .view
-                .injected_values
-                .iter()
-                .zip(first_item.injected_modules())
-                .all(|(module, supplied)| module.module_name().eq(supplied))
-            || !initial_interfaces_match(&finite.interfaces, first_item.baseline_value_interfaces())
-            || self.public_visibility_snapshot_in(admission.scope).as_ref()
-                != Some(&finite.visibility)
-            || self.compile_view_digest_in(admission.scope) != Some(finite.view_digest)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
-        let (interfaces, interface_index) = CheckedInterfaces::base(&finite.interfaces);
-        let snapshot = Arc::new(checked_snapshot(
-            finite.view.clone(),
-            finite.view_digest,
-            finite.visibility.clone(),
-            interfaces,
-            first_item.initial_prefix()?,
-            admission.digest(),
-            admission._retained_scope.clone(),
-            CheckedNativeImports::base(finite.native_imports.clone()),
-        ));
-        admission
-            .prefix_started
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let native_index = CheckedNativeIndex::new(finite.native_imports.clone());
-        let compile_inputs = finite.compile_inputs.clone();
-        Ok(Arc::new(RuntimeCheckedPrefix {
-            settled,
-            admission,
-            first_item,
-            program,
-            retained_inputs: None,
-            state: parking_lot::Mutex::new(RuntimeCheckedState {
-                phase: CellPhase::Ready(snapshot),
-                interface_index,
-                native_index,
-                compile_inputs: Some(compile_inputs),
-            }),
-        }))
-    }
     /// Capsule drops happen outside checkout. The next owner entry retires
     /// their detached lease scopes through the same binding/native owner.
     pub(crate) fn reap_admission_leases(&mut self) {
@@ -6396,97 +5846,6 @@ impl PersistentSession {
         )
     }
 
-    /// Admit trusted setup under its existing scope with the same ordered
-    /// parser and exact environment seals used by private authored execution.
-    pub fn admit_native_setup_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        if plan.items().len() != 1
-            || plan.items()[0].kind() != Kind::Bind
-            || !plan.items()[0].binders().is_empty()
-        {
-            return Err(self.native_setup_refusal(
-                scope,
-                NativeSetupAdmissionFailure::Shape {
-                    items: plan.items().len(),
-                    first: plan.items().first().map(|item| item.kind()),
-                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
-                },
-            ));
-        }
-        self.admit_cell_with_plan(
-            scope,
-            0,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::NativeSetup,
-            compile_inputs,
-        )
-    }
-
-    pub(super) fn admit_host_carrier_cell_in(
-        &mut self,
-        scope: ScopeId,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        binding: String,
-        expected: super::resident::HostBindingType,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        if self
-            .source_lease_in(scope)?
-            .private_lifecycle
-            .get()
-            .is_some()
-        {
-            return Err(SessionError::WorldCellRequiresServicePreparation);
-        }
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        if plan.items().len() != 1
-            || plan.items()[0].kind() != Kind::Bind
-            || plan.items()[0].binders() != [binding.as_str()]
-        {
-            return Err(self.native_setup_refusal(
-                scope,
-                NativeSetupAdmissionFailure::HostCarrierShape {
-                    items: plan.items().len(),
-                    first: plan.items().first().map(|item| item.kind()),
-                    binders: plan.items().first().map_or(0, |item| item.binders().len()),
-                },
-            ));
-        }
-        self.admit_cell_with_plan(
-            scope,
-            0,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::HostCarrier {
-                binding,
-                expected,
-                authority_digest,
-                private_preparation: None,
-            },
-            compile_inputs,
-        )
-    }
-
     fn native_setup_refusal(
         &self,
         scope: ScopeId,
@@ -6500,6 +5859,7 @@ impl PersistentSession {
         }
     }
 
+    #[cfg(test)]
     fn admit_cell_with_plan(
         &mut self,
         scope: ScopeId,
@@ -6585,11 +5945,8 @@ impl PersistentSession {
                     })
             };
             if let Some(reason) = refusal {
-                return Err(if matches!(purpose, RuntimeCellPurpose::NativeSetup) {
-                    self.native_setup_refusal(scope, reason)
-                } else {
-                    SessionError::StaleStagedDeclaration
-                });
+                let _ = reason;
+                return Err(SessionError::StaleStagedDeclaration);
             }
         }
         let view_digest = self
@@ -6609,7 +5966,8 @@ impl PersistentSession {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let native_imports = Arc::new(self.capture_admitted_native_imports(scope)?);
+        let scoped_inputs =
+            Arc::new(self.capture_admitted_scoped_inputs(Arc::clone(&retained_scope))?);
         let interfaces = self.capture_value_interfaces(&view)?;
         let native_count = match &plan {
             Some(plan) => plan.items().iter().try_fold(0u64, |count, item| {
@@ -6755,7 +6113,7 @@ impl PersistentSession {
         }
         frame(&view.next_value_generation().0.to_le_bytes());
         frame(&view_digest);
-        frame(&native_imports.commitment);
+        frame(&scoped_inputs.commitment);
         if let Some(context) = view.exact_declaration_context() {
             frame(&context.semantic_sha256());
         }
@@ -6852,7 +6210,7 @@ impl PersistentSession {
                 view_digest,
                 planned,
                 native_shares,
-                native_imports,
+                scoped_inputs,
                 interfaces,
                 specification,
                 specification_digest,
@@ -6863,253 +6221,6 @@ impl PersistentSession {
             digest,
         });
         Ok(prepared)
-    }
-
-    fn capture_admitted_native_imports(
-        &self,
-        scope: ScopeId,
-    ) -> Result<AdmittedNativeImports, SessionError> {
-        if !self.scope_tree().is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        let mut entries = std::collections::BTreeSet::new();
-        let mut owners = std::collections::BTreeMap::new();
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"TidepoolAdmittedNativeImports1");
-        for id in self
-            .bindings()
-            .scope_reachable_binding_ids(self.scope_tree(), scope)
-        {
-            let entry = self
-                .bindings()
-                .get(id)
-                .ok_or(SessionError::StaleStagedDeclaration)?;
-            let handle = entry.value.handle;
-            if self
-                .prepared()
-                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                != Some(handle)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            hash.update(b"binding");
-            hash.update(&id.raw().to_le_bytes());
-            hash.update(&entry.module.gen.0.to_le_bytes());
-            hash.update(&handle.raw().0.to_le_bytes());
-            frame_native_identity(&mut hash, &entry.value.identity);
-            entries.insert((entry.value.identity.clone(), entry.module.gen.0));
-            owners.insert(
-                (entry.value.identity.clone(), entry.module.gen.0),
-                handle.raw().0,
-            );
-        }
-        Ok(AdmittedNativeImports {
-            entries: entries.into_iter().collect(),
-            owners,
-            commitment: *hash.finalize().as_bytes(),
-        })
-    }
-
-    fn bind_world_retained_inputs(
-        &self,
-        program: &tidepool_toolchain::checked_cell::CellProgram,
-        scope: Arc<RuntimeLexicalScopeLease>,
-    ) -> Result<BoundRetainedInputs, SessionError> {
-        self.validate_lexical_scope_lease(scope.scope, &scope)?;
-        let scoped = self.scoped_prepared_bindings_in(scope.scope);
-        let mut stages = BTreeMap::new();
-        for item in program.items() {
-            let checked = item.checked_item();
-            let stage = checked
-                .world_selected_runtime_inputs()
-                .ok_or(SessionError::StaleStagedDeclaration)?
-                .stage_first_ordinal();
-            if stages.contains_key(&stage) {
-                continue;
-            }
-            let selected = checked
-                .world_stage_dependencies()
-                .ok_or(super::SessionTransitionReason::WrongPhase)?
-                .terminals();
-            let mut bound = Vec::with_capacity(selected.len());
-            for terminal in selected {
-                let module = tidepool_repr::SessionModule::val(Generation(terminal.generation()));
-                let entry = scoped
-                    .get(&(terminal.identity(), module))
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                let row = self
-                    .retained_checked_value_artifact(entry.module)
-                    .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?;
-                let interface = row.certified_interface().interface();
-                let handle = entry.value.handle;
-                if row.owner() != entry.module
-                    || interface.unit() != terminal.identity().unit
-                    || interface.module() != terminal.identity().module
-                    || !terminal.matches_checked_value(row)?
-                    || self
-                        .prepared()
-                        .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                        != Some(handle)
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                let id = entry.id;
-                let defining_scope = entry.scope;
-                let row = Arc::clone(row);
-                bound.push(BoundRetainedInput {
-                    terminal,
-                    id,
-                    defining_scope,
-                    handle,
-                    row,
-                });
-            }
-            stages.insert(stage, bound);
-        }
-        Ok(BoundRetainedInputs { scope, stages })
-    }
-
-    fn capture_world_native_imports(
-        &self,
-        scope: ScopeId,
-        program: &tidepool_toolchain::checked_cell::CellProgram,
-        retained: &BoundRetainedInputs,
-    ) -> Result<AdmittedNativeImports, SessionError> {
-        use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-        let own_values = program
-            .slots()
-            .iter()
-            .filter_map(|slot| match slot {
-                Slot::Bind { value } => Some(*value),
-                Slot::Expression { capture, .. } => Some(*capture),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        self.capture_selected_native_imports(
-            scope,
-            program
-                .items()
-                .iter()
-                .filter_map(|item| item.native())
-                .flat_map(|native| native.required_native_imports())
-                .filter(|(identity, generation)| {
-                    // Same-cell values become imports only after their own item succeeds.
-                    !(own_values.contains(generation)
-                        && identity.unit == "main"
-                        && identity.module
-                            == tidepool_repr::SessionModule::val(Generation(*generation))
-                                .module_name())
-                })
-                .chain(
-                    retained
-                        .stages
-                        .values()
-                        .flatten()
-                        .map(|input| (input.terminal.identity(), input.terminal.generation())),
-                ),
-        )
-    }
-
-    fn capture_selected_native_imports<'a>(
-        &self,
-        scope: ScopeId,
-        required: impl IntoIterator<Item = (&'a SymbolIdentity, u64)>,
-    ) -> Result<AdmittedNativeImports, SessionError> {
-        if !self.scope_tree().is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        let scoped = self.scoped_prepared_bindings_in(scope);
-        let mut owners = BTreeMap::new();
-        for (identity, generation) in required {
-            let entry = scoped
-                .get(&(
-                    identity,
-                    tidepool_repr::SessionModule::val(Generation(generation)),
-                ))
-                .ok_or(SessionError::StaleStagedDeclaration)?;
-            let handle = entry.value.handle;
-            if self
-                .prepared()
-                .and_then(|engine| engine.prepared_handle_of(handle.raw()))
-                != Some(handle)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            let root = handle.raw().0;
-            let key = (identity.clone(), generation);
-            if owners.insert(key, root).is_some_and(|old| old != root) {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        }
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"TidepoolWorldAdmittedNativeImports1");
-        for ((identity, generation), root) in &owners {
-            frame_native_identity(&mut hash, identity);
-            hash.update(&generation.to_le_bytes());
-            hash.update(&root.to_le_bytes());
-        }
-        Ok(AdmittedNativeImports {
-            entries: owners.keys().cloned().collect(),
-            owners,
-            commitment: *hash.finalize().as_bytes(),
-        })
-    }
-
-    fn capture_checked_native_delta<'a>(
-        &self,
-        scope: ScopeId,
-        generation: u64,
-        bound_rows: impl Iterator<Item = (&'a str, u64)>,
-    ) -> Result<CapturedNativeDelta, SessionError> {
-        if !self.scope_tree().is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        let engine = self
-            .prepared()
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        let mut imports = std::collections::BTreeMap::new();
-        let mut bindings = Vec::new();
-        for (name, id) in bound_rows {
-            let id = tidepool_repr::SessionVarId::from_extract(id);
-            let Some(entry) = self.bindings().get(id) else {
-                return Err(SessionError::StaleStagedDeclaration);
-            };
-            let identity = &entry.value.identity;
-            let module = tidepool_repr::SessionModule::val(Generation(generation));
-            if entry.scope != scope
-                || entry.name.0 != name
-                || entry.module != module
-                || identity.module != module.module_name()
-                || identity.namespace != "value"
-                || identity.occurrence != name
-                || identity.record_parent.is_some()
-                || engine.prepared_handle_of(entry.value.handle.raw()) != Some(entry.value.handle)
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            let root_id = entry.value.handle.raw().0;
-            imports.insert((identity.clone(), generation), root_id);
-            bindings.push(SettledNativeBinding {
-                name: name.to_owned(),
-                id,
-                import: SettledNativeImport {
-                    identity: identity.clone(),
-                    generation,
-                    root_id,
-                },
-            });
-        }
-        Ok(CapturedNativeDelta {
-            imports: imports
-                .into_iter()
-                .map(|((identity, generation), root_id)| SettledNativeImport {
-                    identity,
-                    generation,
-                    root_id,
-                })
-                .collect(),
-            bindings,
-        })
     }
 
     /// Capture private admission facts for owner-component controls without
@@ -7135,40 +6246,6 @@ impl PersistentSession {
             None,
             RuntimeCellPurpose::PrivateExecution(execution),
             None,
-        )
-    }
-
-    /// Reserve every ordered source item under the original private admission.
-    /// The parser capability supplies kinds and order; callers cannot guess a
-    /// declaration count or assign generations. Authoritative checking must
-    /// subsequently bind this exact reservation before prefix creation.
-    pub fn admit_planned_cell_for_execution(
-        &mut self,
-        execution: Arc<PrivateExecutionAdmission>,
-        plan: Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        self.compile_view_for_execution(&execution)?;
-        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        let declaration_count = plan
-            .items()
-            .iter()
-            .filter(|item| matches!(item.kind(), Kind::Prologue | Kind::Declaration))
-            .count();
-        self.admit_cell_with_plan(
-            execution.private_scope(),
-            declaration_count,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            Some(plan),
-            RuntimeCellPurpose::PrivateExecution(execution),
-            compile_inputs,
         )
     }
 
@@ -8066,73 +7143,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
-        let first = ValueInterfaceSnapshot {
-            module: tidepool_repr::SessionModule::val(Generation(1)),
-            bytes: Arc::from([1, 2, 3]),
-        };
-        let second = ValueInterfaceSnapshot {
-            module: tidepool_repr::SessionModule::val(Generation(2)),
-            bytes: Arc::from([4, 5, 6]),
-        };
-        let admitted = [first.clone(), second.clone()];
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [
-                (&second.module, &second.bytes),
-                (&first.module, &first.bytes)
-            ],
-        ));
-        assert!(initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &first.bytes),
-                (&second.module, &second.bytes)
-            ],
-        ));
-        let equal_bytes: Arc<[u8]> = Arc::from([1, 2, 3]);
-        assert!(!Arc::ptr_eq(&first.bytes, &equal_bytes));
-        assert!(initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &equal_bytes),
-                (&second.module, &second.bytes)
-            ],
-        ));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &first.bytes)],
-        ));
-        let extra = tidepool_repr::SessionModule::val(Generation(3));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &first.bytes),
-                (&second.module, &second.bytes),
-                (&extra, &first.bytes),
-            ],
-        ));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &first.bytes), (&first.module, &first.bytes)],
-        ));
-        let changed: Arc<[u8]> = Arc::from([1, 2, 4]);
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &changed), (&second.module, &second.bytes)],
-        ));
-        assert!(!initial_interfaces_match(
-            &[first.clone(), first],
-            [(&second.module, &second.bytes)],
-        ));
-        assert!(initial_interfaces_match::<ValueInterfaceSnapshot>(&[], []));
-        assert!(!initial_interfaces_match::<ValueInterfaceSnapshot>(
-            &[],
-            [(&second.module, &second.bytes)],
-        ));
-    }
-
-    #[test]
     fn native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger() {
         use tidepool_repr::{SessionModule, SessionVarId};
 
@@ -8169,12 +7179,17 @@ mod tests {
                 let foreign_identity = foreign.value.identity.clone();
                 session.bind_in(sibling, foreign).unwrap();
                 let retained = session.retain_lexical_scope(public).unwrap();
-                let ledger = Arc::new(session.capture_admitted_native_imports(public).unwrap());
-                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
-                assert!(ledger.entries.contains(&(historical_identity, 911)));
+                let ledger = Arc::new(
+                    session
+                        .capture_admitted_scoped_inputs(
+                            session.prepared_lexical_scope_lease(public).unwrap(),
+                        )
+                        .unwrap(),
+                );
+                assert!(ledger.value(&original_identity, 910).is_some());
+                assert!(ledger.value(&historical_identity, 911).is_some());
                 assert!(!ledger
-                    .entries
-                    .iter()
+                    .imports()
                     .any(|(identity, _)| identity == &foreign_identity));
 
                 let mut replacement =
@@ -8183,12 +7198,14 @@ mod tests {
                 let replacement_identity = replacement.value.identity.clone();
                 session.bind_in(public, replacement).unwrap();
                 assert!(session
-                    .capture_admitted_native_imports(public)
+                    .capture_admitted_scoped_inputs(
+                        session.prepared_lexical_scope_lease(public).unwrap()
+                    )
                     .unwrap()
-                    .entries
-                    .contains(&(replacement_identity.clone(), 913)));
-                assert!(!ledger.entries.contains(&(replacement_identity, 913)));
-                assert!(ledger.entries.contains(&(original_identity.clone(), 910)));
+                    .value(&replacement_identity, 913)
+                    .is_some());
+                assert!(!ledger.value(&replacement_identity, 913).is_some());
+                assert!(ledger.value(&original_identity, 910).is_some());
                 (public, retained, ledger, original_id, sibling_source)
             });
         session.retire_scope(public);
@@ -8351,17 +7368,11 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024)
             .spawn(|| {
-                let mut native = None;
                 let mut interfaces = None;
                 let bytes: Arc<[u8]> = Arc::from([1]);
                 let mut retained = None;
                 let mut oldest = None;
                 for generation in 0..50_000 {
-                    native = Some(Arc::new(CheckedNativeDelta {
-                        previous: native,
-                        imports: Vec::new(),
-                        bindings: Vec::new(),
-                    }));
                     interfaces = Some(Arc::new(CheckedInterfaceDelta {
                         previous: interfaces,
                         interface: ValueInterfaceSnapshot {
@@ -8370,22 +7381,16 @@ mod tests {
                         },
                     }));
                     if generation == 0 {
-                        oldest = Some((
-                            Arc::downgrade(native.as_ref().unwrap()),
-                            Arc::downgrade(interfaces.as_ref().unwrap()),
-                        ));
+                        oldest = Some(Arc::downgrade(interfaces.as_ref().unwrap()));
                     }
                     if generation == 25_000 {
-                        retained = Some((native.clone(), interfaces.clone()));
+                        retained = interfaces.clone();
                     }
                 }
-                let (old_native, old_interface) = oldest.unwrap();
-                drop(native);
+                let old_interface = oldest.unwrap();
                 drop(interfaces);
-                assert!(old_native.upgrade().is_some());
                 assert!(old_interface.upgrade().is_some());
                 drop(retained);
-                assert!(old_native.upgrade().is_none());
                 assert!(old_interface.upgrade().is_none());
                 assert_eq!(Arc::strong_count(&bytes), 1);
             })
@@ -8396,16 +7401,10 @@ mod tests {
 
     #[test]
     fn settled_delta_release_handles_concurrent_last_readers_on_small_stacks() {
-        let mut native = None;
         let mut interfaces = None;
         let mut readers = Vec::new();
         let bytes: Arc<[u8]> = Arc::from([1]);
         for generation in 0..50_000 {
-            native = Some(Arc::new(CheckedNativeDelta {
-                previous: native,
-                imports: Vec::new(),
-                bindings: Vec::new(),
-            }));
             interfaces = Some(Arc::new(CheckedInterfaceDelta {
                 previous: interfaces,
                 interface: ValueInterfaceSnapshot {
@@ -8413,17 +7412,15 @@ mod tests {
                     bytes: bytes.clone(),
                 },
             }));
-            readers.push((native.clone(), interfaces.clone()));
+            readers.push(interfaces.clone());
         }
-        let old_native = Arc::downgrade(readers[0].0.as_ref().unwrap());
-        let old_interface = Arc::downgrade(readers[0].1.as_ref().unwrap());
+        let old_interface = Arc::downgrade(readers[0].as_ref().unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let release_barrier = barrier.clone();
         let release = std::thread::Builder::new()
             .stack_size(64 * 1024)
             .spawn(move || {
                 release_barrier.wait();
-                drop(native);
                 drop(interfaces);
             })
             .unwrap();
@@ -8438,219 +7435,56 @@ mod tests {
             .unwrap();
         release.join().unwrap();
         readers.join().unwrap();
-        assert!(old_native.upgrade().is_none());
         assert!(old_interface.upgrade().is_none());
         assert_eq!(Arc::strong_count(&bytes), 1);
     }
 
     #[test]
-    fn selected_native_imports_keep_exact_scoped_roots_and_refuse_sibling_only_values() {
+    fn scoped_inputs_share_held_values_and_keep_snapshot_membership() {
         let mut session = PersistentSession::new(None, 1024 * 1024);
         let source = session.mint_notebook_scope_with_lease(None).unwrap();
         native_source_action(&mut session, &source, |session| {
             let public = session.mint_isolated_scope();
             let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
-            let first =
+            let mut first =
                 super::super::prepared::tests::rooted_publication_fixture(session, "value", 460);
+            first.value.identity.module = first.module.module_name();
             let identity = first.value.identity.clone();
-            let first_root = first.value.handle.raw().0;
+            let root = first.value.handle;
             session.bind_in(public, first).unwrap();
-            let private = session.mint_detached_scope(public).unwrap();
-            let replacement =
-                super::super::prepared::tests::rooted_publication_fixture(session, "value", 461);
-            session.bind_in(public, replacement).unwrap();
-            let sibling = session.mint_isolated_scope();
-            let _sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
-            let mut foreign =
-                super::super::prepared::tests::rooted_publication_fixture(session, "value", 462);
-            foreign.module = tidepool_repr::SessionModule::val(Generation(460));
-            let foreign_root = foreign.value.handle.raw().0;
-            assert_ne!(first_root, foreign_root);
-            session.bind_in(sibling, foreign).unwrap();
-            let selected = session
-                .capture_selected_native_imports(private, [(&identity, 460)])
+            let lease = session.prepared_lexical_scope_lease(public).unwrap();
+            let owner = session
+                .capture_admitted_scoped_inputs(Arc::clone(&lease))
                 .unwrap();
-            assert_eq!(selected.entries, [(identity.clone(), 460)]);
-            assert_eq!(
-                selected.owners.get(&(identity.clone(), 460)),
-                Some(&first_root)
-            );
-            assert!(session
-                .capture_selected_native_imports(public, [(&identity, 461)])
-                .is_ok());
-            assert!(matches!(
-                session.capture_selected_native_imports(private, [(&identity, 461)]),
-                Err(SessionError::StaleStagedDeclaration)
-            ), "a later value that is live in the issuer scope cannot replace the captured generation");
-            assert!(
-                matches!(
-                    session.capture_selected_native_imports(private, [(&identity, 9999)]),
-                    Err(SessionError::StaleStagedDeclaration)
-                ),
-                "an absent runtime generation is refused before native execution"
-            );
-            let isolated = session.mint_isolated_scope();
-            assert!(matches!(
-                session.capture_selected_native_imports(isolated, [(&identity, 460)]),
-                Err(SessionError::StaleStagedDeclaration)
-            ));
-            let empty = session
-                .capture_selected_native_imports(private, [])
-                .unwrap();
-            assert!(empty.entries.is_empty());
-            assert!(empty.owners.is_empty());
-        });
-    }
-
-    fn bind_native_delta_fixture(
-        session: &mut PersistentSession,
-        name: &str,
-        generation: u64,
-    ) -> SymbolIdentity {
-        let mut entry =
-            crate::session::prepared::tests::rooted_publication_fixture(session, name, generation);
-        entry.value.identity.module = entry.module.module_name();
-        entry.value.identity.namespace = "value".into();
-        entry.value.identity.occurrence = entry.name.0.clone();
-        let identity = entry.value.identity.clone();
-        session.bind_in(ScopeId::ROOT, entry).unwrap();
-        identity
-    }
-
-    #[test]
-    fn settled_native_delta_excludes_ambient_exports_and_reuses_only_owned_roots() {
-        use tidepool_repr::execution_schema::testing;
-        let mut session = PersistentSession::new(None, 1024 * 1024);
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
-        native_source_action(&mut session, &source, |session| {
-            let baseline = Arc::new(
-                session
-                    .capture_admitted_native_imports(ScopeId::ROOT)
-                    .unwrap(),
-            );
-            let mut index = CheckedNativeIndex::new(baseline.clone());
-            let ambient_identity = testing::identity("Fixture", "entry");
-            session
-                .install_prepared(testing::prepare(testing::wire_program()).unwrap(), None)
-                .unwrap();
-            assert!(matches!(
-                session.capture_selected_native_imports(ScopeId::ROOT, [(&ambient_identity, 0)]),
-                Err(SessionError::StaleStagedDeclaration)
-            ));
-            let own_identity = bind_native_delta_fixture(session, "answer", 924);
-            let delta = session
-                .capture_checked_native_delta(ScopeId::ROOT, 924, [("answer", 924)].into_iter())
-                .unwrap();
-            assert_eq!(delta.imports.len(), 1);
-            assert_eq!(delta.imports[0].identity, own_identity);
-            let (ledger, added) = CheckedNativeImports::base(baseline.clone())
-                .append(delta, &index)
-                .unwrap();
-            index.extend(added);
-            assert!(!ledger
-                .imports()
-                .any(|(identity, _)| identity == &ambient_identity));
-            assert!(ledger
-                .imports()
-                .any(|(identity, _)| identity == &own_identity));
-            let absent = session
-                .capture_checked_native_delta(ScopeId::ROOT, 924, [].into_iter())
-                .unwrap();
-            assert!(absent.imports.is_empty());
-            assert!(absent.bindings.is_empty());
-            let (unchanged, added) = ledger.append(absent, &index).unwrap();
-            assert!(added.is_empty());
+            let shared = owner.clone();
+            drop(lease);
             assert!(Arc::ptr_eq(
-                ledger.tail.as_ref().unwrap(),
-                unchanged.tail.as_ref().unwrap()
+                owner.value(&identity, 460).unwrap(),
+                shared.value(&identity, 460).unwrap()
             ));
-            assert!(Arc::ptr_eq(&ledger.base, &baseline));
-            assert!(matches!(
-                session.capture_checked_native_delta(
-                    ScopeId::ROOT,
-                    925,
-                    [("answer", 924)].into_iter()
-                ),
-                Err(SessionError::StaleStagedDeclaration)
-            ));
-        });
-    }
-
-    #[test]
-    fn checked_native_index_shares_live_baseline_and_keeps_exact_delta_owners() {
-        let mut session = PersistentSession::new(None, 1024 * 1024);
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
-        native_source_action(&mut session, &source, |session| {
-            let value_identity = bind_native_delta_fixture(session, "answer", 924);
-            let baseline = Arc::new(
-                session
-                    .capture_admitted_native_imports(ScopeId::ROOT)
-                    .unwrap(),
-            );
-            let retained = Arc::downgrade(&baseline);
-            let mut index = CheckedNativeIndex::new(baseline.clone());
-            let ledger = CheckedNativeImports::base(baseline.clone());
-            assert!(Arc::ptr_eq(&index.base, &ledger.base));
-            assert!(index.added.is_empty());
-            assert!(index.get(&(value_identity.clone(), 924)).is_some());
-            assert!(index.get(&(value_identity.clone(), 925)).is_none());
-            let mut foreign_value = value_identity.clone();
-            foreign_value.unit.push_str("-foreign");
-            assert!(index.get(&(foreign_value, 924)).is_none());
-            let reused = session
-                .capture_checked_native_delta(ScopeId::ROOT, 924, [("answer", 924)].into_iter())
-                .unwrap();
-            assert_eq!(reused.imports.len(), 1);
-            let (unchanged, added) = ledger.append(reused, &index).unwrap();
-            assert!(added.is_empty());
-            assert!(unchanged.tail.as_ref().unwrap().imports.is_empty());
-            assert_eq!(unchanged.tail.as_ref().unwrap().bindings.len(), 1);
-            for ((identity, generation), root) in &baseline.owners {
-                assert!(ledger
-                    .append(
-                        CapturedNativeDelta {
-                            imports: vec![SettledNativeImport {
-                                identity: identity.clone(),
-                                generation: *generation,
-                                root_id: root + 1,
-                            }],
-                            bindings: Vec::new(),
-                        },
-                        &index
-                    )
-                    .is_err());
-            }
-            let own_identity = bind_native_delta_fixture(session, "later", 925);
-            let delta = session
-                .capture_checked_native_delta(ScopeId::ROOT, 925, [("later", 925)].into_iter())
-                .unwrap();
-            assert_eq!(delta.imports.len(), 1);
-            let root = delta.imports[0].root_id;
-            let (settled, added) = ledger.append(delta, &index).unwrap();
-            index.extend(added);
-            assert_eq!(index.added.len(), 1);
-            assert_eq!(index.get(&(own_identity.clone(), 925)), Some(&root));
-            assert!(baseline.owners.get(&(own_identity.clone(), 925)).is_none());
-            assert!(settled
-                .append(
-                    CapturedNativeDelta {
-                        imports: vec![SettledNativeImport {
-                            identity: own_identity,
-                            generation: 925,
-                            root_id: root + 1,
-                        }],
-                        bindings: Vec::new(),
-                    },
-                    &index
+            assert_eq!(owner.value(&identity, 460).unwrap().handle, root);
+            let mut later =
+                super::super::prepared::tests::rooted_publication_fixture(session, "value", 461);
+            later.value.identity.module = later.module.module_name();
+            let later_identity = later.value.identity.clone();
+            session.bind_in(public, later).unwrap();
+            let next = session
+                .capture_admitted_scoped_inputs(
+                    session.prepared_lexical_scope_lease(public).unwrap(),
                 )
-                .is_err());
-            drop(baseline);
-            drop(ledger);
-            drop(unchanged);
-            drop(settled);
-            assert!(retained.upgrade().is_some());
-            drop(index);
-            assert!(retained.upgrade().is_none());
+                .unwrap();
+            assert!(next.value(&later_identity, 461).is_some());
+            assert!(owner.value(&later_identity, 461).is_none());
+            let isolated = session.mint_isolated_scope();
+            let _isolated_source = session.adopt_initial_notebook_scope(isolated).unwrap();
+            let isolated = session
+                .capture_admitted_scoped_inputs(
+                    session.prepared_lexical_scope_lease(isolated).unwrap(),
+                )
+                .unwrap();
+            assert!(isolated.value(&identity, 460).is_none());
+            assert_eq!(owner.commitment, shared.commitment);
+            assert_ne!(owner.commitment, next.commitment);
         });
     }
 
@@ -8711,16 +7545,33 @@ mod tests {
             let handle = unbound.value.handle.raw().0;
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
             let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
-            let before = session.capture_admitted_native_imports(scope).unwrap();
-            assert!(!before.entries.contains(&key));
+            let before = session
+                .capture_admitted_scoped_inputs(
+                    session.prepared_lexical_scope_lease(scope).unwrap(),
+                )
+                .unwrap();
+            assert!(!before.value(&key.0, key.1).is_some());
             session.bind_in(scope, unbound).unwrap();
-            let admitted = session.capture_admitted_native_imports(scope).unwrap();
-            assert!(admitted.entries.contains(&key));
-            assert_eq!(admitted.owners.get(&key), Some(&handle));
+            let admitted = session
+                .capture_admitted_scoped_inputs(
+                    session.prepared_lexical_scope_lease(scope).unwrap(),
+                )
+                .unwrap();
+            assert!(admitted.value(&key.0, key.1).is_some());
+            assert_eq!(
+                admitted
+                    .value(&key.0, key.1)
+                    .map(|value| value.handle.raw().0),
+                Some(handle)
+            );
             assert_ne!(handle, 0);
-            let unrelated = session.capture_admitted_native_imports(sibling).unwrap();
-            assert!(!unrelated.entries.contains(&key));
-            assert!(!unrelated.owners.contains_key(&key));
+            let unrelated = session
+                .capture_admitted_scoped_inputs(
+                    session.prepared_lexical_scope_lease(sibling).unwrap(),
+                )
+                .unwrap();
+            assert!(!unrelated.value(&key.0, key.1).is_some());
+            assert!(!unrelated.value(&key.0, key.1).is_some());
             assert_ne!(admitted.commitment, unrelated.commitment);
             assert_ne!(admitted.commitment, before.commitment);
         });
