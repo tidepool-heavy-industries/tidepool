@@ -3976,7 +3976,7 @@ decodeScope = do
         originalDigest <- digestField
         budget <- decodeWord64
         templateSha <- digestField
-        native <- signature
+        native <- decodeCheckedSignature
         witness <- decodeBytes
         unless (not (BS.null witness) && BS.length witness <= 4 * 1024 * 1024)
           (fail "activation input witness exceeds bound")

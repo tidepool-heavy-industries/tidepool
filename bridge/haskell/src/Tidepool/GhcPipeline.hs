@@ -9878,7 +9878,7 @@ selectCurrentSourceOriginals admitted resolved recipe sourceGraph = do
       Just protected -> do
         (whole,driver) <- either (liftIO . fail) pure (generatedImportDriver resolved)
         liftIO (readGeneratedScaffoldImportAuthority closure'
-          (scopeExecutionNativeOwners admitted) Nothing protected whole driver sourceGraph hydrated)
+          protected whole driver sourceGraph hydrated)
           >>= either (liftIO . fail) pure
     let roots = Set.toAscList (reloadOwners `Set.union` Set.fromList [key | (summary,imported,key) <- hiddenImports
           , key `Set.notMember` publishedOwners
@@ -10436,8 +10436,8 @@ sessionVariant purpose scope = do
             Nothing -> pure noGeneratedScaffoldImports
             Just recipe -> do
               (whole,driver) <- either (liftIO . fail) pure (generatedImportDriver resolved)
-                    liftIO (readGeneratedScaffoldImportAuthority closure'
-                (scopeExecutionNativeOwners admitted) original recipe whole driver modGraphRaw hydrated)
+              liftIO (readGeneratedScaffoldImportAuthority closure'
+                recipe whole driver modGraphRaw hydrated)
                 >>= either (liftIO . fail) pure
           preflight <- liftIO (installLexicalInterfaces interfaceViews hydratedOwner
             (ExactLexicalInputs observation modGraphRaw lexical checkedValues scaffold))

@@ -114,7 +114,6 @@ import GHC.Types.SrcLoc (Located, unLoc, getLoc, SrcSpan(..), srcSpanStartLine, 
 import GHC.Types.Avail (availNames)
 import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import Tidepool.ExecutionSource (ExecutionSourceIdentity(..))
 import Tidepool.DependencyEvidence (sourceEvidenceWithFingerprint, dependencySourceSha256)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -869,13 +868,9 @@ captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Eit
 captureGeneratedScaffoldTarget recipe requested =
   fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
 
-data GeneratedScaffoldOwner
-  = NativeScaffoldOwner ExecutionSourceIdentity
-  | TemplateInterfaceOwner
-
 -- Interface-only template edges never enter the native/source replay inventory.
 data GeneratedScaffoldImportAuthority = GeneratedScaffoldImportAuthority
-  [(Module,Fingerprint,GeneratedScaffoldOwner,SrcSpan,ExactIfaceArtifact)]
+  [(Module,Fingerprint,SrcSpan,ExactIfaceArtifact)]
   [(ExactIfaceArtifact,[(String,String)])]
   [(Module,Fingerprint,[(String,String)])]
   [OriginalPreviewOrphans]
@@ -890,10 +885,8 @@ permitsGeneratedScaffoldImport
   -> (PkgQual, Located ModuleName) -> Bool
 permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold _ _ _) summary requested (qualifier,imported) =
   qualifier == NoPkgQual && any
-    (\(target,fingerprint,owner,span',artifact) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
-      && requested == (case owner of
-          NativeScaffoldOwner native -> (executionUnit native,executionModule native)
-          TemplateInterfaceOwner -> (exactUnit artifact,exactModule artifact))
+    (\(target,fingerprint,span',artifact) -> ms_mod summary == target && ms_hs_hash summary == fingerprint
+      && requested == (exactUnit artifact,exactModule artifact)
       && sameImportOccurrenceSpan (getLoc imported) span') scaffold
 
 sameImportOccurrenceSpan :: SrcSpan -> SrcSpan -> Bool
@@ -901,11 +894,10 @@ sameImportOccurrenceSpan left right = left == right && case (getBufSpan left,get
   (Strict.Just before,Strict.Just after) -> before == after
   _ -> False
 
-readGeneratedScaffoldImportAuthority :: CapturedInterfaceInputs -> [ExecutionSourceIdentity]
-  -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe
+readGeneratedScaffoldImportAuthority :: CapturedInterfaceInputs -> GeneratedScaffoldRecipe
   -> CapturedGeneratedImports -> DriverImportSyntax -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
-readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured) nativeOwners planned
+readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured)
     recipe@(GeneratedScaffoldRecipe path target expected _ templateInterfaces templateGraph instanceScope purpose census)
     (CapturedGeneratedImports (CapturedGeneratedScaffoldSource capturedPath capturedBytes capturedCensus) _ syntax classified)
     driver sourceGraph env = do
@@ -987,37 +979,6 @@ readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured) nativeOw
       pure ()
       -- This remains an ordinary external import. Package witnesses and the
       -- defining fat interface own its type and executable body evidence.
-    originals <- case planned of
-      Nothing -> Right noGeneratedScaffoldImports
-      Just (owner,expectedFingerprint) -> do
-        let original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
-        unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env))
-          (Left "checked recipe original belongs to another home unit")
-        unless (not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
-          (mgModSummaries' sourceGraph)))
-          (Left "checked recipe original collides with fresh source")
-        (verified,_) <- maybe (Left "checked recipe lacks its verified original interface") Right
-          (Map.lookup owner captured)
-        let (artifact,iface) = verifiedExactInterface verified
-        unless (mi_module iface == original
-          && show (mi_iface_hash (mi_final_exts iface)) == expectedFingerprint)
-          (Left "checked recipe original fingerprint differs")
-        native <- case [candidate | candidate <- nativeOwners
-            , (executionUnit candidate,executionModule candidate) == owner
-            && executionIfaceSha256 candidate == exactSha256 artifact] of
-          [candidate] -> Right candidate
-          _ -> Left "checked recipe lacks its paired original native owner"
-        declaration <- case [declaration | (_,declaration) <- protected
-            , unLoc (ideclName declaration) == moduleName original
-            , ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
-            , ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
-            , case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False] of
-          [declaration] -> Right declaration
-          _ -> Left "checked recipe original lacks its protected import occurrence"
-        imported <- consumed summary (== NoPkgQual) declaration
-        -- Original instances and families belong to this sealed declaration;
-        -- only the protected recipe edge receives visibility.
-        pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
     templateNodes <- forM templateGraph $ \selected -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
       (verified,_) <- maybe (Left "checked template graph interface is not retained") Right (Map.lookup owner captured)
@@ -1046,7 +1007,7 @@ readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured) nativeOw
         (before,(_,declaration):after) -> Right (declaration,before ++ after)
         _ -> Left "checked template interface lacks its protected structural occurrence"
       imported <- consumed summary (== NoPkgQual) declaration
-      pure ((ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact):edges,unclaimed))
+      pure ((ms_mod summary,fingerprint,getLoc imported,artifact):edges,unclaimed))
       ([],protected) templateInterfaces
     let templateEdges = reverse reversedTemplateEdges
     orphanScopes <- case instanceScope of
@@ -1066,13 +1027,11 @@ readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured) nativeOw
               `Map.member` captured)
             (Left "activation preview original orphan interface is not retained")
         pure [OriginalPreviewOrphans (ms_mod summary) fingerprint orphans]
-    let GeneratedScaffoldImportAuthority originalEdges originalNodes _ _ = originals
-        instanceEdges = case instanceScope of
+    let instanceEdges = case instanceScope of
           ImportedTemplateInstances -> []
           OriginalPreviewInstances _ -> [(ms_mod summary,fingerprint,
             [(exactUnit artifact,exactModule artifact) | (artifact,_) <- templateNodes])]
-    pure (GeneratedScaffoldImportAuthority (originalEdges ++ templateEdges)
-      (originalNodes ++ templateNodes) instanceEdges orphanScopes)
+    pure (GeneratedScaffoldImportAuthority templateEdges templateNodes instanceEdges orphanScopes)
 
 readCheckedValueImportAuthority
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CheckedValueImportAuthority)
