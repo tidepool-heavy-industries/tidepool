@@ -43,6 +43,30 @@ pub(super) fn fixture_support_with_issued_offers(
     Ok(issued)
 }
 
+fn same_offer_issuances(
+    actual: &[crate::artifact_inventory::IssuedNativeOffer],
+    expected: &[crate::artifact_inventory::IssuedNativeOffer],
+) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual.same_issuance(expected))
+}
+
+fn same_availability_observations(
+    actual: &RequestNativeAvailability,
+    expected: &RequestNativeAvailability,
+) -> bool {
+    actual.same_recorded_facts(expected)
+        && actual
+            .rows()
+            .map(|row| (row.original_artifact_id(), row.classification))
+            .eq(expected
+                .rows()
+                .map(|row| (row.original_artifact_id(), row.classification)))
+}
+
 fn recorded_native_choices(
     snapshot: &crate::exact_context::ExactContextSnapshot,
 ) -> BTreeMap<ExactModuleIdentity, crate::exact_context::RecordedNativeChoices> {
@@ -2970,7 +2994,10 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     // an existing private body stays custody, never a namespace contribution.
     let extended = interfaces.admit_value_interfaces(&[]).unwrap();
     assert_eq!(extended.projection(), interfaces.projection());
-    assert_eq!(extended.native_offers(), interfaces.native_offers());
+    assert!(same_offer_issuances(
+        extended.native_offers(),
+        interfaces.native_offers()
+    ));
     assert_eq!(
         extended.artifacts().selected_native_groups(),
         interfaces.artifacts().selected_native_groups()
@@ -4119,8 +4146,8 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     let expected = rows
         .for_compiler_roles(support.compiler_roles(), support.artifacts())
         .unwrap();
-    assert_eq!(
-        &expected, rows,
+    assert!(
+        expected.same_acquisition(rows),
         "the receiver already carries completed qualification"
     );
     for (prior, copied) in rows.rows().zip(independent.rows()) {
@@ -4146,7 +4173,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
         let retained = support.retain_normalized_availability(&incoming).unwrap();
         let after = support.artifacts().inventory().metrics();
         assert!(Arc::ptr_eq(&rows.0, &retained.native_availability().0));
-        assert_eq!(retained.native_availability(), &expected);
+        assert!(retained.native_availability().same_acquisition(&expected));
         assert!(Arc::ptr_eq(
             support.artifacts().selection_snapshot(),
             retained.artifacts().selection_snapshot(),
@@ -4167,7 +4194,10 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     let after = support.artifacts().inventory().metrics();
     assert!(!Arc::ptr_eq(&rows.0, &requalified.native_availability().0));
     assert!(after.graph_visits > before.graph_visits);
-    assert_eq!(requalified.native_availability(), rows);
+    assert!(same_availability_observations(
+        requalified.native_availability(),
+        rows
+    ));
 
     let canonical = Arc::new(ArtifactEntry::canonical(native.module_interface().clone()));
     let canonical_id = canonical.descriptor.id;
@@ -4214,7 +4244,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
             rebound_support.artifacts(),
         )
         .unwrap();
-    assert_eq!(&expected, rebound_support.native_availability());
+    assert!(expected.same_acquisition(rebound_support.native_availability()));
     let unchanged = rebound_support
         .retain_normalized_availability(&independently_cloned_availability(
             rebound_support.native_availability(),
@@ -4224,7 +4254,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
         &rebound_support.native_availability().0,
         &unchanged.native_availability().0
     ));
-    assert_eq!(unchanged.native_availability(), &expected);
+    assert!(unchanged.native_availability().same_acquisition(&expected));
     let prior = rebound_support.native_availability().0.clone();
     let retained = rebound_support
         .retain_normalized_availability(rows)
@@ -4308,8 +4338,8 @@ fn unchanged_native_availability_merge_preserves_indirect_permissions() {
     let expected = rows
         .for_compiler_roles(support.compiler_roles(), support.artifacts())
         .unwrap();
-    assert_eq!(
-        &expected, rows,
+    assert!(
+        expected.same_acquisition(rows),
         "indirect permission restriction is already complete"
     );
     let independent = independently_cloned_availability(rows);
@@ -4319,7 +4349,7 @@ fn unchanged_native_availability_merge_preserves_indirect_permissions() {
         .unwrap();
     let after = support.artifacts().inventory().metrics();
     assert!(Arc::ptr_eq(&rows.0, &retained.native_availability().0));
-    assert_eq!(retained.native_availability(), &expected);
+    assert!(retained.native_availability().same_acquisition(&expected));
     assert_eq!(after.graph_visits, before.graph_visits);
     assert!(retained.native_availability().0[&hidden_id].permits(7));
     assert!(!retained.native_availability().0[&hidden_id].permits(9001));
@@ -4365,8 +4395,8 @@ fn native_availability_failed_merge_preserves_qualified_owner() {
         "actual_error={failure:?}"
     );
     assert!(Arc::ptr_eq(&before.0, &support.native_availability().0));
-    assert_eq!(support.native_availability(), &before);
-    assert_eq!(incoming, incoming_before);
+    assert!(support.native_availability().same_acquisition(&before));
+    assert!(incoming.same_acquisition(&incoming_before));
 }
 
 #[test]
@@ -4547,10 +4577,10 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             advanced.primary.inputs.native_selection.candidates.0,
             cold.inputs.native_selection.candidates.0
         );
-        assert_eq!(
-            advanced.primary.inputs.native_selection.availability,
-            cold.inputs.native_selection.availability
-        );
+        assert!(same_availability_observations(
+            &advanced.primary.inputs.native_selection.availability,
+            &cold.inputs.native_selection.availability
+        ));
         assert!(
             matches!(advanced.primary.inputs.native_selection.candidates.require_unique(owner),
             Err(CompileError::ArtifactInventory(error))
@@ -4697,8 +4727,8 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
         assert!(offer.proof().is_none());
         offer
     });
-    assert_ne!(
-        offers[0], offers[1],
+    assert!(
+        !offers[0].same_recorded_facts(&offers[1]),
         "the two Empty offers have distinct exact carrier scopes"
     );
     let original_role = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
@@ -4803,10 +4833,10 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             advanced.primary.inputs.native_selection.candidates.0,
             cold.inputs.native_selection.candidates.0
         );
-        assert_eq!(
-            advanced.primary.inputs.native_selection.availability,
-            cold.inputs.native_selection.availability
-        );
+        assert!(same_availability_observations(
+            &advanced.primary.inputs.native_selection.availability,
+            &cold.inputs.native_selection.availability
+        ));
         assert_eq!(
             advanced
                 .primary
@@ -4921,8 +4951,8 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     .expect("same selected canonical supports each genuine Full in isolation")
             })
             .collect::<Vec<_>>();
-        assert_ne!(
-            witnesses[0], witnesses[1],
+        assert!(
+            !witnesses[0].same_recorded_facts(&witnesses[1]),
             "equal payload cannot identify exact carrier/group issuance"
         );
         let metadata = projection
@@ -4940,7 +4970,9 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
             assert!(available.permits(9001));
             assert_eq!(available.offers().len(), 2);
             for offer in &offers {
-                assert!(available.offers().any(|available| available == offer));
+                assert!(available
+                    .offers()
+                    .any(|available| available.same_issuance(offer)));
             }
             let support =
                 fixture_support_with_issued_offers(projection.clone(), namespace.clone(), selected)
@@ -5243,18 +5275,18 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 program.primary.inputs.native_selection.candidates.0,
                 cold.inputs.native_selection.candidates.0
             );
-            assert_eq!(
-                program.primary.inputs.native_selection.availability,
-                cold.inputs.native_selection.availability
-            );
+            assert!(same_availability_observations(
+                &program.primary.inputs.native_selection.availability,
+                &cold.inputs.native_selection.availability
+            ));
             assert_eq!(
                 advanced.primary.inputs.native_selection.candidates.0,
                 cold.inputs.native_selection.candidates.0
             );
-            assert_eq!(
-                advanced.primary.inputs.native_selection.availability,
-                cold.inputs.native_selection.availability
-            );
+            assert!(same_availability_observations(
+                &advanced.primary.inputs.native_selection.availability,
+                &cold.inputs.native_selection.availability
+            ));
             assert_eq!(
                 advanced
                     .primary
@@ -5290,14 +5322,14 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             baseline.projection(),
             "custody cannot select B"
         );
-        assert_eq!(
-            input.native_availability(),
-            baseline.native_availability(),
+        assert!(
+            input
+                .native_availability()
+                .same_acquisition(baseline.native_availability()),
             "custody cannot issue Full B"
         );
-        assert_eq!(
-            input.issued_offers(),
-            baseline.native_offers(),
+        assert!(
+            same_offer_issuances(input.issued_offers(), baseline.native_offers()),
             "custody cannot add an offer for B"
         );
         assert_eq!(
@@ -5596,14 +5628,13 @@ fn candidate_availability_keeps_partial_same_owner_input_permissions() {
             .unwrap()
             .unwrap();
         assert_eq!(input.role_projection(), context.compiler_input_projection());
-        assert_eq!(
-            input.native_availability(),
-            context.compiler_source_support().native_availability()
-        );
-        assert_eq!(
+        assert!(input
+            .native_availability()
+            .same_acquisition(context.compiler_source_support().native_availability()));
+        assert!(same_offer_issuances(
             input.issued_offers(),
             context.compiler_source_support().native_offers()
-        );
+        ));
         let request = ExactCompileContext::new(context.clone())
             .prepare_compilation_with_private_input(
                 &root.path().join(index.to_string()),
@@ -5798,8 +5829,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .unwrap()
             .expect("authored availability is independent of optional catalog custody");
         assert_eq!(received.role_projection(), input.role_projection());
-        assert_eq!(received.native_availability(), input.native_availability());
-        assert_eq!(received.issued_offers(), input.issued_offers());
+        assert!(received
+            .native_availability()
+            .same_acquisition(input.native_availability()));
+        assert!(same_offer_issuances(
+            received.issued_offers(),
+            input.issued_offers()
+        ));
         assert_eq!(
             received
                 .issued_input_decisions()
@@ -5859,8 +5895,13 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
         eprintln!("authored_custody_history stage=after_fallback step={step} candidate_empty={} retained_available={}",
             !available, received.issued_artifacts().artifact_ids().contains(&available_authored_id));
         assert_eq!(received.role_projection(), input.role_projection());
-        assert_eq!(received.native_availability(), input.native_availability());
-        assert_eq!(received.issued_offers(), input.issued_offers());
+        assert!(received
+            .native_availability()
+            .same_acquisition(input.native_availability()));
+        assert!(same_offer_issuances(
+            received.issued_offers(),
+            input.issued_offers()
+        ));
         assert_eq!(
             received
                 .issued_input_decisions()
@@ -5917,10 +5958,10 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .artifact_ids()
             .contains(&available_authored_id));
         assert_eq!(retained.projection(), context.compiler_input_projection());
-        assert_eq!(
+        assert!(same_offer_issuances(
             retained.native_offers(),
             context.compiler_source_support().native_offers()
-        );
+        ));
         history = history.rebuild(|facts| facts.compiler_support = retained);
     }
     let root = tempfile::tempdir().unwrap();
@@ -6300,14 +6341,13 @@ fn native_availability_preserves_ambiguity_and_explicit_selection_refuses_confli
         received.role_projection(),
         ambiguous.compiler_input_projection()
     );
-    assert_eq!(
-        received.native_availability(),
-        ambiguous.compiler_source_support().native_availability()
-    );
-    assert_eq!(
+    assert!(received
+        .native_availability()
+        .same_acquisition(ambiguous.compiler_source_support().native_availability()));
+    assert!(same_offer_issuances(
         received.issued_offers(),
         ambiguous.compiler_source_support().native_offers()
-    );
+    ));
     assert!(received
         .role_projection()
         .roles()
@@ -6519,7 +6559,10 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
         let inputs = OriginalCompilerInputs::reuse_selected_authored(&context)
             .unwrap()
             .unwrap();
-        assert_eq!(inputs.native_offers(), vec![offer.clone()]);
+        assert!(same_offer_issuances(
+            inputs.native_offers(),
+            std::slice::from_ref(&offer)
+        ));
         assert_eq!(
             inputs.native_offers()[0]
                 .snapshot_facts()
@@ -6532,17 +6575,18 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             before.roots
         );
         assert_eq!(context.artifact_view().capture_graph_selection(), before);
-        assert_eq!(
+        assert!(same_offer_issuances(
             context.compiler_source_support().native_offers(),
-            &[offer.clone()]
-        );
+            std::slice::from_ref(&offer)
+        ));
         let directory = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(context.clone()))
             .prepare_compilation_with_private_input(directory.path(), PRODUCER, None, Some(inputs))
             .unwrap();
         let prepared = request.compiler_inputs();
         let carried = prepared.native_availability(entry.descriptor.id).unwrap();
-        assert_eq!(carried.offers().collect::<Vec<_>>(), vec![&offer]);
+        assert_eq!(carried.offers().len(), 1);
+        assert!(carried.offers().next().unwrap().same_issuance(&offer));
     }
 }
 
@@ -6723,10 +6767,9 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             private.role_projection(),
             context.compiler_input_projection()
         );
-        assert_eq!(
-            private.native_availability(),
-            context.compiler_source_support().native_availability()
-        );
+        assert!(private
+            .native_availability()
+            .same_acquisition(context.compiler_source_support().native_availability()));
         let available_b = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("authored-other-availability"),
             by_owner: BTreeMap::new(),
@@ -6739,11 +6782,13 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap()
             .unwrap();
         assert_eq!(received_b.role_projection(), private.role_projection());
-        assert_eq!(
-            received_b.native_availability(),
-            private.native_availability()
-        );
-        assert_eq!(received_b.issued_offers(), private.issued_offers());
+        assert!(received_b
+            .native_availability()
+            .same_acquisition(private.native_availability()));
+        assert!(same_offer_issuances(
+            received_b.issued_offers(),
+            private.issued_offers()
+        ));
         let physical_b = available_context
             .artifact_view()
             .inventory()
@@ -6841,10 +6886,12 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap()
             .retain_normalized_availability(context.compiler_source_support().native_availability())
             .unwrap();
-            assert_eq!(
-                support.native_availability(),
-                context.compiler_source_support().native_availability(),
-                "recovered graph census must retain the actual selected output permission row"
+            assert!(
+                same_availability_observations(
+                    support.native_availability(),
+                    context.compiler_source_support().native_availability()
+                ),
+                "recovered graph census must retain the recorded output permission row"
             );
             context = context.rebuild(|facts| facts.compiler_support = support);
         }
@@ -8479,8 +8526,8 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
     );
     assert!(left_graph.native_groups.is_empty());
     assert!(right_graph.native_groups.is_empty());
-    assert_ne!(
-        left_offer, right_offer,
+    assert!(
+        !left_offer.same_recorded_facts(&right_offer),
         "scoped Empty facts survive live offer deduplication"
     );
     assert_ne!(left_graph, right_graph);
@@ -10295,14 +10342,13 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
             inputs.role_projection(),
             context.compiler_input_projection()
         );
-        assert_eq!(
-            inputs.native_availability(),
-            context.compiler_source_support().native_availability()
-        );
-        assert_eq!(
+        assert!(inputs
+            .native_availability()
+            .same_acquisition(context.compiler_source_support().native_availability()));
+        assert!(same_offer_issuances(
             inputs.issued_offers(),
             context.compiler_source_support().native_offers()
-        );
+        ));
         assert!(inputs
             .issued_artifacts()
             .artifact_ids()
