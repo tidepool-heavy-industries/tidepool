@@ -23162,10 +23162,13 @@ mod tests {
                         .native_availability()
                         .semantic_observations()
                         .unwrap();
-                    let expected_roles = context
-                        .compiler_input_projection()
-                        .semantic_observations()
-                        .unwrap();
+                    let expected_roles = serde_json::to_value(
+                        context
+                            .compiler_input_projection()
+                            .semantic_observations()
+                            .unwrap(),
+                    )
+                    .unwrap();
                     let expected_offers = context
                         .compiler_source_support()
                         .native_offer_observations()
@@ -23312,10 +23315,13 @@ mod tests {
                             "reimport preserves live permission observations",
                         );
                         proptest::prop_assert_eq!(
-                            &context
-                                .compiler_input_projection()
-                                .semantic_observations()
-                                .unwrap(),
+                            &serde_json::to_value(
+                                context
+                                    .compiler_input_projection()
+                                    .semantic_observations()
+                                    .unwrap()
+                            )
+                            .unwrap(),
                             &expected_roles,
                             "reimport preserves live role observations",
                         );
