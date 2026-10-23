@@ -69,6 +69,7 @@ import GHC.Driver.Pipeline.Execute (runPhase)
 import GHC.Driver.Pipeline.Phases (TPhase(..), PhaseHook(..))
 import GHC.Driver.Hooks (hscCompileCoreExprHook, hscFrontendHook, runPhaseHook, runMetaHook)
 import GHC.Data.StringBuffer (stringToStringBuffer)
+import qualified GHC.Data.EnumSet as EnumSet
 import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, runHsc')
@@ -4050,7 +4051,7 @@ prepareImportAdmission variant target environment actual resolved@(ResolvedImpor
     (ScopedImportAdmission _ _ (ImportAttempt _ _ root path fingerprint)) driver selected _) = do
   actualPath <- traverse canonicalizePath (ml_hs_file (ms_location actual))
   let admitted = pm_mod_summary (driverParsedModule driver)
-      policy flags = (language flags,extensionFlags flags,safeHaskell flags,importPaths flags)
+      policy flags = (language flags,EnumSet.toList (extensionFlags flags),safeHaskell flags,importPaths flags)
   unless (ms_mod actual == root && ms_hs_hash actual == fingerprint
       && actualPath == Just path && policy (ms_hspp_opts actual) == policy (ms_hspp_opts admitted)) $
     fail "import frontend differs from its resolved root or source policy"
