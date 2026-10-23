@@ -19016,7 +19016,11 @@ mod tests {
         );
         assert_ne!(
             left.support.artifacts().capture_graph_selection().namespace,
-            right.support.artifacts().capture_graph_selection().namespace,
+            right
+                .support
+                .artifacts()
+                .capture_graph_selection()
+                .namespace,
             "equal role payloads retain distinct issued binding rows"
         );
         assert_ne!(
@@ -23152,6 +23156,20 @@ mod tests {
                         .unwrap();
                     let expected = context.semantic_sha256();
                     let expected_facts = context.snapshot();
+                    let expected_metadata = context.artifact_view().metadata_snapshot();
+                    let expected_permissions = context
+                        .compiler_source_support()
+                        .native_availability()
+                        .semantic_observations()
+                        .unwrap();
+                    let expected_roles = context
+                        .compiler_input_projection()
+                        .semantic_observations()
+                        .unwrap();
+                    let expected_offers = context
+                        .compiler_source_support()
+                        .native_offer_observations()
+                        .unwrap();
                     let original = context
                         .compiler_input_roles()
                         .iter()
@@ -23272,6 +23290,57 @@ mod tests {
                             &observed_facts.roles,
                             &expected_facts.roles,
                             "reimport preserves exact published roles",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_facts.source_scope,
+                            &expected_facts.source_scope,
+                            "reimport preserves source permission",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_facts.lexical,
+                            &expected_facts.lexical,
+                            "reimport preserves lexical adjacency",
+                        );
+                        let observed_metadata = context.artifact_view().metadata_snapshot();
+                        proptest::prop_assert_eq!(
+                            &context
+                                .compiler_source_support()
+                                .native_availability()
+                                .semantic_observations()
+                                .unwrap(),
+                            &expected_permissions,
+                            "reimport preserves live permission observations",
+                        );
+                        proptest::prop_assert_eq!(
+                            &context
+                                .compiler_input_projection()
+                                .semantic_observations()
+                                .unwrap(),
+                            &expected_roles,
+                            "reimport preserves live role observations",
+                        );
+                        proptest::prop_assert_eq!(
+                            &context
+                                .compiler_source_support()
+                                .native_offer_observations()
+                                .unwrap(),
+                            &expected_offers,
+                            "reimport preserves live offer observations",
+                        );
+                        proptest::prop_assert_eq!(
+                            observed_metadata.descriptors(),
+                            expected_metadata.descriptors(),
+                            "reimport preserves retained payload facts",
+                        );
+                        proptest::prop_assert_eq!(
+                            observed_metadata.dependencies(),
+                            expected_metadata.dependencies(),
+                            "reimport preserves retained dependency facts",
+                        );
+                        proptest::prop_assert_eq!(
+                            &observed_metadata.selected_native_groups,
+                            &expected_metadata.selected_native_groups,
+                            "reimport preserves executable group demand",
                         );
                         proptest::prop_assert_eq!(context.semantic_sha256(), expected);
                         proptest::prop_assert!(context
