@@ -911,13 +911,7 @@ impl PersistentSession {
         owner: Option<RecoveryPublicOwner>,
         intent: Arc<FrozenWorldExecution>,
     ) -> Result<CapturedDeclarationPublication, SessionError> {
-        if !intent.owner_stamp.matches(self.admission_owner())
-            || !self.has_lib()
-            || intent.library != self.lib().compile_view_identity
-            || !intent.private_view_is_current(self)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
+        self.validate_world_execution_base(&intent)?;
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -931,7 +925,7 @@ impl PersistentSession {
         )?;
         public.intent = super::PublicationIntent::Final(intent.clone());
         if public.semantic.expected_private != intent.private {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(super::SessionTransitionReason::PreparedValueChanged.into());
         }
         let current_public = tip(self.lib(), public.semantic.expected_public.declaration_tip)?;
         let public_context = self

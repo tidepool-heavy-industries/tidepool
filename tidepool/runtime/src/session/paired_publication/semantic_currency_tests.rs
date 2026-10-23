@@ -259,7 +259,7 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     *session.lib_mut() = library;
     assert!(matches!(
         session.freeze_private_execution(&before_first_freeze),
-        Err(SessionError::StaleStagedDeclaration)
+        Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),
@@ -286,7 +286,7 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     let _removed_library = session.take_lib().unwrap();
     assert!(matches!(
         session.freeze_private_execution(&before_first_freeze),
-        Err(SessionError::StaleStagedDeclaration)
+        Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),

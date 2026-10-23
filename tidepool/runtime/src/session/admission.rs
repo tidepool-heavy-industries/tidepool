@@ -8572,7 +8572,7 @@ mod tests {
         ));
         assert!(matches!(
             session.freeze_private_execution(&private),
-            Err(SessionError::StaleStagedDeclaration)
+            Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
         ));
         assert!(matches!(
             session.restage_execution_publication(owner.clone(), intent),
@@ -8819,7 +8819,7 @@ mod tests {
         );
         assert!(matches!(
             second.freeze_private_execution(&private),
-            Err(SessionError::StaleStagedDeclaration)
+            Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
         ));
         let first_cell = first
             .admit_cell_in(
