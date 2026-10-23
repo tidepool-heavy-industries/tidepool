@@ -760,7 +760,9 @@ impl CertifiedModuleInterface {
             && interface.package_imports_sha256 == self.receipt.package_imports.sha256
             && reference.certificate_sha256 == sha(&self.certificate)
             && core_matches
-            && self.package_interfaces.matches_references(&reference.package_interfaces)
+            && self
+                .package_interfaces
+                .matches_references(&reference.package_interfaces)
     }
 
     /// Materialization can retain Core without making it available through an
@@ -1349,9 +1351,12 @@ pub(super) fn recover_interface(
 #[cfg(test)]
 fn fixture_empty_package_interfaces() -> PackageInterfaceCustody {
     PackageInterfaceCustody::restore(
-        Path::new("."), &[], &BTreeMap::new(),
+        Path::new("."),
+        &[],
+        &BTreeMap::new(),
         &mut PackageInterfaceValidation::default(),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[cfg(test)]
