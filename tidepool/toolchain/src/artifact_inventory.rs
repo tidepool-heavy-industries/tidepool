@@ -9087,6 +9087,45 @@ impl ArtifactView {
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut selected_original_owners = BTreeSet::new();
         let mut input_decisions = compiler_projection::RecordedInputNativeDecisions::default();
+        let root_carrier = |source: &Self, state: &InventoryState, root: InventoryNodeKey| {
+            let InventoryNodeKey::Group(group) = root else {
+                return Err(failure("native merge requires an exact Group root"));
+            };
+            let held = source
+                .lease
+                .selection
+                .scopes
+                .get(&root.selection())
+                .is_some_and(|scope| scope.proof().nodes.binary_search(&root).is_ok());
+            if !source.lease.selection.roots.contains_key(&root)
+                || !held
+                || !state.contains_node(&root)
+            {
+                return Err(failure("native merge root is outside its issuing view"));
+            }
+            let mut carriers = state
+                .outgoing(root)
+                .filter_map(|(target, edge)| match target {
+                    InventoryNodeKey::Artifact(carrier)
+                        if carrier.artifact == group.binding.artifact()
+                            && *edge == ArtifactDependency::Interface =>
+                    {
+                        Some(carrier)
+                    }
+                    _ => None,
+                });
+            let carrier = carriers
+                .next()
+                .ok_or_else(|| failure("native merge root lacks its carrier"))?;
+            if carriers.next().is_some() {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: carrier.artifact,
+                    },
+                ));
+            }
+            Ok(carrier)
+        };
         for selected_role in selected_roles {
             let selected_role = selected_role?;
             selected.retain_role_selection(&selected_role);
@@ -9115,7 +9154,6 @@ impl ArtifactView {
                 }
             } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
-                let owned = &source.read_projection(&state).nodes;
                 for id in std::iter::once(role.interface()).chain(role.original()) {
                     namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
@@ -9145,7 +9183,52 @@ impl ArtifactView {
                     .expect("chosen acquired compiler row")
                     .native_decision()
                 {
-                    InputNativeDecision::UnissuedPolicy => continue,
+                    InputNativeDecision::UnissuedPolicy => {
+                        // Existing execution remains owned while input policy
+                        // awaits its actual request issuer. This does not issue
+                        // a choice or recover a root from available custody.
+                        let carrier = namespace[&original];
+                        let canonical = namespace[&role.interface()];
+                        let state = source.lease.inventory.0.lock().expect("inventory lock");
+                        for root in source.roots() {
+                            let InventoryNodeKey::Group(group) = root else {
+                                continue;
+                            };
+                            if group.binding.artifact() != original {
+                                continue;
+                            }
+                            let actual_carrier = root_carrier(source, &state, *root)?;
+                            if actual_carrier != carrier
+                                || !state.outgoing(InventoryNodeKey::Artifact(carrier)).any(
+                                    |(target, edge)| {
+                                        target == InventoryNodeKey::Artifact(canonical)
+                                            && *edge == ArtifactDependency::Interface
+                                    },
+                                )
+                            {
+                                return Err(admission_failure(
+                                    ArtifactInventoryFailure::BindingAmbiguity {
+                                        artifact: original,
+                                    },
+                                ));
+                            }
+                            let key = NativeGroupKey {
+                                artifact: original,
+                                original_ordinal: group.original_ordinal,
+                            };
+                            if groups
+                                .insert(key, *group)
+                                .is_some_and(|previous| previous != *group)
+                            {
+                                return Err(admission_failure(
+                                    ArtifactInventoryFailure::BindingAmbiguity {
+                                        artifact: original,
+                                    },
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     InputNativeDecision::IssuedChoices(groups) => {
                         vec![groups.values().copied().collect::<Vec<_>>()]
                     }
@@ -9235,31 +9318,7 @@ impl ArtifactView {
                     let InventoryNodeKey::Group(group) = root else {
                         continue;
                     };
-                    if !owned.contains(root) || !state.contains_node(root) {
-                        return Err(failure("native merge root is outside its issuing view"));
-                    }
-                    let mut carriers =
-                        state
-                            .outgoing(*root)
-                            .filter_map(|(target, edge)| match target {
-                                InventoryNodeKey::Artifact(carrier)
-                                    if carrier.artifact == group.binding.artifact()
-                                        && *edge == ArtifactDependency::Interface =>
-                                {
-                                    Some(carrier)
-                                }
-                                _ => None,
-                            });
-                    let carrier = carriers
-                        .next()
-                        .ok_or_else(|| failure("native merge root lacks its carrier"))?;
-                    if carriers.next().is_some() {
-                        return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity {
-                                artifact: carrier.artifact,
-                            },
-                        ));
-                    }
+                    let carrier = root_carrier(source, &state, *root)?;
                     let entry = source
                         .observed_payload(&carrier.artifact)
                         .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))

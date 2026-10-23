@@ -1823,40 +1823,6 @@ impl RecordedInputNativeDecisions {
         }
         self.with_recorded_facts(facts)
     }
-    pub(crate) fn restricted(
-        &self,
-        projection: &CompilerInputProjection,
-        view: &ArtifactView,
-    ) -> Self {
-        let roots = view.roots();
-        let mut facts = self.facts.clone();
-        for (owner, fact) in &self.facts {
-            if projection
-                .snapshot_roles()
-                .get(owner)
-                .is_none_or(|role| &fact.role != role)
-            {
-                facts.remove(owner);
-                continue;
-            }
-            let mut groups = fact.groups.clone();
-            for (ordinal, group) in &fact.groups {
-                if !roots.contains(&InventoryNodeKey::Group(*group)) {
-                    groups.remove(ordinal);
-                }
-            }
-            if fact.groups.diff(&groups).next().is_some() {
-                facts.insert(
-                    owner.clone(),
-                    RecordedInputNativeDecision {
-                        role: fact.role.clone(),
-                        groups,
-                    },
-                );
-            }
-        }
-        self.with_recorded_facts(facts)
-    }
 }
 
 /// Native permission belongs to the selected Original row, including an issued
@@ -2130,27 +2096,6 @@ impl ResolvedCompilerRole {
             *native_choice = SelectedInputNativeChoice::Issued { groups, support };
         }
         self
-    }
-
-    fn narrow_native_choice(&mut self, view: &ArtifactView) -> bool {
-        if let SelectedCompilerRow::Original {
-            native_choice: SelectedInputNativeChoice::Issued { groups, support },
-            ..
-        } = &mut self.0
-        {
-            let removed = groups
-                .iter()
-                .filter(|(_, group)| !view.roots().contains(&InventoryNodeKey::Group(**group)))
-                .map(|(ordinal, group)| (*ordinal, *group))
-                .collect::<Vec<_>>();
-            let changed = !removed.is_empty();
-            for (ordinal, group) in removed {
-                groups.remove(&ordinal);
-                support.remove(&group);
-            }
-            return changed;
-        }
-        false
     }
 
     fn same_selected_acquisition(&self, other: &Self) -> bool {
@@ -3328,14 +3273,7 @@ impl CompilerSourceSupport {
                 projection.recorded_roles.remove(owner);
             }
         }
-        for (owner, prior) in self.selected.iter() {
-            let mut row = prior.clone();
-            if selected.rows.contains_key(owner) && row.narrow_native_choice(support) {
-                selected.changed_owners.insert(owner.clone());
-                selected.rows.insert(owner.clone(), row);
-            }
-        }
-        let input_decisions = self.input_decisions.restricted(&projection, support);
+        let input_decisions = self.input_decisions.for_exact_roles(&projection);
         let mut offers = Vec::new();
         for offer in self.native_offers.iter() {
             if let Some(offer) = offer.within_assembly(projection.role_view(), support)? {
@@ -4032,16 +3970,18 @@ impl CompilerSourceSupport {
         artifacts: ArtifactView,
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
-        self.rebuild_narrowed(projection, artifacts, offers)
+        self.project_acquired_rows(projection, artifacts, offers)
     }
 
-    fn rebuild_narrowed(
+    /// Project compiler roles and retained topology without changing the
+    /// exact native choices/acquisitions of a surviving Original row.
+    fn project_acquired_rows(
         &self,
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
         offers: impl IntoIterator<Item = IssuedNativeOffer>,
     ) -> Result<Self, CompileError> {
-        let decisions = self.input_decisions.restricted(&projection, &artifacts);
+        let decisions = self.input_decisions.for_exact_roles(&projection);
         let selected = projection
             .roles
             .iter()
@@ -4058,7 +3998,6 @@ impl CompilerSourceSupport {
                     (Some(id), Some((binding, _))) if id == binding.artifact => {}
                     _ => return Err(failure("narrowing changed the acquired original binding")),
                 }
-                row.narrow_native_choice(&artifacts);
                 let row = row.with_issued_provenance(role)?;
                 Ok((owner.clone(), row))
             })
@@ -5078,7 +5017,7 @@ impl CompilerSourceSupport {
         let projection = support.projection.merge(protected.role_requirements())?;
         // Protected requirements constrain existing admitted rows; they cannot
         // acquire another compiler owner from retained bytes.
-        let support = support.rebuild_narrowed(
+        let support = support.project_acquired_rows(
             projection,
             support.artifacts.clone(),
             support.native_offers.iter().cloned(),
@@ -5424,7 +5363,7 @@ impl CompilerSourceSupport {
         parent: &Self,
         output: &crate::declaration_context::OriginalCompilerInputs,
     ) -> Result<Self, CompileError> {
-        let retained = compiler.rebuild_narrowed(
+        let retained = compiler.project_acquired_rows(
             compiler.projection.within_view(output.issued_artifacts()),
             output.issued_artifacts().clone(),
             parent.native_offers().iter().cloned(),
@@ -6093,7 +6032,7 @@ impl CompilerSourceSupport {
                     }
                 })
         });
-        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
+        self.project_acquired_rows(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     fn validate_publication_endorsement(
@@ -6177,7 +6116,7 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let artifacts = self.artifacts.select_roots(roots)?;
         let projection = self.projection.for_selected_support(&artifacts);
-        self.rebuild_narrowed(projection, artifacts, self.native_offers.iter().cloned())
+        self.project_acquired_rows(projection, artifacts, self.native_offers.iter().cloned())
     }
 
     pub(crate) fn source_support(
@@ -6225,11 +6164,8 @@ impl CompilerSourceSupport {
         // Keep the existing topology/custody transition. Only its already
         // authenticated role rows bypass metadata reconstruction afterward.
         let artifacts = self.artifacts.select_compiler_support(&projection)?;
-        for row in selected.values_mut() {
-            row.narrow_native_choice(&artifacts);
-        }
         let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
-        let decisions = self.input_decisions.restricted(&projection, &artifacts);
+        let decisions = self.input_decisions.for_exact_roles(&projection);
         let mut native_offer_facts = self.native_offer_facts.clone();
         let offers = self
             .native_offers
@@ -8160,7 +8096,7 @@ mod tests {
                 .source_support_facts(&support.artifacts, &owners)
                 .unwrap();
             let recomputed = support
-                .rebuild_narrowed(recomputed.0, recomputed.1, [])
+                .project_acquired_rows(recomputed.0, recomputed.1, [])
                 .unwrap();
             assert_eq!(source.projection, recomputed.projection);
             assert!(source.selected.same_recorded_facts(&recomputed.selected));
@@ -8382,7 +8318,7 @@ mod tests {
                 .source_support_facts(&reusable.artifacts, &owners)
                 .unwrap();
             let legacy = reusable
-                .rebuild_narrowed(legacy.0, legacy.1, reusable.native_offers.iter().cloned())
+                .project_acquired_rows(legacy.0, legacy.1, reusable.native_offers.iter().cloned())
                 .unwrap();
             assert!(narrowed.selected.same_recorded_facts(&legacy.selected));
             assert_eq!(narrowed.projection, legacy.projection);
@@ -9666,6 +9602,179 @@ mod tests {
                 assert_eq!(entry.requirements.len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn full_native_choices_survive_role_and_output_projection_without_demand() {
+        let entry = decision_affinity_entries().remove(0);
+        let owner = &entry.descriptor.owner;
+        let inventory = ArtifactInventory::default();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![entry.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut selection =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &available.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        let completed = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut selection,
+            &inventory.empty_view(),
+            vec![entry.clone()],
+            &mut validation,
+        )
+        .unwrap();
+        let actual =
+            CompilerSourceSupport::close_complete_output(completed.compiler_inputs()).unwrap();
+        assert!(actual.artifacts.selected_native_groups().is_empty());
+        assert_eq!(
+            actual.recorded_input_decisions()[owner]
+                .groups
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([9])
+        );
+        let group = actual.recorded_input_decisions()[owner].groups[&9];
+        assert!(matches!(
+            actual
+                .compiler_roles()
+                .selected_native_support(owner, group),
+            Some(SelectedNativeSupport::Acquired(_))
+        ));
+        let facts = actual.native_fact_owner();
+        let missing = actual
+            .restore_native_maps(
+                actual.recorded_rows(),
+                &facts.offers,
+                &facts.native_availability,
+            )
+            .unwrap();
+        assert!(matches!(
+            missing
+                .compiler_roles()
+                .selected_native_support(owner, group),
+            Some(SelectedNativeSupport::Missing(_))
+        ));
+        let owners = BTreeSet::from([owner.clone()]);
+        let generated = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "NoGeneratedOwner".into(),
+        };
+        for source in [&actual, &missing] {
+            let private =
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(source);
+            let projected = [
+                source.finalize_namespace().unwrap(),
+                source
+                    .for_output_continuation(source.artifacts(), &generated)
+                    .unwrap(),
+                source.source_support(&owners).unwrap(),
+                source.close_request(None, &Default::default()).unwrap(),
+                CompilerSourceSupport::empty()
+                    .close_request(Some(&private), &Default::default())
+                    .unwrap(),
+            ];
+            for output in projected {
+                assert!(
+                    output.same_selected_acquisitions(source),
+                    "role/output projection preserves actual choices, including Missing"
+                );
+                assert_eq!(
+                    output.recorded_input_decisions(),
+                    source.recorded_input_decisions()
+                );
+                assert!(
+                    output.artifacts.selected_native_groups().is_empty(),
+                    "retained Full choices do not introduce execution roots"
+                );
+            }
+        }
+        let types = actual.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(types.compiler_roles().original_acquisition(owner).is_none());
+        assert!(types.recorded_input_decisions().is_empty());
+    }
+
+    #[test]
+    fn unissued_original_keeps_exact_execution_until_request_policy_issuance() {
+        let entry = decision_affinity_entries().remove(0);
+        let owner = &entry.descriptor.owner;
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            unreachable!()
+        };
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
+        let issued = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
+        let expected = issued.artifacts.capture_graph_selection().native_groups;
+        assert_eq!(expected.len(), 1);
+        let mut records = issued.recorded_rows().clone();
+        let RecordedCompilerRow::Original { native_choices, .. } = records.get_mut(owner).unwrap()
+        else {
+            unreachable!()
+        };
+        *native_choices = RecordedNativeChoices::Unissued;
+        let facts = issued.native_fact_owner();
+        let unissued = CompilerSourceSupport::authenticate_recorded_rows(
+            issued.artifacts.clone(),
+            &records,
+            &facts.offers,
+            &facts.native_availability,
+        )
+        .unwrap();
+        let canonical = unissued.projection.snapshot_roles()[owner].interface();
+        let check_unissued = |source: &CompilerSourceSupport| {
+            assert!(matches!(
+                source.checked_native_input_decision(
+                    entry.descriptor.id,
+                    canonical,
+                    product.owner()
+                ),
+                Err(crate::certified_products::InputDecisionRefusal::MissingDecision)
+            ));
+            assert_eq!(
+                source.artifacts.capture_graph_selection().native_groups,
+                expected
+            );
+        };
+        check_unissued(&unissued);
+        let owners = BTreeSet::from([owner.clone()]);
+        let types = unissued.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(types.compiler_roles().original_acquisition(owner).is_none());
+        assert_eq!(
+            types.artifacts.capture_graph_selection().native_groups,
+            expected
+        );
+        let promoted = types
+            .promote_issued_authored_originals(&issued, &owners)
+            .unwrap();
+        check_unissued(&promoted);
+        let merged = CompilerSourceSupport::empty()
+            .merge_output_fragments(&promoted)
+            .unwrap();
+        check_unissued(&merged);
+        let closed = merged.close_request(None, &Default::default()).unwrap();
+        let InputNativeDecision::IssuedChoices(groups) = closed
+            .checked_native_input_decision(entry.descriptor.id, canonical, product.owner())
+            .unwrap()
+        else {
+            panic!("the actual request issuer resolves its selected graph");
+        };
+        assert_eq!(groups.values().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            closed.artifacts.capture_graph_selection().native_groups,
+            expected
+        );
     }
 
     #[test]
