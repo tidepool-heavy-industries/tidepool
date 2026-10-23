@@ -40,7 +40,11 @@ module Tidepool.ExactHydration
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
-  , capturedSourceImportOrigins, capturedGeneratedScaffoldOrigins, parseCapturedGeneratedImports
+  , capturedSourceImportOrigins
+  , CapturedGeneratedImports, parseCapturedGeneratedImports
+  , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax
+  , CapturedGeneratedImportOccurrence, capturedGeneratedImportOccurrences
+  , capturedGeneratedImportOccurrenceSyntax, capturedGeneratedImportOccurrenceOrigin
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot
   , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
@@ -144,7 +148,9 @@ import System.Directory (canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
 import System.IO (fixIO)
 import Tidepool.TurnSource (preambleImportMarker, ImportOrigin(..), ImportRendering, importRenderingSource, importRenderingOrigins)
-import Tidepool.ImportSyntax (ImportDescriptor, describeImport, CapturedImportSyntax, captureImportSyntax)
+import Tidepool.ImportSyntax
+  ( ImportDescriptor, describeImport, CapturedImportSyntax, captureImportSyntax
+  , ImportOccurrence, capturedImportOccurrences )
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -580,26 +586,45 @@ capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
 -- Call only after the root's effective flags and compile-purpose policy have
 -- been admitted. Parsing does not load interfaces or execute finite TH syntax.
 -- The resulting raw AST is retained for demand analysis and driver matching.
+data CapturedGeneratedImports = CapturedGeneratedImports
+  CapturedGeneratedScaffoldSource DynFlags CapturedImportSyntax [CapturedGeneratedImportOccurrence]
+
+data CapturedGeneratedImportOccurrence = CapturedGeneratedImportOccurrence ImportOccurrence ImportOrigin
+
 parseCapturedGeneratedImports :: DynFlags -> CapturedGeneratedScaffoldSource
-  -> Either String CapturedImportSyntax
+  -> Either String CapturedGeneratedImports
 parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path bytes _) =
   case unP Parser.parseModule parser of
     PFailed _ -> Left "GHC could not parse the captured generated root"
     POk state parsed -> do
       unless (isEmptyMessages (getPsErrorMessages state))
         (Left "GHC reported errors in the captured generated root")
-      _ <- capturedSourceImportOrigins captured parsed
-      either (Left . show) Right (captureImportSyntax parsed)
+      origins <- capturedSourceImportOrigins captured parsed
+      syntax <- either (Left . show) Right (captureImportSyntax parsed)
+      pure (CapturedGeneratedImports captured flags syntax
+        (zipWith CapturedGeneratedImportOccurrence (capturedImportOccurrences syntax) origins))
   where
     parser = initParserState (initParserOpts flags)
       (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
       (mkRealSrcLoc (mkFastString path) 1 1)
 
--- This projection is DATA until parseCapturedGeneratedImports has checked
--- complete occurrence coverage and the higher owner has bound the root.
-capturedGeneratedScaffoldOrigins :: CapturedGeneratedScaffoldSource -> [ImportOrigin]
-capturedGeneratedScaffoldOrigins (CapturedGeneratedScaffoldSource _ _ census) =
-  [origin | (_,_,origin) <- census]
+capturedGeneratedImportSource :: CapturedGeneratedImports -> CapturedGeneratedScaffoldSource
+capturedGeneratedImportSource (CapturedGeneratedImports source _ _ _) = source
+
+capturedGeneratedImportFlags :: CapturedGeneratedImports -> DynFlags
+capturedGeneratedImportFlags (CapturedGeneratedImports _ flags _ _) = flags
+
+capturedGeneratedImportSyntax :: CapturedGeneratedImports -> CapturedImportSyntax
+capturedGeneratedImportSyntax (CapturedGeneratedImports _ _ syntax _) = syntax
+
+capturedGeneratedImportOccurrences :: CapturedGeneratedImports -> [CapturedGeneratedImportOccurrence]
+capturedGeneratedImportOccurrences (CapturedGeneratedImports _ _ _ occurrences) = occurrences
+
+capturedGeneratedImportOccurrenceSyntax :: CapturedGeneratedImportOccurrence -> ImportOccurrence
+capturedGeneratedImportOccurrenceSyntax (CapturedGeneratedImportOccurrence occurrence _) = occurrence
+
+capturedGeneratedImportOccurrenceOrigin :: CapturedGeneratedImportOccurrence -> ImportOrigin
+capturedGeneratedImportOccurrenceOrigin (CapturedGeneratedImportOccurrence _ origin) = origin
 
 capturedSourceImportOrigins :: CapturedGeneratedScaffoldSource -> Located (HsModule GhcPs)
   -> Either String [ImportOrigin]
