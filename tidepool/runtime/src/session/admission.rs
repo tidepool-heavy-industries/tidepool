@@ -8115,6 +8115,20 @@ mod tests {
                 selected.owners.get(&(identity.clone(), 460)),
                 Some(&first_root)
             );
+            assert!(session
+                .capture_selected_native_imports(public, [(&identity, 461)])
+                .is_ok());
+            assert!(matches!(
+                session.capture_selected_native_imports(private, [(&identity, 461)]),
+                Err(SessionError::StaleStagedDeclaration)
+            ), "a later value that is live in the issuer scope cannot replace the captured generation");
+            assert!(
+                matches!(
+                    session.capture_selected_native_imports(private, [(&identity, 9999)]),
+                    Err(SessionError::StaleStagedDeclaration)
+                ),
+                "an absent runtime generation is refused before native execution"
+            );
             let isolated = session.mint_isolated_scope();
             assert!(matches!(
                 session.capture_selected_native_imports(isolated, [(&identity, 460)]),
