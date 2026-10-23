@@ -7531,7 +7531,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn checked_metadata_observation_survives_physical_drift_and_runtime_conversion() {
+    fn checked_world_metadata_is_shared_through_sealing_and_runtime_conversion() {
         #[derive(Clone)]
         struct Trace(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Trace {
@@ -7575,7 +7575,7 @@ mod tests {
         // Fixture bootstrap has its own real checked compilation; exclude it.
         let baseline = counts();
         let outcome = admission
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
@@ -7594,34 +7594,26 @@ mod tests {
         );
         assert!(before.0 >= 2, "actual multi-item output must be observed");
         assert_eq!(before.0, before.1, "one decode per captured item");
-        let mut originals = std::collections::BTreeMap::new();
-        let mut changed = 0;
-        for entry in std::fs::read_dir(prepared.finite_evidence().1.path()).unwrap() {
-            let directory = entry.unwrap().path();
-            let path = directory.join("meta.cbor");
-            if path.is_file() {
-                let ordinal: usize = directory
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .strip_prefix("item-")
-                    .expect("actual item output directory")
-                    .parse()
-                    .unwrap();
-                let bytes = std::fs::read(&path).unwrap();
-                assert!(originals.insert(ordinal, bytes.clone()).is_none());
-                let (table, mut warnings) = tidepool_repr::serial::read_metadata(&bytes).unwrap();
-                warnings.captured_type = Some("later file observation".into());
-                let replacement = tidepool_repr::serial::write_metadata(&table, &warnings).unwrap();
-                assert_ne!(bytes, replacement);
-                std::fs::write(&path, replacement).unwrap();
-                changed += 1;
-            }
-        }
+        let originals = prepared
+            .program
+            .items()
+            .iter()
+            .filter_map(|item| item.native())
+            .map(|owner| {
+                (
+                    owner.item().index(),
+                    (
+                        owner.table().clone(),
+                        owner.warnings().captured_type.clone(),
+                        owner.warnings().has_io,
+                        owner.warnings().warnings.clone(),
+                    ),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         assert!(
-            changed >= 2,
-            "mutate actual item files after capture, before seal"
+            originals.len() >= 2,
+            "capture metadata from multiple actual World items"
         );
         let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
         let natives = program
@@ -7631,16 +7623,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(natives.len(), before.1);
         for owner in &natives {
-            let (table, warnings) =
-                tidepool_repr::serial::read_metadata(&originals[&owner.item().index()]).unwrap();
-            assert_eq!(&table, owner.table());
-            assert_eq!(warnings.captured_type, owner.warnings().captured_type);
-            assert_eq!(warnings.has_io, owner.warnings().has_io);
-            assert_eq!(warnings.warnings, owner.warnings().warnings);
-            assert_ne!(
-                warnings.captured_type.as_deref(),
-                Some("later file observation")
-            );
+            let (table, captured_type, has_io, warnings) = &originals[&owner.item().index()];
+            assert_eq!(table, owner.table());
+            assert_eq!(captured_type, &owner.warnings().captured_type);
+            assert_eq!(*has_io, owner.warnings().has_io);
+            assert_eq!(warnings, &owner.warnings().warnings);
             assert!(owner.table().json_layout().is_none());
         }
         let siblings = natives
@@ -7655,10 +7642,13 @@ mod tests {
             .begin_cell_program(program)
             .unwrap()
             .unwrap();
-        let reserved = fixture
-            .resident
-            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
-            .unwrap();
+        let original_source = admission.compiler_preparation_source();
+        let reserved = crate::session::world_cell_test_support::source_action_with_original(
+            &mut fixture.resident,
+            original_source.clone(),
+            |resident, _| resident.admit_checked_item(prefix, checked.checked_item(0).unwrap()),
+        )
+        .unwrap();
         let TurnResult::Bind {
             compiled, bound, ..
         } = consume_cell_program_item(reserved.clone()).unwrap()
@@ -7705,15 +7695,19 @@ mod tests {
         let [binder] = bound.as_slice() else {
             panic!("expected one actual binder")
         };
-        let installed = tidepool_testing::with_settlement(|settlement| {
-            fixture.resident.run_bind_with_sites(
-                &binder.name,
-                compiled.code(),
-                binder,
-                reserved.generation(),
-                settlement,
-            )
-        })
+        let installed = crate::session::world_cell_test_support::source_action_with_original(
+            &mut fixture.resident,
+            original_source,
+            |resident, settlement| {
+                resident.run_bind_with_sites(
+                    &binder.name,
+                    compiled.code(),
+                    binder,
+                    reserved.generation(),
+                    settlement,
+                )
+            },
+        )
         .unwrap();
         let crate::session::ResidentOutcome::Completed { result, .. } = installed else {
             panic!("installed checked bind must complete")
@@ -7872,7 +7866,7 @@ mod tests {
                 &[],
             )
             .unwrap();
-            let source = admission.source_lease();
+            let source = admission.compiler_preparation_source();
             let cancellation = crate::CompilerTransactionCancellation::new();
             let observed = std::cell::RefCell::new(None);
             let before = tidepool_extract_cmd::extract_spawn_count();
@@ -7968,7 +7962,7 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = admission
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation.clone(),
@@ -8106,7 +8100,7 @@ mod tests {
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let outcome = admitted
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation.clone(),
@@ -8162,7 +8156,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn completed_cell_preparation_with_observed_retirement_refuses_publication_without_retaining_scratch(
+    fn completed_world_preparation_with_observed_retirement_refuses_publication_and_releases_output(
     ) {
         let mut fixture = CheckedHomeFixture::new();
         let admission = CheckedHomeFixture::admit_in(
@@ -8177,7 +8171,7 @@ mod tests {
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = admission
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation.clone(),
@@ -8200,9 +8194,10 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = outcome.action().as_ref().unwrap();
-        let root = prepared.finite_evidence().1.path().to_owned();
-        let weak = Arc::downgrade(&prepared.finite_evidence().1);
-        assert!(root.join("cell.cbor").exists());
+        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
+            panic!("the actual World producer must retain its completed output owner");
+        };
+        let weak = Arc::downgrade(output);
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1);
         let failure = finish_cell_program_admitted(outcome).unwrap_err();
@@ -8213,7 +8208,7 @@ mod tests {
         drop(failure);
         assert!(
             weak.upgrade().is_none(),
-            "confirmed retirement does not retain released request scratch"
+            "confirmed retirement releases the actual World output owner"
         );
         assert!(observed.borrow().as_ref().unwrap().resources_retired());
         assert!(!observed.borrow().as_ref().unwrap().is_clean());
@@ -8224,8 +8219,7 @@ mod tests {
         );
         drop(observed.into_inner());
         assert!(weak.upgrade().is_none());
-        // The counted runner may deliberately retain filesystem diagnostics.
-        // The weak owner proves release independently of that case policy.
+        // Output ownership is independent of optional retained filesystem diagnostics.
     }
 
     #[test]
@@ -8244,7 +8238,7 @@ mod tests {
         let observed = std::cell::RefCell::new(None);
         let before = tidepool_extract_cmd::extract_spawn_count();
         let original = admission
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation.clone(),
@@ -8265,9 +8259,10 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = original.action.as_ref().unwrap();
-        let weak = Arc::downgrade(&prepared.finite_evidence().1);
-        let root = prepared.finite_evidence().1.path().to_owned();
-        assert!(root.join("cell.cbor").exists());
+        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
+            panic!("the actual World producer must retain its completed output owner");
+        };
+        let weak = Arc::downgrade(output);
         let fresh = crate::CompilerTransactionCancellation::new();
         let reassociated =
             crate::settle_compiler_transaction_cancellable(fresh, |_| {}, || original.action);
@@ -8309,7 +8304,7 @@ mod tests {
         let cancellation = crate::CompilerTransactionCancellation::new();
         let before = tidepool_extract_cmd::extract_spawn_count();
         let outcome = admission
-            .source_lease()
+            .compiler_preparation_source()
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 cancellation,
