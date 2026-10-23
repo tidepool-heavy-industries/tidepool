@@ -21353,6 +21353,20 @@ mod tests {
     fn merkle_context_history_matches_canonical_and_cold_facts() {
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        // Native target demand belongs to the completed target resolution.
+        // A published SOURCE projection retains its own passive input choices.
+        let target_groups = fixture
+            .entry
+            .products()
+            .native_source_products()
+            .unwrap()
+            .groups()
+            .map(|row| row.binding())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !target_groups.is_empty(),
+            "the actual completed target selects native Groups"
+        );
         let mut runner =
             proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(24));
         runner.run(&proptest::collection::vec((proptest::prelude::any::<u16>(), 0u8..7), 1..28), |operations| {
@@ -21367,17 +21381,20 @@ mod tests {
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
             assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
                 "published fixture must carry a real issued decision domain");
-            assert!(!left.artifact_view().selected_native_groups().is_empty(),
-                "withdrawal starts from the completed target's actually selected native Groups");
+            assert!(left.artifact_view().selected_native_groups().is_empty(),
+                "publication retains SOURCE policy without selecting executable Groups");
+            assert!(left.compiler_source_support().recorded_input_decisions().values()
+                .all(|fact| fact.groups.is_empty()),
+                "the fresh source fixture issued explicit empty compiler-input choices");
             let interface_roots = left.compiler_input_projection().roles().into_iter()
                 .map(|role| role.interface()).collect();
-            let withdrawn_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
-            let withdrawn = left.clone().rebuild(|facts| facts.compiler_support = withdrawn_support).finish().unwrap();
-            assert!(withdrawn.artifact_view().selected_native_groups().is_empty(),
-                "interface-root withdrawal leaves the exact native Groups in custody only");
-            assert!(!withdrawn.compiler_source_support().recorded_input_decisions().is_empty());
-            assert!(withdrawn.compiler_source_support().recorded_input_decisions().values()
-                .all(|fact| fact.groups.is_empty()), "withdrawal preserves domains but no chosen Group");
+            let narrowed_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
+            let narrowed = left.clone().rebuild(|facts| facts.compiler_support = narrowed_support).finish().unwrap();
+            assert!(narrowed.artifact_view().selected_native_groups().is_empty(),
+                "interface-root narrowing cannot acquire executable Group demand");
+            assert!(!narrowed.compiler_source_support().recorded_input_decisions().is_empty());
+            assert!(narrowed.compiler_source_support().recorded_input_decisions().values()
+                .all(|fact| fact.groups.is_empty()), "narrowing preserves issued empty domains without adding chosen Groups");
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
             let initial = materializer.materialize_context(None,&left.snapshot()).unwrap();
@@ -21395,7 +21412,7 @@ mod tests {
                     3 => empty.clone(),
                     4 => right.clone(),
                     5 => joined.clone(),
-                    _ => withdrawn.clone(),
+                    _ => narrowed.clone(),
                 };
                 assert_context_observation_wire(&next);
                 let snapshot = next.snapshot();
