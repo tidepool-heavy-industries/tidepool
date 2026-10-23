@@ -222,7 +222,8 @@ fn protected_catalog_availability_preserves_receiving_interface_only_selection()
             packages,
             certification,
         )
-        .with_module_interface(canonical.clone())?;
+        .with_module_interface(canonical.clone())
+        .map_err(crate::certified_products::CertificationError::CapturedModulePayload)?;
         crate::certified_products::certify_original_draft_with_validation(
             draft,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
