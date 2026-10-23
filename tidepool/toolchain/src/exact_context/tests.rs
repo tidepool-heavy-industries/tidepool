@@ -999,7 +999,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3, 4, 5, 6, 7, 8] {
+    for version in [2, 3, 4, 5, 6, 7, 8, 9] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -1019,6 +1019,60 @@ fn old_selection_and_context_versions_are_rejected() {
         assert!(matches!(hydrate_context(&store, &old_root),
                 Err(SnapshotError::UnsupportedContextVersion { found, expected })
                     if found == version && expected == CONTEXT_ENCODING_VERSION));
+    }
+}
+
+#[test]
+fn recorded_compiler_row_codec_preserves_unissued_and_issued_empty_choices() {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let row = |native_choices| RecordedCompilerRow::Original {
+        interface: ArtifactId([1; 32]),
+        original: ArtifactId([2; 32]),
+        provenance: RecordedOriginalProvenance::Reusable,
+        native_choices,
+    };
+    let unissued = row(RecordedNativeChoices::Unissued);
+    let empty = row(RecordedNativeChoices::Issued {
+        groups: OrdMap::new(),
+    });
+    let unissued_cid = CompilerRowCodec::encode(&mut writer, &unissued).unwrap();
+    let empty_cid = CompilerRowCodec::encode(&mut writer, &empty).unwrap();
+    assert_ne!(unissued_cid, empty_cid);
+    install(&store, writer.finish().unwrap());
+    let reader = SnapshotHydrator::new(&store);
+    for (cid, expected) in [(unissued_cid, unissued), (empty_cid, empty)] {
+        let decoded = CompilerRowCodec::decode(&reader, cid).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.interface(), ArtifactId([1; 32]));
+        assert_eq!(decoded.original(), Some(ArtifactId([2; 32])));
+        assert!(decoded.publication().is_none());
+        assert_eq!(decoded.native_choices(), expected.native_choices());
+    }
+}
+
+#[test]
+fn recorded_compiler_row_codec_refuses_foreign_group_and_ordinal() {
+    let store = MemoryBlockstore::new();
+    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(
+        serde_json::json!({"binding": {"artifact": vec![2u8; 32], "selection": vec![3u8; 32]}, "original_ordinal": 7}),
+    ).unwrap();
+    for (original, ordinal) in [(ArtifactId([4; 32]), 7), (ArtifactId([2; 32]), 8)] {
+        let row = RecordedCompilerRow::Original {
+            interface: ArtifactId([1; 32]),
+            original,
+            provenance: RecordedOriginalProvenance::Reusable,
+            native_choices: RecordedNativeChoices::Issued {
+                groups: std::iter::once((ordinal, group)).collect(),
+            },
+        };
+        let mut writer = Materializer::new(&store);
+        let cid = CompilerRowCodec::encode(&mut writer, &row).unwrap();
+        install(&store, writer.finish().unwrap());
+        assert!(
+            matches!(CompilerRowCodec::decode(&SnapshotHydrator::new(&store), cid),
+            Err(SnapshotError::Malformed(message)) if message == "native choice differs from its recorded original row")
+        );
     }
 }
 
@@ -1242,14 +1296,14 @@ fn input_decision_codec_refuses_non_original_roles_and_duplicate_ordinals() {
     let mut writer = Materializer::new(&store);
     let no_original = CompilerRoleCodec::encode(
         &mut writer,
-        &CompilerInputRole::InterfaceOnly {
+        &crate::artifact_inventory::RecordedCompilerRole::InterfaceOnly {
             interface: ArtifactId([1; 32]),
         },
     )
     .unwrap();
     let original = CompilerRoleCodec::encode(
         &mut writer,
-        &CompilerInputRole::ReusableOriginal {
+        &crate::artifact_inventory::RecordedCompilerRole::ReusableOriginal {
             interface: ArtifactId([1; 32]),
             original: ArtifactId([2; 32]),
         },
@@ -1883,7 +1937,7 @@ proptest! {
 }
 
 #[test]
-fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage() {
+fn context_v10_requires_linked_and_source_roots_and_distinguishes_missing_storage() {
     let store = MemoryBlockstore::new();
     let mut writer = Materializer::new(&store);
     let valid = writer
@@ -1891,7 +1945,7 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
         .unwrap();
     install(&store, writer.finish().unwrap());
     let descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
-    assert_eq!(descriptor.version, 9);
+    assert_eq!(descriptor.version, 10);
     let bytes = store.get(valid.root().cid()).unwrap().unwrap();
     let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
     let encode = |value: &ciborium::Value| {

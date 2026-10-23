@@ -84,7 +84,11 @@ pub(crate) fn restore_acquired_native_closures(
             }
             receipts.insert(
                 receipt.stage_id,
-                NativePackageReceipt::from_facts(Arc::clone(receipt), None, &operation)?,
+                NativePackageReceipt::acquire_recorded(
+                    Arc::clone(receipt),
+                    acquired_packages,
+                    &operation,
+                )?,
             );
         }
         for row in &facts.occurrences {
@@ -250,51 +254,54 @@ pub(crate) fn restore_acquired_native_closures(
     }
     let mut result = Vec::new();
     for (identity, facts, home, receipts) in prepared {
+        operation
+            .reserve::<(NativeOccurrenceId, NativeCodeRef)>(facts.occurrences.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let codes = facts
+            .occurrences
+            .iter()
+            .map(|row| {
+                let code = restored
+                    .get(&row.code.component)
+                    .and_then(|component| component.member(row.code.member))
+                    .ok_or_else(|| refusal("acquired code member was not restored"))?;
+                Ok((row.occurrence, code))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let mut nodes = Vec::new();
         for row in &facts.occurrences {
-            let component = restored
-                .get(&row.code.component)
-                .ok_or_else(|| refusal("acquired component was not restored"))?;
-            let code = component
-                .member(row.code.member)
-                .ok_or_else(|| refusal("acquired code member was not restored"))?;
-            let acquisition = match row.occurrence {
-                NativeOccurrenceId::Home(binding) => NativeAcquisition::Home {
-                    grant: home
-                        .get(&binding)
+            let plan = match row.occurrence {
+                NativeOccurrenceId::Home(binding) => NativeOccurrencePlan::restore_home(
+                    home.get(&binding)
                         .cloned()
                         .ok_or_else(|| refusal("actual HOME acquisition is absent"))?,
-                },
+                    &row.imports,
+                    &receipts,
+                    &operation,
+                )?,
                 NativeOccurrenceId::Package {
                     stage_id,
                     occurrence,
                 } => {
-                    let receipt = receipts
+                    let grant = receipts
                         .get(&stage_id)
-                        .ok_or_else(|| refusal("actual package receipt is absent"))?;
-                    let selected = receipt
-                        .row(occurrence)
+                        .and_then(|receipt| receipt.occurrence(occurrence))
                         .ok_or_else(|| refusal("actual package occurrence is absent"))?;
-                    NativeAcquisition::Package {
-                        product: Arc::clone(
-                            acquired_packages
-                                .get(&selected.product)
-                                .ok_or_else(|| refusal("actual package product is absent"))?,
-                        ),
-                        receipt: Arc::clone(receipt),
-                        occurrence,
-                    }
+                    NativeOccurrencePlan::package(grant, &operation)?
                 }
             };
-            nodes.push(NativeAcquiredOccurrence {
-                occurrence: row.occurrence,
-                code,
-                acquisition,
-                imports: Arc::clone(&row.imports),
-            });
+            nodes.push(plan.restore(
+                codes[&row.occurrence].clone(),
+                &row.imports,
+                &codes,
+                &operation,
+            )?);
         }
-        let closure =
-            AcquiredNativeClosure::issue(nodes, artifacts.inventory().empty_view(), &operation)?;
+        let closure = AcquiredNativeClosure::from_occurrences(
+            nodes,
+            artifacts.inventory().empty_view(),
+            &operation,
+        )?;
         if closure.identity() != &identity || closure.recorded_facts().as_ref() != facts.as_ref() {
             return Err(refusal(
                 "acquired closure facts changed during authenticated restoration",

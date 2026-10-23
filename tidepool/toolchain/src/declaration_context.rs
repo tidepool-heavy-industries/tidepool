@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::artifact_inventory::{
-    admission_failure, ArtifactBinding, ArtifactBindingNode, ArtifactDependency, ArtifactEntry,
-    ArtifactGraphSelection, ArtifactId, ArtifactInventory, ArtifactInventoryFailure,
-    ArtifactPayload, ArtifactView, CanonicalProducerIdentity, CompilerArtifactMetadata,
-    CompilerInputProjection, CompilerInputRole, JoinedInterfaceRole, NativeGroupKey,
+    admission_failure, AdmittedCompilerRoles, ArtifactBinding, ArtifactBindingNode,
+    ArtifactDependency, ArtifactEntry, ArtifactGraphSelection, ArtifactId, ArtifactInventory,
+    ArtifactInventoryFailure, ArtifactPayload, ArtifactView, CanonicalProducerIdentity,
+    CompilerArtifactMetadata, CompilerInputProjection, CompilerInputRole, JoinedInterfaceRole,
+    NativeGroupKey,
 };
 use crate::certified_products::{IssuedSelectedNativeGroup, PendingCertifiedGroup};
 use crate::declaration_join::{
@@ -1088,8 +1089,13 @@ fn preserve_native_offers(
 ) -> Result<Vec<crate::artifact_inventory::IssuedNativeOffer>, CompileError> {
     let mut retained = Vec::new();
     for offer in offers {
-        if let Some(offer) = offer.within_projection(projection, namespace)? {
-            if !retained.contains(&offer) {
+        if let Some(offer) = offer.within_assembly(projection.role_view(), namespace)? {
+            if !retained
+                .iter()
+                .any(|prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                    prior.same_issuance(&offer)
+                })
+            {
                 retained.push(offer);
             }
         }
@@ -1167,7 +1173,7 @@ impl CapturedCompilerStage {
         let issued = RequestNativeAvailability::from_current_cohort(
             &physical,
             validated,
-            &projection,
+            projection.role_view(),
             &validation.inventory,
         )?;
         selection
@@ -1638,7 +1644,11 @@ impl OriginalCompilerInputs {
         let mut native_offers = Vec::new();
         for issued in continuation.availability_rows() {
             for offer in issued.offers() {
-                if !native_offers.contains(offer) {
+                if !native_offers.iter().any(
+                    |prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                        prior.same_issuance(offer)
+                    },
+                ) {
                     native_offers.push(offer.clone());
                 }
             }
@@ -1729,7 +1739,12 @@ impl OriginalCompilerInputs {
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
         for offer in &other.native_offers {
-            if !native_offers.contains(offer) {
+            if !native_offers
+                .iter()
+                .any(|prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                    prior.same_issuance(offer)
+                })
+            {
                 native_offers.push(offer.clone());
             }
         }
@@ -1865,6 +1880,16 @@ pub(crate) struct ContinuationNativeInputs<'a> {
 }
 
 impl<'a> ContinuationNativeInputs<'a> {
+    pub(crate) fn native_decision(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> crate::artifact_inventory::InputNativeDecision<'_> {
+        match self.projection.snapshot_roles().get(owner) {
+            Some(role) => self.decisions.for_role(owner, role),
+            None => crate::artifact_inventory::InputNativeDecision::UnissuedPolicy,
+        }
+    }
+
     fn from_selection(
         selection: &'a crate::certified_products::CertifiedSourceSelection,
         projection: &CompilerInputProjection,
@@ -2106,9 +2131,7 @@ impl NativeTransportAvailability {
             return Err(failure("normalized native row is not original"));
         };
         Ok(ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("normalized native row lacks canonical owner"))?,
+            product.module_interface(),
         ))
     }
 
@@ -2496,13 +2519,9 @@ impl RequestNativeAvailability {
 
     pub(crate) fn validate_role_coverage(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
     ) -> Result<(), CompileError> {
-        for original in projection
-            .snapshot_roles()
-            .values()
-            .filter_map(|role| role.original())
-        {
+        for original in roles.iter().filter_map(|(_, role)| role.original()) {
             if !self.0.contains_key(&original) {
                 return Err(failure(
                     "selected original lacks its normalized native permission row",
@@ -2660,7 +2679,7 @@ impl RequestNativeAvailability {
     #[track_caller]
     pub(crate) fn for_compiler_roles(
         &self,
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
         if self.0.is_empty() {
@@ -2670,7 +2689,7 @@ impl RequestNativeAvailability {
             .0
             .iter()
             .filter_map(|(id, row)| {
-                let role = roles.snapshot_roles().get(&row.original.descriptor.owner)?;
+                let role = roles.get(&row.original.descriptor.owner)?;
                 (role.interface() == row.canonical
                     && role.original().is_none_or(|selected| selected == *id))
                 .then_some(*id)
@@ -2688,7 +2707,7 @@ impl RequestNativeAvailability {
     #[track_caller]
     fn for_compiler_roots(
         &self,
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         artifacts: &ArtifactView,
         direct: &BTreeSet<ArtifactId>,
         budget: NativeDemandBudget<'_>,
@@ -2821,7 +2840,6 @@ impl RequestNativeAvailability {
                 selected.contributions = contributions.into();
             }
             selected.classification = if roles
-                .snapshot_roles()
                 .get(&row.original.descriptor.owner)
                 .is_some_and(|role| role.original() == Some(id))
             {
@@ -2955,10 +2973,11 @@ impl RequestNativeAvailability {
 
     /// Transfer one checked physical cohort without qualifying its immutable
     /// dependency graphs against a later namespace or widening its own subset.
+    /// Assembly facts classify rows; the validated cohort owns their permission.
     fn from_current_cohort(
         physical: &ArtifactView,
         validated: crate::artifact_inventory::ValidatedFreshNativeAvailability,
-        roles: &CompilerInputProjection,
+        roles: crate::artifact_inventory::AssemblyRoleView<'_>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<CompletedRequestNativeAvailability, CompileError> {
         let artifacts = physical.retain_issued_offer_custody(validated.offers().iter().cloned())?;
@@ -3019,9 +3038,8 @@ impl RequestNativeAvailability {
             return Err(failure("current cohort omitted an own availability offer"));
         }
         let role_originals = roles
-            .roles()
             .iter()
-            .filter_map(|role| role.original())
+            .filter_map(|(_, role)| role.original())
             .collect::<BTreeSet<_>>();
         let mut rows = imbl::OrdMap::new();
         for (id, contributions) in availability {
@@ -3078,12 +3096,12 @@ impl RequestNativeAvailability {
     }
 
     pub(crate) fn issue_checked(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
+        metadata: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
-        let metadata = roles.project_metadata(artifacts.metadata_snapshot())?;
-        Ok(NativeInputSelection::issue_checked(roles, &metadata, artifacts, offers)?.availability)
+        Ok(NativeInputSelection::issue_checked(roles, metadata, artifacts, offers)?.availability)
     }
 
     pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
@@ -4556,7 +4574,7 @@ impl RequestCompilerInputs {
             }
         }
         let availability = self.native_selection.availability.for_compiler_roots(
-            demand.projection(),
+            demand.compiler_roles(),
             self.artifacts(),
             &direct,
             budget,
@@ -4569,7 +4587,7 @@ impl RequestCompilerInputs {
                 &demand.metadata().entries,
             )?;
         }
-        availability.validate_role_coverage(demand.projection())?;
+        availability.validate_role_coverage(demand.compiler_roles())?;
         let mut changed = BTreeMap::new();
         for row in availability.rows() {
             let id = row.original.descriptor.id;
@@ -4617,8 +4635,7 @@ impl NativeInputSelection {
         let mut changed = BTreeSet::new();
         for owner in changed_owners {
             let role = support
-                .projection()
-                .snapshot_roles()
+                .compiler_roles()
                 .get(owner)
                 .ok_or_else(|| failure("type candidate refresh lost its compiler role"))?;
             if role.original().is_some() {
@@ -4632,7 +4649,7 @@ impl NativeInputSelection {
             .any(|row| changed.contains(&row.original.descriptor.owner))
         {
             Self::from_normalized_rows(
-                support.projection(),
+                support.compiler_roles(),
                 metadata,
                 support.artifacts(),
                 support.native_availability().clone(),
@@ -4644,7 +4661,7 @@ impl NativeInputSelection {
     }
 
     fn receive(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: &RequestNativeAvailability,
@@ -4656,7 +4673,7 @@ impl NativeInputSelection {
     }
 
     fn from_normalized_rows(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: RequestNativeAvailability,
@@ -4683,7 +4700,7 @@ impl NativeInputSelection {
                 &projection.entries,
             )?;
             let owner = &row.original.descriptor.owner;
-            let Some(role) = roles.snapshot_roles().get(owner) else {
+            let Some(role) = roles.get(owner) else {
                 continue;
             };
             let direct = match role.original() {
@@ -4767,7 +4784,7 @@ impl NativeInputSelection {
     }
 
     fn issue_checked(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
@@ -4813,7 +4830,7 @@ impl NativeInputSelection {
     }
 
     fn normalize_issued_contributions(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
@@ -4825,7 +4842,6 @@ impl NativeInputSelection {
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         >::new();
         let namespace_originals = roles
-            .snapshot_roles()
             .iter()
             .filter_map(|(owner, role)| {
                 let id = role.original()?;
@@ -5207,7 +5223,7 @@ impl WorldPrimaryInputs {
             )?
         } else {
             NativeInputSelection::receive(
-                delta.support.projection(),
+                delta.support.compiler_roles(),
                 &metadata,
                 delta.support.artifacts(),
                 delta.support.native_availability(),
@@ -5393,7 +5409,7 @@ impl ProtectedScaffoldRequirements {
             .projection()
             .project_metadata(support.artifacts().metadata_snapshot())?;
         let native_selection = NativeInputSelection::receive(
-            support.projection(),
+            support.compiler_roles(),
             &metadata,
             support.artifacts(),
             support.native_availability(),
@@ -5526,7 +5542,7 @@ impl ExactCompileContext {
             .entries
             .get(&identity(&product.owner().unit, &product.owner().module))
             .ok_or_else(|| failure("protected scaffold lacks a selected canonical interface"))?;
-        if canonical_source_interface(selected) != product.module_interface()
+        if canonical_source_interface(selected) != Some(product.module_interface())
             || certificate.product().owner() != product.owner()
         {
             return Err(failure(
@@ -5638,7 +5654,7 @@ fn canonical_source_interface(
 ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
     match &entry.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Original(product) => product.module_interface(),
+        ArtifactPayload::Original(product) => Some(product.module_interface()),
         ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     }
 }
@@ -6846,7 +6862,7 @@ impl RecoveredArtifactInventory {
         let canonical = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                ArtifactPayload::Original(product) => Some(product.module_interface().clone()),
                 _ => None,
             })
             .map(ArtifactEntry::canonical)
@@ -8621,10 +8637,8 @@ impl ProgramSourceSupportRow {
         };
         receipt.row().original_artifact_id() == entry.descriptor.id
             && receipt.row().original_owner() == product.owner()
-            && product
-                .module_interface()
-                .map(ArtifactEntry::canonical_artifact_id)
-                == Some(receipt.row().canonical)
+            && ArtifactEntry::canonical_artifact_id(product.module_interface())
+                == receipt.row().canonical
             && receipt
                 .row()
                 .target_original(product.owner())
@@ -11914,11 +11928,9 @@ impl ProductInputFacts<'_> {
                         interface.origin(),
                         crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                     ),
-                    ArtifactPayload::Original(product) => product.module_interface().is_some_and(
-                        |interface| matches!(
-                            interface.origin(),
-                            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
-                        ),
+                    ArtifactPayload::Original(product) => matches!(
+                        product.module_interface().origin(),
+                        crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                     ),
                 })
                 .map(|entry| entry.descriptor.owner.clone())
@@ -14165,9 +14177,7 @@ fn scope_interface_evidence(
             return Err(failure("package code has no compiler interface evidence"))
         }
         ArtifactPayload::Canonical(interface) => interface,
-        ArtifactPayload::Original(product) => product
-            .module_interface()
-            .ok_or_else(|| failure("native interface evidence is missing"))?,
+        ArtifactPayload::Original(product) => product.module_interface(),
         ArtifactPayload::Interface(_, role) => {
             let tag = match role {
                 JoinedInterfaceRole::LexicalJoin => "join",
@@ -14727,8 +14737,8 @@ impl ExactDeclarationContext {
             .ok_or_else(|| failure("authored source scope lacks its issued output"))?;
         if !matches!(&entry.payload, ArtifactPayload::Original(product)
             if product.source_sha256() == Some(authored.source_sha256())
-                && product.module_interface().map(|interface| interface.origin())
-                    == Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() }))
+                && product.module_interface().origin()
+                    == crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() })
         {
             return Err(failure(
                 "authored source scope differs from its reserved output",
@@ -15341,10 +15351,8 @@ impl ExactDeclarationContext {
             .iter()
             .filter(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) if generation != 0 => {
-                    product
-                        .module_interface()
-                        .map(|interface| interface.origin())
-                        == Some(CanonicalOrigin::NativeAuthoredDeclaration { generation })
+                    product.module_interface().origin()
+                        == CanonicalOrigin::NativeAuthoredDeclaration { generation }
                 }
                 _ => false,
             })
@@ -16863,7 +16871,7 @@ impl ExactDeclarationContext {
 
             let canonical = match &entry.payload {
                 ArtifactPayload::Canonical(interface) => Some(interface),
-                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Original(product) => Some(product.module_interface()),
                 ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
             };
             if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
@@ -16931,7 +16939,9 @@ impl ExactDeclarationContext {
                     payload,
                     canonical_custody: match &entry.payload {
                         ArtifactPayload::Canonical(interface) => Some(interface.clone()),
-                        ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                        ArtifactPayload::Original(product) => {
+                            Some(product.module_interface().clone())
+                        }
                         ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
                     },
                 },
@@ -17011,7 +17021,7 @@ impl ExactDeclarationContext {
                     {
                         if let Some(slice) = product
                             .module_interface()
-                            .and_then(|canonical| canonical.catalog_input_custody())
+                            .catalog_input_custody()
                             .and_then(|custody| {
                                 custody
                                     .transport(original_inputs::OriginalInputKind::Graph)
@@ -17353,9 +17363,9 @@ impl ExactDeclarationContext {
                             ArtifactPayload::Canonical(interface) => {
                                 interface.original_input_origins()
                             }
-                            ArtifactPayload::Original(product) => product
-                                .module_interface()
-                                .and_then(|interface| interface.original_input_origins()),
+                            ArtifactPayload::Original(product) => {
+                                product.module_interface().original_input_origins()
+                            }
                             ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
                                 None
                             }
@@ -23176,20 +23186,6 @@ mod tests {
             let decoded: crate::artifact_inventory::RecordedCompilerRole =
                 fvm_ipld_encoding::from_slice(&wire).unwrap();
             assert_eq!(decoded, facts);
-            let wire_store = MemoryBlockstore::new();
-            let mut wire_writer = Materializer::new(&wire_store);
-            let live_cid =
-                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
-                    CompilerInputRole,
-                >>::encode(&mut wire_writer, &role)
-                .unwrap();
-            let fact_cid =
-                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
-                    crate::artifact_inventory::RecordedCompilerRole,
-                >>::encode(&mut wire_writer, &facts)
-                .unwrap();
-            assert_eq!(live_cid, fact_cid);
-            wire_writer.finish().unwrap();
         }
         drop(live_role);
         let fact_only_snapshot = restored.snapshot();
@@ -25682,7 +25678,7 @@ mod tests {
 
     // Frozen pre-split constructor, independent of the new semantic/physical split.
     fn reference_native_transport(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: RequestNativeAvailability,
@@ -25713,7 +25709,7 @@ mod tests {
                 &projection.entries,
             )?;
             let owner = &row.original.descriptor.owner;
-            let Some(role) = roles.snapshot_roles().get(owner) else {
+            let Some(role) = roles.get(owner) else {
                 continue;
             };
             let direct = match role.original() {
@@ -25772,7 +25768,7 @@ mod tests {
         normalized: &RequestNativeAvailability,
     ) -> Option<ReferenceNativeCompilerTransport> {
         let support = inputs.compiler_source_support();
-        let roles = inputs.projection();
+        let roles = support.compiler_roles();
         let artifacts = inputs.artifacts();
         let expected = normalized
             .for_compiler_roles(roles, artifacts)
@@ -25873,10 +25869,10 @@ mod tests {
             )
             .expect("genuinely issued common inputs");
             if inputs
-                .projection()
-                .roles()
+                .compiler_source_support()
+                .compiler_roles()
                 .iter()
-                .any(|role| role.original().is_some())
+                .any(|(_, role)| role.original().is_some())
             {
                 assert!(check_native_selection_reference(
                     &inputs,
@@ -25925,7 +25921,7 @@ mod tests {
             let source = physical.inputs.compiler_source_support();
             let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
             let issued = NativeInputSelection::issue_checked(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 source.native_offers(),
@@ -25946,7 +25942,7 @@ mod tests {
             row.contributions = Arc::from([]);
             let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
             let expected = reference_native_transport(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 invalid.clone(),
@@ -25955,7 +25951,7 @@ mod tests {
             .err()
             .expect("complete proof is mandatory");
             let actual = NativeInputSelection::from_normalized_rows(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 invalid,

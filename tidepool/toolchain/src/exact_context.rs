@@ -2518,6 +2518,212 @@ impl ExactContextSnapshot {
     }
 }
 
+/// Durable row facts never contain acquired input owners or source authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecordedCompilerRow {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    Original {
+        interface: ArtifactId,
+        original: ArtifactId,
+        provenance: RecordedOriginalProvenance,
+        native_choices: RecordedNativeChoices,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "birth",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum RecordedOriginalProvenance {
+    Reusable,
+    Published(RecordedPublicationBirth),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordedPublicationBirth {
+    pub(crate) source_revision: String,
+    pub(crate) original_input_identity: String,
+    pub(crate) selection: crate::artifact_inventory::ExactArtifactSelection,
+    pub(crate) selection_sha256: [u8; 32],
+    pub(crate) native_facts: Arc<PublicationNativeFacts>,
+}
+
+/// An absent choice and an issued empty choice are different recorded facts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecordedNativeChoices {
+    Unissued,
+    Issued {
+        #[serde(with = "serde_ord_map")]
+        groups: OrdMap<u32, crate::artifact_inventory::NativeGroupBinding>,
+    },
+}
+
+impl RecordedCompilerRow {
+    pub(crate) fn interface(&self) -> ArtifactId {
+        match self {
+            Self::InterfaceOnly { interface } | Self::Original { interface, .. } => *interface,
+        }
+    }
+    pub(crate) fn original(&self) -> Option<ArtifactId> {
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::Original { original, .. } => Some(*original),
+        }
+    }
+    pub(crate) fn publication(&self) -> Option<&RecordedPublicationBirth> {
+        match self {
+            Self::Original {
+                provenance: RecordedOriginalProvenance::Published(birth),
+                ..
+            } => Some(birth),
+            _ => None,
+        }
+    }
+    pub(crate) fn native_choices(&self) -> Option<&RecordedNativeChoices> {
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::Original { native_choices, .. } => Some(native_choices),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "birth",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum OriginalProvenanceWire {
+    Reusable,
+    Published {
+        source_revision: String,
+        original_input_identity: String,
+        selection: SelectionRoot,
+        selection_sha256: [u8; 32],
+        native_facts: Cid,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CompilerRowWire {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    Original {
+        interface: ArtifactId,
+        original: ArtifactId,
+        provenance: OriginalProvenanceWire,
+        native_choices: RecordedNativeChoices,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CompilerRowCodec;
+impl SnapshotValueCodec<RecordedCompilerRow> for CompilerRowCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        store: &mut Materializer<'_, BS>,
+        row: &RecordedCompilerRow,
+    ) -> Result<Cid, SnapshotError> {
+        let wire = match row {
+            RecordedCompilerRow::InterfaceOnly { interface } => CompilerRowWire::InterfaceOnly {
+                interface: *interface,
+            },
+            RecordedCompilerRow::Original {
+                interface,
+                original,
+                provenance,
+                native_choices,
+            } => {
+                let provenance = match provenance {
+                    RecordedOriginalProvenance::Reusable => OriginalProvenanceWire::Reusable,
+                    RecordedOriginalProvenance::Published(birth) => {
+                        let native_facts =
+                            store.materialize_publication_native(&birth.native_facts)?;
+                        let base = store.selection_base.clone();
+                        let selection = store
+                            .materialize_selection(base.as_ref(), birth.selection.snapshot())?;
+                        OriginalProvenanceWire::Published {
+                            source_revision: birth.source_revision.clone(),
+                            original_input_identity: birth.original_input_identity.clone(),
+                            selection: selection.root,
+                            selection_sha256: birth.selection_sha256,
+                            native_facts,
+                        }
+                    }
+                };
+                CompilerRowWire::Original {
+                    interface: *interface,
+                    original: *original,
+                    provenance,
+                    native_choices: native_choices.clone(),
+                }
+            }
+        };
+        store.materialize_value(&wire)
+    }
+    fn decode<BS: Blockstore>(
+        store: &SnapshotHydrator<'_, BS>,
+        cid: Cid,
+    ) -> Result<RecordedCompilerRow, SnapshotError> {
+        Ok(match read_value::<CompilerRowWire, _>(store, &cid)? {
+            CompilerRowWire::InterfaceOnly { interface } => {
+                RecordedCompilerRow::InterfaceOnly { interface }
+            }
+            CompilerRowWire::Original {
+                interface,
+                original,
+                provenance,
+                native_choices,
+            } => {
+                if let RecordedNativeChoices::Issued { groups } = &native_choices {
+                    if groups.iter().any(|(ordinal, group)| {
+                        *ordinal != group.original_ordinal || group.binding.artifact() != original
+                    }) {
+                        return Err(malformed(
+                            "native choice differs from its recorded original row",
+                        ));
+                    }
+                }
+                let provenance = match provenance {
+                    OriginalProvenanceWire::Reusable => RecordedOriginalProvenance::Reusable,
+                    OriginalProvenanceWire::Published {
+                        source_revision,
+                        original_input_identity,
+                        selection,
+                        selection_sha256,
+                        native_facts,
+                    } => RecordedOriginalProvenance::Published(RecordedPublicationBirth {
+                        source_revision,
+                        original_input_identity,
+                        selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                            store.selection(&selection)?.snapshot,
+                        ),
+                        selection_sha256,
+                        native_facts: hydrate_publication_native(store, &native_facts)?,
+                    }),
+                };
+                RecordedCompilerRow::Original {
+                    interface,
+                    original,
+                    provenance,
+                    native_choices,
+                }
+            }
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompilerRoleFact {
@@ -2540,92 +2746,6 @@ pub enum CompilerRoleFact {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct CompilerRoleCodec;
-impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
-    type Wire = Cid;
-    fn encode<BS: Blockstore>(
-        store: &mut Materializer<'_, BS>,
-        role: &CompilerInputRole,
-    ) -> Result<Cid, SnapshotError> {
-        let fact = match role {
-            CompilerInputRole::InterfaceOnly { interface } => CompilerRoleFact::InterfaceOnly {
-                interface: *interface,
-            },
-            CompilerInputRole::ReusableOriginal {
-                interface,
-                original,
-            } => CompilerRoleFact::ReusableOriginal {
-                interface: *interface,
-                original: *original,
-            },
-            CompilerInputRole::PublishedSourceOriginal {
-                interface,
-                original,
-                source_revision,
-                original_input_identity,
-                selection,
-                selection_sha256,
-                native_authority,
-            } => {
-                let authority = store.materialize_publication_native(native_authority.facts())?;
-                let base = store.selection_base.clone();
-                let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
-                CompilerRoleFact::PublishedSourceOriginal {
-                    interface: *interface,
-                    original: *original,
-                    source_revision: source_revision.clone(),
-                    original_input_identity: original_input_identity.clone(),
-                    selection: selection.root,
-                    selection_sha256: *selection_sha256,
-                    native_authority: authority,
-                }
-            }
-        };
-        store.materialize_value(&fact)
-    }
-    fn decode<BS: Blockstore>(
-        store: &SnapshotHydrator<'_, BS>,
-        cid: Cid,
-    ) -> Result<CompilerInputRole, SnapshotError> {
-        Ok(match read_value::<CompilerRoleFact, _>(store, &cid)? {
-            CompilerRoleFact::InterfaceOnly { interface } => {
-                CompilerInputRole::InterfaceOnly { interface }
-            }
-            CompilerRoleFact::ReusableOriginal {
-                interface,
-                original,
-            } => CompilerInputRole::ReusableOriginal {
-                interface,
-                original,
-            },
-            CompilerRoleFact::PublishedSourceOriginal {
-                interface,
-                original,
-                source_revision,
-                original_input_identity,
-                selection,
-                selection_sha256,
-                native_authority,
-            } => {
-                let native_authority = hydrate_publication_native(store, &native_authority)?;
-                let selection = store.selection(&selection)?;
-                CompilerInputRole::PublishedSourceOriginal {
-                    interface,
-                    original,
-                    source_revision,
-                    original_input_identity,
-                    selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
-                        selection.snapshot,
-                    ),
-                    selection_sha256,
-                    native_authority:
-                        crate::artifact_inventory::PublicationNativeAuthority::recorded(
-                            native_authority,
-                        ),
-                }
-            }
-        })
-    }
-}
 
 impl SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole> for CompilerRoleCodec {
     type Wire = Cid;
@@ -2674,8 +2794,42 @@ impl SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole> for Com
         store: &SnapshotHydrator<'_, BS>,
         wire: Cid,
     ) -> Result<crate::artifact_inventory::RecordedCompilerRole, SnapshotError> {
-        <Self as SnapshotValueCodec<CompilerInputRole>>::decode(store, wire)
-            .map(|role| role.recorded_fact())
+        use crate::artifact_inventory::RecordedCompilerRole;
+        Ok(match read_value::<CompilerRoleFact, _>(store, &wire)? {
+            CompilerRoleFact::InterfaceOnly { interface } => {
+                RecordedCompilerRole::InterfaceOnly { interface }
+            }
+            CompilerRoleFact::ReusableOriginal {
+                interface,
+                original,
+            } => RecordedCompilerRole::ReusableOriginal {
+                interface,
+                original,
+            },
+            CompilerRoleFact::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+                native_authority,
+            } => {
+                let native_authority = hydrate_publication_native(store, &native_authority)?;
+                let selection = store.selection(&selection)?;
+                RecordedCompilerRole::PublishedSourceOriginal {
+                    interface,
+                    original,
+                    source_revision,
+                    original_input_identity,
+                    selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                        selection.snapshot,
+                    ),
+                    selection_sha256,
+                    native_authority,
+                }
+            }
+        })
     }
 }
 
@@ -2849,7 +3003,7 @@ fn hydrate_publication_native<BS: Blockstore>(
     Ok(facts)
 }
 
-const CONTEXT_ENCODING_VERSION: u32 = 9;
+const CONTEXT_ENCODING_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

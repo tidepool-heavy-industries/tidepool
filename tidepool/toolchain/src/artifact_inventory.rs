@@ -24,7 +24,8 @@ pub(crate) use compiler_projection::{
     RecordedInputNativeDecision,
 };
 pub use compiler_projection::{
-    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+    AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
+    CompilerRoleFacts, PublicationFactsRef, PublicationNativeAuthority,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -1104,11 +1105,7 @@ impl NativeOriginalRequirement {
                 },
             ));
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("private original lacks canonical carrier"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let Some((carrier, canonical_binding)) = self.namespace_pair_in(state, graph, canonical)
         else {
             return Ok(None);
@@ -1350,6 +1347,17 @@ impl NativeOriginalRequirement {
         Ok(requirements)
     }
 
+    pub(crate) fn from_publication(
+        roles: AdmittedCompilerRoles<'_>,
+        owner: &ExactModuleIdentity,
+    ) -> Option<Self> {
+        let role = roles.get(owner)?;
+        Some(Self {
+            original: role.original()?,
+            selection: role.publication()?.selection().clone(),
+        })
+    }
+
     pub(crate) fn from_role(role: CompilerInputRole) -> Option<Self> {
         match role {
             CompilerInputRole::PublishedSourceOriginal {
@@ -1390,6 +1398,12 @@ fn checked_input_group_choices(
         }
     }
     Ok(selected)
+}
+
+struct AdmittedCompilerRowMerge<'a> {
+    receiving: AdmittedCompilerRoles<'a>,
+    incoming: AdmittedCompilerRoles<'a>,
+    selected: &'a mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
 }
 
 enum CompilerNativeDemand<'a> {
@@ -2393,7 +2407,7 @@ impl ArtifactEntry {
     fn adopt_facts(&self, facts: ArtifactFactsHandle) -> Self {
         let payload = match (&self.payload, &facts) {
             (ArtifactPayload::Original(product), ArtifactFactsHandle::Original(owner)) => {
-                ArtifactPayload::Original(product.clone().with_facts(Arc::clone(owner)))
+                ArtifactPayload::Original(product.clone().adopt_fact_owner(Arc::clone(owner)))
             }
             (ArtifactPayload::Canonical(interface), ArtifactFactsHandle::Canonical(owner)) => {
                 ArtifactPayload::Canonical(interface.clone().with_facts(Arc::clone(owner)))
@@ -2408,7 +2422,7 @@ impl ArtifactEntry {
         };
         let mut adopted = self.clone();
         adopted.native = match &payload {
-            ArtifactPayload::Original(product) => product.original_native().cloned(),
+            ArtifactPayload::Original(product) => Some(Arc::clone(product.original_native())),
             _ => None,
         };
         adopted.payload = payload;
@@ -2420,27 +2434,24 @@ impl ArtifactEntry {
     ) -> Option<Arc<crate::module_candidates::deployment::CapturedCatalogInputs>> {
         match &self.payload {
             ArtifactPayload::Canonical(interface) => interface.catalog_input_custody(),
-            ArtifactPayload::Original(product) => product
-                .module_interface()
-                .and_then(|interface| interface.catalog_input_custody()),
+            ArtifactPayload::Original(product) => {
+                product.module_interface().catalog_input_custody()
+            }
             ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         }
     }
 
-    fn source_admission_witness(&self) -> Option<[u8; 32]> {
-        match &self.payload {
-            ArtifactPayload::Original(product) => product.source_sha256(),
-            _ => None,
-        }
-    }
-
     fn same_issuing_authority(&self, other: &Self) -> bool {
-        self.source_admission_witness() == other.source_admission_witness()
-            && match (self.catalog_input_custody(), other.catalog_input_custody()) {
-                (None, None) => true,
-                (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
-                _ => false,
-            }
+        if let (ArtifactPayload::Original(left), ArtifactPayload::Original(right)) =
+            (&self.payload, &other.payload)
+        {
+            return left.same_admission_and_transport(right);
+        }
+        match (self.catalog_input_custody(), other.catalog_input_custody()) {
+            (None, None) => true,
+            (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
+            _ => false,
+        }
     }
 
     pub(crate) fn merge_catalog_input_custody(
@@ -2540,12 +2551,7 @@ impl ArtifactEntry {
     ) -> Result<Self, CompileError> {
         #[cfg(test)]
         ORIGINAL_ENTRY_CONSTRUCTION_CALLS.with(|calls| calls.set(calls.get() + 1));
-        let product =
-            crate::certified_products::finalize_original_for_inventory(product, validation)
-                .map_err(|error| failure(&format!("original facts: {error}")))?;
-        let canonical = product
-            .module_interface()
-            .ok_or_else(|| failure("native product lacks its canonical finalized module"))?;
+        let canonical = product.module_interface();
         if canonical.producer_sha256() != producer {
             return Err(failure("native product has another canonical producer"));
         }
@@ -2564,13 +2570,11 @@ impl ArtifactEntry {
         let descriptor = Self::original_descriptor(producer, &product);
         Ok(Self {
             descriptor,
-            facts: ArtifactFactsHandle::Original(Arc::clone(
-                product.facts().expect("finalized original"),
-            )),
+            facts: ArtifactFactsHandle::Original(Arc::clone(product.facts())),
             payload: ArtifactPayload::Original(product.clone()),
             requirements,
             interface_seals,
-            native: product.original_native().cloned(),
+            native: Some(Arc::clone(product.original_native())),
         })
     }
     fn original_descriptor(
@@ -2754,11 +2758,7 @@ pub(crate) fn restore_recovery_interface_dependencies(
     }
     for entry in entries.iter_mut() {
         if let ArtifactPayload::Original(product) = &entry.payload {
-            let canonical = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("recovered native lacks canonical carrier"))?,
-            );
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let direct = edges
                 .iter()
                 .filter(|(from, _, _)| *from == entry.descriptor.id)
@@ -2993,9 +2993,7 @@ impl InventoryState {
             return Ok(entry);
         }
         let entry = if let ArtifactPayload::Original(product) = &entry.payload {
-            let interface = product
-                .module_interface()
-                .expect("complete canonical companion");
+            let interface = product.module_interface();
             let normalized =
                 self.canonicalize(Arc::new(ArtifactEntry::canonical(interface.clone())))?;
             let ArtifactFactsHandle::Canonical(canonical) = &normalized.facts else {
@@ -3004,10 +3002,12 @@ impl InventoryState {
             if Arc::ptr_eq(interface.facts(), canonical) {
                 entry
             } else {
-                let product = product.clone().with_canonical_facts(Arc::clone(canonical));
-                Arc::new(entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(
-                    product.facts().unwrap(),
-                ))))
+                let product = product
+                    .clone()
+                    .adopt_fact_owner(product.facts().adopt_canonical_owner(Arc::clone(canonical)));
+                Arc::new(
+                    entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(product.facts()))),
+                )
             }
         } else {
             entry
@@ -3521,11 +3521,7 @@ impl SelectedOwners {
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
         let canonical = match &entry.payload {
             ArtifactPayload::Canonical(interface) => Some(interface),
-            ArtifactPayload::Original(product) => Some(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?,
-            ),
+            ArtifactPayload::Original(product) => Some(product.module_interface()),
             ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         };
         if let Some(canonical) = canonical {
@@ -3587,12 +3583,7 @@ impl SelectedOwners {
             }
         }
         if let ArtifactPayload::Original(product) = &entry.payload {
-            let carrier = ArtifactEntry::canonical(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?
-                    .clone(),
-            );
+            let carrier = ArtifactEntry::canonical(product.module_interface().clone());
             let id = resolve(&entry.descriptor.owner, &ArtifactDependency::Interface)?;
             if id != carrier.descriptor.id {
                 return Err(ArtifactInventoryError {
@@ -4607,9 +4598,7 @@ impl ArtifactInventory {
         let mut implicit = Vec::new();
         for entry in &expanded {
             if let ArtifactPayload::Original(product) = &entry.payload {
-                let canonical = product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?;
+                let canonical = product.module_interface();
                 // An explicitly supplied canonical carrier can replace this
                 // implicit carrier only when it also preserves its custody.
                 if !expanded.iter().any(|available| {
@@ -4760,11 +4749,7 @@ impl ArtifactInventory {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(failure("native namespace proof lacks original payload"));
             };
-            let canonical = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?,
-            );
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let (carrier, canonical) = requirement
                 .namespace_pair_in(&state, graph, canonical)
                 .ok_or_else(|| {
@@ -4910,8 +4895,7 @@ impl ArtifactInventory {
                         || current_artifacts.contains(id)
                         || (supplied.contains_key(id)
                             && matches!(&entry.payload, ArtifactPayload::Original(product)
-                            if product.module_interface().is_some_and(|canonical|
-                                ids.contains(&ArtifactEntry::canonical_artifact_id(canonical)))))
+                            if ids.contains(&ArtifactEntry::canonical_artifact_id(product.module_interface()))))
                 })
             })
             .map(|(id, entry)| (*id, Arc::clone(entry)))
@@ -6911,7 +6895,7 @@ impl ArtifactView {
             .iter()
             .filter(|entry| entry.descriptor.id == id)
             .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Original(product) => Some(product.module_interface()),
                 ArtifactPayload::Canonical(interface) => Some(interface),
                 ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
             })
@@ -7410,8 +7394,7 @@ impl ArtifactView {
             .filter(|(_, entry)| {
                 accepted_owners.contains(&entry.descriptor.owner)
                     && matches!(&entry.payload, ArtifactPayload::Original(product)
-                        if product.module_interface().is_some_and(|interface|
-                            matches!(interface.origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+                        if matches!(product.module_interface().origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }))
             })
             .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>();
@@ -8132,7 +8115,7 @@ impl ArtifactView {
                 };
                 Some((
                     id,
-                    ArtifactEntry::canonical_artifact_id(product.module_interface()?),
+                    ArtifactEntry::canonical_artifact_id(product.module_interface()),
                 ))
             })
             .collect::<BTreeMap<_, _>>();
@@ -9008,7 +8991,11 @@ impl ArtifactView {
                     right: Some(right.input_decisions()),
                 },
                 CompilerInputValidation::Closed,
-                Some(&mut selected),
+                Some(AdmittedCompilerRowMerge {
+                    receiving: left.compiler_roles(),
+                    incoming: right.compiler_roles(),
+                    selected: &mut selected,
+                }),
             )?;
         Ok(compiler_projection::ResolvedCompilerInputs {
             artifacts,
@@ -9032,9 +9019,7 @@ impl ArtifactView {
         incoming: &CompilerInputProjection,
         demand: CompilerNativeDemand<'_>,
         validation: CompilerInputValidation,
-        mut selected_rows: Option<
-            &mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
-        >,
+        mut selected_rows: Option<AdmittedCompilerRowMerge<'_>>,
     ) -> Result<
         (
             Self,
@@ -9047,18 +9032,22 @@ impl ArtifactView {
             "exact.compiler_input_merge",
             "validate_inputs",
         );
-        match validation {
-            CompilerInputValidation::Closed => {
-                projection.validate(self)?;
-                incoming.validate(other)?;
-            }
-            CompilerInputValidation::ReceivedFragment => {
-                projection.validate(self)?;
-                incoming.validate_associations(other)?;
-            }
-            CompilerInputValidation::FragmentPair => {
-                projection.validate_associations(self)?;
-                incoming.validate_associations(other)?;
+        // Closed owners supply already authenticated rows and the solver carries
+        // its chosen row whole. Raw projections still require admission here.
+        if selected_rows.is_none() {
+            match validation {
+                CompilerInputValidation::Closed => {
+                    projection.validate(self)?;
+                    incoming.validate(other)?;
+                }
+                CompilerInputValidation::ReceivedFragment => {
+                    projection.validate(self)?;
+                    incoming.validate_associations(other)?;
+                }
+                CompilerInputValidation::FragmentPair => {
+                    projection.validate_associations(self)?;
+                    incoming.validate_associations(other)?;
+                }
             }
         }
         timing.advance("merge_projection");
@@ -9080,36 +9069,23 @@ impl ArtifactView {
                 compiler_projection::CompilerRoleIssuer::Receiving => self,
                 compiler_projection::CompilerRoleIssuer::Incoming => other,
             };
-            {
+            if let Some(rows) = selected_rows.as_mut() {
+                let selected_source = match issuer {
+                    compiler_projection::CompilerRoleIssuer::Receiving => rows.receiving,
+                    compiler_projection::CompilerRoleIssuer::Incoming => rows.incoming,
+                };
+                let row = selected_source
+                    .selected_row(owner)
+                    .ok_or_else(|| failure("chosen compiler issuer lacks its admitted row"))?;
+                for binding in row.selected_bindings() {
+                    namespace.insert(binding.artifact, binding);
+                }
+                rows.selected.insert(owner.clone(), row.clone());
+            } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
-                let canonical = source.resolve_binding(role.interface(), owned)?;
-                namespace.insert(role.interface(), canonical);
-                let original = role
-                    .original()
-                    .map(|id| {
-                        source.resolve_binding(id, owned).map(|binding| {
-                            namespace.insert(id, binding);
-                            binding
-                        })
-                    })
-                    .transpose()?;
-                if let Some(rows) = selected_rows.as_deref_mut() {
-                    rows.insert(
-                        owner.clone(),
-                        compiler_projection::ResolvedCompilerRole::from_issued_bindings(
-                            (
-                                canonical,
-                                Arc::clone(&source.lease.payloads[&role.interface()]),
-                            ),
-                            original.map(|binding| {
-                                (
-                                    binding,
-                                    Arc::clone(&source.lease.payloads[&binding.artifact]),
-                                )
-                            }),
-                        ),
-                    );
+                for id in std::iter::once(role.interface()).chain(role.original()) {
+                    namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
             }
             if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
@@ -9762,9 +9738,7 @@ impl ArtifactView {
         product: &CertifiedRecoveryProduct,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Option<Arc<ArtifactEntry>>, CompileError> {
-        let Some(native) = product.original_native() else {
-            return Ok(None);
-        };
+        let native = product.original_native();
         if !native.matches_original(product) {
             return Ok(None);
         }
@@ -9798,21 +9772,10 @@ impl ArtifactView {
                 ArtifactMetadataInvariant::OriginalDurableFacts,
             ));
         }
-        // Inventory equality deliberately excludes the fresh source witness.
-        // A different source admission follows ordinary construction instead.
-        if previous.source_sha256() != product.source_sha256() {
+        if !previous.same_admission_and_transport(product) {
             return Ok(None);
         }
-        let Some(previous_native) = previous.original_native() else {
-            return Ok(None);
-        };
-        if !Arc::ptr_eq(native, previous_native) || !previous_native.matches_original(previous) {
-            return Ok(None);
-        }
-        if product
-            .module_interface()
-            .is_none_or(|interface| interface.producer_sha256() != producer)
-        {
+        if product.module_interface().producer_sha256() != producer {
             return Err(failure("native product has another canonical producer"));
         }
         crate::certified_products::original_execution_source_digest_with_validation(
