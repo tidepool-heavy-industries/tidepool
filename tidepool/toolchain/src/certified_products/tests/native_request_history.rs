@@ -480,15 +480,16 @@ fn replay_native_transport_history(
                     entries[index + 1].clone(),
                 ])
                 .unwrap();
-                let supplied = [proofs[index].clone(), partial[index].clone()];
+                let supplied = [
+                    (&entries[index + 1].descriptor.owner, proofs[index].clone()),
+                    (&entries[0].descriptor.owner, partial[index].clone()),
+                ];
                 let issuer =
                     issue_fixture_compiler_support(capture_projection, sources[index].clone())
                         .unwrap();
                 let before = supplied
                     .iter()
-                    .map(|proof| {
-                        issuer.issue_native_offer(&entries[0].descriptor.owner, Some(proof.clone()))
-                    })
+                    .map(|(owner, proof)| issuer.issue_native_offer(owner, Some(proof.clone())))
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
                 // Restore this source's complete selected namespace, including
@@ -501,9 +502,8 @@ fn replay_native_transport_history(
                 let receiving_issuer = issuer.retain_custody(&receiving).unwrap();
                 let after = supplied
                     .iter()
-                    .map(|proof| {
-                        receiving_issuer
-                            .issue_native_offer(&entries[0].descriptor.owner, Some(proof.clone()))
+                    .map(|(owner, proof)| {
+                        receiving_issuer.issue_native_offer(owner, Some(proof.clone()))
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
