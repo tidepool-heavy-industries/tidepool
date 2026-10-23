@@ -14265,7 +14265,13 @@ mod tests {
             )
             .unwrap();
         let independent = ArtifactInventory::default();
-        let physical_entries = vec![cold.clone(), Arc::new(entry("Other", &[]))];
+        let other = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            cold.descriptor.producer_sha256,
+            "fixture",
+            "Other",
+            BTreeMap::new(),
+        ));
+        let physical_entries = vec![cold.clone(), Arc::new(other)];
         let physical = independent
             .admit_shared_with_demand(
                 &independent.empty_view(),
