@@ -1577,6 +1577,25 @@ impl ExactDeclarationContext {
                 .all(|owner| continued.changed_owners.contains(owner)),
             "the continuation must actually install the nonempty source delta"
         );
+        for added in &additions {
+            if let Some(incoming_acquisition) =
+                incoming.compiler_roles().original_acquisition(added)
+            {
+                assert!(
+                    Arc::ptr_eq(
+                        continued
+                            .primary
+                            .inputs()
+                            .compiler_source_support()
+                            .compiler_roles()
+                            .original_acquisition(added)
+                            .unwrap(),
+                        incoming_acquisition,
+                    ),
+                    "a newly installed source row retains the actual incoming acquisition"
+                );
+            }
+        }
         assert_acquisition(continued.primary.context().compiler_source_support());
         assert_acquisition(continued.primary.inputs().compiler_source_support());
         assert_acquisition(
