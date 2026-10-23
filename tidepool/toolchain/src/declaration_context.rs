@@ -17663,6 +17663,9 @@ mod stage_type_anchor_tests;
 mod candidate_offer_history_tests;
 
 #[cfg(test)]
+mod cold_exact_native_demand_tests;
+
+#[cfg(test)]
 pub(crate) fn issue_fixture_compiler_support(
     projection: CompilerInputProjection,
     artifacts: ArtifactView,

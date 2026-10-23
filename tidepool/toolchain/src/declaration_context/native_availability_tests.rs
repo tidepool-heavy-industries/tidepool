@@ -88,7 +88,7 @@ fn restore_fixture_support_in_view(
 
 const PRODUCER: &[u8] = b"protected-native-availability-fixture";
 
-fn product(module: &str, version: u8) -> CertifiedRecoveryProduct {
+pub(super) fn product(module: &str, version: u8) -> CertifiedRecoveryProduct {
     let finalized = fixture_finalized_product(
         original_groups_fixture_with_interface(
             module,
@@ -10713,7 +10713,7 @@ fn recovery_interface_materialization_work_is_independent_of_native_body_growth(
     );
 }
 
-fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationContext> {
+pub(super) fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationContext> {
     let inventory = ArtifactInventory::default();
     let entry = Arc::new(
         ArtifactEntry::original(
