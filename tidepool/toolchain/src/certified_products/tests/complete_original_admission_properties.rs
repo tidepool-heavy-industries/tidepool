@@ -131,7 +131,7 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
             .native_selections()
             .find(|native| &native.owner == authored.owner())
             .unwrap();
-        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+        let ReceiptNativeState::CompletedCurrent { receipt, .. } = &native.state else {
             panic!("the physical issuer completed the authored original");
         };
         Arc::downgrade(receipt)

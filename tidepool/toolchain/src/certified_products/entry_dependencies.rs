@@ -82,7 +82,7 @@ impl CertifiedSourceSelection {
         let projection = self.compiler_projection(view)?;
         let borrowed = self
             .native_selections()
-            .filter(|selection| matches!(selection.version, ReceiptSourceVersion::Original))
+            .filter(|selection| matches!(selection.version(), ReceiptSourceVersion::Original))
             .map(|selection| selection.owner.clone())
             .collect::<BTreeSet<_>>();
         let linked = candidates
