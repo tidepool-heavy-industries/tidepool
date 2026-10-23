@@ -138,6 +138,12 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
     ] {
         assert_whole_row_precedence(&first[0], &second[1], owner);
     }
+    assert_fresh_dependency_permission_boundary(
+        contexts[0].as_ref(),
+        &checked_inputs[0][0],
+        &checked_inputs[0][1],
+        acquisitions[0],
+    );
     for offered in 0..2 {
         let types = supports[offered]
             .selected_interfaces()
@@ -356,4 +362,111 @@ fn assert_whole_row_precedence(
         ));
         assert_same_native_decision(incoming, &appended, owner);
     }
+}
+
+fn assert_fresh_dependency_permission_boundary(
+    completed: &crate::declaration_context::ExactDeclarationContext,
+    empty: &CompilerSourceSupport,
+    full: &CompilerSourceSupport,
+    helper: &Arc<ArtifactEntry>,
+) {
+    let owner = &helper.descriptor.owner;
+    assert!(
+        full.native_offers()
+            .iter()
+            .any(|offer| offer.original() == helper.descriptor.id && offer.is_full()),
+        "the actual checked issuer must supply an individual Full helper offer"
+    );
+    let available = empty
+        .retain_custody(full.artifacts())
+        .unwrap()
+        .retain_normalized_availability(full.native_availability())
+        .unwrap()
+        .retain_offers(full.native_offers().iter().cloned())
+        .unwrap();
+    let InputNativeDecision::IssuedChoices(choices) =
+        available.compiler_roles().native_decision(owner)
+    else {
+        panic!("the selected input explicitly issues no root choices")
+    };
+    assert!(choices.is_empty());
+    let ArtifactPayload::Original(product) = &helper.payload else {
+        unreachable!()
+    };
+    let ordinal = helper
+        .native_group_ordinals
+        .iter()
+        .copied()
+        .find(|ordinal| {
+            crate::certified_products::original_native_group_definitions(product, *ordinal)
+                .unwrap()
+                .export_contracts()
+                .any(|contract| contract.unwrap().identity.occurrence == "second")
+        })
+        .expect("the actual Haskell helper exports the demanded second body");
+    let key = NativeGroupKey {
+        artifact: helper.descriptor.id,
+        original_ordinal: ordinal,
+    };
+    let InputNativeDecision::IssuedChoices(full_choices) =
+        full.compiler_roles().native_decision(owner)
+    else {
+        panic!("actual Full selected ingress carries exact group choices")
+    };
+    let expected_group = full_choices[&ordinal];
+    let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_issued_compiler_support(&available)
+        .unwrap();
+    let request = context
+        .capture_world_primary_inputs(helper.descriptor.producer_sha256)
+        .unwrap();
+    let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        request.inputs(),
+        &validation.inventory,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            super::super::native_availability::verified_root_choice(&selection, key, product.owner(), helper),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.native_refusal, Some(NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                    original_ordinal, .. }) if original_ordinal == ordinal)
+        ),
+        "Full request-owned availability cannot override an explicit empty direct root decision"
+    );
+    completed.assert_fresh_dependency_acquires_available_group(
+        &available,
+        helper,
+        expected_group,
+        true,
+    );
+
+    // Restore actual recorded choices through the production authentication
+    // owner. Decoding authentic graph facts cannot restore their live grant.
+    let facts = full.native_fact_owner();
+    let missing = full
+        .restore_native_maps(
+            full.recorded_rows(),
+            &facts.offers,
+            &facts.native_availability,
+        )
+        .unwrap()
+        .retain_normalized_availability(full.native_availability())
+        .unwrap()
+        .retain_offers(full.native_offers().iter().cloned())
+        .unwrap();
+    assert!(matches!(
+        missing
+            .compiler_roles()
+            .selected_native_support(owner, expected_group),
+        Some(SelectedNativeSupport::Missing(_))
+    ));
+    completed.assert_fresh_dependency_acquires_available_group(
+        &missing,
+        helper,
+        expected_group,
+        false,
+    );
 }
