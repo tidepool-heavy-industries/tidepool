@@ -30017,8 +30017,15 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .map(Path::to_path_buf)
             .chain(std::iter::once(root.to_path_buf()))
             .collect::<Vec<_>>();
+        // The caller's owned root retains this request manifest after the
+        // helper returns, including when another request uses the same root.
+        let request_root = tempfile::Builder::new()
+            .prefix("source-request-")
+            .tempdir_in(root)
+            .unwrap()
+            .keep();
         let mut request = context
-            .prepare_compilation(&root.join("request-13"), SOURCE_TEST_PRODUCER)
+            .prepare_compilation(&request_root, SOURCE_TEST_PRODUCER)
             .unwrap()
             .with_source_search_context(&include);
 
@@ -30569,7 +30576,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         request
             .validate_receipt(&receipt, None, &effective)
             .unwrap();
-        let mut without_proof = read_receipt(&receipt);
+        let original_receipt = read_receipt(&receipt);
+        let mut without_proof = original_receipt.clone();
         without_proof.as_array_mut().unwrap()[9] =
             Value::Array(vec![Value::Array(vec![]), Value::Null]);
         write_receipt(&receipt, &without_proof);
@@ -30579,14 +30587,24 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .is_err(),
             "prior source-selected support must not become blanket import authority"
         );
-        let (_, _, receipt) = source_selected_receipt(directory.path(), false, None);
-        std::fs::write(directory.path().join("A.hs"), "module A where\nvalue = 2\n").unwrap();
-        assert!(
-            request
-                .validate_receipt(&receipt, None, &effective)
-                .is_err(),
-            "a later stage must recheck current source bytes"
+        write_receipt(&receipt, &original_receipt);
+        request.validate_receipt(&receipt, None, &effective).expect(
+            "the same issued request and complete receipt remain valid before source mutation",
         );
+        let source_path = directory.path().join("A.hs");
+        let original_source = std::fs::read(&source_path).unwrap();
+        std::fs::write(&source_path, "module A where\nvalue = 2\n").unwrap();
+        let refusal = request
+            .validate_receipt(&receipt, None, &effective)
+            .err()
+            .expect("a later stage must recheck current source bytes");
+        assert!(matches!(refusal, CompileError::ExtractFailed(ref detail)
+            if detail == "original execution source proof: current source selection: selected original source changed"),
+            "the same request must refuse changed source rather than a different request identity: {refusal:?}");
+        std::fs::write(&source_path, original_source).unwrap();
+        request
+            .validate_receipt(&receipt, None, &effective)
+            .expect("restoring the authenticated source restores the same request's proof");
     }
 
     #[test]
