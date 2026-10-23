@@ -24,7 +24,8 @@ pub(crate) use compiler_projection::{
     RecordedInputNativeDecision,
 };
 pub use compiler_projection::{
-    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+    AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
+    CompilerRoleFacts, PublicationFactsRef, PublicationNativeAuthority,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -9048,36 +9049,25 @@ impl ArtifactView {
                 compiler_projection::CompilerRoleIssuer::Receiving => self,
                 compiler_projection::CompilerRoleIssuer::Incoming => other,
             };
-            {
+            let acquired_row = selected_rows
+                .as_ref()
+                .map(|_| {
+                    compiler_projection::ResolvedCompilerRole::acquire_selected(owner, role, source)
+                })
+                .transpose()?;
+            if let Some(row) = acquired_row {
+                for binding in row.selected_bindings() {
+                    namespace.insert(binding.artifact, binding);
+                }
+                selected_rows
+                    .as_deref_mut()
+                    .expect("selected row requested")
+                    .insert(owner.clone(), row);
+            } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
-                let canonical = source.resolve_binding(role.interface(), owned)?;
-                namespace.insert(role.interface(), canonical);
-                let original = role
-                    .original()
-                    .map(|id| {
-                        source.resolve_binding(id, owned).map(|binding| {
-                            namespace.insert(id, binding);
-                            binding
-                        })
-                    })
-                    .transpose()?;
-                if let Some(rows) = selected_rows.as_deref_mut() {
-                    rows.insert(
-                        owner.clone(),
-                        compiler_projection::ResolvedCompilerRole::from_issued_bindings(
-                            (
-                                canonical,
-                                Arc::clone(&source.lease.payloads[&role.interface()]),
-                            ),
-                            original.map(|binding| {
-                                (
-                                    binding,
-                                    Arc::clone(&source.lease.payloads[&binding.artifact]),
-                                )
-                            }),
-                        ),
-                    );
+                for id in std::iter::once(role.interface()).chain(role.original()) {
+                    namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
             }
             if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
