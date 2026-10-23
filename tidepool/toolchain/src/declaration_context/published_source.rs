@@ -61,19 +61,16 @@ impl PublishedSourceOriginalSelection {
         {
             return Ok(false);
         }
-        let CompilerInputRole::PublishedSourceOriginal {
-            native_authority, ..
-        } = &self.context.compiler_input_projection().snapshot_roles()[&self.public_root]
-        else {
-            return Err(failure("publication lacks its issued native selection"));
-        };
-        native_authority.permits_target_native_groups(groups)
+        self.context
+            .compiler_source_support()
+            .permits_publication_target_native_groups(&self.public_root, groups)
     }
 }
 
 pub(crate) struct PublishedOriginalEndorsement {
     owner: ExactModuleIdentity,
     role: CompilerInputRole,
+    birth: Arc<crate::artifact_inventory::CompilerSourceSupport>,
 }
 
 impl PublishedOriginalEndorsement {
@@ -89,9 +86,15 @@ impl PublishedOriginalEndorsement {
             .get(owner)
             .ok_or_else(|| failure("publication lacks its issued compiler role"))?
             .clone();
+        let birth = Arc::clone(
+            support
+                .publication_birth(owner)
+                .ok_or_else(|| failure("publication lacks its acquired birth support"))?,
+        );
         Ok(Self {
             owner: owner.clone(),
             role,
+            birth,
         })
     }
     pub(crate) fn owner(&self) -> &ExactModuleIdentity {
@@ -99,6 +102,9 @@ impl PublishedOriginalEndorsement {
     }
     pub(crate) fn role(&self) -> &CompilerInputRole {
         &self.role
+    }
+    pub(crate) fn birth(&self) -> &Arc<crate::artifact_inventory::CompilerSourceSupport> {
+        &self.birth
     }
 }
 
@@ -108,7 +114,7 @@ struct PublishedSelectionFacts<'a> {
     source_revision: &'a str,
     original_input_identity: &'a str,
     selection: &'a crate::artifact_inventory::ExactArtifactSelection,
-    native_authority: &'a crate::artifact_inventory::PublicationNativeAuthority,
+    native_authority: &'a crate::artifact_inventory::PublicationBirthFacts,
 }
 
 impl<'a> PublishedSelectionFacts<'a> {
@@ -303,7 +309,7 @@ impl ExactDeclarationContext {
             }
         }
         // This role commits compiler/native selection. Source permission is
-        // carried separately by the context's admitted scope and Context9 root;
+        // carried separately by the context's admitted scope and Context10 root;
         // borrowing this role after source restriction cannot restore a grant.
         let bytes = serde_json::to_vec(&(
             "published-source-original4",
@@ -354,7 +360,7 @@ impl ExactDeclarationContext {
         let selection = crate::artifact_inventory::ExactArtifactSelection::capture(
             self.owner.facts.compiler_support.artifacts(),
         );
-        let native_authority = crate::artifact_inventory::PublicationNativeAuthority::capture(
+        let native_authority = crate::artifact_inventory::PublicationBirthFacts::capture(
             &self.owner.facts.compiler_support,
         )?;
         let selection_sha256 = self.published_selection_sha256(
@@ -370,6 +376,7 @@ impl ExactDeclarationContext {
         )?;
         Ok(PublishedOriginalEndorsement {
             owner: root.clone(),
+            birth: Arc::new(self.compiler_source_support().clone()),
             role: CompilerInputRole::PublishedSourceOriginal {
                 interface,
                 original,
