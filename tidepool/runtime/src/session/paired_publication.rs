@@ -1550,25 +1550,6 @@ pub(in crate::session) mod semantic_currency_tests;
 #[cfg(test)]
 pub(in crate::session) mod tests {
     use super::*;
-    use crate::session::{
-        ModuleEnv, PublicManifestCommit, PublicationDecision, PublicationPhase, SessionId,
-        SourceImports,
-    };
-
-    #[track_caller]
-    pub(super) fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
-        match tidepool_testing::with_settlement(|settlement| base.certify(settlement))
-            .expect("certify declaration publication")
-        {
-            CertifiedDeclarationPublication::Accepted(accepted) => accepted,
-            CertifiedDeclarationPublication::Rejected(rejected) => {
-                panic!(
-                    "certify declaration publication rejected: {:?}",
-                    rejected.receipt.outcome()
-                )
-            }
-        }
-    }
 
     pub(in crate::session) fn reject_missing_export(
         first: AcceptedDeclarationPublication,
@@ -1728,34 +1709,5 @@ pub(in crate::session) mod tests {
             &publication.receipt,
             PublicationEvidence::ReusedProjection { .. }
         )
-    }
-
-    #[track_caller]
-    pub(super) fn commit_certified_source(
-        session: &mut PersistentSession,
-        scope: ScopeId,
-        source: &str,
-    ) -> Generation {
-        let receipt = tidepool_testing::with_settlement(|settlement| {
-            session.lib().declaration_receipt(&[source], settlement)
-        })
-        .expect("compile declaration receipt")
-        .expect("nonempty source produces a declaration receipt");
-        let (candidate, values) = session
-            .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
-            .expect("render declaration candidate");
-        let staged = tidepool_testing::with_settlement(|settlement| {
-            crate::session::validate_declaration_candidate(
-                candidate,
-                session.lib().include_dir(),
-                settlement,
-            )
-        })
-        .expect("validate declaration candidate")
-        .with_visible_values(values);
-        session
-            .adopt_staged_declaration_in(staged)
-            .expect("adopt staged declaration")
-            .generation
     }
 }

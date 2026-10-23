@@ -1359,6 +1359,14 @@ def runtime_world_publication_test_cases(binary):
         "paired_publication_before_guarded_cancellation_preserves_committed_winner",
         "fixed_sibling_intents_restage_after_observation_and_domain_changes_without_reexecution",
     ))
+    tests.extend("session::resident::world_cell_test_support::publication_semantic_currency::" + name for name in (
+        "reservations_refill_and_unrelated_private_facts_preserve_certificate_through_reopen",
+        "semantic_change_between_metadata_retry_and_refresh_retains_execution_intent",
+        "raw_visibility_mutation_does_not_issue_a_current_compiler_world",
+        "declaration_rejection_baseline_refuses_retired_public_owner",
+        "library_replacement_under_same_runtime_owner_refuses_held_publication_and_intent",
+        "bounded_interference_then_fair_drain_preserves_public_owners",
+    ))
     env, resources, worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_world_publication_histories"
     )
