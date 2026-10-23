@@ -8538,6 +8538,24 @@ impl CapturedTemplateImports {
             original.owner.facts.original_instance_environment,
             OriginalInstanceEnvironment::Complete { .. }
         ) {
+            let missing = match original.original_instance_environment() {
+                OriginalInstanceEnvironment::MissingOriginalOwners(owners) => owners.as_ref(),
+                _ => &[],
+            };
+            tracing::warn!(
+                target: "tidepool_toolchain::template_imports",
+                environment_unknown = matches!(
+                    original.original_instance_environment(),
+                    OriginalInstanceEnvironment::Unknown
+                ),
+                missing_owner_count = missing.len(),
+                missing_owners = ?missing.iter().take(16).collect::<Vec<_>>(),
+                missing_owners_omitted = missing.len().saturating_sub(16),
+                template_root_count = roots.len(),
+                template_roots = ?roots.iter().take(16).collect::<Vec<_>>(),
+                template_roots_omitted = roots.len().saturating_sub(16),
+                "retained template capture lacks complete original instance evidence"
+            );
             return Err(failure(
                 "retained template imports require complete original compiler execution evidence",
             ));
