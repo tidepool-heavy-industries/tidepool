@@ -5729,7 +5729,7 @@ mod tests {
         let first_graph = testing::closed_type_roots(&[shape.clone()]);
         let relocated_graph = testing::closed_type_roots(&[
             (testing::identity("Fixture", "Other"), DeclarationForm::Data),
-            shape,
+            shape.clone(),
         ]);
         let row = |site, wire| SiteRow {
             site,
@@ -5753,7 +5753,7 @@ mod tests {
         }
         let mut independently_held = SelectedNativeSites::default();
         independently_held
-            .insert_issued(row(7, 0), Arc::new((*first_graph).clone()))
+            .insert_issued(row(7, 0), testing::closed_type_roots(&[shape]))
             .unwrap();
         assert!(!pool[0].same_selected_acquisitions(&independently_held));
         let mut relocated = pool[0].clone();
