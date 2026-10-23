@@ -157,7 +157,7 @@ pub(in crate::session) fn bootstrap_state_world_for(
     state: &mut PersistentSession,
     recipe: &InputRecipe,
     source: &Arc<RuntimeLexicalScopeLease>,
-) {
+) -> Arc<tidepool_toolchain::compiler_world::CompilerWorld> {
     let original = source.original_source().clone();
     let admitted = state
         .capture_inspection_world_in(source.scope(), &recipe.reference, &original, |_| false)
@@ -178,6 +178,7 @@ pub(in crate::session) fn bootstrap_state_world_for(
     assert!(settled.close().resources_retired());
     let completed = crate::session::finish_admitted_compiler_world(settled).unwrap();
     assert!(state.install_inspection_world_if_current(&completed, &recipe.reference, &original));
+    completed.world().clone()
 }
 
 pub(in crate::session) fn plan_state_fixture_specification_for(
@@ -291,7 +292,8 @@ pub(in crate::session) fn bootstrap_world_for<H, O>(
     resident: &mut ResidentSession<H, O>,
     recipe: &InputRecipe,
     source: &Arc<crate::session::RuntimeLexicalScopeLease>,
-) where
+) -> Arc<tidepool_toolchain::compiler_world::CompilerWorld>
+where
     H: crate::DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
@@ -319,6 +321,7 @@ pub(in crate::session) fn bootstrap_world_for<H, O>(
         &recipe.reference,
         source.original_source()
     ));
+    completed.world().clone()
 }
 
 pub(in crate::session) fn fixture_cell_recipe(
