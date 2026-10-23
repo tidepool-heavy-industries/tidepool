@@ -25061,9 +25061,9 @@ pub(crate) mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        // The future VALUE is physical dependency custody, not a selected
-        // compiler interface or a produced-value prefix certificate.
-        let projection = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+        // Physical issuance needs the actual future TYPE dependency. The item
+        // projection below removes its compiler role without granting a value.
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let mut physical = CertifiedSourceSelection::from_compiler_projection(
             &projection,
             &available.metadata_snapshot(),
@@ -25071,7 +25071,27 @@ pub(crate) mod tests {
         )
         .unwrap();
         let future_owner = (product.owner().unit.clone(), future_module);
-        let mut premature = physical.clone();
+        let mut target_validation = PackageInterfaceValidation::default();
+        let completed = crate::declaration_context::CapturedCompilerStage::issue(
+            &mut physical,
+            &inventory.empty_view(),
+            entries.clone(),
+            &mut target_validation,
+        )
+        .unwrap();
+        assert!(physical.modules.contains_key(&future_owner));
+        assert!(completed
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+
+        let native_only = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
+        let mut premature = CertifiedSourceSelection::from_compiler_projection(
+            &native_only,
+            &available.metadata_snapshot(),
+            &PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap();
         assert!(matches!(
             crate::declaration_context::CapturedCompilerStage::issue(
                 &mut premature,
@@ -25081,17 +25101,22 @@ pub(crate) mod tests {
             ),
             Err(crate::CompileError::ArtifactInventory(error))
                 if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency {
-                    dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding { dependent_ordinal: 17, generation: 11, .. }, ..
-                })
+                    artifact,
+                    ref dependent,
+                    ref required,
+                    dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding {
+                        dependent_ordinal: 17,
+                        generation: 11,
+                        ref namespace,
+                        ref occurrence,
+                        record_parent: None,
+                    },
+                } if artifact == native.descriptor.id
+                    && dependent == &native.descriptor.owner
+                    && required == &future.descriptor.owner
+                    && namespace == "value"
+                    && occurrence == "publishedB")
         ));
-        let mut target_validation = PackageInterfaceValidation::default();
-        let completed = crate::declaration_context::CapturedCompilerStage::issue(
-            &mut physical,
-            &inventory.empty_view(),
-            entries.clone(),
-            &mut target_validation,
-        )
-        .unwrap();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
         let [issued] = physical_availability.as_slice() else {
             panic!("one physical native product");
@@ -25147,7 +25172,6 @@ pub(crate) mod tests {
         );
         let before = inventory.metrics();
         let item = physical.clone();
-        assert!(!physical.modules.contains_key(&future_owner));
         assert!(completed
             .issued_artifacts()
             .observed_payload(&future.descriptor.id)
@@ -25174,6 +25198,11 @@ pub(crate) mod tests {
         .unwrap()
         .source_support(&BTreeSet::from([native.descriptor.owner.clone()]))
         .unwrap();
+        assert!(!item_support
+            .projection()
+            .snapshot_roles()
+            .contains_key(&future.descriptor.owner));
+        assert!(item_support.artifacts().selected_native_groups().is_empty());
         let private = OriginalCompilerInputs::from_issued_support(&item_support);
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
@@ -25315,14 +25344,17 @@ pub(crate) mod tests {
             .iter()
             .find(|group| group.original_ordinal == 17)
             .unwrap();
-        assert!(next.binding_dependencies().iter().any(|(source, target, edge)| {
-            *source == ArtifactBindingNode::Group(future_group)
-                && matches!(target, ArtifactBindingNode::Artifact(binding)
+        assert!(next
+            .binding_dependencies()
+            .iter()
+            .any(|(source, target, edge)| {
+                *source == ArtifactBindingNode::Group(future_group)
+                    && matches!(target, ArtifactBindingNode::Artifact(binding)
                     if binding.artifact == future.descriptor.id)
-                && matches!(edge, ArtifactDependency::NativeBinding {
+                    && matches!(edge, ArtifactDependency::NativeBinding {
                     dependent_ordinal: 17, generation: 11, occurrence, ..
                 } if occurrence == "publishedB")
-        }));
+            }));
     }
 
     pub(crate) fn assert_request_private_product_uses_carried_dependency(
