@@ -25302,7 +25302,7 @@ pub(crate) mod tests {
             ArtifactBindingNode::Artifact(groups[&consumer_group]),
             ArtifactDependency::Interface
         )));
-        let next = ExactCompileContext::new(context)
+        let next = ExactCompileContext::new(context.clone())
             .prepare_compilation_with_private_input(
                 &root.join("completed"),
                 producer_bytes,
@@ -25339,10 +25339,7 @@ pub(crate) mod tests {
             "a new output does not narrow an existing Input Full permission"
         );
         assert!(next.context().lexical_graph().is_empty());
-        assert_eq!(
-            next.context().original_instance_environment(),
-            &crate::declaration_context::OriginalInstanceEnvironment::Unknown
-        );
+        assert_eq!(next.context(), &context);
         // Observe physical row modes with literal writer positions; the opaque
         // C closure above remains restricted to A7 independently of Input Full.
         let bytes = std::fs::read(&next.manifest).unwrap();
