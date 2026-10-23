@@ -2557,98 +2557,30 @@ impl IssuedNativeOffer {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// The immutable declaration context is an issuance ingress. Capture its
-    /// own roles and graph before merging any private input. Protected roles
-    /// whose carrier is not present here wait for their exact private offer.
-    pub(crate) fn issue_context_offers(
-        roles: AdmittedCompilerRoles<'_>,
-        source: &ArtifactView,
-        preferred: &[NativeOriginalRequirement],
-    ) -> Result<Vec<Self>, CompileError> {
-        let mut offers = Vec::new();
-        for (owner, role) in roles.iter() {
-            let Some(original) = role.original() else {
-                continue;
-            };
-            if !source.lease.payloads.contains_key(&original) {
-                continue;
-            }
-            let mut proofs = match NativeOriginalRequirement::from_publication(roles, owner) {
-                Some(proof) => vec![proof],
-                None => preferred
-                    .iter()
-                    .filter(|proof| proof.original == original)
-                    .cloned()
-                    .collect(),
-            };
-            if proofs.is_empty() {
-                proofs.extend(NativeOriginalRequirement::from_selected_view(
-                    original, source,
-                )?);
-            }
-            if proofs.is_empty() {
-                let complete = match NativeOriginalRequirement::from_issued_group_custody(
-                    original,
-                    role.interface(),
-                    source,
-                ) {
-                    Ok(proof) => proof,
-                    // Optional baseline discovery has no issued group choice.
-                    // Competing custody cannot issue Full or prevent a separate
-                    // exact private offer from supplying its own authority.
-                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original) => {
-                        None
-                    }
-                    Err(error) => return Err(error),
-                };
-                proofs.extend(complete);
-            }
-            if proofs.is_empty() {
-                offers.push(Self::issue(
-                    roles
-                        .original_acquisition(owner)
-                        .expect("selected original"),
-                    source,
-                    None,
-                )?);
-            } else {
-                for proof in proofs {
-                    offers.push(Self::issue(
-                        roles
-                            .original_acquisition(owner)
-                            .expect("selected original"),
-                        source,
-                        Some(proof),
-                    )?);
-                }
-            }
-        }
-        Ok(offers)
-    }
-
     /// Issuance is restricted to an input owner's view before independent
     /// inputs merge. `None` issues empty availability rather than discovery.
-    pub(crate) fn issue(
-        entry: &Arc<ArtifactEntry>,
-        source: &ArtifactView,
+    pub(super) fn issue(
+        input: CompilerPrimaryInput<'_>,
         proof: Option<NativeOriginalRequirement>,
     ) -> Result<Self, CompileError> {
-        let original = entry.descriptor.id;
-        if !source.lease.payloads.contains_key(&original) {
-            return Err(failure("native offer original is outside issuer custody"));
-        }
-        let ArtifactPayload::Original(product) = &entry.payload else {
+        let original_binding = input.original().ok_or_else(|| {
+            admission_failure(ArtifactInventoryFailure::MissingOriginal {
+                owner: input.owner().clone(),
+            })
+        })?;
+        let canonical_binding = input.interface();
+        let entry = input.entry();
+        let source = input.artifacts();
+        let original = original_binding.artifact;
+        let ArtifactPayload::Original(_) = &entry.payload else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
             ));
         };
-        let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
+        let interface = canonical_binding.artifact;
         let (body, custody) = match proof {
             None => {
-                let state = source.lease.inventory.0.lock().expect("inventory lock");
-                let binding =
-                    source.resolve_binding(original, &source.read_projection(&state).nodes)?;
-                drop(state);
+                let binding = original_binding;
                 let custody = source.inventory().retain(
                     Vec::new(),
                     vec![ArtifactBindingNode::Artifact(binding)],
@@ -2660,8 +2592,23 @@ impl IssuedNativeOffer {
                 (NativeOfferBody::Empty, custody)
             }
             Some(proof) => {
-                if proof.original != original {
-                    return Err(failure("native offer proof names another original"));
+                if proof.original != original
+                    || proof.selection.snapshot().namespace.get(&original)
+                        != Some(&original_binding)
+                    || proof
+                        .selection
+                        .snapshot()
+                        .namespace
+                        .get(&canonical_binding.artifact)
+                        != Some(&canonical_binding)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeOfferBindingMismatch {
+                            owner: input.owner().clone(),
+                            original: original_binding,
+                            interface: canonical_binding,
+                        },
+                    ));
                 }
                 let qualification = proof.qualify_availability(source)?;
                 let graph = proof.selection.graph_selection();
@@ -3540,12 +3487,8 @@ mod normalized_dependency_tests {
             let graph = custody
                 .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
                 .unwrap();
-            let graph_only = IssuedNativeOffer::issue(
-                offer.original_acquisition(),
-                &graph,
-                offer.proof().cloned(),
-            )
-            .unwrap();
+            let graph_only =
+                IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
@@ -3658,8 +3601,7 @@ mod normalized_dependency_tests {
             .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
             .unwrap();
         let graph_only =
-            IssuedNativeOffer::issue(offer.original_acquisition(), &graph, offer.proof().cloned())
-                .unwrap();
+            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
         assert!(
             matches!(
                 graph_only.source_causes_at(left, child).unwrap().as_ref(),
@@ -3849,8 +3791,13 @@ mod normalized_dependency_tests {
             original,
             selection: ExactArtifactSelection::capture(&broad),
         };
-        let broad_offer =
-            IssuedNativeOffer::issue(offer.original_acquisition(), &broad, Some(proof)).unwrap();
+        let broad_offer = stage
+            .compiler_inputs()
+            .compiler_source_support()
+            .retain_custody(&broad)
+            .unwrap()
+            .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+            .unwrap();
         assert!(broad_offer.is_full());
         let mixed = Arc::new(
             broad_offer

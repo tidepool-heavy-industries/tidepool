@@ -2252,19 +2252,24 @@ pub(crate) struct WorldPrimaryTypeRow<'a> {
     pub(crate) entry: &'a Arc<ArtifactEntry>,
 }
 
-/// A compiler-only observation issued from this support's acquired selected row.
-/// It cannot restore a runtime selection or qualify executable availability.
+/// A borrowed acquired row and the exact source that issued its bindings.
+/// Consumers cannot pair its Original acquisition with another source view.
 pub(crate) enum CompilerPrimaryInput<'a> {
     InterfaceOnly(CompilerPrimaryRow<'a>),
     Original(CompilerPrimaryRow<'a>),
 }
 
 pub(crate) struct CompilerPrimaryRow<'a> {
+    artifacts: &'a ArtifactView,
     owner: &'a ExactModuleIdentity,
     row: &'a ResolvedCompilerRole,
 }
 
 impl<'a> CompilerPrimaryInput<'a> {
+    pub(super) fn artifacts(&self) -> &'a ArtifactView {
+        self.row().artifacts
+    }
+
     fn row(&self) -> &CompilerPrimaryRow<'a> {
         match self {
             Self::InterfaceOnly(row) | Self::Original(row) => row,
@@ -3612,8 +3617,12 @@ impl CompilerSourceSupport {
                             .collect::<Vec<_>>()
                     }),
                 )?;
-                let entry = &selected[owner].original().expect("selected Original").1;
-                let offer = IssuedNativeOffer::issue(entry, &artifacts, proof)?;
+                let input = CompilerPrimaryInput::Original(CompilerPrimaryRow {
+                    owner,
+                    row: &selected[owner],
+                    artifacts: &artifacts,
+                });
+                let offer = IssuedNativeOffer::issue(input, proof)?;
                 for group in groups.values().copied() {
                     input_decisions.selected.insert(
                         group,
@@ -3671,6 +3680,19 @@ impl CompilerSourceSupport {
         result
     }
 
+    pub(crate) fn issue_native_offer(
+        &self,
+        owner: &ExactModuleIdentity,
+        proof: Option<NativeOriginalRequirement>,
+    ) -> Result<IssuedNativeOffer, CompileError> {
+        let input = self.compiler_primary_input(owner)?.ok_or_else(|| {
+            admission_failure(ArtifactInventoryFailure::MissingOriginal {
+                owner: owner.clone(),
+            })
+        })?;
+        IssuedNativeOffer::issue(input, proof)
+    }
+
     pub(crate) fn compiler_primary_inputs(
         &self,
     ) -> impl Iterator<Item = Result<CompilerPrimaryInput<'_>, CompileError>> {
@@ -3707,12 +3729,6 @@ impl CompilerSourceSupport {
                 || self
                     .artifacts
                     .lease
-                    .payloads
-                    .get(&binding.artifact)
-                    .is_none_or(|held| !Arc::ptr_eq(held, entry))
-                || self
-                    .artifacts
-                    .lease
                     .selection
                     .scopes
                     .get(&binding.selection)
@@ -3739,11 +3755,13 @@ impl CompilerSourceSupport {
                 .expect("inventory lock");
             ResolvedCompilerRole::validate_original_pair(&state, row.interface().0, *original)?;
             Ok(CompilerPrimaryInput::Original(CompilerPrimaryRow {
+                artifacts: &self.artifacts,
                 owner,
                 row,
             }))
         } else {
             Ok(CompilerPrimaryInput::InterfaceOnly(CompilerPrimaryRow {
+                artifacts: &self.artifacts,
                 owner,
                 row,
             }))

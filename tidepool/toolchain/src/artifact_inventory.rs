@@ -1672,6 +1672,14 @@ pub enum ArtifactInventoryFailure {
     AuthoredNativeRoot { generation: u64, found: usize },
     #[error("native root {artifact:?} is outside its retained view")]
     NativeRootOutsideView { artifact: ArtifactId },
+    #[error("compiler owner {owner:?} has no selected Original")]
+    MissingOriginal { owner: ExactModuleIdentity },
+    #[error("native offer for {owner:?} differs from selected Original {original:?} and interface {interface:?}")]
+    NativeOfferBindingMismatch {
+        owner: ExactModuleIdentity,
+        original: ArtifactBinding,
+        interface: ArtifactBinding,
+    },
     #[error("native root {artifact:?} has no original native proof")]
     NativeRootNotOriginal { artifact: ArtifactId },
     #[error("artifact {artifact:?} has no certified native group {original_ordinal}")]
