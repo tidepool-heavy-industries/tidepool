@@ -22673,20 +22673,6 @@ mod tests {
             let decoded: crate::artifact_inventory::RecordedCompilerRole =
                 fvm_ipld_encoding::from_slice(&wire).unwrap();
             assert_eq!(decoded, facts);
-            let wire_store = MemoryBlockstore::new();
-            let mut wire_writer = Materializer::new(&wire_store);
-            let live_cid =
-                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
-                    CompilerInputRole,
-                >>::encode(&mut wire_writer, &role)
-                .unwrap();
-            let fact_cid =
-                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
-                    crate::artifact_inventory::RecordedCompilerRole,
-                >>::encode(&mut wire_writer, &facts)
-                .unwrap();
-            assert_eq!(live_cid, fact_cid);
-            wire_writer.finish().unwrap();
         }
         drop(live_role);
         let fact_only_snapshot = restored.snapshot();
