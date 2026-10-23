@@ -2266,6 +2266,9 @@ impl SelectedCompilerRows {
         AdmittedCompilerRoles { selected: self }
     }
 
+    // Role choice requires the same canonical interface/certificate for a
+    // replacement, so its home units stay equal. Only new owners grow this
+    // index; narrowing rebuilds the exact demanded set.
     pub(super) fn insert_incoming(
         &mut self,
         owner: ExactModuleIdentity,
