@@ -4,13 +4,10 @@
 -- Lower exact-scope validation consumes the existing scope and import facts;
 -- only this upper owner pairs them with the actual compiled root.
 module Tidepool.ImportAdmission
-  ( CheckedItemImportRendering, checkedItemImportRendering
-  , checkedItemOriginalRendering, checkedItemValueRendering, checkedItemImportNamespaces
-  , appendCompletedProgramImports
-  , ExactCompilation, compilationScope, compilationTransaction, compilationSourceImports
+  ( ExactCompilation, compilationScope, compilationTransaction, compilationSourceImports
   , compilationExactImports, compilationSourceSelection, compilationSource
   , IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
-  , captureFinalizedSourceOriginals, compilationOriginalSourceImports
+  , compilationOriginalSourceImports
   , ExactCompilationPublication(..)
   , writeExactCompilation, writeCheckedExactCompilation
   , writeCheckedExactCompilationWithOutputsAndPublication
@@ -21,7 +18,6 @@ import Codec.CBOR.Write (toStrictByteString)
 import qualified Codec.CBOR.Encoding as E
 import Control.Exception (IOException, try, throwIO)
 import Control.Monad (forM_, unless)
-import Data.List (intercalate)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
@@ -32,96 +28,17 @@ import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Error (isAlreadyExistsError)
 import GHC.Driver.Env (HscEnv)
-import GHC.Unit.Module (ModuleName, mkModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence, DependencySource(..), DependencyQualifier
   , dependencySources, revalidateDependencyEvidence, renderDependencyQualifier, renderDependencyEvidence )
 import Tidepool.ExactScope
-  ( ExactScope, scopeCheckedCell, scopeCheckedItem, scopeLexical, scopeInterfaceEvidence, scopeInterfaces, scopeValueInterfaces
-  , CheckedItemAdmission(..), ExactInterfaceEvidence(..)
-  , scopeRequestSha256, scopeSemanticSha256
+  ( ExactScope, scopeRequestSha256, scopeSemanticSha256
   , SourceSelectedOriginals, encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
-  , CanonicalInterfaceProof, CanonicalSourceImport, originalSourceImports
-  , captureCheckedSourceOriginals, extendSourceSelectedOriginals
+  , CanonicalSourceImport, originalSourceImports
+  , extendSourceSelectedOriginals
   , ExactScopeValidationReason(..), FreshOutputSeals, emptyFreshOutputSeals
   , revalidateExactScopesAtWithOutputs )
-import Tidepool.ModuleCandidates (ModuleCandidate)
-import Tidepool.FinalizedModuleArtifacts (FinalizedModuleArtifacts, localFinalizedInterface)
-import Tidepool.LocalNativeDeclaration (localNativeOwner, localNativeProof)
-import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.Binders (CellSourcePlan(..), SourcePrologue(..))
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ImportAdmission.Internal (ExactCompilation(..), CompletedFiniteImportAdmission(..), ImportAttempt(..), IssuedSourceImports(..))
-import Tidepool.ImportSyntax.Internal
-  ( CellSourceSpan(..), LocatedImport(..), ImportIntent(..)
-  , ProtectedImports(..), protectedImportsRendering )
-import Tidepool.TurnSource (ImportRendering, renderImportBinder, appendImportRendering, literalImportRendering)
-
--- Render only the imports already attached to this exact checked item. The
--- returned syntax carries no new lexical or native grant; subsequent admission
--- still authenticates the exact selected owners and imported binder contracts.
-data CheckedItemImportRendering = CheckedItemImportRendering
-  (Maybe ImportRendering) (Maybe ImportRendering) [ModuleName]
-
-checkedItemImportRendering :: ExactScope -> CheckedItemAdmission
-  -> Either String CheckedItemImportRendering
-checkedItemImportRendering scope item = do
-  unless (scopeCheckedItem scope == Just item)
-    (Left "checked import rendering belongs to another item admission")
-  let original = fmap (\((_,owner),_) -> protectedImportsRendering
-        (ProtectedImports ("import " ++ owner ++ "\n"))) (itemPlannedDeclaration item)
-      values = case itemValueImports item of
-        [] -> Nothing
-        imports -> Just (foldl appendImportRendering (literalImportRendering "")
-          [protectedImportsRendering (ProtectedImports
-            ("import " ++ owner ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n"))
-          | (owner,names) <- imports])
-      namespaces = maybe [] (\((_,owner),_) -> [mkModuleName owner]) (itemPlannedDeclaration item)
-        ++ map (mkModuleName . fst) (itemValueImports item)
-  pure (CheckedItemImportRendering original values namespaces)
-
-checkedItemOriginalRendering :: CheckedItemImportRendering -> Maybe ImportRendering
-checkedItemOriginalRendering (CheckedItemImportRendering original _ _) = original
-
-checkedItemValueRendering :: CheckedItemImportRendering -> Maybe ImportRendering
-checkedItemValueRendering (CheckedItemImportRendering _ values _) = values
-
-checkedItemImportNamespaces :: CheckedItemImportRendering -> [ModuleName]
-checkedItemImportNamespaces (CheckedItemImportRendering _ _ namespaces) = namespaces
-
--- Same-cell declaration imports derive from retained local native admission,
--- not merely from payload custody. Values retain their independent Protected
--- route and must match the exact checked-value interface already in the scope.
-appendCompletedProgramImports :: ExactScope -> [CompletedValueImport]
-  -> [(String,String)] -> CellSourcePlan -> Either String CellSourcePlan
-appendCompletedProgramImports scope values originals plan = do
-  unless (maybe False (const True) (scopeCheckedCell scope))
-    (Left "program prefix imports lack their checked cell admission")
-  forM_ originals $ \owner -> do
-    unless (owner `elem` map fst (scopeLexical scope))
-      (Left "program declaration import lacks its admitted lexical owner")
-    case Map.lookup owner (scopeInterfaceEvidence scope) of
-      Just (LocalNativeDeclarationEvidence native)
-        | localNativeOwner native == owner
-        , [localFinalizedInterface (localNativeProof native)] ==
-            [row | row@(artifact,_,_) <- scopeInterfaces scope
-              , (exactUnit artifact,exactModule artifact) == owner] -> pure ()
-      _ -> Left "program declaration import lacks its retained local native admission"
-  forM_ values $ \value -> unless
-    (any (\artifact -> exactUnit artifact == completedValueUnit value
-      && exactModule artifact == completedValueModule value
-      && exactPath artifact == completedValueIfacePath value
-      && exactSha256 artifact == completedValueIfaceSha256 value) (scopeValueInterfaces scope))
-    (Left "program value import differs from its checked interface")
-  let prologue = cellPlanPrologue plan
-      imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
-          InheritedLexicalImport [mkModuleName owner] | (_,owner) <- originals]
-        ++ [LocatedImport (CellSourceSpan 1 1 1 1)
-          ("import " ++ completedValueModule value ++ " ("
-            ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")")
-          ProtectedCompilerImport [mkModuleName (completedValueModule value)] | value <- values]
-  pure plan {cellPlanPrologue = prologue {prologueImports = prologueImports prologue ++ imports}}
-
 
 compilationScope :: ExactCompilation -> ExactScope
 compilationScope (ExactCompilation (CompletedFiniteImportAdmission scope _ _ _ _) _) = scope
@@ -147,14 +64,6 @@ sourceImportsHomeRoles (IssuedSourceImports _ _ _ _ _ roles) = roles
 
 compilationSource :: ExactCompilation -> FilePath
 compilationSource = fst . sourceImportsSnapshot . compilationSourceImports
-
-captureFinalizedSourceOriginals
-  :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
-  -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureFinalizedSourceOriginals compilation accepted target finalized evidence
-  | Nothing <- scopeCheckedCell (compilationScope compilation) = pure Map.empty
-  | otherwise = captureCheckedSourceOriginals (compilationScope compilation)
-      (compilationExactImports compilation) accepted target finalized evidence
 
 compilationOriginalSourceImports
   :: ExactCompilation -> DependencyEvidence -> (String,String)

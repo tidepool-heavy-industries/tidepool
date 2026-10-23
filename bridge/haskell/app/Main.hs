@@ -41,9 +41,6 @@ import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
-import Tidepool.ImportAdmission
-  ( checkedItemImportRendering, checkedItemOriginalRendering, checkedItemValueRendering
-  , checkedItemImportNamespaces, appendCompletedProgramImports )
 import Tidepool.Binders
   ( classifyWithFlags, exportItemName, templateParserFlags
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
@@ -56,16 +53,11 @@ import Tidepool.Binders
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
   , StmtBinders(..), TurnOut(..), renderVerdictsJson
   )
-import Tidepool.TypedSegment
-  ( TypedItem, TypedSegmentPlan, typedSegmentPlanRoot, typedSegmentPlanItems, typedSegmentPlanDigest, typedSegmentReservationDigest
-  , TypedItemPlan(..), TypedItemBody(..), typedSegmentOriginalRoot, typedSegmentItems, typedItemPlan, typedItemRoot
-  , typedItemCaptures, typedCaptureIdentifier, typedCaptureType, typedItemObservation
-  , typedObservationLift, typedObservationValueType, ObservationLift(..) )
 import Tidepool.CompilerRequest
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
   , pprPackageImports, CheckedEnvironmentResult(..)
-  , preparedFreshDependencies, preparedExactCompilation, retainProgramSourceImports
+  , preparedFreshDependencies, preparedExactCompilation
   , CompilePurpose(..), prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
@@ -73,31 +65,14 @@ import Tidepool.GhcPipeline
   , scopedEnsureWorld, WorldCellRefusal(..)
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
-import Tidepool.ExecutionEncode (moduleProductInput, moduleProductBytes, encodeSymbol)
 import Tidepool.CompilerProducts
-  ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , PreparedProductContext
-  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts
-  , stagedOriginalEntryOrdinal, stagedFinalizedArtifacts, stagedOriginalOutputFiles
-  , retainStagedProgramProducts, publishStagedOriginalProducts
-  , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
-import Tidepool.ExecutionProjection (preparedRootIdentity)
+  ( CertifiedOriginalProducts, PreparedProductContext
+  , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import qualified Tidepool.EffectSchema
-import Tidepool.PreparedStg
-  ( pmModule, pmIdentityResolver )
 import Tidepool.CompileInput (writeCompileInputProof)
-import Tidepool.CertifiedProducts (homeInterfaceUsageOwners)
-import Tidepool.FinalizedModuleArtifacts
-  ( finalizedLocalAdmissions
-  , localFinalizedInterface, localFinalizedCore )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), CheckedTemplateImports(..), OriginalInterfaceArtifacts
-  , generatedActivationPreviewRecipe
-  , RenderedProtectedTemplateImports
-  , captureProtectedTemplateImports, captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedScaffoldRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
-  , generatedTypedSegmentRecipeWithImportRendering)
+import Tidepool.ExactHydration
+  ( OriginalInterfaceArtifacts, generatedActivationPreviewRecipe )
 import Tidepool.DeclarationJoin
   ( DeclarationOperation(..), readDeclarationOperation, validateDeclarationJoin
   , HostBindingInterfaceInput(..), encodeHostBindingInterface, encodeBindingInterfacePurpose
@@ -107,10 +82,6 @@ import Tidepool.DeclarationJoin
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
   ( Diag, SourceRejection(..), InputRejection(..) )
-import Tidepool.CheckedAdmission
-  ( validateCheckedCellAdmission, validateCheckedItemAdmission )
-import Tidepool.CheckedRecipe
-  ( checkedItemCompilePurpose, checkedRecipeSourceWithLineOffset, checkedRecipeSourceWithImports, replaceRecipeMarker, writeCheckedItemReceipt )
 import Tidepool.ExtractUtil (shaHex, trySynchronous)
 import Tidepool.RequestCompletion
   ( Completion, PhaseSink, BodyOutcome(..), CleanupStage(CompilerScopeRestore), captureCompletion
@@ -133,25 +104,12 @@ import Tidepool.Introspection
 import Tidepool.InspectionRunner
   ( runInspectionRequests )
 import Tidepool.ExactScope
-  ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
-  , ActivationPreviewAdmission(..), scopeActivationPreview
-  , scopeCheckedCell, scopeCheckedItem
-  , originalGroupFromProjected
-  , CheckedCellAdmission(..), CheckedItemAdmission(..), CheckedItemPurpose(..), PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
-  , revalidateExactScope, ExactScopeOriginal(..), extendExactScopeGeneration, extendCheckedValueScope
-  )
-import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
-import Tidepool.CellProgramState
+  ( ExactScope, scopeRequestSha256, scopeSemanticSha256
+  , ActivationPreviewAdmission(..), scopeActivationPreview, revalidateExactScope )
 import Tidepool.CheckedCell (encodeCheckedSignature, captureCheckedSignature
   , CheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness)
-import Tidepool.TypePolicy (nominalHeadsOfType)
-import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, PlannedDeclarationRejection(..), PlannedDeclarationInventory, plannedExports, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan, replaceTemplateModuleHeader
-  , preparePlannedDeclaration, certifyPlannedDeclaration, admitLocalNativeDeclaration
-  , renderPlannedDeclarationInventory, plannedInterfaceFingerprint, originalDeclarationWrapper )
 import Tidepool.Session
   ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
   , SessionModule(..), SessionModuleKind(..), Generation(..)
@@ -275,7 +233,6 @@ dispatch timing bound = case boundAdmittedOperation bound of
   AdmittedActivationPreview request -> runActivationPreviewMode bound request
   AdmittedSourceCheck request -> runSourceCheckMode bound (sourceInput request)
   AdmittedCellPlan request -> runCellPlanMode (boundParserFlags bound) (boundWorkerRequest bound) request
-  AdmittedCell request -> runCellMode bound request
   AdmittedClassification request -> runClassifyMode (boundParserFlags bound) timing request
   AdmittedInspection request -> runInspectionMode bound request
   AdmittedTurn request -> runTurnMode bound request
@@ -518,7 +475,6 @@ writeRequestInputProof :: BoundCompilerRequest -> FilePath -> PreparedPipelineRe
 writeRequestInputProof bound outDir prepared =
   let args = boundWorkerRequest bound
       sourceProofAllowed = case boundAdmittedOperation bound of
-        AdmittedCell _ -> False
         AdmittedActivationPreview _ -> False
         _ -> True
   in when (sourceProofAllowed
@@ -569,8 +525,6 @@ runTurnMode bound request = do
       Nothing -> timePhase timing "classify"
         (evaluate (classifyWithFlags parserFlags turnSrc))
     let exact = boundRequestExactScope bound
-    let admittedItem = exact >>= scopeCheckedItem
-    forM_ admittedItem $ \admission -> validateCheckedItemAdmission args (turnTemplates request) admission turnSrc sb
     let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (turnOutputDirectory request)
         bindersStr = intercalate ", " (sbBinders sb)
     turnOut <- case sbKind sb of
@@ -589,15 +543,10 @@ runTurnMode bound request = do
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
       _kind -> do
-        compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr admittedItem lastAttempt exact
+        compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr lastAttempt exact
     let outFile = turnOutput request
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
-    forM_ (exact >>= \scope -> (,) scope <$> scopeCheckedItem scope) $ \(scope,admission) ->
-      case turnOut of
-        TBind _ _ _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
-        TExpr _ _ wrapped -> writeCheckedItemReceipt outDir scope admission (T.unpack wrapped)
-        TDecl {} -> fail "checked recipe cannot compile an unproved declaration"
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
   case res of
     Left _ -> do
@@ -628,41 +577,13 @@ writeSplicedModule flags outDir lastAttempt spliced = do
   writeFile modulePath spliced
   return (spliced, modName, modulePath)
 
--- | Compile one non-declaration turn from authored syntax or an admitted
--- native recipe. Checked signatures remain compiler payloads, never type text.
+-- | Compile an ordinary non-declaration turn with its selected native template.
 compileClassifiedTurn
   :: DynFlags -> BoundCompilerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
-  -> IORef (Maybe (FilePath, String))
-  -> Maybe ExactScope
-  -> IO TurnOut
-compileClassifiedTurn flags bound timing outDir turnSrc sb bindersStr admitted lastAttempt exact =
-  compiledTurn <$> compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt (StandaloneTurnParse flags) exact
-
-data CompiledTurnOutput = CompiledTurnOutput
-  { compiledTurn :: TurnOut
-  , compiledPipeline :: PreparedPipelineResult
-  , compiledOriginalProducts :: CertifiedOriginalProducts
-  , compiledModule :: String
-  }
-
-data TurnParseContext
-  = StandaloneTurnParse DynFlags
-  | PlannedTurnParse DynFlags SourcePrologue
-
-compileClassifiedTurnKeeping
-  :: BoundCompilerRequest -> Bool -> FilePath
-  -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
-  -> IORef (Maybe (FilePath, String)) -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt parseContext exact = do
+  -> String -> StmtBinders -> String -> IORef (Maybe (FilePath, String))
+  -> Maybe ExactScope -> IO TurnOut
+compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr lastAttempt exact = do
     let args = boundWorkerRequest bound
-    checkedImports <- case (admitted, exact) of
-      (Nothing, _) -> pure Nothing
-      (Just item, Just scope) -> Just <$> either fail pure (checkedItemImportRendering scope item)
-      (Just _, Nothing) -> fail "checked item imports lack their exact scope"
-    let (parserFlags, prologue) = case parseContext of
-          StandaloneTurnParse flags -> (flags, Nothing)
-          PlannedTurnParse flags authored -> (flags, Just authored)
         semanticScopeFields = case exact of
           Just selected -> ["exact-scope-semantic", scopeSemanticSha256 selected]
           Nothing ->
@@ -670,64 +591,18 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
             in (["session-scope-root", ssRoot scope]
               ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
               ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
-    let templates = boundTurnTemplates bound
-        protectedTemplates = itemTurnTemplates <$> admitted
-        templateImports = maybe (CheckedTemplateImports [] []) itemTemplateImports admitted
-        verifyProtectedTemplate path captured = forM_ protectedTemplates $ \expected ->
-          unless (any (\(kind,file) -> file == path
-              && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
-            (fail "generated scaffold template differs from its protected offer")
-        basePurpose = maybe GeneralCompile checkedItemCompilePurpose admitted
-        -- Splice @tmplFile@ against the turn text and write the generated
-        -- module under the name in its compiler-owned header. Non-declaration
-        -- turns derive a stable owner from their semantic compile inputs;
-        -- authored declaration templates retain their declared module name.
-        -- The scratch path uses the generated header's identity; compilation
-        -- selects the target's GHC summary by that source path.
-        spliceInto :: FilePath -> IO (String, ImportRendering, RenderedProtectedTemplateImports, String, FilePath)
+        templates = boundTurnTemplates bound
         spliceInto tmplFile = do
           originalTemplate <- readFile tmplFile
-          verifyProtectedTemplate tmplFile originalTemplate
           selectedFlags <- templateParserFlags parserFlags originalTemplate >>= either throwCellSplitError pure
           defaults <- either fail pure (captureCompilerDefaultRecipe selectedFlags originalTemplate)
-          let original = admitted >>= itemPlannedDeclaration
-          let prepareTemplate template = do
-                let pragmaPrefix = maybe "" (concatMap ((++ "\n") . locatedPragmaSource) . prologuePragmas) prologue
-                tmplSrc <- case prologue of
-                  Nothing -> pure (literalImportRendering template)
-                  Just authored -> do
-                    either fail pure (replaceImportRendering preambleImportMarker
-                      (appendImportRendering (locatedImportsRendering (prologueImports authored))
-                        (literalImportRendering preambleImportMarker)) (literalImportRendering template))
-                withOriginal <- case checkedImports >>= checkedItemOriginalRendering of
-                  Nothing -> pure tmplSrc
-                  Just imports -> either fail pure (replaceImportRendering preambleImportMarker
-                    (appendImportRendering imports (literalImportRendering preambleImportMarker)) tmplSrc)
-                pure (appendImportRendering (literalImportRendering pragmaPrefix) withOriginal, length (filter (== '\n') pragmaPrefix))
-              namespaces = maybe [] (concatMap locatedImportNamespaces . prologueImports) prologue
-                ++ maybe [] checkedItemImportNamespaces checkedImports
-              renderRecipe (withProgram, protectedLinePrefix) = do
-                case admitted of
-                  Nothing -> do
-                    (prepared, qualifiedLinePrefix) <- either fail pure
-                      (qualifyCompilerDefaultRendering defaults namespaces withProgram)
-                    rendered <- either fail pure (spliceImportRendering prepared turnSrc bindersStr)
-                    pure (rendered, protectedLinePrefix + qualifiedLinePrefix)
-                  Just admission -> do
-                    withPrefix <- case checkedImports >>= checkedItemValueRendering of
-                      Nothing -> pure withProgram
-                      Just imports -> either fail pure (replaceImportRendering preambleImportMarker
-                        (appendImportRendering imports (literalImportRendering preambleImportMarker)) withProgram)
-                    (source, qualifiedLinePrefix) <- checkedRecipeSourceWithImports
-                      defaults namespaces admission withPrefix turnSrc
-                    pure (source, protectedLinePrefix + qualifiedLinePrefix)
-              authorityFields = case admitted of
-                Just authority -> ["item", itemAdmissionDigest authority, itemCellReceiptDigest authority]
-                Nothing -> ["unadmitted"]
-              includeFields = case admitted of
-                Nothing -> ["source-search-includes"]
-                  ++ concatMap (\include -> ["include-path", include]) (optionIncludes args)
-                _ -> ["checked-import-authority"]
+          let renderRecipe template = do
+                (prepared, _) <- either fail pure
+                  (qualifyCompilerDefaultRendering defaults [] (literalImportRendering template))
+                either fail pure (spliceImportRendering prepared turnSrc bindersStr)
+          baseSource <- renderRecipe originalTemplate
+          let includeFields = ["source-search-includes"]
+                ++ concatMap (\include -> ["include-path", include]) (optionIncludes args)
               retainedFields = concat
                 [ ["retained", T.unpack (symbolUnit identity), T.unpack (symbolModule identity)
                   , T.unpack (symbolNamespace identity), T.unpack (symbolOccurrence identity)]
@@ -735,33 +610,13 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
                     (symbolRecordParent identity)
                   ++ [show generation]
                 | (identity, generation) <- Map.toAscList (optionRetainedGenerations args) ]
-              renderNamedRecipe = do
-                withProgram <- prepareTemplate originalTemplate
-                (baseSource, baseLineOffset) <- renderRecipe withProgram
-                if sbKind sb == KDecl
-                  then do
-                    protectedOccurrences <- either fail pure
-                      (captureProtectedTemplateImports selectedFlags originalTemplate)
-                    renderedOccurrences <- either fail pure
-                      (renderProtectedTemplateImports baseLineOffset protectedOccurrences)
-                    pure (originalTemplate, baseSource, renderedOccurrences)
-                  else do
-                    let owner = generatedScaffoldModuleName
-                          (["turn-scaffold-owner-v1", "scope"] ++ semanticScopeFields
-                            ++ ["template", originalTemplate, "rendered", importRenderingSource baseSource
-                              ] ++ includeFields ++ authorityFields ++ retainedFields)
-                    renamed <- either fail pure (renameScaffoldModuleHeader selectedFlags owner originalTemplate)
-                    protectedOccurrences <- either fail pure
-                      (captureProtectedTemplateImports selectedFlags renamed)
-                    renamedTemplate <- prepareTemplate renamed
-                    (finalSource, linePrefix) <- renderRecipe renamedTemplate
-                    renderedOccurrences <- either fail pure
-                      (renderProtectedTemplateImports linePrefix protectedOccurrences)
-                    pure (renamed, finalSource, renderedOccurrences)
-          (finalProtected, finalSource, finalOccurrences) <- renderNamedRecipe
-          finalOutput <- writeSplicedModule selectedFlags outDir lastAttempt (importRenderingSource finalSource)
-          let (_,moduleName',modulePath) = finalOutput
-          pure (finalProtected, finalSource, finalOccurrences, moduleName',modulePath)
+              owner = generatedScaffoldModuleName
+                (["turn-scaffold-owner-v1", "scope"] ++ semanticScopeFields
+                  ++ ["template", originalTemplate, "rendered", importRenderingSource baseSource]
+                  ++ includeFields ++ ["unadmitted"] ++ retainedFields)
+          renamed <- either fail pure (renameScaffoldModuleHeader selectedFlags owner originalTemplate)
+          finalSource <- renderRecipe renamed
+          writeSplicedModule selectedFlags outDir lastAttempt (importRenderingSource finalSource)
     -- Four-shape selection (protocol note, "the verdict space has four
     -- shapes, not three"): a bind that binds no name selects its own
     -- template kind and skips the session-bind artifacts entirely —
@@ -770,33 +625,22 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
     let selector = templateSelectorForVerdict (sbKind sb) (sbBinders sb)
     let scope = scopeFromWorkerRequest args
         allMatching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
-        matching = case admitted of
-          Just admission | itemKind admission == "expr" ->
-            [(0,file) | (kind,file) <- templates, kind == "bind",
-              length [() | (candidate,_) <- templates, candidate == "bind"] == 1,
-              isJust (itemObservationName admission)]
-          _ -> zip [0..] allMatching
+        matching = zip [0..] allMatching
         -- A prepared turn uses one compiler pass for the checked metadata
         -- and the prepared modules.
-        compileTurn protected spliced protectedOccurrences modName modulePath = do
-          purpose <- case protectedTemplates of
-            Nothing -> pure basePurpose
-            Just _ -> do
-              recipe <- generatedScaffoldRecipeWithImportRendering parserFlags templateImports
-                protectedOccurrences protected spliced modulePath modName >>= either fail pure
-              pure (GeneratedScaffoldCompile recipe basePurpose)
+        compileTurn modulePath =
           compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args))
-            (Map.keysSet (optionRetainedGenerations args)) purpose
+            (Map.keysSet (optionRetainedGenerations args)) GeneralCompile
             (Just scope) modulePath
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants _ ((index,tmplFile):rest) = do
-          (protected, spliced, protectedOccurrences, modName, modulePath) <- spliceInto tmplFile
-          attempted <- try (compileTurn protected spliced protectedOccurrences modName modulePath)
+          (spliced, _modName, modulePath) <- spliceInto tmplFile
+          attempted <- try (compileTurn modulePath)
           case attempted of
             Right prepared ->
-              return (index, importRenderingSource spliced, prepared)
+              return (index, spliced, prepared)
             Left err@(_ :: SomeException) -> case (sourceFailureDiagnostics err, rest) of
-              (Just _, _ : _) | not (isJust admitted) -> compileVariants (index + 1) rest
+              (Just _, _ : _) -> compileVariants (index + 1) rest
               _               -> throwIO err
     (variant, spliced, completion) <- compileVariants (0 :: Int) matching
     let prepared = preparedCompilationResult completion
@@ -808,7 +652,6 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
     -- scaffold, and its constructors join the shared metadata before write.
     let boundNames = case selector of
           SBind -> sbBinders sb
-          SExpr -> maybe [] pure (admitted >>= itemObservationName)
           _ -> []
     sessionBindings <- prepareSessionBindings boundNames result
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
@@ -818,7 +661,7 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
     let asksSites = concatMap paYieldSites preparedArtifacts
     void $ timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
-    originalProducts <- timePhase timing "module_products" $
+    void $ timePhase timing "module_products" $
       writeRequestProducts bound originalInterfaces outDir prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
@@ -831,16 +674,9 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
         bbs  <- writeSessionBindings g root sessionBindings
         return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
       SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
-      SExpr -> case admitted >>= itemObservationName of
-        Just observation -> do
-          generation <- requireArg "--bind-gen" (optionBindGen args)
-          root <- requireArg "--session-root" (optionSessionRoot args)
-          bindings <- writeSessionBindings generation root sessionBindings
-          return (TBind [T.pack observation] variant bindings asksSites wrapped)
-        Nothing -> return (TExpr variant asksSites wrapped)
+      SExpr -> return (TExpr variant asksSites wrapped)
       SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
-    let owner = moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv result)))
-    pure (CompiledTurnOutput turn prepared originalProducts owner)
+    pure turn
 
 -- | Block classify mode (@--classify@):
 -- Classify every input using the capability's retained parser defaults and
@@ -900,508 +736,6 @@ runCellPlanMode parserFlags args request = do
     let out = cellOutput request
     BS.writeFile out (toStrictByteString receipt)
   either throwIO (const (pure [])) result
-
-runCellMode :: BoundCompilerRequest -> CellRequest -> IO [Diag]
-runCellMode bound request = do
-  let exact = boundRequestExactScope bound
-  case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
-    Just (scope, planned) -> runCellProgramMode bound request scope planned
-    Nothing -> runLegacyCellMode bound request
-
-runLegacyCellMode :: BoundCompilerRequest -> CellRequest -> IO [Diag]
-runLegacyCellMode bound request = do
-  let cellPath = sourceInput (cellSourceRequest request)
-  let args = boundWorkerRequest bound
-      parserFlags = boundParserFlags bound
-  provisionalOutput <- newIORef Nothing
-  res <- trySynchronous $ do
-    cellSource <- readFile cellPath
-    let templatePath = cellTemplate request
-    template <- readFile templatePath
-    let admittedScope = boundRequestExactScope bound
-    forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
-      validateCheckedCellAdmission args (cellTemplates request) admission cellSource template
-    checkingTemplate <- case admittedScope >>= scopeCheckedCell of
-      Nothing -> pure template
-      Just _ -> either (throwIO . InvalidCheckingWrapper) pure
-        (replaceTemplateModuleHeader "module CellCheck where" template)
-    protectedCheckImports <- either fail pure
-      (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags checkingTemplate)
-    initialPlan <- analyzeCellWithFlags parserFlags template cellSource >>= either throwCellSplitError pure
-    initialSource <- either fail pure (renderCellCheckSource checkingTemplate initialPlan)
-    effectiveFlags <- templateParserFlags parserFlags initialSource >>= either throwCellSplitError pure
-    declaredModule <- either fail pure (extractModuleName effectiveFlags initialSource)
-    let outDir = fromMaybe
-          (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
-          (cellOutputDirectory request)
-        moduleName' = fromMaybe "Main" declaredModule
-        modulePath = outDir </> moduleName' ++ ".hs"
-        scope = if hasSessionScope args
-          then Just (scopeFromWorkerRequest args)
-          else Nothing
-    createDirectoryIfMissing True outDir
-    let out = cellOutput request
-    preparedDeclaration <- case admittedScope >>= \exact -> (,) exact <$> scopeCheckedCell exact of
-      Just (exact, admission)
-        | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
-            Just <$> prepareOriginalCellDeclaration bound template outDir scope exact admission initialPlan
-      _ -> pure Nothing
-    let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact,_) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
-        checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
-          maybe CheckedEnvironment CheckedEnvironmentProducts (optionModuleCandidates args)
-        checkPlan plan = maybe plan (\(_,planned,_,_,_) -> plannedCheckPlan planned) preparedDeclaration
-    (analyzed, provisional) <- checkCellInstances (\plan -> do
-      let effective = checkPlan plan
-      (rendering, linePrefix) <- either fail pure
-        (renderCellCheckSourceWithImports checkingTemplate effective)
-      let rendered = importRenderingSource rendering
-      writeFile modulePath rendered
-      -- Preserve the latest plan for failure diagnostics without encoding and
-      -- writing a provisional result before every successful check attempt.
-      writeIORef provisionalOutput (Just (out, plan, rendered))
-      let baseCheckPurpose = GeneratedInstanceCheck (cellGeneratedInstanceRecipe effective) checkPurpose
-      compilePurpose <- case admittedScope >>= scopeCheckedCell of
-        Nothing -> pure baseCheckPurpose
-        Just admission -> do
-          mappedImports <- either fail pure (renderProtectedTemplateImports linePrefix protectedCheckImports)
-          recipe <- generatedCheckingTemplateRecipeWithImportRendering parserFlags
-            (checkedTemplateImports admission) mappedImports checkingTemplate rendering modulePath moduleName'
-            >>= either fail pure
-          pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
-      compileBoundRequest bound checkedSelection Set.empty compilePurpose scope modulePath)
-        (maybe initialPlan (\(plan,_,_,_,_) -> plan) preparedDeclaration)
-    checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
-    let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
-    -- Presentation observations remain separate from native signature authority.
-    expressionEvidence <- cellExpressionEvidence compiled
-    let outputBytes = encodeCellOut finalPlan (crCheckedBinderPins compiled)
-          (map fst expressionEvidence) finalSource
-    BS.writeFile out outputBytes
-    forM_ admittedScope $ \receiptScope -> forM_ (scopeCheckedCell receiptScope) $ \admission -> do
-      binderSignatures <- cellCheckedBinderSignatures compiled
-      cellNow <- readFile cellPath
-      templateNow <- readFile templatePath
-      validateCheckedCellAdmission args (cellTemplates request) admission cellNow templateNow
-      verified <- revalidateExactScope (crHscEnv compiled) receiptScope
-      either fail pure verified
-      plannedReceipt <- traverse (const (BS.readFile (outDir </> "planned-declaration.cbor"))) preparedDeclaration
-      let text = encodeString . T.pack
-          signatures = binderSignatures ++ map snd expressionEvidence
-          receipt = encodeListLen 10
-            <> text "TPEXACTCHECK" <> text "3" <> text (scopeRequestSha256 receiptScope)
-            <> text (checkedAdmissionDigest admission) <> text (checkedCellSha256 admission)
-            <> text (checkedTemplateSha256 admission) <> text (shaHex outputBytes)
-            <> text (shaHex (TE.encodeUtf8 (T.pack finalSource)))
-            <> encodeListLen (fromIntegral (length signatures))
-            <> foldMap encodeCheckedSignature signatures
-            <> maybe encodeNull (text . shaHex) plannedReceipt
-      BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt)
-    pure (crWarnings compiled)
-  case res of
-    Left _ -> do
-      provisional <- readIORef provisionalOutput
-      forM_ provisional $ \(out, plan, rendered) -> do
-        _ <- try (BS.writeFile out (encodeCellOut plan [] [] rendered)) :: IO (Either IOException ())
-        pure ()
-    Right _ -> pure ()
-  either throwIO pure res
-
--- The worker owns all GHC passes of a cell. Interfaces produced here are
--- type evidence; no value or effect is evaluated by this transaction.
-runCellProgramMode :: BoundCompilerRequest -> CellRequest
-  -> ExactScope -> PlannedCellAdmission -> IO [Diag]
-runCellProgramMode bound request exact planned = do
-  let cellPath = sourceInput (cellSourceRequest request)
-  let args = boundWorkerRequest bound
-      parserFlags = boundParserFlags bound
-  timing <- readTimingEnabled
-  attempted <- trySynchronous $ do
-    source <- readFile cellPath
-    let templatePath = cellTemplate request
-    template <- readFile templatePath
-    admission <- maybe (fail "compiled cell has no source admission") pure (scopeCheckedCell exact)
-    validateCheckedCellAdmission args (cellTemplates request) admission source template
-    parserBytes <- BS.readFile (plannedParserPath planned)
-    unless (shaHex parserBytes == plannedParserSha256 planned
-        && plannedReservationDigest planned == checkedAdmissionDigest admission)
-      (fail "compiled cell parser or reservation changed")
-    initial <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
-    unless (length (cellPlanItems initial) == length (plannedSlots planned))
-      (fail "compiled cell reservation count differs from parser")
-    root <- requireArg "--session-root" (optionSessionRoot args)
-    let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (cellOutputDirectory request)
-        initialState = initialProgramCellState (cellPlanPrologue initial) exact (optionRetainedGenerations args)
-    createDirectoryIfMissing True outDir
-    batches <- newIORef []
-    settled <- foldM (compileSegment parserFlags timing admission template outDir batches)
-      initialState (zip [0::Int ..] (cellInferenceSegments initial))
-    let finalPlan = initial { cellPlanItems = concatMap cellPlanItems (programPlans settled) }
-        checkedSource = concat (programSources settled)
-        observations = encodeCellOut finalPlan [] (programObservations settled) checkedSource
-        text = encodeString . T.pack
-        receipt = encodeListLen 12 <> text "TPEXACTPROGRAM" <> text "4"
-          <> text (scopeRequestSha256 exact) <> text (checkedAdmissionDigest admission)
-          <> text (checkedCellSha256 admission) <> text (checkedTemplateSha256 admission)
-          <> text (shaHex observations) <> text (shaHex (TE.encodeUtf8 (T.pack checkedSource)))
-          <> encodeListLen (fromIntegral (length (programCaptureSignatures settled)))
-          <> foldMap encodeCheckedSignature (programCaptureSignatures settled)
-          <> encodeListLen (fromIntegral (length (programDeclarations settled)))
-          <> foldMap (\(index,digest) -> encodeListLen 2 <> encodeWord64 (fromIntegral index) <> text digest)
-            (programDeclarations settled)
-          <> text (plannedParserDigest planned)
-          <> encodeListLen (fromIntegral (length (programTypedPlans settled)))
-          <> foldMap encodeTypedSegmentPlan (programTypedPlans settled)
-    let out = cellOutput request
-    sourceNow <- readFile cellPath
-    templateNow <- readFile templatePath
-    validateCheckedCellAdmission args (cellTemplates request) admission sourceNow templateNow
-    unless (sourceNow == source && templateNow == template) (fail "compiled cell source changed")
-    completedBatches <- readIORef batches
-    foldr (\batch next -> withTypedSegmentSessionPublication root batch next)
-      (BS.writeFile out observations >> BS.writeFile (outDir </> "checked-cell.cbor") (toStrictByteString receipt))
-      completedBatches
-    pure []
-  either throwIO pure attempted
-  where
-    compileSegment parserFlags timing admission template outDir batches state (segmentIndex, segment) = do
-      let offset = programItemOffset state
-          prefix = selectedProgramValues (programValues state)
-          scope = programInput state
-          segmentRequest = cellSegmentRequest bound state
-          localArgs = boundWorkerRequest segmentRequest
-          directory = outDir </> "segment-" ++ show segmentIndex
-      withPrefix <- either fail pure (appendCompletedProgramImports scope prefix
-        (map fst (programOriginals state)) segment)
-      createDirectoryIfMissing True directory
-      case cellPlanItems segment of
-        [item] | sbKind (cellAnalysisVerdict item) == KDecl -> do
-          generation <- case plannedSlots planned !! offset of
-            PlannedDeclaration value -> pure value
-            PlannedPrologue value -> pure value
-            _ -> fail "declaration has a native reservation"
-          let owner = "Tidepool.Session.Lib.G" ++ show generation
-              ownAdmission = admission { checkedReservedModules = [owner] }
-          (finalized,_,inventory,extended,(prepared,certified)) <- timePhase timing "cell_program_declaration" $
-            prepareOriginalCellDeclaration segmentRequest template directory
-              (Just (scopeFromWorkerRequest localArgs)) scope ownAdmission withPrefix
-          retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
-            (certifiedFinalizedArtifacts certified) extended
-          receipt <- BS.readFile (directory </> "planned-declaration.cbor")
-          let original = Just (("main",owner), extractPlannedFingerprint inventory)
-          -- Keep the ordered item under its original ordinal; its original
-          -- module owns declarations and the generated instances.
-          let declared = [exportOccurrence identity | exported <- plannedExports inventory
-                , identity <- exportHead exported : exportChildren exported
-                , exportNamespace identity /= TypeNamespace]
-              remainingValues = [value { completedValueBinders = kept }
-                | value <- programValues state
-                , let kept = [(name,identifier) | (name,identifier) <- completedValueBinders value, name `notElem` declared]
-                , not (null kept)]
-          pure $ recordDeclarationSegment finalized (plannedSourceFromDirectory finalized) (shaHex receipt)
-            $ state { programInput = extended, programOriginal = original
-              , programSourceImports = retainedImports
-              , programValues = remainingValues
-              , programOriginals = programOriginals state ++ maybe [] pure original }
-        _ -> do
-          let checkingTemplate = either error id (replaceTemplateModuleHeader "module CellCheck where" template)
-              slots = [case plannedSlots planned !! index of
-                  PlannedBind generation -> (index,generation,Nothing)
-                  PlannedExpression generation observation -> (index,generation,Just observation)
-                  _ -> error "executable segment has declaration reservation"
-                | index <- [offset .. offset + length (cellPlanItems withPrefix) - 1]]
-          preparedBatch <- newIORef Nothing
-          preparationAttempt <- newIORef (0 :: Int)
-          let compile plan = do
-                attempt <- readIORef preparationAttempt
-                modifyIORef' preparationAttempt (+ 1)
-                writeIORef preparedBatch Nothing
-                let stagingRoot = directory </> "typed-session-" ++ show attempt
-                base <- either fail pure (prepareTypedSegmentSource checkingTemplate plan
-                  (plannedReservationDigest planned) slots)
-                let owner = generatedScaffoldModuleName ["typed-segment-owner-v1",
-                      scopeRequestSha256 scope, checkedAdmissionDigest admission,
-                      preparedTypedSegmentSource base]
-                effectiveFlags <- templateParserFlags parserFlags (preparedTypedSegmentSource base)
-                  >>= either throwCellSplitError pure
-                named <- either fail pure (renameScaffoldModuleHeader effectiveFlags owner checkingTemplate)
-                authored <- either fail pure (prepareTypedSegmentSource named plan
-                  (plannedReservationDigest planned) slots)
-                unless (preparedTypedSegmentPlan base == preparedTypedSegmentPlan authored)
-                  (fail "typed segment owner changed its normalized plan")
-                let protected = preparedTypedSegmentTemplate authored
-                    rendered = preparedTypedSegmentSource authored
-                    typedPlan = preparedTypedSegmentPlan authored
-                    sourcePath = directory </> owner ++ ".hs"
-                protectedImports <- either fail pure
-                  (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags protected)
-                mapped <- either fail pure (renderProtectedTemplateImports
-                  (preparedTypedSegmentLineOffset authored) protectedImports)
-                writeFile sourcePath rendered
-                recipe <- generatedTypedSegmentRecipeWithImportRendering (preparedTypedSegmentOperations authored) parserFlags
-                  (checkedTemplateImports admission) mapped protected (preparedTypedSegmentImports authored) sourcePath owner >>= either fail pure
-                let prepare environment admissions typed = do
-                      batch <- prepareTypedSegmentSessionBindings environment admissions typed stagingRoot
-                      writeIORef preparedBatch (Just (stagingRoot,batch))
-                      pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
-                        typedSegmentSessionInterfaces batch)
-                    purpose = GeneratedScaffoldCompile recipe
-                      (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-                        (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] (programOriginal state) prefix)))
-                compiledSegment <- compilePreparedSegmentRequest segmentRequest (WithTypedSegmentPreparation prepare
-                  (PreparedSegmentProducts typedPlan (optionModuleCandidates localArgs)))
-                  (Map.keysSet (optionRetainedGenerations localArgs))
-                  purpose
-                  (Just (scopeFromWorkerRequest localArgs)) sourcePath
-                pure (authored,compiledSegment)
-          (finalized,(authored,compiled)) <- timePhase timing "cell_program_segment_frontend"
-            (checkCellInstances compile withPrefix)
-          (stagingRoot,batch) <- readIORef preparedBatch
-            >>= maybe (fail "typed segment has no prepared Session batch") pure
-          let (completion,typed) = compiled
-              prepared = preparedCompilationResult completion
-              typedPlan = preparedTypedSegmentPlan authored
-              rendered = preparedTypedSegmentSource authored
-              result = pprPipelineResult prepared
-              items = typedSegmentItems typed
-              targets = map (plannedItemEntry . typedItemPlan) items
-              binds = prBinds result
-              sourceOwner = moduleNameString (moduleName (tcg_mod (prTargetTcGblEnv result)))
-          targetPreparedModule <- case
-              [preparedModule | preparedModule <- pprModules prepared,
-                pmModule preparedModule == tcg_mod (prTargetTcGblEnv result)] of
-            [value] -> pure value
-            values -> fail ("prepared target module selection was not unique: " ++ show (length values))
-          capturesByItem <- either throwIO pure
-            (typedSegmentSessionBinders (pmIdentityResolver targetPreparedModule) batch)
-          attempts <- readIORef preparationAttempt
-          emitCount timing "typed_segment_kept_entries" (toInteger (length items))
-          emitCount timing "typed_segment_generated_instance_retries" (toInteger (attempts - 1))
-          captureSignatures <- concat <$> forM items (\item ->
-            forM (typedItemCaptures item) (\capture -> captureCheckedSignature (prHscEnv result)
-              (plannedItemEntry (typedItemPlan item) ++ ":"
-                ++ occNameString (nameOccName (idName (typedCaptureIdentifier capture))))
-              (typedCaptureType capture)))
-          let expressionObservations =
-                [CellExpressionPlan (plannedItemEntry (typedItemPlan item))
-                  (case typedObservationLift observation of
-                    PureObservation -> ExpressionPure
-                    EffectfulObservation -> ExpressionEffectful)
-                  (showSDoc (hsc_dflags (prHscEnv result)) (ppr (typedObservationValueType observation)))
-                  (nominalHeadsOfType (typedObservationValueType observation))
-                | item <- items, Just observation <- [typedItemObservation item]]
-          originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
-          let producedGenerations = Map.fromList
-                [(preparedRootIdentity global,generation)
-                | (global,generation) <- typedSegmentSessionRetainedGlobals batch]
-          unless (Map.null (Map.intersection producedGenerations (programRetained state)))
-            (fail "typed segment output collides with a retained generation")
-          let projectionGenerations = Map.union producedGenerations (programRetained state)
-          (artifacts,productContext) <- timePhase timing "cell_program_segment_project" $
-            prepareArtifacts originalInterfaces directory completion targets (standardAuxiliaryRoots binds)
-              projectionGenerations (typedSegmentSessionBindingRepresentations batch)
-          unless (length artifacts == length items) (fail "typed segment projection lost an entry")
-          currentProducts <- maybe (fail "typed segment has no admitted original inventory") pure productContext
-          sharedProducts <- writeCertifiedSegmentProducts (optionIncludes localArgs) originalInterfaces
-            directory prepared currentProducts
-          emitted <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
-            let itemPlan = typedItemPlan item
-                index = plannedItemOrdinal itemPlan
-                generation = plannedItemGeneration itemPlan
-                itemDirectory = outDir </> "item-" ++ show index
-                captures = case lookup index capturesByItem of
-                  Just values -> values
-                  Nothing -> error "typed Session batch lost an item"
-                outputArtifact = artifact {paTarget=preparedScaffoldTargetName}
-                asks = paYieldSites artifact
-                boundNames = map (T.pack . bbName) captures
-                turn = TBind boundNames 0 captures asks (T.pack rendered)
-                source = cellAnalysisSource sourceItem
-                verdict = cellAnalysisVerdict sourceItem
-                observation = case plannedItemBody itemPlan of ObservationItem _ name -> Just name; _ -> Nothing
-                itemAdmission = CheckedItemAdmission AuthoredCheckedItem (checkedAdmissionDigest admission) (checkedAdmissionDigest admission)
-                  (fromIntegral index) (shaHex (TE.encodeUtf8 (T.pack source)))
-                  (if sbKind verdict == KBind then "bind" else "expr") (sbBinders verdict)
-                  (checkedTurnTemplates admission) (map exactModule (scopeValues scope)) [] Nothing
-                  generation (checkedAdmissionDigest admission) (map programValueImport prefix) observation (programOriginal state)
-                  prefix (scopeValues scope) (checkedTemplateImports admission)
-            packageTarget <- maybe (fail "typed segment item lost its paired package projection") pure
-              (paPackageTarget outputArtifact)
-            createDirectoryIfMissing True itemDirectory
-            writeFile (itemDirectory </> sourceOwner ++ ".hs") rendered
-            void $ writePreparedSidecars InlineYieldSites itemDirectory binds
-              Nothing (map T.pack (prWarnings result)) [outputArtifact]
-            void $ writePreparedArtifacts itemDirectory [outputArtifact]
-            void $ writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory packageTarget
-            ordinal <- stagedOriginalEntryOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
-            BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
-            writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
-              (preparedRootIdentity (typedSegmentOriginalRoot typed)) (preparedRootIdentity (typedItemRoot item)) ordinal
-            pure (generation,captures)
-          validateDependencyEvidence (preparedFreshDependencies prepared)
-          when (null emitted) (fail "typed segment emitted no items")
-          extended <- retainStagedProgramProducts directory prepared sharedProducts sourceOwner scope
-          retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
-            (stagedFinalizedArtifacts sharedProducts) extended
-          let completedState = recordTypedSegment finalized typedPlan expressionObservations captureSignatures rendered
-                state {programInput=extended,programSourceImports=retainedImports}
-          next <- foldM (\current (generation,captures) ->
-            addProgramValue stagingRoot generation captures current) completedState emitted
-          modifyIORef' batches (++ [batch])
-          pure next
-
-    scopeValues = maybe [] checkedValueInterfaces . scopeCheckedCell
-    extractPlannedFingerprint inventory = plannedInterfaceFingerprint inventory
-    plannedSourceFromDirectory plan = concatMap cellAnalysisSource (cellPlanItems plan)
-
-writeTypedItemReceipt :: FilePath -> ExactScope -> CheckedItemAdmission -> String
-  -> TypedSegmentPlan -> SymbolIdentity -> SymbolIdentity -> Word32 -> IO ()
-writeTypedItemReceipt root scope admission source plan original entry ordinal = do
-  let text = encodeString . T.pack
-      identity value = encodeListLen 3 <> encodeString (symbolUnit value)
-        <> encodeString (symbolModule value) <> encodeString (symbolOccurrence value)
-      receipt = encodeListLen 9 <> text "TPEXACTITEM" <> text "2"
-        <> text (scopeRequestSha256 scope) <> text (itemAdmissionDigest admission)
-        <> text (itemCellReceiptDigest admission) <> encodeWord64 (itemIndex admission)
-        <> text (shaHex (TE.encodeUtf8 (T.pack source))) <> text "tidepool-checked-recipe-2"
-        <> encodeListLen 4 <> text (typedSegmentPlanDigest plan) <> identity original <> identity entry
-        <> encodeWord32 ordinal
-  unless (symbolUnit original == symbolUnit entry && symbolModule original == symbolModule entry
-    && symbolNamespace original == "value" && symbolNamespace entry == "value"
-    && isNothing (symbolRecordParent original) && isNothing (symbolRecordParent entry))
-    (fail "typed segment roots leave their ordinary value owner")
-  BS.writeFile (root </> "checked-item.cbor") (toStrictByteString receipt)
-
-programValueImport :: CompletedValueImport -> (String,[String])
-programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
-
-addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState ExactScope -> IO (ProgramCellState ExactScope)
-addProgramValue _ _ [] state = pure state
-addProgramValue root generation binders@(firstBinder:_) state = do
-  owner <- maybe (fail "compiled Val owner is not canonical") pure
-    (parseValModule ("Tidepool.Session.Val.G" ++ show generation))
-  let path = sessionHiPath root owner
-  bytes <- BS.readFile path
-  packages <- BS.readFile (path ++ ".packages")
-  requirementBytes <- BS.readFile (path ++ ".requirements")
-  requirements <- case deserialiseFromBytes (do
-      count <- CD.decodeListLen
-      when (count > 4096) (fail "value type interface dependencies exceed bound")
-      replicateM count $ do
-        fields <- CD.decodeListLen
-        unless (fields == 2) (fail "value type interface dependency is not a pair")
-        (,) <$> (T.unpack <$> CD.decodeString) <*> (T.unpack <$> CD.decodeString)) (BL.fromStrict requirementBytes) of
-    Right (remaining, owners) | BL.null remaining -> pure owners
-    _ -> fail "value type interface dependencies are invalid"
-  let digest = shaHex bytes
-      artifact = ExactIfaceArtifact "main" (bbModule firstBinder) path digest requirements
-      exact = programInput state
-      selection = CompletedValueImport "main" (bbModule firstBinder) path digest
-        [(bbName binder,bbVarId binder) | binder <- binders, not ("__tidepoolMetadata" `isPrefixOf` bbName binder)]
-  lexicalRequirements <- programLexicalRequirements exact [] requirements
-  extended <- extendCheckedValueScope exact
-    (artifact,path ++ ".packages",shaHex packages) lexicalRequirements >>= either fail pure
-  let retained = foldr (\binder -> Map.insert
-          (SymbolIdentity "main" (T.pack (bbModule binder)) "value" (T.pack (bbName binder)) Nothing) generation)
-        (programRetained state) binders
-  pure state { programInput = extended, programValues = programValues state ++ [selection]
-    , programRetained = retained }
-
--- Refine generated instances in the original declaration's typed environment.
--- The successful frontend's prepared interface supplies the declaration's
--- native product and its retained type evidence.
-prepareOriginalCellDeclaration
-  :: BoundCompilerRequest -> String -> FilePath -> Maybe SessionScope
-  -> ExactScope -> CheckedCellAdmission -> CellSourcePlan
-  -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope,
-         (PreparedPipelineResult, CertifiedOriginalProducts))
-prepareOriginalCellDeclaration bound template outDir scope exact admission initial = do
-  let args = boundWorkerRequest bound
-      parserFlags = boundParserFlags bound
-  reserved <- case checkedReservedModules admission of
-    [owner] -> pure owner
-    _ -> throwIO InvalidDeclarationReservation
-  wrapper <- either fail pure (originalDeclarationWrapper template)
-  let directory = outDir </> "planned-declaration"
-      sourcePath = directory </> reserved ++ ".hs"
-      planned plan = either rejectPlan pure (preparePlannedDeclaration reserved wrapper plan)
-      writeOriginal plan = do
-        original <- planned plan
-        writeFile sourcePath (plannedSource original)
-        writeFile (outDir </> "turn-attempt.hs") (plannedSource original)
-        pure original
-      compileOriginal plan = do
-        original <- writeOriginal plan
-        protectedImports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags wrapper)
-        mapped <- either fail pure (renderProtectedTemplateImports (plannedSourceLineOffset original) protectedImports)
-        recipe <- generatedCheckingTemplateRecipeWithImportRendering parserFlags
-          (checkedTemplateImports admission) mapped wrapper (plannedSourceImports original) sourcePath reserved >>= either fail pure
-        compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args))
-          (Map.keysSet (optionRetainedGenerations args))
-          (GeneratedScaffoldCompile recipe (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
-  createDirectoryIfMissing True directory
-  (finalized, completion) <- checkCellInstances compileOriginal initial
-  original <- planned finalized
-  let prepared = preparedCompilationResult completion
-      result = pprPipelineResult prepared
-      environment = prHscEnv result
-      binds = prBinds result
-  inventory <- certifyPlannedDeclaration original environment >>= either fail pure
-  originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
-  (artifacts, productContext) <- prepareArtifacts originalInterfaces directory completion
-    ["__result"] [] (optionRetainedGenerations args) []
-  void $ writePreparedSidecars SeparateYieldSites directory binds
-    Nothing (map T.pack (prWarnings result)) artifacts
-  void $ writePreparedArtifacts directory artifacts
-  certified <- writeRequestProducts bound originalInterfaces directory prepared productContext artifacts
-  let products = certifiedOriginalProducts certified
-  supportScope <- retainProgramProducts directory prepared certified reserved exact
-  originalProductEncoding <- case
-      [product' | product' <- products
-        , let (_, name, _, _) = moduleProductInput product', T.unpack name == reserved] of
-    [value] -> pure value
-    _ -> fail "planned original declaration has no unique prepared interface"
-  let (unitText, _, interfaceBytes, originalGroups') = moduleProductInput originalProductEncoding
-      unit = T.unpack unitText
-      originalBytes = moduleProductBytes originalProductEncoding
-      productPath = directory </> "original.product.cbor"
-  BS.writeFile productPath originalBytes
-  localProof <- maybe (fail "planned original declaration lacks captured finalization") pure
-    (Map.lookup (unit,reserved) (finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)))
-  when (isNothing (localFinalizedCore localProof))
-    (fail "planned original declaration lacks its finalized Core")
-  lexicalRequirements <- programSourceRequirements prepared unit reserved >>= programLexicalRequirements supportScope []
-  let (interface,packagesPath,packagesSha) = localFinalizedInterface localProof
-  unless (exactSha256 interface == shaHex interfaceBytes)
-    (fail "planned native product differs from its finalized interface")
-  packageBytes <- BS.readFile packagesPath
-  unless (shaHex packageBytes == packagesSha)
-    (fail "planned original declaration package capture changed")
-  nativeEvidence <- either fail pure (admitLocalNativeDeclaration original inventory localProof)
-  let originalProduct = ExactProduct unit reserved
-        (exactProgramProductVersion exact unit reserved (plannedSource original) interfaceBytes originalBytes packageBytes)
-        (shaHex interfaceBytes) (shaHex originalBytes) productPath
-        (map originalGroupFromProjected originalGroups')
-      text = encodeString . T.pack
-      receipt = encodeListLen 8 <> text "TPEXACTDECL" <> text "1"
-        <> text (scopeRequestSha256 exact) <> text reserved <> text (plannedSource original)
-        <> text (shaHex interfaceBytes) <> text (renderPlannedDeclarationInventory inventory)
-        <> text "planned-declaration"
-  extended <- extendExactScopeGeneration supportScope
-    [((interface,packagesPath,packagesSha),LocalNativeDeclarationEvidence nativeEvidence)]
-    [CompilerOriginal originalProduct] [((unit,reserved),lexicalRequirements)] >>= either fail pure
-  BS.writeFile (outDir </> "planned-declaration.cbor") (toStrictByteString receipt)
-  pure (finalized, original, inventory, extended, (prepared,certified))
-  where
-    rejectPlan UnsupportedDeclarationOrder = throwIO (SourceRejection
-      "local declarations currently require one initial group before bindings or expressions")
-    rejectPlan ReservedResultDeclaration = throwIO (SourceRejection
-      "authored declarations use the compiler-reserved __result binder")
-    rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
-    rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
-
-exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
-exactProgramProductVersion scope unit owner source =
-  exactProgramProductVersionFromDigest scope unit owner (shaHex (TE.encodeUtf8 (T.pack source)))
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'classifyWithFlags' would have produced, so the rest of

@@ -4,10 +4,8 @@
 
 module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
-  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
-  , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
+  , extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , ActivationPreviewAdmission(..), scopeActivationPreview
-  , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalSourceImport, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule, resolveShippedHomeModuleWithEvidence, ShippedHomeModuleRefusal(..), ShippedHomeModuleOrigin(..), CanonicalAdmissionKind(..)
@@ -18,7 +16,7 @@ module Tidepool.ExactScope
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
   , canonicalRequirements, canonicalOrigin, canonicalSourceImports, isSourceOriginal, normalizeInterfaceEvidence
   , canonicalProofMatchesOwner
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
+  , scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , InputRetentionLimits, optionalInputByteLimit, originalImageCountLimit
   , exactInputRetentionLimits, commitWorldInputRetention
@@ -95,11 +93,9 @@ import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
 import GHC.Unit.Module.ModIface (ModIface)
-import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
-import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports, interfaceExports, normalizeDeclarationExports)
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures, encodeCheckedSignature, encodeRequestTypeSignatures
@@ -217,8 +213,6 @@ scopeCompletedSourceOriginals scope = ownedScopePublishedSourceOriginals scope
 -- request-type evidence is an independent wrapper, not another checked stage.
 data ExactScopePurpose
   = NoCheckedPurpose
-  | ExactCellPurpose CheckedCellAdmission [FilePath]
-  | ExactItemPurpose CheckedItemAdmission [FilePath]
   | ExactInspectionPurpose [ExactIfaceArtifact] [FilePath]
   | ExactReloadInspectionPurpose [ExactIfaceArtifact] [FilePath]
   | ExactActivationPreviewPurpose ActivationPreviewAdmission [FilePath]
@@ -241,21 +235,9 @@ scopeActivationPreview scope = case scopePurpose scope of
   ExactActivationPreviewPurpose admission _ -> Just admission
   _ -> Nothing
 
-scopeCheckedCell :: ExactScope -> Maybe CheckedCellAdmission
-scopeCheckedCell scope = case scopePurpose scope of
-  ExactCellPurpose admission _ -> Just admission
-  _ -> Nothing
-
-scopeCheckedItem :: ExactScope -> Maybe CheckedItemAdmission
-scopeCheckedItem scope = case scopePurpose scope of
-  ExactItemPurpose admission _ -> Just admission
-  _ -> Nothing
-
 scopeIncludePaths :: ExactScope -> Maybe [FilePath]
 scopeIncludePaths scope = case scopePurpose scope of
   NoCheckedPurpose -> Nothing
-  ExactCellPurpose _ paths -> Just paths
-  ExactItemPurpose _ paths -> Just paths
   ExactInspectionPurpose _ paths -> Just paths
   ExactReloadInspectionPurpose _ paths -> Just paths
   ExactActivationPreviewPurpose _ paths -> Just paths
@@ -787,14 +769,6 @@ extendExactScopeGeneration scope offered products lexical = do
        (_,Left reason) -> pure (Left reason)
        _ -> pure (Left "scope generation lexical edge leaves admitted interface owners")
 
-extendCheckedValueScope :: ExactScope -> InterfaceRow -> [(String,String)] -> IO (Either String ExactScope)
-extendCheckedValueScope scope row@(artifact,_,_) requirements = case scopePurpose scope of
-  ExactCellPurpose admission paths | checkedValueOwner artifact -> do
-    let extended = scope {ownedScopePurpose=ExactCellPurpose
-          (admission {checkedValueInterfaces=checkedValueInterfaces admission ++ [artifact]}) paths}
-    extendExactScopeGeneration extended [(row,CheckedValueEvidence)] [] [(rowOwner row,requirements)]
-  _ -> pure (Left "completed value extension requires a checked cell scope and canonical value owner")
-
 canonicalRequirementsSelected :: Map.Map (String,String) String -> ExactIfaceArtifact -> CanonicalInterfaceProof -> Bool
 canonicalRequirementsSelected seals artifact proof =
   Map.keysSet (canonicalRequirements proof) == Set.fromList (exactRequirements artifact)
@@ -1183,55 +1157,6 @@ data CanonicalModuleCertificate = CanonicalModuleCertificate
   , certificateOrigin :: CanonicalOrigin
   } deriving (Eq, Show)
 
-data CheckedCellPurpose = AuthoredCellCheck
-  deriving (Eq, Show)
-
-data CheckedCellAdmission = CheckedCellAdmission
-  { checkedAdmissionDigest :: String
-  , checkedCellSha256 :: String
-  , checkedTemplateSha256 :: String
-  , checkedTurnTemplates :: [(String, String)]
-  , checkedInjectedModules :: [String]
-  , checkedReservedModules :: [String]
-  , checkedValueInterfaces :: [ExactIfaceArtifact]
-  , checkedTemplateImports :: CheckedTemplateImports
-  , checkedPlannedCell :: Maybe PlannedCellAdmission
-  , checkedCellPurpose :: CheckedCellPurpose
-  } deriving (Eq, Show)
-
-data PlannedCellAdmission = PlannedCellAdmission
-  { plannedParserDigest :: String
-  , plannedParserPath :: FilePath
-  , plannedParserSha256 :: String
-  , plannedReservationDigest :: String
-  , plannedSlots :: [PlannedCellSlot]
-  } deriving (Eq, Show)
-
-data CheckedItemPurpose = AuthoredCheckedItem
-  deriving (Eq, Show)
-
-data CheckedItemAdmission = CheckedItemAdmission
-  { itemPurpose :: CheckedItemPurpose
-  , itemAdmissionDigest :: String
-  , itemCellReceiptDigest :: String
-  , itemIndex :: Word64
-  , itemSourceDigest :: String
-  , itemKind :: String
-  , itemBinders :: [String]
-  , itemTurnTemplates :: [(String,String)]
-  , itemInjectedModules :: [String]
-  , itemSignatures :: [CheckedSignature]
-  , itemExpressionLift :: Maybe String
-  , itemGeneration :: Word64
-  , itemPrefixDigest :: String
-  , itemValueImports :: [(String,[String])]
-  , itemObservationName :: Maybe String
-  , itemPlannedDeclaration :: Maybe ((String,String),String)
-  , itemCompletedValues :: [CompletedValueImport]
-  , itemValueInterfaces :: [ExactIfaceArtifact]
-  , itemTemplateImports :: CheckedTemplateImports
-  } deriving (Eq, Show)
-
 data ExactProduct = ExactProduct
   { originalUnit :: String, originalModule :: String
   , originalVersion :: String, originalIfaceSha256 :: String
@@ -1428,8 +1353,6 @@ extendSourceSelectedOriginals (Just selected) scope = do
 scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
 scopeValueInterfaces scope = case scopePurpose scope of
   NoCheckedPurpose -> []
-  ExactCellPurpose admission _ -> checkedValueInterfaces admission
-  ExactItemPurpose admission _ -> itemValueInterfaces admission
   ExactInspectionPurpose values _ -> values
   ExactReloadInspectionPurpose values _ -> values
   ExactActivationPreviewPurpose _ _ -> []
@@ -4108,76 +4031,6 @@ decodeScope = do
         validateInterfaces injected values
         paths <- includePaths
         pure (ExactReloadInspectionPurpose values paths)
-      "cell-check4" -> do
-        unless (authCount == 10) (fail "invalid cell-check admission")
-        admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
-          <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> checkedTemplateImports <*> pure Nothing
-          <*> pure AuthoredCellCheck
-        validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
-        unique "checked injected modules" (checkedInjectedModules admission)
-        unique "checked reserved modules" (checkedReservedModules admission)
-        paths <- includePaths
-        pure (ExactCellPurpose admission paths)
-      "cell-program3" -> do
-        unless (authCount == 15) (fail "invalid compiled cell admission")
-        admission <- CheckedCellAdmission <$> digestField <*> digestField <*> digestField
-          <*> bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-          <*> bounded 4096 nonempty <*> bounded 4096 nonempty <*> valueInterfaces <*> checkedTemplateImports
-          <*> (Just <$> (PlannedCellAdmission <$> digestField <*> absolute <*> digestField <*> digestField
-            <*> bounded 10000 (do
-              slotFields <- decodeListLen
-              kind <- nonempty
-              case (kind,slotFields) of
-                ("prologue",2) -> PlannedPrologue <$> decodeWord64
-                ("decl",2) -> PlannedDeclaration <$> decodeWord64
-                ("bind",2) -> PlannedBind <$> decodeWord64
-                ("expr",3) -> PlannedExpression <$> decodeWord64 <*> nonempty
-                _ -> fail "invalid compiled cell reservation")))
-          <*> pure AuthoredCellCheck
-        validateInterfaces (checkedInjectedModules admission) (checkedValueInterfaces admission)
-        paths <- includePaths
-        pure (ExactCellPurpose admission paths)
-      "checked-item5" -> do
-        unless (authCount == 20) (fail "invalid checked-item admission")
-        admissionDigest <- digestField
-        receiptDigest <- digestField
-        index <- decodeWord64
-        sourceDigest <- digestField
-        kind <- nonempty
-        unless (kind `elem` ["bind","expr"]) (fail "unsupported checked-item kind")
-        binders <- bounded 65536 nonempty
-        templates <- bounded 64 (array 2 >> (,) <$> nonempty <*> digestField)
-        injected <- bounded 4096 nonempty
-        signatures <- bounded 65536 signature
-        unique "checked item binders" binders
-        unique "checked item injected modules" injected
-        unique "checked item signatures" (map signatureKey signatures)
-        token <- peekTokenType
-        liftPlan <- if token == TypeNull then decodeNull >> pure Nothing else do
-          expression <- decodeCellExpressionPlan
-          unless (kind == "expr") (fail "expression plan belongs to a non-expression item")
-          pure (Just (case expressionPlanLift expression of
-              ExpressionPure -> "pure"; ExpressionEffectful -> "effectful"))
-        generation <- decodeWord64
-        prefix <- digestField
-        valueImports <- bounded 4096 (array 2 >> ((,) <$> nonempty <*> bounded 65536 nonempty))
-        unique "completed value import owners" (map fst valueImports)
-        unique "completed value import names" (concatMap snd valueImports)
-        unless (all ((`elem` injected) . fst) valueImports) (fail "completed value import has no exact injected owner")
-        observationToken <- peekTokenType
-        observation <- if observationToken == TypeNull then decodeNull >> pure Nothing else Just <$> nonempty
-        unless ((kind == "expr") == maybe False (const True) observation)
-          (fail "checked observation identity differs from item kind")
-        planned <- plannedDeclaration
-        values <- completedValues
-        valueInputs <- valueInterfaces
-        templateInputs <- checkedTemplateImports
-        validateInterfaces injected valueInputs
-        validateValues valueImports values
-        paths <- includePaths
-        pure (ExactItemPurpose (CheckedItemAdmission AuthoredCheckedItem admissionDigest receiptDigest index sourceDigest kind binders
-          templates injected signatures liftPlan generation prefix valueImports observation planned values valueInputs templateInputs) paths)
       _ -> fail "unsupported exact compile purpose"
     nullable decoder = do
       token <- peekTokenType
@@ -4194,14 +4047,6 @@ decodeScope = do
       unless (all checkedValueOwner values
           && length values == length injected && all (`elem` injected) (map exactModule values))
         (fail "checked value bytes differ from injected owner inventory")
-    completedValues = bounded 4096 $ do
-      array 5
-      CompletedValueImport <$> nonempty <*> nonempty <*> absolute <*> digestField
-        <*> bounded 65536 (array 2 >> (,) <$> nonempty <*> decodeWord64)
-    validateValues imports values = unless
-      (map (\value -> (completedValueModule value,map fst (completedValueBinders value))) values == imports
-        && all ((== "main") . completedValueUnit) values)
-      (fail "completed value identities differ from exact prefix imports")
     templateInterfaces = do
       inputs <- bounded 4096 (array 4 >> CheckedTemplateInterface <$> nonempty <*> nonempty <*> digestField
         <*> bounded 4096 (array 2 >> (,) <$> nonempty <*> nonempty))
@@ -4215,29 +4060,6 @@ decodeScope = do
         unless (all (`Set.member` ownerSet) (templateInterfaceImports input))
           (fail "checked template edge leaves its captured graph")
       pure inputs
-    checkedTemplateImports = do
-      array 2
-      roots <- bounded 4096 (array 2 >> (,) <$> nonempty <*> nonempty)
-      graph <- templateInterfaces
-      let rootSet = Set.fromList roots
-          graphOwners = Set.fromList
-            [(templateInterfaceUnit input,templateInterfaceModule input) | input <- graph]
-      unique "checked template direct roots" roots
-      unless (rootSet `Set.isSubsetOf` graphOwners)
-        (fail "checked template direct root leaves its sealed graph")
-      pure (CheckedTemplateImports roots graph)
-    plannedDeclaration = do
-      token <- peekTokenType
-      if token == TypeNull then decodeNull >> pure Nothing else do
-        array 3
-        unit <- nonempty
-        ownerModule <- nonempty
-        fingerprint <- nonempty
-        unless (unit == "main" && "Tidepool.Session.Lib.G" `isPrefixOf` ownerModule
-            && length fingerprint == 32 && all isHexDigit fingerprint)
-          (fail "invalid completed original declaration identity")
-        pure (Just ((unit,ownerModule),fingerprint))
-    signature = decodeCheckedSignature
 
 identity :: Decoder s SymbolIdentity
 identity = do

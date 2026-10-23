@@ -23,7 +23,7 @@ module Tidepool.ExtractRequest
   , AdmittedRequestOperation
       (AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare
       , AdmittedSource, AdmittedTurn, AdmittedActivationPreview, AdmittedClassification, AdmittedInspection
-      , AdmittedCell, AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration)
+      , AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration)
   , SourceRequest, sourceInput, sourceAdditionalInputs
   , SourceProductRequest, sourceProductSource, sourceProductOutput
   , SourceOutput, SourceOutputKind(..), sourceOutputKind, sourceOutputDirectory, sourceOutputTargets
@@ -307,7 +307,6 @@ data RequestField
   | TurnVerdict String
   | Classify
   | ClassifyOut FilePath
-  | Cell
   | CellPlan
   | CheckSource
   | CellTemplate FilePath
@@ -368,7 +367,6 @@ data WorkerRequest = WorkerRequest
   , requestTurnVerdict :: Maybe String
   , requestClassify :: Bool
   , requestClassifyOut :: Maybe FilePath
-  , requestCell :: Bool
   , requestCheckSource :: Bool
   , requestCellPlan :: Bool
   , requestCellTemplate :: Maybe FilePath
@@ -451,7 +449,6 @@ data AdmittedRequestOperation
   | AdmittedActivationPreviewPayload TurnRequest
   | AdmittedClassificationPayload ClassificationRequest
   | AdmittedInspectionPayload InspectionPayload
-  | AdmittedCellPayload CellRequest
   | AdmittedCellPlanPayload CellRequest
   | AdmittedSourceCheckPayload SourceRequest
   | AdmittedDeclarationPayload FilePath FilePath
@@ -479,7 +476,6 @@ admittedOperationTag operation = case operation of
   AdmittedActivationPreviewPayload _ -> ActivationPreviewOperation
   AdmittedClassificationPayload _ -> ClassificationOperation
   AdmittedInspectionPayload _ -> InspectionOperation
-  AdmittedCellPayload _ -> CellOperation
   AdmittedCellPlanPayload _ -> CellPlanOperation
   AdmittedSourceCheckPayload _ -> SourceCheckOperation
   AdmittedDeclarationPayload manifest output -> DeclarationOperation manifest output
@@ -493,7 +489,6 @@ admittedSourceFiles request = case admittedRequestOperation request of
   AdmittedSourceCheckPayload source -> sources source
   AdmittedTurnPayload turn -> sources (payloadTurnSourceRequest turn)
   AdmittedActivationPreviewPayload turn -> sources (payloadTurnSourceRequest turn)
-  AdmittedCellPayload cell -> sources (payloadCellSourceRequest cell)
   AdmittedCellPlanPayload cell -> sources (payloadCellSourceRequest cell)
   AdmittedClassificationPayload classification -> payloadClassificationSources classification
   AdmittedInspectionPayload inspection -> map fst (payloadInspectionInputs inspection) ++ maybe [] (:[]) (payloadInspectionBatch inspection)
@@ -509,7 +504,6 @@ traverseAdmittedSources replacePath (AdmittedWorkerRequest options operation) = 
   AdmittedSourceCheckPayload source -> AdmittedSourceCheckPayload <$> sourcePaths source
   AdmittedTurnPayload turn -> AdmittedTurnPayload <$> turnPaths turn
   AdmittedActivationPreviewPayload turn -> AdmittedActivationPreviewPayload <$> turnPaths turn
-  AdmittedCellPayload cell -> AdmittedCellPayload <$> cellPaths cell
   AdmittedCellPlanPayload cell -> AdmittedCellPlanPayload <$> cellPaths cell
   AdmittedClassificationPayload classification -> (\paths -> AdmittedClassificationPayload (classification {payloadClassificationSources=paths}))
     <$> traverse (\(index,path) -> replace (if index == (0 :: Int) then PrimarySource else AdditionalSource) path) (zip [0..] (payloadClassificationSources classification))
@@ -569,7 +563,6 @@ admitWorkerRequest args = do
       output <- required RequiredInspectionOutput (requestInspectOut args)
       pure (AdmittedInspectionPayload (InspectionPayload (zip paths queries) output
         (requestInspectTypeBatch args) (requestInspectionStrict args) (requestOutDir args)))
-    CellOperation -> AdmittedCellPayload <$> cell
     CellPlanOperation -> AdmittedCellPlanPayload <$> cell
     SourceCheckOperation -> AdmittedSourceCheckPayload <$> source
     DeclarationOperation manifest output -> AdmittedDeclarationPayload
@@ -607,7 +600,7 @@ admitWorkerRequest args = do
     isTypeQuery _ = False
     checkExclusivePayload tag = do
       let turnMode = tag `elem` [TurnOperation, ActivationPreviewOperation]
-          cellMode = tag `elem` [CellOperation, CellPlanOperation]
+          cellMode = tag == CellPlanOperation
           inspectionMode = tag == InspectionOperation
           classificationMode = tag == ClassificationOperation
       unlessShape (turnMode || requestTurnOut args == Nothing && requestTurnVerdict args == Nothing) ConflictingRequestFields
@@ -629,7 +622,6 @@ data RequestOperation
   | ActivationPreviewOperation
   | ClassificationOperation
   | InspectionOperation
-  | CellOperation
   | CellPlanOperation
   | SourceCheckOperation
   | DeclarationOperation FilePath FilePath
@@ -719,7 +711,6 @@ admitOperationTag args
       [ (requestTurn args, if requestActivationPreview args then ActivationPreviewOperation else TurnOperation)
       , (requestClassify args, ClassificationOperation)
       , (not (null (requestInspections args)), InspectionOperation)
-      , (requestCell args, CellOperation)
       , (requestCellPlan args, CellPlanOperation)
       , (requestCheckSource args, SourceCheckOperation)
       ] , selected]
@@ -732,7 +723,7 @@ admitOperationTag args
       && not (present (requestModuleCandidates args)) && not (requestCertifyHomeProducts args)
       && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
       && Map.null (requestRetainedGenerations args)
-    validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
+    validSourceCheck = length (requestFiles args) == 1
       && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not hasSessionScope
       && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
@@ -748,7 +739,7 @@ admitOperationTag args
       && not (present (requestSessionIncarnation args))
       && not (requestInspectionStrict args)
       && Map.null (requestRetainedGenerations args)
-    validCellPlan = length (requestFiles args) == 1 && not (requestCell args)
+    validCellPlan = length (requestFiles args) == 1
       && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not (present (requestSessionArtifacts args))
       && not (present (requestDeclarationJoin args)) && not (present (requestModuleCandidates args))
@@ -779,7 +770,6 @@ emptyWorkerRequest = WorkerRequest
   , requestTurnVerdict = Nothing
   , requestClassify = False
   , requestClassifyOut = Nothing
-  , requestCell = False
   , requestCheckSource = False
   , requestCellPlan = False
   , requestCellTemplate = Nothing
@@ -876,7 +866,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       TurnVerdict verdict -> request { requestTurnVerdict = Just verdict }
       Classify -> request { requestClassify = True }
       ClassifyOut path -> request { requestClassifyOut = Just path }
-      Cell -> request { requestCell = True }
       CellPlan -> request { requestCellPlan = True }
       CheckSource -> request { requestCheckSource = True }
       CellTemplate path -> request { requestCellTemplate = Just path }
@@ -1040,7 +1029,6 @@ encodeField field = case field of
   InspectOut value -> taggedText 28 value
   InspectBrowse value -> taggedText 29 value
   InspectBrowseExpanded value -> taggedText 30 value
-  Cell -> BS.singleton 31
   CellPlan -> BS.singleton 51
   CheckSource -> BS.singleton 52
   CellTemplate value -> taggedText 32 value
@@ -1247,9 +1235,9 @@ pField bytes = do
     28 -> mapParser InspectOut pText rest
     29 -> mapParser InspectBrowse pText rest
     30 -> mapParser InspectBrowseExpanded pText rest
-    31 -> Right (Cell, rest)
     51 -> Right (CellPlan, rest)
     52 -> Right (CheckSource, rest)
+    31 -> retired tag
     32 -> mapParser CellTemplate pText rest
     33 -> mapParser CellOut pText rest
     34 -> retired tag
@@ -1570,7 +1558,6 @@ admittedOutputDirectory request = case admittedRequestOperation request of
   AdmittedSourcePayload source -> sourceOutputDirectory (sourceProductOutput source)
   AdmittedTurnPayload turn -> turnOutputDirectory turn
   AdmittedActivationPreviewPayload turn -> turnOutputDirectory turn
-  AdmittedCellPayload cell -> cellOutputDirectory cell
   AdmittedCellPlanPayload cell -> cellOutputDirectory cell
   AdmittedInspectionPayload inspection -> inspectionOutputDirectory inspection
   AdmittedClassificationPayload classification -> classificationOutputDirectory classification
@@ -1579,7 +1566,6 @@ admittedTurnTemplates :: AdmittedRequestOperation -> [(String,FilePath)]
 admittedTurnTemplates operation = case operation of
   AdmittedTurnPayload turn -> turnTemplates turn
   AdmittedActivationPreviewPayload turn -> turnTemplates turn
-  AdmittedCellPayload cell -> cellTemplates cell
   AdmittedCellPlanPayload cell -> cellTemplates cell
   _ -> []
 
@@ -1601,12 +1587,10 @@ pattern AdmittedClassification :: ClassificationRequest -> AdmittedRequestOperat
 pattern AdmittedClassification request <- AdmittedClassificationPayload request
 pattern AdmittedInspection :: InspectionPayload -> AdmittedRequestOperation
 pattern AdmittedInspection request <- AdmittedInspectionPayload request
-pattern AdmittedCell :: CellRequest -> AdmittedRequestOperation
-pattern AdmittedCell request <- AdmittedCellPayload request
 pattern AdmittedCellPlan :: CellRequest -> AdmittedRequestOperation
 pattern AdmittedCellPlan request <- AdmittedCellPlanPayload request
 pattern AdmittedSourceCheck :: SourceRequest -> AdmittedRequestOperation
 pattern AdmittedSourceCheck request <- AdmittedSourceCheckPayload request
 pattern AdmittedDeclaration :: FilePath -> FilePath -> AdmittedRequestOperation
 pattern AdmittedDeclaration manifest output <- AdmittedDeclarationPayload manifest output
-{-# COMPLETE AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare, AdmittedSource, AdmittedTurn, AdmittedActivationPreview, AdmittedClassification, AdmittedInspection, AdmittedCell, AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration #-}
+{-# COMPLETE AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare, AdmittedSource, AdmittedTurn, AdmittedActivationPreview, AdmittedClassification, AdmittedInspection, AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration #-}
