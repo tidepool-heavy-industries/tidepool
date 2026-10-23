@@ -404,13 +404,13 @@ worldMaterializationBoundaries = do
     frame bytes = word32 (BS.length bytes) <> bytes
     word32 value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..3 :: Int]]
 
--- Actual module checking enters the same bound executor and pipeline as the
--- service query. Refusals must identify the transitive dependency, before
+-- Actual module checking enters the resident kernel through its scoped helper.
+-- Refusals must identify the transitive dependency before
 -- preprocessing/typechecking has an opportunity to execute its options.
 checkedPublicModuleHistories :: IO ()
 checkedPublicModuleHistories = do
-  withRequestFixture $ \_ request work -> do
-    runBoundGhc request $ do
+  withCompilerFixture $ \scope work -> do
+    scopedRunGhc scope $ do
       baseline <- getSessionDynFlags
       (effective,leftover,_) <- parseDynamicFilePragma baseline [noLoc "-fbyte-code"]
       liftIO $ unless (null leftover
@@ -420,42 +420,42 @@ checkedPublicModuleHistories = do
           && gopt Opt_ByteCode effective)
         (fail "pinned GHC bytecode pragma no longer separates its generation flag from the checking backend")
     writeTarget work
-    checked <- compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing
-      (work </> "BoundPreparedA.hs")
+    checked <- scopedCompile scope CheckedPublicModule Set.empty GeneralCompile Nothing
+      (work </> "BoundPreparedA.hs") [work] Nothing
     unless (moduleNameString (moduleName (checkedPublicModuleIdentity checked)) == "BoundPreparedA"
         && Set.fromList (map dependencyModuleName (dependencyModules (checkedPublicModuleEvidence checked)))
           == Set.fromList ["BoundPreparedA","BoundPreparedB"])
       (fail "public module completion lost the actual target or dependency graph")
     -- Ordinary consumers still receive their target's checked environment.
-    ordinary <- compileBoundRequest request CheckedEnvironment Set.empty GeneralCompile Nothing
-      (work </> "BoundPreparedA.hs")
+    ordinary <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing
+      (work </> "BoundPreparedA.hs") [work] Nothing
     unless (moduleNameString (moduleName (tcg_mod (crTargetTcGblEnv ordinary))) == "BoundPreparedA")
       (fail "ordinary checked consumer changed after public module completion")
   forM_ ["{-# LANGUAGE CPP #-}","{-# LANGUAGE TemplateHaskell #-}"] $ \pragma ->
-    withRequestFixture $ \_ request work -> do
+    withCompilerFixture $ \scope work -> do
       writeTarget work
       prependDependency work pragma
-      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+      refused scope work (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
   forM_ [("-ddump-parsed -ddump-to-file -dumpdir ",WorldSideOutputs)
         ,("-fwrite-ide-info -hiedir ",WorldSideOutputs)
         ,("-hidir ",WorldOutputPolicyChanged)
         ,("-tmpdir ",WorldOutputPolicyChanged)
         ,("-ddump-file-prefix ",WorldOutputPolicyChanged)] $ \(flags,reason) ->
-    withRequestFixture $ \_ request work -> do
+    withCompilerFixture $ \scope work -> do
       writeTarget work
       let ambient = work </> "ambient-outputs"
       createDirectory ambient
       prependDependency work ("{-# OPTIONS_GHC " ++ flags ++ show ambient ++ " #-}")
-      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" reason
+      refused scope work (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" reason
       outputs <- listDirectory ambient
       unless (null outputs) (fail ("world module admission wrote untracked outputs: " ++ show outputs))
   forM_ ["-fwrite-interface","-fwrite-if-simplified-core","-shared"] $ \flag ->
-    withRequestFixture $ \_ request work -> do
+    withCompilerFixture $ \scope work -> do
       writeTarget work
       prependDependency work ("{-# OPTIONS_GHC " ++ flag ++ " #-}")
-      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldOutputPolicyChanged
+      refused scope work (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldOutputPolicyChanged
   forM_ ["-fbyte-code","-fobject-code"] $ \backendFlag ->
-    withRequestFixture $ \_ request work -> do
+    withCompilerFixture $ \scope work -> do
       writeTarget work
       let compiler = work </> "foreign-compiler.sh"
           marker = work </> "foreign-compiler-ran"
@@ -471,10 +471,10 @@ checkedPublicModuleHistories = do
         , "__result :: Int"
         , "__result = 97"
         ])
-      refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldCodeGeneration
+      refused scope work (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldCodeGeneration
       ran <- doesFileExist marker
       unless (not ran) (fail "world module admission executed a transitive foreign compiler")
-  withRequestFixture $ \_ request work -> do
+  withCompilerFixture $ \scope work -> do
     writeTarget work
     let preprocessor = work </> "preprocessor.sh"
         marker = work </> "preprocessor-ran"
@@ -482,13 +482,13 @@ checkedPublicModuleHistories = do
     permissions <- getPermissions preprocessor
     setPermissions preprocessor (permissions {executable=True})
     prependDependency work ("{-# OPTIONS_GHC -F -pgmF " ++ show preprocessor ++ " #-}")
-    refused request (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
+    refused scope work (work </> "BoundPreparedA.hs") "BoundPreparedB.hs" WorldUntrackedOptions
     ran <- doesFileExist marker
     unless (not ran) (fail "world module admission executed a transitive custom preprocessor")
-  withRequestFixture $ \_ request work -> do
+  withCompilerFixture $ \scope work -> do
     let literate = work </> "BoundPreparedA.lhs"
     writeFile literate "> module BoundPreparedA where\n> answer :: Int\n> answer = 41\n"
-    refused request literate "BoundPreparedA.lhs" WorldLiterateSource
+    refused scope work literate "BoundPreparedA.lhs" WorldLiterateSource
   where
     writeTarget work = writeFile (work </> "BoundPreparedA.hs")
       "module BoundPreparedA where\nimport qualified BoundPreparedB\nanswer :: Int\nanswer = BoundPreparedB.__result\n"
@@ -497,8 +497,8 @@ checkedPublicModuleHistories = do
       original <- readFile path
       -- Force the old text before reopening the same path for writing.
       length original `seq` writeFile path (pragma ++ "\n" ++ original)
-    refused request path dependency reason = do
-      outcome <- try (compileBoundRequest request CheckedPublicModule Set.empty GeneralCompile Nothing path)
+    refused scope work path dependency reason = do
+      outcome <- try (scopedCompile scope CheckedPublicModule Set.empty GeneralCompile Nothing path [work] Nothing)
         :: IO (Either SomeException CheckedPublicModuleResult)
       case outcome of
         Left failure
@@ -508,18 +508,21 @@ checkedPublicModuleHistories = do
         Right _ -> fail "unsupported world module source was checked"
 
 requestFor :: FilePath -> IO WorkerRequest
-requestFor work = case workerRequestFromArgv (workerArgv [Input (work </> "BoundPreparedA.hs"), Include work]) of
+requestFor work = case workerRequestFromArgv (workerArgv [Input (work </> "BoundPreparedA.hs"), Include work, Targets ["__result", "alternate"]]) of
   Right (Just args) -> pure args
   other -> fail ("invalid bound compiler fixture request: " ++ show other)
 
-withRequestFixture :: (CompilerScope -> BoundCompilerRequest -> FilePath -> IO a) -> IO a
-withRequestFixture action = withScratch $ \work -> do
+withCompilerFixture :: (CompilerScope -> FilePath -> IO a) -> IO a
+withCompilerFixture action = withScratch $ \work -> do
   forM_ ["BoundPreparedA.hs", "BoundPreparedB.hs", "BoundPreparedError.hs"] $ \name ->
     copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  args <- requestFor work
   withRootedCompilerEnvironment work $ withQuietStdout $
-    withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
-      (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> action scope request work
+    withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> action scope work
+
+withRequestFixture :: (CompilerScope -> BoundCompilerRequest -> FilePath -> IO a) -> IO a
+withRequestFixture action = withCompilerFixture $ \scope work -> do
+  args <- requestFor work
+  (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> action scope request work
 
 compileA :: BoundCompilerRequest -> FilePath -> IO PreparedCompilation
 compileA request work = compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
@@ -670,7 +673,7 @@ nativePackageOutputChecks :: IO ()
 nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) -> withScratch $ \work -> do
   let source = work </> name ++ ".hs"
   writeFile source (unlines sourceLines)
-  args <- case workerRequestFromArgv (workerArgv ([Input source,Include work,OutputDir work] ++ map Target names)) of
+  args <- case workerRequestFromArgv (workerArgv [Input source,Include work,OutputDir work,Targets names]) of
     Right (Just request) -> pure request
     other -> fail ("invalid native package fixture: " ++ show other)
   withRootedCompilerEnvironment work $ withQuietStdout $

@@ -19,6 +19,7 @@ import Control.Exception
   , IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (intercalate, nub, isPrefixOf)
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
 import Data.Word (Word32, Word64)
 import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
@@ -483,7 +484,7 @@ processFile bound timing request = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
-    let preparedTargets = sourceOutputTargets outputRequest
+    let preparedTargets = NE.toList (sourceOutputTargets outputRequest)
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     output <- prepareArtifactsWithIntent
       originalInterfaces outDir completion preparedTargets
