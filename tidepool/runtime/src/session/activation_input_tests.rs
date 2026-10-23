@@ -4089,7 +4089,11 @@ fn activation_preview_package_only_input_preserves_original_producer_and_renders
     let site = parked_site(&mut resident, &hole);
     let original = resident.parked_program_provenance(&hole).unwrap();
     let joint_types = &original.authenticated_inputs[&site].types;
-    let joint_descriptors = joint_types.artifact_view().descriptors();
+    let input = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let request = input.type_evidence().compile_context(None).unwrap();
+    let joint_descriptors = request.declarations().artifact_view().descriptors();
     assert!(
         !joint_descriptors.is_empty(),
         "the joint request retains the ResponseResult home interface"
@@ -4102,26 +4106,20 @@ fn activation_preview_package_only_input_preserves_original_producer_and_renders
             .iter()
             .all(|descriptor| descriptor.owner.unit != unit || descriptor.owner.module != module)
     }));
-    let input = resident
-        .capture_activation_input(&hole, RealmId::ROOT, site)
-        .unwrap();
     let producer = input.prototype.producer();
     assert_eq!(producer, joint_types.toolchain_identity_sha256());
+    let package_types = joint_types.select(&[], &[]).unwrap();
     assert!(input
         .prototype
-        .context()
-        .artifact_view()
-        .descriptors()
-        .is_empty());
+        .type_interfaces()
+        .same_authenticated_interfaces(&package_types));
     assert_ne!(producer, [0; 32]);
     let (owner, interface) = issued_captured_input(&mut resident, input, fixture.recipe.clone());
     assert_eq!(interface.prototype().producer(), producer);
     assert!(interface
         .prototype()
-        .context()
-        .artifact_view()
-        .descriptors()
-        .is_empty());
+        .type_interfaces()
+        .same_authenticated_interfaces(&package_types));
     assert_eq!(
         execute_mounted_input_preview(&mut resident, owner, interface, &fixture.recipe),
         serde_json::json!(["42", false]),
