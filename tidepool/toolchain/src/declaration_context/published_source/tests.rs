@@ -103,13 +103,9 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         .filter(|group| group.binding.artifact() == root.descriptor.id)
         .collect::<BTreeSet<_>>();
     assert!(!genuine_groups.is_empty());
-    let demand = genuine_groups
-        .iter()
-        .map(|group| NativeGroupKey {
-            artifact: group.binding.artifact(),
-            original_ordinal: group.original_ordinal,
-        })
-        .collect();
+    // Exact recovery takes the whole issued request closure, including the
+    // child groups selected by the published root.
+    let demand = source.artifact_view().selected_native_groups();
     let producer = root.descriptor.producer_sha256;
     let mut entries = source.artifact_view().entries();
     entries.push(Arc::new(ArtifactEntry::canonical(
@@ -156,6 +152,44 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
             "equal native payload and ordinal have distinct issuing scopes"
         );
     }
+    let foreign_edges = foreign_view.binding_dependencies();
+    let corresponding = |group: crate::artifact_inventory::NativeGroupBinding| {
+        foreign
+            .native_groups
+            .iter()
+            .copied()
+            .find(|candidate| {
+                candidate.binding.artifact() == group.binding.artifact()
+                    && candidate.original_ordinal == group.original_ordinal
+            })
+            .expect("the independently issued graph closes the actual native demand")
+    };
+    let mut child_edges = 0;
+    for (from, to, dependency) in source.artifact_view().binding_dependencies() {
+        let (ArtifactBindingNode::Group(from), ArtifactBindingNode::Group(to)) = (from, to) else {
+            continue;
+        };
+        if genuine_groups.contains(&from)
+            && matches!(
+                dependency,
+                crate::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+            )
+        {
+            child_edges += 1;
+            assert!(
+                foreign_edges.contains(&(
+                    ArtifactBindingNode::Group(corresponding(from)),
+                    ArtifactBindingNode::Group(corresponding(to)),
+                    dependency,
+                )),
+                "the foreign DATA issuer retains each real selected child edge"
+            );
+        }
+    }
+    assert!(
+        child_edges > 0,
+        "the actual publication exercises a native child dependency"
+    );
     let ArtifactPayload::Original(product) = &root.payload else {
         unreachable!()
     };

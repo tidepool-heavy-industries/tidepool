@@ -21699,15 +21699,24 @@ mod tests {
             .find(|role| role.is_published_source_original())
             .unwrap()
             .interface();
-        let narrowed = selection
+        let canonical = selection
             .context()
             .artifact_view()
-            .select_roots(vec![interface])
+            .observed_payload(&interface)
+            .unwrap()
+            .clone();
+        let inventory = ArtifactInventory::default();
+        let narrowed = inventory
+            .admit_shared(&inventory.empty_view(), vec![canonical])
             .unwrap();
+        assert!(!narrowed
+            .artifact_ids()
+            .contains(&fixture.helper.descriptor.id));
         let projection = selection
             .context()
             .compiler_input_projection()
             .within_view(&narrowed);
+        assert_eq!(projection.snapshot_roles(), roles);
         assert!(
             matches!(recover_fixture_compiler_support(projection, narrowed, []),
             Err(CompileError::ExtractFailed(detail)) if detail == "exact declaration context: bound recovery namespace differs from recorded compiler roles"),
@@ -22027,7 +22036,7 @@ mod tests {
             .unwrap()
             .binders()[0]
             .clone();
-        let support = {
+        let support_for_demand = |demand| {
             let entry = Arc::new(
                 ArtifactEntry::original(issuer.owner.facts.producer, consumer.clone()).unwrap(),
             );
@@ -22038,7 +22047,7 @@ mod tests {
                 .admit_shared_with_demand(
                     publication.context().artifact_view(),
                     vec![entry.clone()],
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+                    demand,
                 )
                 .unwrap();
             let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
@@ -22062,19 +22071,28 @@ mod tests {
             )
             .unwrap()
         };
-        let mut context = publication
-            .context()
-            .as_ref()
-            .clone()
-            .extend_issued_compiler_support(&support)
-            .unwrap();
-        edit_lexical(&mut context, |nodes| {
-            nodes.push(ExactLexicalNode {
-                owner: identity(&owner.unit, &owner.module),
-                imports: vec![root],
+        let context_for_support = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+            let mut context = publication
+                .context()
+                .as_ref()
+                .clone()
+                .extend_issued_compiler_support(support)
+                .unwrap();
+            edit_lexical(&mut context, |nodes| {
+                nodes.push(ExactLexicalNode {
+                    owner: identity(&owner.unit, &owner.module),
+                    imports: vec![root.clone()],
+                });
             });
-        });
-        context.normalize().unwrap();
+            context.normalize().unwrap();
+            context
+        };
+        let empty_demand = context_for_support(&support_for_demand(
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        ));
+        let context = context_for_support(&support_for_demand(
+            crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+        ));
         let imports = [PendingImportOwner::Source {
             binder: binder.clone(),
             owner: owner.clone(),
@@ -22100,29 +22118,26 @@ mod tests {
                 binder,
             },
         }];
-        let inputs = ProtectedScaffoldRequirements::default()
-            .compiler_inputs(&Arc::new(context.clone()), None)
-            .unwrap();
-        let mut validation = PackageInterfaceValidation::default();
-        let mut selected =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
-                &inputs,
-                &validation.inventory,
-            )
-            .unwrap();
-        let physical = crate::declaration_context::CapturedCompilerStage::issue(
-            &mut selected,
-            inputs.artifacts(),
-            Vec::new(),
-            &mut validation,
-        )
-        .unwrap();
-        let observed =
-            AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory).unwrap();
-        let target = inputs
-            .artifacts()
-            .inventory()
-            .select_native_target(
+        let select_target = |context: &ExactDeclarationContext| {
+            let inputs = ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&Arc::new(context.clone()), None)?;
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selected =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
+                    &validation.inventory,
+                )
+                .map_err(compiler_evidence_failure)?;
+            let physical = CapturedCompilerStage::issue(
+                &mut selected,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )?;
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .map_err(compiler_evidence_failure)?;
+            inputs.artifacts().inventory().select_native_target(
                 physical.physical_cohort(),
                 observed,
                 None,
@@ -22131,7 +22146,16 @@ mod tests {
                 &BTreeMap::new(),
                 &mut validation,
             )
-            .unwrap();
+        };
+        let refused = select_target(&empty_demand).map(|_| ());
+        assert!(matches!(&refused, Err(CompileError::ArtifactInventory(error))
+            if matches!(&error.native_refusal,
+                Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                    owner: refused_owner,
+                    original_ordinal: 7,
+                }) if refused_owner == &identity(&owner.unit, &owner.module))),
+            "SOURCE policy cannot supply the consumer's explicitly empty native demand: {refused:?}");
+        let target = select_target(&context).unwrap();
         let groups = target.resolve().unwrap().groups().clone();
         let published_original = publication
             .context()
