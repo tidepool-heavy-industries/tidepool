@@ -9638,6 +9638,13 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                 &mut validation,
             )
             .unwrap();
+            let selected_original = physical
+                .issued_artifacts()
+                .capture_graph_selection()
+                .namespace
+                .into_iter()
+                .find(|binding| binding.artifact == entry.descriptor.id)
+                .expect("the physical request retains this exact selected Original binding");
             let definitions =
                 crate::certified_products::original_native_group_definitions(native, fixture.first)
                     .unwrap();
@@ -9692,7 +9699,12 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                 assert!(
                     matches!(&admitted, Err(CompileError::ArtifactInventory(error))
                     if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
-                        if artifact == entry.descriptor.id && original_ordinal == fixture.first)),
+                        if artifact == entry.descriptor.id && original_ordinal == fixture.first)
+                    && matches!(&error.native_refusal,
+                        Some(crate::artifact_inventory::NativeAdmissionRefusal::InputPermissionDenied {
+                            body_present: true,
+                            selected_original: Some(binding),
+                        }) if *binding == selected_original)),
                     "Full availability cannot resurrect explicit Empty demand: {admitted:?}"
                 );
             }
@@ -9944,7 +9956,9 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
             Err(crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch(ref mismatch))
                 if mismatch.stage == crate::certified_products::ArtifactIdentityStage::RequestedIdentityDiffers
                     && mismatch.expected_original == Some(old.descriptor.id)
-                    && mismatch.observed_original == Some(entry.descriptor.id)),
+                    && mismatch.observed_original == Some(entry.descriptor.id)
+                    && mismatch.expected_canonical == Some(historical_canonical)
+                    && mismatch.observed_canonical == Some(current_canonical)),
             "historical A cannot replace the current Source slot selecting B: {crossed:?}"
         );
         let reused = OriginalCompilerInputs::reuse_selected_authored(&mixed).expect(
