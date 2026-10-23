@@ -32,6 +32,18 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_testing::effect_surface::TestEffectSurface;
 
+fn same_selected_input_contexts(
+    left: &BTreeMap<u64, AuthenticatedInputContext>,
+    right: &BTreeMap<u64, AuthenticatedInputContext>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|(site, input)| {
+            right
+                .get(site)
+                .is_some_and(|other| input.same_selected_acquisitions(other))
+        })
+}
+
 #[derive(Clone)]
 struct EmptyOutput;
 
@@ -1747,8 +1759,9 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let site = parked_site(&mut destination, &activation);
     let parked = destination.parked_program_provenance(&activation).unwrap();
     assert!(parked.sites[&site].same_metadata(&original.sites[&site]));
-    assert_eq!(
-        parked.authenticated_inputs[&site], original.authenticated_inputs[&site],
+    assert!(
+        parked.authenticated_inputs[&site]
+            .same_selected_acquisitions(&original.authenticated_inputs[&site]),
         "the original selected immutable interface view survives source retirement"
     );
     let realm = destination.parked_realm(&activation).unwrap();
@@ -1780,8 +1793,8 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let expected_types = compiler_source
         .project_type_interfaces(&[result_witness], &[])
         .unwrap();
-    assert_ne!(
-        package_types, expected_types,
+    assert!(
+        !package_types.same_authenticated_interfaces(&expected_types),
         "ResponseResult () retains its original home interface beyond package-only Int -> Int"
     );
     assert!(
@@ -1844,7 +1857,11 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .capture_activation_input(&activation, realm, site)
         .unwrap();
     let observations = destination.request_site_type_evidence(site).unwrap();
-    assert_ne!(&observations, input.type_evidence().as_ref());
+    assert!(observations.original_request_type_interfaces().is_none());
+    assert!(input
+        .type_evidence()
+        .original_request_type_interfaces()
+        .is_some());
     assert_ne!(
         observations.commitment(),
         input.type_evidence().commitment(),
@@ -1862,7 +1879,19 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .unwrap();
     assert_ne!(observations.commitment(), repeated_evidence.commitment(),
         "reauthenticating a clone replaces its initialized commitment without changing the original");
-    assert_eq!(&repeated_evidence, input.type_evidence().as_ref());
+    assert!(repeated_evidence
+        .original_request_type_interfaces()
+        .unwrap()
+        .same_authenticated_interfaces(
+            input
+                .type_evidence()
+                .original_request_type_interfaces()
+                .unwrap()
+        ));
+    assert_eq!(
+        repeated_evidence.request_type_signatures(),
+        input.type_evidence().request_type_signatures()
+    );
     assert_eq!(
         repeated_evidence.commitment(),
         input.type_evidence().commitment()
@@ -2014,8 +2043,10 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
     for (site, left, right) in &overlap {
         assert!(original.sites[site].same_metadata(&receiver_original.sites[site]));
         assert_eq!(left.type_identity, right.type_identity);
-        assert_ne!(
-            left.execution, right.execution,
+        assert!(
+            !left
+                .execution
+                .same_authenticated_execution(&right.execution),
             "different original output environments survive issuance"
         );
     }
@@ -2130,7 +2161,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         "the real continuation executes the shared site, not an unrelated constructed row"
     );
     let parked = destination.parked_program_provenance(&activation).unwrap();
-    assert_eq!(*parked, composed);
+    assert!(parked.same_selected_acquisitions(&composed));
     let expected = parked.authenticated_inputs[&demanded]
         .execution
         .contexts()
@@ -2363,8 +2394,8 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .unwrap()
             .instantiate(&source.display_owners);
         Arc::make_mut(&mut recomputed).original_sources = NativeSourceCustody::default();
-        assert_eq!(
-            retained, &recomputed,
+        assert!(
+            retained.same_selected_acquisitions(&recomputed),
             "retained plan agrees with fresh selected-fact recomputation"
         );
         for input in retained.authenticated_inputs.values() {
@@ -2415,12 +2446,17 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .unwrap()
             .selected_native_sites()
             .expect("typed entries carry their sealed native-site selection");
-        assert_eq!(
-            &value.provenance.native_sites, selected,
+        assert!(
+            value
+                .provenance
+                .native_sites
+                .same_selected_acquisitions(selected),
             "settled custody retains exactly the issuer's selected native rows"
         );
-        assert_eq!(
-            &reobserved[index].native_sites, selected,
+        assert!(
+            reobserved[index]
+                .native_sites
+                .same_selected_acquisitions(selected),
             "later installation cannot widen earlier native site authority"
         );
         assert_eq!(
@@ -2431,8 +2467,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             expected[index],
             "issued selection follows the authored target, independently of installed custody"
         );
-        assert_eq!(
-            reobserved[index].authenticated_inputs, value.provenance.authenticated_inputs,
+        assert!(
+            same_selected_input_contexts(
+                &reobserved[index].authenticated_inputs,
+                &value.provenance.authenticated_inputs
+            ),
             "later native installation preserves the earlier target's exact authority"
         );
         // Each item retains its own compiler-issued census. Available native
@@ -2496,24 +2535,26 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             *expected_sites,
             "implicit retained imports carry exactly their original authority"
         );
-        assert_eq!(
-            source_action(&mut source, |source, _| {
-                source
-                    .admit_turn_code_in(
-                        source.run_context.lexical_scope,
-                        compiled.code(),
-                        TurnInstallationAdmission::Compilation,
-                    )
-                    .and_then(|admission| {
-                        source
-                            .provenance_for(&admission)
-                            .map(|prepared| prepared.metadata)
-                    })
-                    .unwrap()
-                    .authenticated_inputs
-                    .clone()
-            }),
-            original.authenticated_inputs,
+        assert!(
+            same_selected_input_contexts(
+                &source_action(&mut source, |source, _| {
+                    source
+                        .admit_turn_code_in(
+                            source.run_context.lexical_scope,
+                            compiled.code(),
+                            TurnInstallationAdmission::Compilation,
+                        )
+                        .and_then(|admission| {
+                            source
+                                .provenance_for(&admission)
+                                .map(|prepared| prepared.metadata)
+                        })
+                        .unwrap()
+                        .authenticated_inputs
+                        .clone()
+                }),
+                &original.authenticated_inputs
+            ),
             "warm immutable plans still instantiate current retained binding lineage"
         );
         if index == 0 {
@@ -2567,24 +2608,26 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             );
             assert_eq!(source.persistent_roots_count(), roots);
             source.set_run_context(previous).unwrap();
-            assert_eq!(
-                source_action(&mut source, |source, _| {
-                    source
-                        .admit_turn_code_in(
-                            source.run_context.lexical_scope,
-                            compiled.code(),
-                            TurnInstallationAdmission::Compilation,
-                        )
-                        .and_then(|admission| {
-                            source
-                                .provenance_for(&admission)
-                                .map(|prepared| prepared.metadata)
-                        })
-                        .unwrap()
-                        .authenticated_inputs
-                        .clone()
-                }),
-                original.authenticated_inputs,
+            assert!(
+                same_selected_input_contexts(
+                    &source_action(&mut source, |source, _| {
+                        source
+                            .admit_turn_code_in(
+                                source.run_context.lexical_scope,
+                                compiled.code(),
+                                TurnInstallationAdmission::Compilation,
+                            )
+                            .and_then(|admission| {
+                                source
+                                    .provenance_for(&admission)
+                                    .map(|prepared| prepared.metadata)
+                            })
+                            .unwrap()
+                            .authenticated_inputs
+                            .clone()
+                    }),
+                    &original.authenticated_inputs
+                ),
                 "failed and retired scope observations do not poison the immutable plan"
             );
         }
@@ -2638,10 +2681,10 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
                     );
                     for site in &oracle {
                         let owner = if shared_sites.contains(site) { 1 } else { 2 };
-                        prop_assert_eq!(
-                            &composed.authenticated_inputs[site],
-                            &values[owner].provenance.authenticated_inputs[site]
-                        );
+                        prop_assert!(composed.authenticated_inputs[site]
+                            .same_selected_acquisitions(
+                                &values[owner].provenance.authenticated_inputs[site]
+                            ));
                     }
                 }
                 Ok(())
@@ -2677,7 +2720,10 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             combined.merge(right).is_err(),
             "native input and observed completion cannot share one site id"
         );
-        assert_eq!(combined, before, "refused authority composition is atomic");
+        assert!(
+            combined.same_selected_acquisitions(&before),
+            "refused authority composition is atomic"
+        );
     }
 
     let receiver_parcel = source.export_custody(values.remove(0)).unwrap();
@@ -2730,8 +2776,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
         .unwrap();
     assert!(receiver.provenance.authenticated_inputs.is_empty());
     assert!(Arc::ptr_eq(&payload.provenance, &original));
-    assert_eq!(
-        payload.provenance.native_sites, original.native_sites,
+    assert!(
+        payload
+            .provenance
+            .native_sites
+            .same_selected_acquisitions(&original.native_sites),
         "parcel export/import keeps original native site rows"
     );
     let activation = suspended(
@@ -5598,10 +5647,13 @@ fn activation_input_staging_does_not_publish_a_reserved_interface() {
         std::fs::read(&path).unwrap(),
         certificate.bytes_owned().as_ref()
     );
+    let current = resident.compile_view_in(resident.public_scope()).unwrap();
+    assert!(current.is_current_for(&view) && view.is_current_for(&current));
     assert_eq!(
-        resident.compile_view_in(resident.public_scope()).as_ref(),
-        Some(&view)
+        current.next_value_generation(),
+        view.next_value_generation()
     );
+    assert_eq!(current.injected_values(), view.injected_values());
     assert_eq!(
         resident
             .public_visibility_snapshot_in(resident.public_scope())
