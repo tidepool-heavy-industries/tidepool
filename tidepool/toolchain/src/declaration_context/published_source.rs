@@ -4,7 +4,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PublishedSourceOriginalSelection {
     context: Arc<ExactDeclarationContext>,
     revision: String,
@@ -22,6 +22,21 @@ impl PublishedSourceOriginalSelection {
     }
     pub fn public_root(&self) -> &ExactModuleIdentity {
         &self.public_root
+    }
+
+    /// Compare publication records without equating their selected acquisitions.
+    /// Equal facts grant no authority to replace an authenticated selection.
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.public_root == other.public_root
+            && self.context.same_recorded_facts(&other.context)
+    }
+
+    /// Compare the retained selected acquisitions and publication policy.
+    pub fn same_authenticated_selection(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.public_root == other.public_root
+            && self.context.same_authenticated_context(&other.context)
     }
 
     fn selects_target(
