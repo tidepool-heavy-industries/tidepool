@@ -1615,6 +1615,15 @@ impl ExactLexicalSnapshot {
         let mut selected = std::collections::BTreeSet::new();
         for mut node in nodes {
             if !selected.insert(node.owner.clone()) {
+                tracing::debug!(
+                    target: "exomonad_harness::compiler::lexical",
+                    operation = "replace",
+                    owner = ?node.owner,
+                    previous_imports = ?facts.get(&node.owner).map(|fact| &fact.node.imports),
+                    incoming_imports = ?node.imports,
+                    backtrace = %std::backtrace::Backtrace::force_capture(),
+                    "refused duplicate lexical owner"
+                );
                 return Err(crate::CompileError::ExtractFailed(format!(
                     "duplicate selected lexical owner {}:{}",
                     node.owner.unit, node.owner.module
