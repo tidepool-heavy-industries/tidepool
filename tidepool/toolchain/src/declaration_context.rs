@@ -455,6 +455,57 @@ impl SourceLexicalScope {
         })
     }
 
+    fn project_output<'a>(
+        &self,
+        previous: &crate::artifact_inventory::CompilerSourceSupport,
+        output: &crate::artifact_inventory::CompilerSourceSupport,
+        consumed: impl IntoIterator<Item = &'a ExactModuleIdentity>,
+    ) -> Result<Self, CompileError> {
+        let mut roots = output
+            .compiler_roles()
+            .keys()
+            .filter(|owner| self.admits(owner))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        // A consumed SOURCE owner remains an obligation even when the output
+        // omitted its interface. Project the complete issued edge closure;
+        // missing dependencies and changed retained canonicals still refuse.
+        roots.extend(
+            consumed
+                .into_iter()
+                .filter(|owner| self.admits(owner))
+                .cloned(),
+        );
+        let selected = self.project_roots(&roots.into_iter().collect::<Vec<_>>())?;
+        selected.preserve_support(previous, output)?;
+        Ok(selected)
+    }
+
+    fn append_compiler_admission(
+        &self,
+        admission: &SourceAdmissionBundle,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<Self, CompileError> {
+        let roots = admission.lexical_roots().cloned().collect::<Vec<_>>();
+        let delta = crate::declaration_join::keyed_source_lexical_closure(
+            &roots,
+            |owner| {
+                admission
+                    .lexical_imports(owner)
+                    .or_else(|| self.imports(owner).map(<[_]>::to_vec))
+            },
+            |owner| {
+                support
+                    .implementation_entry(owner)
+                    .map(|entry| entry.descriptor.kind)
+            },
+        )?
+        .lexical;
+        let scope = self.append_admitted(delta)?;
+        scope.validate_support(support)?;
+        Ok(scope)
+    }
+
     fn preserve_support(
         &self,
         previous: &crate::artifact_inventory::CompilerSourceSupport,
@@ -10464,7 +10515,15 @@ impl<'a> ExactProductAdmission<'a> {
             },
             None,
         )?;
-        inherited.source_scope_from_admission(&admission, support)
+        let consumed = self.source.consumed_home_adjacency();
+        inherited
+            .source_scope()
+            .project_output(
+                inherited.compiler_source_support(),
+                support,
+                consumed.keys().chain(consumed.values().flatten()),
+            )?
+            .append_compiler_admission(&admission, support)
     }
 
     /// Retain the complete original compiler selection before publication.
@@ -10490,6 +10549,22 @@ impl<'a> ExactProductAdmission<'a> {
         let projection = support.projection();
         let imports = self.source.consumed_home_adjacency();
         let inherited = self.context().as_ref();
+        let consumed = imports
+            .keys()
+            .chain(imports.values().flatten())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        // Terminal output owns a narrower compiler surface. Actual consumed
+        // owners remain census obligations even if their output rows are missing.
+        let inherited_lexical = inherited
+            .lexical_graph()
+            .iter()
+            .filter(|node| {
+                projection.snapshot_roles().contains_key(&node.owner)
+                    || consumed.contains(&node.owner)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         for (owner, original) in &self.source.selected_originals {
             if self
                 .compiler_inputs()
@@ -10521,8 +10596,7 @@ impl<'a> ExactProductAdmission<'a> {
                 .iter()
                 .map(|entry| entry.descriptor.owner.clone())
                 .collect::<BTreeSet<_>>();
-            let inherited_owners = inherited
-                .lexical_graph()
+            let inherited_owners = inherited_lexical
                 .iter()
                 .map(|node| &node.owner)
                 .collect::<BTreeSet<_>>();
@@ -10612,8 +10686,7 @@ impl<'a> ExactProductAdmission<'a> {
         // Their shared lexical rows omit mounted session interfaces and cannot
         // stand in for that original instance graph.
         let lexical = compose_lexical_nodes(
-            inherited
-                .lexical_graph()
+            inherited_lexical
                 .iter()
                 .filter(|node| !self.source.selected_originals.contains_key(&node.owner))
                 .cloned()
@@ -10632,12 +10705,7 @@ impl<'a> ExactProductAdmission<'a> {
             .keys()
             .cloned()
             .chain(scaffold.iter().map(|node| node.owner.clone()))
-            .chain(
-                inherited
-                    .lexical_graph()
-                    .iter()
-                    .map(|node| node.owner.clone()),
-            )
+            .chain(inherited_lexical.iter().map(|node| node.owner.clone()))
             .collect::<BTreeSet<_>>();
         let mut draft = ExactDeclarationContext::prepare_execution_from_authenticated_support(
             self.facts.producer,
@@ -14633,24 +14701,8 @@ impl ExactDeclarationContext {
     ) -> Result<SourceLexicalScope, CompileError> {
         self.source_scope()
             .preserve_support(self.compiler_source_support(), support)?;
-        let roots = admission.lexical_roots().cloned().collect::<Vec<_>>();
-        let delta = crate::declaration_join::keyed_source_lexical_closure(
-            &roots,
-            |owner| {
-                admission
-                    .lexical_imports(owner)
-                    .or_else(|| self.source_scope().imports(owner).map(<[_]>::to_vec))
-            },
-            |owner| {
-                support
-                    .implementation_entry(owner)
-                    .map(|entry| entry.descriptor.kind)
-            },
-        )?
-        .lexical;
-        let scope = self.source_scope().append_admitted(delta)?;
-        scope.validate_support(support)?;
-        Ok(scope)
+        self.source_scope()
+            .append_compiler_admission(admission, support)
     }
 
     pub(crate) fn authored_output_source_scope(
@@ -21057,6 +21109,137 @@ mod tests {
             assert_eq!(draft.missing_owners(), missing);
             assert_eq!(context.lexical_graph().len(), issued_entries.len());
         }
+    }
+
+    #[test]
+    #[ignore = "requires real compiler publication fixture"]
+    fn terminal_output_source_scope_keeps_required_owners_and_canonical_identity() {
+        let fixture =
+            crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        let context = fixture
+            .entry
+            .products()
+            .original_execution_context()
+            .unwrap();
+        let prior = context.compiler_source_support();
+        let scope = context.source_scope();
+        let parent = &fixture.root.descriptor.owner;
+        let helper = &fixture.helper.descriptor.owner;
+        assert!(scope.admits(parent));
+        assert!(scope.imports(parent).unwrap().contains(helper));
+        let parent_row = scope
+            .rows()
+            .iter()
+            .find(|row| &row.owner == parent)
+            .unwrap()
+            .clone();
+        let helper_row = scope
+            .rows()
+            .iter()
+            .find(|row| &row.owner == helper)
+            .unwrap()
+            .clone();
+
+        let helper_only = prior
+            .selected_interfaces()
+            .unwrap()
+            .type_interfaces_for_owners(vec![helper.clone()])
+            .unwrap();
+        assert!(helper_only.compiler_roles().get(parent).is_none());
+        let narrowed = scope
+            .project_output(prior, &helper_only, std::iter::empty())
+            .unwrap();
+        assert!(narrowed.admits(helper));
+        assert!(!narrowed.admits(parent));
+        assert_eq!(narrowed.rows(), std::slice::from_ref(&helper_row));
+        assert_eq!(
+            narrowed
+                .rows()
+                .iter()
+                .map(|row| row.owner.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([helper.clone()]),
+        );
+        assert!(
+            scope.preserve_support(prior, &helper_only).is_err(),
+            "persistent source extension still requires every inherited owner"
+        );
+        let missing = scope
+            .project_output(prior, &helper_only, [parent])
+            .unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("source scope canonical owner changed during projection"));
+        assert!(missing.to_string().contains(&parent.module));
+        let with_parent = prior
+            .selected_interfaces()
+            .unwrap()
+            .type_interfaces_for_owners(vec![parent.clone(), helper.clone()])
+            .unwrap();
+        let retained = scope
+            .project_output(prior, &with_parent, std::iter::empty())
+            .unwrap();
+        assert_eq!(
+            retained.imports(parent),
+            Some(parent_row.imports.as_slice())
+        );
+        assert!(retained.admits(helper));
+        // Narrowing source permission keeps the parent's issued edges. Held
+        // TYPE evidence for Helper cannot replace its omitted SOURCE row.
+        let parent_scope = scope.restrict(std::slice::from_ref(&parent_row)).unwrap();
+        assert!(with_parent.compiler_roles().get(helper).is_some());
+        assert!(!parent_scope.admits(helper));
+        let missing_edge = parent_scope
+            .project_output(prior, &with_parent, std::iter::empty())
+            .unwrap_err();
+        assert!(missing_edge
+            .to_string()
+            .contains("source projection lacks its admitted owner"));
+
+        let helper_path = fixture.includes[0].join("PublicationHelper.hs");
+        let body = std::fs::read_to_string(&helper_path).unwrap();
+        assert!(body.contains("module PublicationHelper (first, second) where"));
+        let changed_body = body.replace(
+            "module PublicationHelper (first, second) where",
+            "module PublicationHelper (first, second, extra) where",
+        ) + "\nextra :: Bool\nextra = True\n";
+        assert_ne!(body, changed_body);
+        std::fs::write(&helper_path, changed_body).unwrap();
+        let sources = crate::artifacts::FrozenEntrySources::capture(
+            &fixture.includes,
+            &fixture.includes[0].join("PublicationTarget.hs"),
+        )
+        .unwrap();
+        let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
+        let changed = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            directory.path(),
+            &directory.path().join("changed-entry"),
+        )
+        .unwrap();
+        let changed = changed.products().original_execution_context().unwrap();
+        let changed_helper = changed
+            .compiler_source_support()
+            .selected_interfaces()
+            .unwrap()
+            .type_interfaces_for_owners(vec![helper.clone()])
+            .unwrap();
+        assert_ne!(
+            prior.compiler_roles().get(helper).unwrap().interface(),
+            changed_helper
+                .compiler_roles()
+                .get(helper)
+                .unwrap()
+                .interface(),
+            "two real source completions issue different canonical source identities"
+        );
+        let changed = scope
+            .project_output(prior, &changed_helper, std::iter::empty())
+            .unwrap_err();
+        assert!(changed
+            .to_string()
+            .contains("source scope canonical owner changed during projection"));
+        assert!(changed.to_string().contains(&helper.module));
     }
 
     fn published_original_fixture() -> ExactDeclarationContext {
