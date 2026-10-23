@@ -75,12 +75,25 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                         tidepool_repr::Generation(selected_value),
                     )
                     .module_name();
-                    let row = original
-                        .lexical_graph()
-                        .iter()
-                        .find(|node| node.owner.unit == "main" && node.owner.module == selected)
-                        .expect("this stage retains its actual checked TYPE input");
-                    assert!(row.imports.is_empty(), "thin value interfaces define no instances");
+                    let roles = original.compiler_input_roles();
+                    assert!(
+                        original.artifact_view().descriptors().iter().any(|descriptor| {
+                            descriptor.owner.unit == "main"
+                                && descriptor.owner.module == selected
+                                && roles.contains(
+                                    &tidepool_toolchain::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                                        interface: descriptor.id,
+                                    },
+                                )
+                        }),
+                        "item {index} selects the prior stage's produced {selected} as a TYPE input"
+                    );
+                    assert!(
+                        !original.lexical_graph().iter().any(|node| {
+                            node.owner.unit == "main" && node.owner.module == selected
+                        }),
+                        "same-cell produced TYPE input {selected} does not create an instance-scope root"
+                    );
                     if let Some(generation) = obsolete_value {
                         let obsolete = tidepool_repr::SessionModule::val(
                             tidepool_repr::Generation(generation),
