@@ -1,8 +1,12 @@
 # G2 joined qualification gates
 
-Test-integration checkpoint `e43985078b`; use the current exact integration OID for
-each run. [NEXT-WAVE](NEXT-WAVE.md) defines the repairs. Existing evidence is in
-`/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/V-HANDOFF.md`.
+Use the current exact integration OID for each run. The active repair scope is
+[live compiler ownership](../domain-owners/LIVE-COMPLETION.md). Current executed
+evidence is in `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
+The source-audited command map at
+`/srv/swarm/evidence/inanna/c-ownership-20261023/g2-command-map.md` identifies
+current named targets and remaining descriptive selectors to resolve before
+qualification. Historical `V-HANDOFF.md` commands require current-source checks.
 Do not add counts from different checkpoints into one passing suite.
 
 ## Ordered gates
@@ -17,9 +21,9 @@ Do not add counts from different checkpoints into one passing suite.
 3. Run affected issuance/representation/retirement controls, package linkage11,
    real crossed-target installer refusal followed by honest execution, and the
    newly added package lifetime/prior Source histories.
-4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner6,
-   typed segment World semantics and the separately registered
-   `runtime_world_segment_component_tests` controls. The former finite runtime
+4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner9,
+   typed segment World semantics22, publication histories32 and the separately
+   registered `runtime_world_segment_component_tests`3. The former finite runtime
    entrypoints are deleted; use each current target's declared count.
    HOME/PACKAGE owner/lifetime component4, source membership2, closed runtime vacancy1 and abort composition
    complement the required authored notebook history; they do not replace it.
@@ -37,7 +41,14 @@ Do not add counts from different checkpoints into one passing suite.
 
 Named target declarations own their filters/counts. Do not narrow them by adding
 an exact filter. Direct libtest recipes must supply their owned-resident resources
-and expected nonzero count. Check V-HANDOFF for exact current labels and commands.
+and expected nonzero count. Source rosters are expected counts; retain the linked
+runner's actual discovery and execution results. Resolve the unnamed HOME/PACKAGE,
+source-membership and reload subsets to concrete existing selectors before calling
+the joined gate complete; do not substitute similarly named tests.
+
+The revised `fat_iface_exact_test` has 11 independent leaves. Its lifecycle group
+selects7; the historical three-term pattern now selects9. Run the full11 for this
+fixture migration. The group name is not an individual test count.
 
 ## Required behavioral controls
 
