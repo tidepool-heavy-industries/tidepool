@@ -4635,9 +4635,11 @@ impl PersistentSession {
     pub(crate) fn bind_checked_private_values_in(
         &mut self,
         completion: &super::admission::CheckedTurnCompletion,
+        ticket: &super::admission::CheckedCaptureTicket,
         scope: ScopeId,
         entries: Vec<BindingEntry>,
         binders: &[&super::BoundBinder],
+        stage: super::resident::CheckedCaptureStage,
     ) -> Result<MaterializationSetCommit, SessionError> {
         match self.admit_source_work_in(scope) {
             Ok(()) => (),
@@ -4658,10 +4660,21 @@ impl PersistentSession {
                 return Err(error);
             }
         }
-        if entries.len() != binders.len()
+        let handles_match = self.prepared().is_some_and(|engine| {
+            entries.iter().all(|entry| {
+                engine.prepared_handle_of(entry.value.handle.raw()) == Some(entry.value.handle)
+            })
+        });
+        if ticket.scope() != scope
+            || !handles_match
+            || entries.len() != binders.len()
             || entries.iter().zip(binders).any(|(entry, binder)| {
                 entry.name.0 != binder.name
                     || entry.id != SessionVarId::from_extract(binder.var_id)
+                    || entry.scope != scope
+                    || entry.module
+                        != SessionModule::val(Generation(ticket.execution().generation()))
+                    || entry.value.identity.unit != "main"
                     || entry.value.identity.module != binder.module
                     || entry.value.identity.occurrence != binder.name
                     || entry.value.identity.namespace != "value"
@@ -4670,6 +4683,13 @@ impl PersistentSession {
         {
             self.discard_unbound_entries(entries);
             return Err(SessionError::StaleStagedDeclaration);
+        }
+        if let Err(error) = completion
+            .validate_capture_ticket(ticket)
+            .and_then(|()| stage.validate(self, ticket))
+        {
+            self.discard_unbound_entries(entries);
+            return Err(error);
         }
         if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
@@ -4687,6 +4707,7 @@ impl PersistentSession {
                 receipt
             })
             .collect();
+        stage.commit(self);
         Ok(MaterializationSetCommit { bindings })
     }
 
