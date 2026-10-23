@@ -1,3 +1,4 @@
+use super::compiler_projection::SelectedNativeSupport;
 use super::*;
 
 /// Exact dependency grants borrow the actual selected source owner.

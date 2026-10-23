@@ -6588,10 +6588,16 @@ impl CertifiedSourceSelection {
                     "authored original has no issued native selection",
                 ));
             }
-            selected.retain(|owner, _| owner.unit == unit && owner.module == module);
+            selected = selected
+                .into_iter()
+                .filter(|(owner, _)| owner.unit == unit && owner.module == module)
+                .collect();
         }
         if let Some((unit, module)) = excluded {
-            selected.retain(|owner, _| owner.unit != unit || owner.module != module);
+            selected = selected
+                .into_iter()
+                .filter(|(owner, _)| owner.unit != unit || owner.module != module)
+                .collect();
         }
         let entries = selected
             .values()
