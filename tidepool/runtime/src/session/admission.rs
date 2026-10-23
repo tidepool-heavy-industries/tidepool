@@ -795,7 +795,7 @@ impl PersistentSession {
             || admission.owner_epoch != self.admission_owner().epoch()
             || !Arc::ptr_eq(interface.prototype(), &admission.prototype)
             || interface.admission_digest() != admission.digest
-            || interface.generation() != admission.generation.0
+            || interface.generation() != admission.generation().0
             || interface.value_interface_certificate().owner()
                 != tidepool_repr::SessionModule::val(admission.generation)
             || self.public_visibility_snapshot_in(admission.scope).as_ref()
@@ -2787,12 +2787,91 @@ impl BoundRetainedInputs {
 
 #[derive(Debug)]
 struct RuntimeCheckedState {
-    snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
-    in_flight: Option<Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>>,
-    reservation: Option<CheckedItemReservation>,
+    phase: CellPhase,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
     native_index: CheckedNativeIndex,
     compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
+}
+
+#[derive(Debug)]
+enum CellPhase {
+    Ready(Arc<RuntimeCheckedPrefixSnapshot>),
+    Reserved(Arc<CheckedItemReservation>),
+    Running(Arc<RunningCheckedItem>),
+    Parked(Arc<RunningCheckedItem>),
+    Capturing(Arc<RunningCheckedItem>),
+    Complete(Arc<RuntimeCheckedPrefixSnapshot>),
+    HostConstructorConsumed(Arc<RuntimeCheckedPrefixSnapshot>),
+    Failed(Arc<RuntimeCheckedPrefixSnapshot>),
+}
+
+#[derive(Debug)]
+struct RunningCheckedItem {
+    reservation: Arc<CheckedItemReservation>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+
+impl RuntimeCheckedState {
+    fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
+        match &self.phase {
+            CellPhase::Ready(snapshot)
+            | CellPhase::Complete(snapshot)
+            | CellPhase::HostConstructorConsumed(snapshot)
+            | CellPhase::Failed(snapshot) => snapshot,
+            CellPhase::Reserved(ticket) => &ticket.snapshot,
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => &ticket.reservation.snapshot,
+        }
+    }
+
+    fn reservation(&self) -> Option<&Arc<CheckedItemReservation>> {
+        match &self.phase {
+            CellPhase::Reserved(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn running(&self) -> Option<&Arc<RunningCheckedItem>> {
+        match &self.phase {
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.phase, CellPhase::Ready(_))
+    }
+
+    fn begin_running(
+        &mut self,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    ) -> Result<Arc<RunningCheckedItem>, SessionError> {
+        let ticket = self
+            .reservation()
+            .cloned()
+            .ok_or(super::SessionTransitionReason::WrongPhase)?;
+        let running = Arc::new(RunningCheckedItem {
+            reservation: ticket,
+            execution,
+        });
+        self.phase = CellPhase::Running(Arc::clone(&running));
+        Ok(running)
+    }
+
+    fn commit(
+        &mut self,
+        snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+        program: &tidepool_toolchain::checked_cell::CellProgram,
+    ) {
+        self.phase = if snapshot.compiler_prefix.next_item() == program.items().len() {
+            CellPhase::Complete(snapshot)
+        } else {
+            CellPhase::Ready(snapshot)
+        };
+    }
 }
 
 impl Drop for RuntimeCheckedPrefix {
@@ -2805,15 +2884,6 @@ impl Drop for RuntimeCheckedPrefix {
 
 #[derive(Debug)]
 struct CheckedItemReservation {
-    item: tidepool_toolchain::checked_cell::ExactCheckedItem,
-    generation: Generation,
-    digest: [u8; 32],
-}
-
-/// Runtime-owned exact item and value identity reserved before compilation.
-#[derive(Debug)]
-pub struct RuntimeCheckedItemAdmission {
-    prefix: Arc<RuntimeCheckedPrefix>,
     snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
     item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     generation: Generation,
@@ -2821,24 +2891,31 @@ pub struct RuntimeCheckedItemAdmission {
     digest: [u8; 32],
 }
 
+/// Runtime-owned exact item and value identity reserved before compilation.
+#[derive(Debug)]
+pub struct RuntimeCheckedItemAdmission {
+    prefix: Arc<RuntimeCheckedPrefix>,
+    ticket: Arc<CheckedItemReservation>,
+}
+
 impl RuntimeCheckedItemAdmission {
     pub fn prefix(&self) -> &Arc<RuntimeCheckedPrefix> {
         &self.prefix
     }
     pub fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
-        &self.snapshot
+        &self.ticket.snapshot
     }
     pub fn item(&self) -> &tidepool_toolchain::checked_cell::ExactCheckedItem {
-        &self.item
+        &self.ticket.item
     }
     pub fn generation(&self) -> Generation {
-        self.generation
+        self.ticket.generation
     }
     pub fn observation_name(&self) -> Option<&str> {
-        self.observation_name.as_deref()
+        self.ticket.observation_name.as_deref()
     }
     pub fn digest(&self) -> [u8; 32] {
-        self.digest
+        self.ticket.digest
     }
 }
 
@@ -2997,7 +3074,7 @@ impl RuntimeCheckedPrefix {
         &self.admission
     }
     pub fn snapshot(&self) -> Arc<RuntimeCheckedPrefixSnapshot> {
-        self.state.lock().snapshot.clone()
+        self.state.lock().snapshot().clone()
     }
 
     pub(crate) fn start(
@@ -3017,18 +3094,18 @@ impl RuntimeCheckedPrefix {
         let store = session.held_admission_store()?;
         let mut state = self.state.lock();
         let stale_reason = if self.admission.host_carrier().is_some() {
-            Some("host carrier")
+            Some(super::SessionTransitionReason::WrongPhase)
         } else if !self.admission.belongs_to(session) {
-            Some("admission owner")
+            Some(super::SessionTransitionReason::OwnerChanged)
         } else if self.admission.scope != scope {
-            Some("scope")
-        } else if state.in_flight.is_some() {
-            Some("in flight")
-        } else if state.reservation.as_ref().is_none_or(|reservation| {
+            Some(super::SessionTransitionReason::ScopeRevoked)
+        } else if state.running().is_some() {
+            Some(super::SessionTransitionReason::WrongPhase)
+        } else if state.reservation().is_none_or(|reservation| {
             reservation.item != *execution.item()
                 || reservation.generation.0 != execution.generation()
         }) {
-            Some("reservation")
+            Some(super::SessionTransitionReason::WrongPhase)
         } else if {
             self.program
                 .items()
@@ -3036,28 +3113,27 @@ impl RuntimeCheckedPrefix {
                 .and_then(|item| item.native())
                 .is_none_or(|native| !Arc::ptr_eq(native, &execution))
         } {
-            Some("execution")
+            Some(super::SessionTransitionReason::WrongPhase)
         } else if execution.item().admission_digest() != self.admission.digest() {
-            Some("admission digest")
+            Some(super::SessionTransitionReason::WrongPhase)
         } else if !state
-            .snapshot
+            .snapshot()
             .is_current_predecessor(&self.admission, session, scope)
         {
-            Some("snapshot")
+            Some(super::SessionTransitionReason::PublicBaselineChanged)
         } else {
             None
         };
         if let Some(reason) = stale_reason {
             tracing::debug!(
                 target: "tidepool::session::private_host_mount",
-                %reason,
+                ?reason,
                 "checked prefix start refused"
             );
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(reason.into());
         }
         let reservation = state
-            .reservation
-            .as_ref()
+            .reservation()
             .expect("checked reservation preflighted");
         execution
             .validate_runtime_admission(reservation.digest, self.admission.digest())
@@ -3073,7 +3149,7 @@ impl RuntimeCheckedPrefix {
             retained.validate_item(session, execution.item())?;
         }
         execution
-            .validate_required_native_imports(state.snapshot.actual_retained_imports())
+            .validate_required_native_imports(state.snapshot().actual_retained_imports())
             .map_err(|error| {
                 tracing::debug!(
                     target: "tidepool::session::private_host_mount",
@@ -3083,7 +3159,7 @@ impl RuntimeCheckedPrefix {
                 error
             })?;
         execution
-            .validate_settled_native_bindings(state.snapshot.settled_native_bindings())
+            .validate_settled_native_bindings(state.snapshot().settled_native_bindings())
             .map_err(|error| {
                 tracing::debug!(
                     target: "tidepool::session::private_host_mount",
@@ -3096,7 +3172,7 @@ impl RuntimeCheckedPrefix {
         validate_private_value_overlay(
             self,
             session,
-            &state.snapshot,
+            state.snapshot(),
             execution.private_value_overlay_binders(),
         )
         .map_err(|error| {
@@ -3107,29 +3183,27 @@ impl RuntimeCheckedPrefix {
             );
             error
         })?;
-        state.snapshot.compiler_prefix.append(execution.clone())?;
-        let prepared = Arc::new(CheckedTurnCompletion {
-            prefix: self.clone(),
-            execution: execution.clone(),
-            scope,
-        });
+        // Immutable item membership was sealed by preparation. The phase
+        // transition carries the exact reserved predecessor into execution.
         let admission = store
             .as_ref()
             .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-        self.admission.with_open_sources(|| {
+        let running = self.admission.with_open_sources(|| {
             if !state
-                .snapshot
+                .snapshot()
                 .is_current_predecessor(&self.admission, session, scope)
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
-            state.in_flight = Some(execution);
-            Ok(())
+            state.begin_running(execution)
         })??;
         super::complete_native_transition(admission)?;
-        Ok(prepared)
+        Ok(Arc::new(CheckedTurnCompletion {
+            prefix: self.clone(),
+            running,
+        }))
     }
 }
 
@@ -3163,11 +3237,134 @@ fn validate_private_value_overlay<'a>(
 #[derive(Debug)]
 pub(crate) struct CheckedTurnCompletion {
     prefix: Arc<RuntimeCheckedPrefix>,
-    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    scope: ScopeId,
+    running: Arc<RunningCheckedItem>,
+}
+
+/// The exact running operation transfers its one capture obligation. Dropping
+/// an uncommitted capture cannot make a successful private frontier.
+pub(crate) struct CheckedCaptureTicket {
+    prefix: Arc<RuntimeCheckedPrefix>,
+    running: Arc<RunningCheckedItem>,
+    committed: bool,
+}
+
+static_assertions::assert_not_impl_any!(CheckedCaptureTicket: Clone, Copy);
+
+impl CheckedCaptureTicket {
+    pub(crate) fn execution(&self) -> &Arc<tidepool_toolchain::checked_cell::ExactCompiledItem> {
+        &self.running.execution
+    }
+
+    pub(crate) fn scope(&self) -> ScopeId {
+        self.prefix.admission.scope
+    }
+
+    pub(crate) fn settle(
+        mut self,
+        session: &mut PersistentSession,
+        captured: super::resident::CapturedCheckedValueSet,
+    ) -> Result<(), SessionError> {
+        let completion = CheckedTurnCompletion {
+            prefix: Arc::clone(&self.prefix),
+            running: Arc::clone(&self.running),
+        };
+        completion.settle_captured(session, captured)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for CheckedCaptureTicket {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut state = self.prefix.state.lock();
+        if matches!(&state.phase, CellPhase::Capturing(running) if Arc::ptr_eq(running, &self.running))
+        {
+            state.phase = CellPhase::Failed(state.snapshot().clone());
+            if let Some(private) = self.prefix.admission.private_execution() {
+                private.fail_authored_program(self.prefix.admission.digest());
+            }
+        }
+    }
 }
 
 impl CheckedTurnCompletion {
+    pub(crate) fn capture_ticket(&self) -> Result<CheckedCaptureTicket, SessionError> {
+        let mut state = self.prefix.state.lock();
+        if !matches!(&state.phase, CellPhase::Running(running) if Arc::ptr_eq(running, &self.running))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        state.phase = CellPhase::Capturing(Arc::clone(&self.running));
+        Ok(CheckedCaptureTicket {
+            prefix: Arc::clone(&self.prefix),
+            running: Arc::clone(&self.running),
+            committed: false,
+        })
+    }
+
+    pub(crate) fn validate_capture_ticket(
+        &self,
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<(), SessionError> {
+        if !Arc::ptr_eq(&self.prefix, &ticket.prefix)
+            || !Arc::ptr_eq(&self.running, &ticket.running)
+            || !matches!(&self.prefix.state.lock().phase, CellPhase::Capturing(running) if Arc::ptr_eq(running, &self.running))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn park(&self, scope: ScopeId) -> Result<(), SessionError> {
+        if scope != self.prefix.admission.scope {
+            return Err(super::SessionTransitionReason::ScopeRevoked.into());
+        }
+        let mut state = self.prefix.state.lock();
+        if !matches!(&state.phase, CellPhase::Running(running) if Arc::ptr_eq(running, &self.running))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        state.phase = CellPhase::Parked(Arc::clone(&self.running));
+        Ok(())
+    }
+
+    pub(crate) fn begin_reentry(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.validate_reentry(session, scope)?;
+        let mut state = self.prefix.state.lock();
+        if !matches!(&state.phase, CellPhase::Parked(running) if Arc::ptr_eq(running, &self.running))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        state.phase = CellPhase::Running(Arc::clone(&self.running));
+        Ok(())
+    }
+
+    pub(crate) fn rejected_reentry(&self) {
+        let mut state = self.prefix.state.lock();
+        if matches!(&state.phase, CellPhase::Running(running) if Arc::ptr_eq(running, &self.running))
+        {
+            state.phase = CellPhase::Parked(Arc::clone(&self.running));
+        }
+    }
+
+    pub(crate) fn fail(&self) {
+        let mut state = self.prefix.state.lock();
+        if matches!(&state.phase, CellPhase::Running(running) | CellPhase::Parked(running) if Arc::ptr_eq(running, &self.running))
+        {
+            state.phase = CellPhase::Failed(state.snapshot().clone());
+            if let Some(private) = self.prefix.admission.private_execution() {
+                private.fail_authored_program(self.prefix.admission.digest());
+            }
+        }
+    }
+
     pub(crate) fn validate_reentry(
         &self,
         session: &PersistentSession,
@@ -3177,10 +3374,13 @@ impl CheckedTurnCompletion {
         if !self.prefix.admission.belongs_to(session) {
             return Err(super::SessionTransitionReason::OwnerChanged.into());
         }
-        if self.scope != scope {
+        if self.prefix.admission.scope != scope {
             return Err(super::SessionTransitionReason::ScopeRevoked.into());
         }
-        session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
+        session.validate_lexical_scope_lease(
+            self.prefix.admission.scope,
+            &self.prefix.admission._retained_scope,
+        )?;
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -3191,21 +3391,19 @@ impl CheckedTurnCompletion {
                 .validate_source_issuer()?;
         }
         let state = self.prefix.state.lock();
-        if state
-            .in_flight
-            .as_ref()
-            .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+        if !matches!(&state.phase, CellPhase::Parked(running) if Arc::ptr_eq(running, &self.running))
         {
             return Err(super::SessionTransitionReason::WrongPhase.into());
         }
-        if !state
-            .snapshot
-            .is_current_predecessor(&self.prefix.admission, session, self.scope)
-        {
+        if !state.snapshot().is_current_predecessor(
+            &self.prefix.admission,
+            session,
+            self.prefix.admission.scope,
+        ) {
             return Err(super::SessionTransitionReason::PublicBaselineChanged.into());
         }
         if let Some(retained) = &self.prefix.retained_inputs {
-            retained.validate_item(session, self.execution.item())?;
+            retained.validate_item(session, self.running.execution.item())?;
         }
         Ok(())
     }
@@ -3259,18 +3457,18 @@ impl CheckedTurnCompletion {
         let association = {
             let state = self.prefix.state.lock();
             if !self.prefix.admission.belongs_to(session)
-                || self.scope != scope
+                || self.prefix.admission.scope != scope
                 || state
-                    .in_flight
-                    .as_ref()
-                    .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+                    .running()
+                    .map(|ticket| &ticket.execution)
+                    .is_none_or(|execution| !Arc::ptr_eq(execution, &self.running.execution))
                 || !state
-                    .snapshot
+                    .snapshot()
                     .is_current_predecessor(&self.prefix.admission, session, scope)
             {
                 return Err(SessionError::StaleStagedDeclaration.into());
             }
-            match state.snapshot.world() {
+            match state.snapshot().world() {
                 None => None,
                 Some(predecessor) => {
                     let association = session
@@ -3332,18 +3530,18 @@ impl CheckedTurnCompletion {
         };
         if !self.prefix.admission.belongs_to(session)
             || private.private_scope != scope
-            || self.scope != scope
+            || self.prefix.admission.scope != scope
             || self
                 .prefix
                 .state
                 .lock()
-                .in_flight
-                .as_ref()
-                .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+                .running()
+                .map(|ticket| &ticket.execution)
+                .is_none_or(|execution| !Arc::ptr_eq(execution, &self.running.execution))
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        self.execution.validate_bound_binders(
+        self.running.execution.validate_bound_binders(
             &binders
                 .iter()
                 .map(|binder| super::turn::encode_bound_binder_authority(binder))
@@ -3352,11 +3550,18 @@ impl CheckedTurnCompletion {
         Ok(true)
     }
 
-    pub(crate) fn settle(&self, session: &mut PersistentSession) -> Result<(), SessionError> {
+    fn settle_captured(
+        &self,
+        session: &mut PersistentSession,
+        captured: super::resident::CapturedCheckedValueSet,
+    ) -> Result<(), SessionError> {
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
         }
-        session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
+        session.validate_lexical_scope_lease(
+            self.prefix.admission.scope,
+            &self.prefix.admission._retained_scope,
+        )?;
         if self.prefix.admission.world_reservation().is_some() {
             self.prefix
                 .admission
@@ -3365,10 +3570,7 @@ impl CheckedTurnCompletion {
         }
         let mut state = self.prefix.state.lock();
         if !self.prefix.admission.belongs_to(session)
-            || state
-                .in_flight
-                .as_ref()
-                .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+            || !matches!(&state.phase, CellPhase::Capturing(running) if Arc::ptr_eq(running, &self.running))
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
@@ -3379,84 +3581,88 @@ impl CheckedTurnCompletion {
                 .admission
                 .private_execution()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
-            if private.private_scope() != self.scope
-                || self.execution.item().index() != state.snapshot.compiler_prefix.next_item()
+            if private.private_scope() != self.prefix.admission.scope
+                || self.running.execution.item().index()
+                    != state.snapshot().compiler_prefix.next_item()
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
         }
         let compiler_prefix = state
-            .snapshot
+            .snapshot()
             .compiler_prefix
-            .append(self.execution.clone())?;
-        let native = session.capture_checked_native_delta(
-            self.scope,
-            self.execution.generation(),
-            self.execution.bound_binder_identities(),
-        )?;
-        let completed_values = if let Some(private) = self.prefix.admission.private_execution() {
-            let mut values = Vec::new();
-            for name in self.execution.private_value_overlay_binders() {
-                let entry = session
-                    .resolve_in(self.scope, name)
-                    .filter(|entry| {
-                        entry.scope == self.scope
-                            && entry.module.gen.0 == self.execution.generation()
-                    })
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                values.push((
-                    entry.id,
-                    CertifiedPrivateValueWrite {
-                        name: name.to_owned(),
-                        identity: entry.value.identity.clone(),
-                        generation: entry.module.gen,
-                        root_id: entry.value.handle.raw().0,
-                        proof: CertifiedPrivateValueProof::Execution(self.execution.clone()),
-                        visible_host: None,
+            .append(self.running.execution.clone())?;
+        let native = CapturedNativeDelta {
+            imports: captured
+                .values()
+                .iter()
+                .map(|value| SettledNativeImport {
+                    identity: value.identity().clone(),
+                    generation: value.generation().0,
+                    root_id: value.handle().raw().0,
+                })
+                .collect(),
+            bindings: captured
+                .values()
+                .iter()
+                .map(|value| SettledNativeBinding {
+                    name: value.name().to_owned(),
+                    id: value.id(),
+                    import: SettledNativeImport {
+                        identity: value.identity().clone(),
+                        generation: value.generation().0,
+                        root_id: value.handle().raw().0,
                     },
-                ));
-            }
-            Some((private, values))
-        } else {
-            None
+                })
+                .collect(),
         };
-        let successor = if let Some(predecessor) = state.snapshot.world() {
-            let interface = self.execution.value_interface_certificate();
-            let mut bindings = Vec::with_capacity(native.bindings.len());
-            for bound in &native.bindings {
-                let entry = session
-                    .bindings()
-                    .get(bound.id)
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                let row = interface
-                    .as_ref()
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                if entry.scope != self.scope
-                    || entry.value.identity != bound.import.identity
-                    || entry.module.gen.0 != bound.import.generation
-                    || entry.value.handle.raw().0 != bound.import.root_id
-                {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
+        let completed_values = self.prefix.admission.private_execution().map(|private| {
+            let values = captured
+                .values()
+                .iter()
+                .map(|value| {
+                    (
+                        value.id(),
+                        CertifiedPrivateValueWrite {
+                            name: value.name().to_owned(),
+                            identity: value.identity().clone(),
+                            generation: value.generation(),
+                            root_id: value.handle().raw().0,
+                            proof: CertifiedPrivateValueProof::Execution(
+                                self.running.execution.clone(),
+                            ),
+                            visible_host: None,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            (private, values)
+        });
+        let successor = if let Some(predecessor) = state.snapshot().world() {
+            let mut bindings = Vec::with_capacity(captured.values().len());
+            for value in captured.values() {
+                let row = captured
+                    .row()
+                    .ok_or(super::SessionTransitionReason::PreparedValueChanged)?;
                 bindings.push(
                     tidepool_toolchain::compiler_world::CompilerWorldBinding::from_checked_value(
-                        &bound.name,
-                        &entry.value.identity,
-                        entry.id,
-                        entry.scope.0,
+                        value.name(),
+                        value.identity(),
+                        value.id(),
+                        self.prefix.admission.scope.0,
                         row.clone(),
                     ),
                 );
             }
             Some(self.prefix.program.item_successor(
                 predecessor,
-                self.execution.item(),
+                self.running.execution.item(),
                 bindings,
             )?)
         } else {
             None
         };
-        let predecessor_world = state.snapshot.world().map(|world| *world.logical_id());
+        let predecessor_world = state.snapshot().world().map(|world| *world.logical_id());
         let bound_binding_ids = native
             .bindings
             .iter()
@@ -3489,10 +3695,11 @@ impl CheckedTurnCompletion {
         settle_checked_snapshot(
             session,
             &mut state,
-            self.scope,
+            self.prefix.admission.scope,
             compiler_prefix,
             &self.prefix.admission,
-            self.execution.value_interface_certificate(),
+            &self.prefix.program,
+            captured.row().cloned(),
             Some(native),
             successor,
         )?;
@@ -3506,7 +3713,7 @@ impl CheckedTurnCompletion {
                         &mut lifecycle.authored
                     {
                         *predecessor = state
-                            .snapshot
+                            .snapshot()
                             .world()
                             .expect("World active successor")
                             .clone();
@@ -3523,7 +3730,7 @@ impl CheckedTurnCompletion {
             tidepool_toolchain::checked_cell::CellProgramBasis::World(output),
         ) = (
             predecessor_world,
-            state.snapshot.world(),
+            state.snapshot().world(),
             self.prefix.program.basis(),
         ) {
             tracing::debug!(target: "exomonad_harness::timing",
@@ -3531,12 +3738,11 @@ impl CheckedTurnCompletion {
                 predecessor_world = ?predecessor_world,
                 successor_world = ?successor.logical_id(),
                 output_certificate = ?output.certificate_sha256(),
-                item_ordinal = self.execution.item().index(),
+                item_ordinal = self.running.execution.item().index(),
                 bound_binding_ids = ?bound_binding_ids,
                 "checked World item successor installed");
         }
-        state.in_flight = None;
-        state.reservation = None;
+
         Ok(())
     }
 }
@@ -3547,6 +3753,7 @@ fn settle_checked_snapshot(
     scope: ScopeId,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     admission: &RuntimeCellAdmission,
+    program: &tidepool_toolchain::checked_cell::CellProgram,
     interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
     native_delta: Option<CapturedNativeDelta>,
     successor: Option<tidepool_toolchain::compiler_world::CheckedWorldSuccessor>,
@@ -3554,7 +3761,7 @@ fn settle_checked_snapshot(
     let visibility = session
         .public_visibility_snapshot_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
-    let mut interfaces = state.snapshot.interfaces.clone();
+    let mut interfaces = state.snapshot().interfaces.clone();
     let mut added_interface = None;
     if let Some(interface) = &interface {
         let module = interface.owner();
@@ -3582,22 +3789,21 @@ fn settle_checked_snapshot(
     let retained = session.retain_current_lexical_scope(scope)?;
     let (native_imports, added_native) = match native_delta {
         Some(delta) => state
-            .snapshot
+            .snapshot()
             .native_imports
             .append(delta, &state.native_index)?,
-        None => (state.snapshot.native_imports.clone(), Vec::new()),
+        None => (state.snapshot().native_imports.clone(), Vec::new()),
     };
-    if let Some(interface) = interface {
-        session.retain_checked_value_interface(interface)?;
-    }
-    let snapshot = match (&state.snapshot.basis, successor.as_ref()) {
+    // The captured owner already installed its exact checked row together
+    // with the value and provenance. This snapshot only projects that receipt.
+    let snapshot = match (state.snapshot().basis, successor.as_ref()) {
         (RuntimeCheckedPrefixBasis::World { .. }, Some(successor)) => {
             Arc::new(world_checked_snapshot(
                 Arc::clone(successor.world()),
                 session
                     .compile_view_key_in(scope)
                     .ok_or(SessionError::DeadScope(scope))?,
-                state.snapshot.session_root.clone(),
+                state.snapshot().session_root.clone(),
                 visibility,
                 interfaces,
                 compiler_prefix,
@@ -3633,14 +3839,14 @@ fn settle_checked_snapshot(
         }
         _ => return Err(SessionError::StaleStagedDeclaration),
     };
-    if let (Some(predecessor), Some(successor)) = (state.snapshot.world(), successor.as_ref()) {
+    if let (Some(predecessor), Some(successor)) = (state.snapshot().world(), successor.as_ref()) {
         session.adopt_checked_world_successor_in(scope, admission, predecessor, successor)?;
     }
     if let Some((generation, digest)) = added_interface {
         state.interface_index.insert(generation, digest);
     }
     state.native_index.extend(added_native);
-    state.snapshot = snapshot;
+    state.commit(snapshot, program);
     Ok(())
 }
 
@@ -4267,9 +4473,9 @@ impl PersistentSession {
         let scope = prefix.admission.scope;
         if prefix.admission.host_carrier() != Some((binding, expected))
             || !prefix.admission.belongs_to(self)
-            || !Arc::ptr_eq(&state.snapshot, admission.snapshot())
-            || state.in_flight.is_some()
-            || state.reservation.as_ref().is_none_or(|reservation| {
+            || !Arc::ptr_eq(state.snapshot(), admission.snapshot())
+            || state.running().is_some()
+            || state.reservation().is_none_or(|reservation| {
                 reservation.item != *execution.item()
                     || reservation.generation.0 != execution.generation()
                     || reservation.digest != admission.digest()
@@ -4279,7 +4485,7 @@ impl PersistentSession {
                 .native()
                 .is_none_or(|original| !Arc::ptr_eq(original, execution))
             || !state
-                .snapshot
+                .snapshot()
                 .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -4288,15 +4494,15 @@ impl PersistentSession {
         if let Some(retained) = &prefix.retained_inputs {
             retained.validate_item(self, execution.item())?;
         }
-        execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
-        execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
+        execution.validate_required_native_imports(state.snapshot().actual_retained_imports())?;
+        execution.validate_settled_native_bindings(state.snapshot().settled_native_bindings())?;
         let admission = store
             .as_ref()
             .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         // Mounting a host payload never executes or completes the placeholder.
-        state.reservation = None;
+        state.phase = CellPhase::HostConstructorConsumed(state.snapshot().clone());
         super::complete_native_transition(admission)?;
         Ok(())
     }
@@ -4346,16 +4552,16 @@ impl PersistentSession {
                     .get(item.index())
                     .is_none_or(|prepared| prepared.checked_item() != &item)
             }
-            || item.index() != state.snapshot.compiler_prefix.next_item()
-            || state.in_flight.is_some()
-            || state.reservation.is_some()
+            || item.index() != state.snapshot().compiler_prefix.next_item()
+            || state.running().is_some()
+            || !state.is_ready()
             || !state
-                .snapshot
+                .snapshot()
                 .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let snapshot = state.snapshot.clone();
+        let snapshot = state.snapshot().clone();
         use tidepool_toolchain::checked_cell::{
             CheckedItemKind as CheckedKind, CheckedPlannedCellSlot as Slot,
         };
@@ -4423,18 +4629,16 @@ impl PersistentSession {
             }
         }
         let digest = *digest.finalize().as_bytes();
-        let reservation = CheckedItemReservation {
-            item: item.clone(),
-            generation,
-            digest,
-        };
-        let prepared = Arc::new(RuntimeCheckedItemAdmission {
-            prefix: prefix.clone(),
+        let reservation = Arc::new(CheckedItemReservation {
             snapshot,
             item,
             generation,
             observation_name,
             digest,
+        });
+        let prepared = Arc::new(RuntimeCheckedItemAdmission {
+            prefix: prefix.clone(),
+            ticket: Arc::clone(&reservation),
         });
         let admission = store
             .as_ref()
@@ -4443,7 +4647,7 @@ impl PersistentSession {
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         prefix.admission.with_open_sources(|| {
             if !state
-                .snapshot
+                .snapshot()
                 .is_current_predecessor(&prefix.admission, self, scope)
             {
                 return Err(SessionError::StaleStagedDeclaration);
@@ -4458,7 +4662,7 @@ impl PersistentSession {
                 };
                 execution.claim_authored_program(prefix.admission.digest(), preparation)?;
             }
-            state.reservation = Some(reservation);
+            state.phase = CellPhase::Reserved(reservation);
             Ok(())
         })??;
         drop(state);
@@ -4478,15 +4682,15 @@ impl PersistentSession {
         prefix.settled.checkpoint()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.scope;
-        let item = &admission.item;
+        let item = admission.item();
         if !prefix.admission.belongs_to(self)
-            || !Arc::ptr_eq(&state.snapshot, &admission.snapshot)
-            || state.in_flight.is_some()
-            || state.reservation.as_ref().is_none_or(|reserved| {
-                reserved.item != *item || reserved.generation != admission.generation
+            || !Arc::ptr_eq(state.snapshot(), admission.snapshot())
+            || state.running().is_some()
+            || state.reservation().is_none_or(|reserved| {
+                reserved.item != *item || reserved.generation != admission.generation()
             })
             || !state
-                .snapshot
+                .snapshot()
                 .is_current_predecessor(&prefix.admission, self, scope)
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -4549,9 +4753,9 @@ impl PersistentSession {
             binders: observation.verdict.binders.clone(),
             items: observation.verdict.items.clone(),
         };
-        let external = match state.snapshot.world() {
+        let external = match state.snapshot().world() {
             Some(_) => self.lib().workbench_imports_in(scope),
-            None => state.snapshot.view()?.persistent_imports().clone(),
+            None => state.snapshot().view()?.persistent_imports().clone(),
         };
         let (external_imports, _, visible_values) =
             self.declaration_staging_context_in(scope, &receipt, &external)?;
@@ -4597,7 +4801,7 @@ impl PersistentSession {
             certified_authored: Some(prepared.clone()),
         };
         let compiler_prefix = state
-            .snapshot
+            .snapshot()
             .compiler_prefix
             .append_declaration_with_projection(item.clone(), prepared.projection.composition())?;
         let final_item = item.index() + 1 == prefix.program.items().len();
@@ -4610,7 +4814,7 @@ impl PersistentSession {
                     .cloned()
             })
             .transpose()?;
-        let commit = if let Some(predecessor) = state.snapshot.world().cloned() {
+        let commit = if let Some(predecessor) = state.snapshot().world().cloned() {
             let source = prefix.admission.world_source_reference()?.clone();
             let original_source = prefix.admission.original_source()?;
             original_source.validate_source_issuer()?;
@@ -4628,7 +4832,7 @@ impl PersistentSession {
             let mut imports = self.lib().workbench_imports_in(scope);
             imports.extend(&staged.turn.workbench_imports);
             let import_lines = imports.source_lines();
-            let prior = state.snapshot.clone();
+            let prior = state.snapshot().clone();
             let interfaces = prior.interfaces.clone();
             let native_imports = prior.native_imports.clone();
             let retained = prior._retained_scope.clone();
@@ -4717,13 +4921,12 @@ impl PersistentSession {
                         let tip = lib.tips.get_mut(&scope).expect("prepared declaration scope");
                         tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(context));
                         tip.inspection_world = Some(association);
-                        state.snapshot = next;
-                        state.reservation = None;
+                        state.commit(next, &prefix.program);
                         if let Some(lifecycle) = lifecycle.as_mut() {
                             if let Some(frontier) = terminal {
                                 lifecycle.authored = PrivateAuthoredProgram::Ready(frontier);
                             } else if let PrivateAuthoredProgram::Active { predecessor, .. } = &mut lifecycle.authored {
-                                *predecessor = state.snapshot.world().expect("World declaration successor").clone();
+                                *predecessor = state.snapshot().world().expect("World declaration successor").clone();
                             }
                         }
                     })
@@ -4734,8 +4937,8 @@ impl PersistentSession {
                 .compile_inputs
                 .clone()
                 .ok_or(SessionError::WorldCellRequiresServicePreparation)?;
-            let interfaces = state.snapshot.interfaces.clone();
-            let native_imports = state.snapshot.native_imports.clone();
+            let interfaces = state.snapshot().interfaces.clone();
+            let native_imports = state.snapshot().native_imports.clone();
             self.adopt_staged_declaration_with_activation(staged, |view, visibility, retained| {
                 let view_digest = view.admission_commitment().0;
                 let view = view
@@ -4753,8 +4956,7 @@ impl PersistentSession {
                     native_imports,
                 ));
                 Ok(move |_: &mut super::SessionLib| {
-                    state.snapshot = next;
-                    state.reservation = None;
+                    state.commit(next, &prefix.program);
                 })
             })?
         };
@@ -5324,9 +5526,7 @@ impl PersistentSession {
             program,
             retained_inputs: Some(retained_inputs),
             state: parking_lot::Mutex::new(RuntimeCheckedState {
-                snapshot,
-                in_flight: None,
-                reservation: None,
+                phase: CellPhase::Ready(snapshot),
                 interface_index,
                 native_index: CheckedNativeIndex::new(native_imports),
                 compile_inputs: None,
@@ -5408,9 +5608,7 @@ impl PersistentSession {
             program,
             retained_inputs: None,
             state: parking_lot::Mutex::new(RuntimeCheckedState {
-                snapshot,
-                in_flight: None,
-                reservation: None,
+                phase: CellPhase::Ready(snapshot),
                 interface_index,
                 native_index,
                 compile_inputs: Some(compile_inputs),
