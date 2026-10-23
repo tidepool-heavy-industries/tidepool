@@ -9463,6 +9463,31 @@ mod module_product_tests {
                 }
                 checked.assert_captured_stage_output_refusals();
             }
+            let mut metadata_drift = BTreeMap::new();
+            if mixed && !cancel_after_end {
+                for (ordinal, item) in prepared.items.iter().enumerate() {
+                    let Some(native) = &item.native else {
+                        continue;
+                    };
+                    let path = native.output.directory().join("meta.cbor");
+                    let bytes = std::fs::read(&path).expect("actual World item's metadata file");
+                    let (table, mut warnings) =
+                        tidepool_repr::serial::read_metadata(&bytes).unwrap();
+                    let original_warnings = warnings.clone();
+                    warnings.captured_type = Some("later physical file observation".into());
+                    let replacement =
+                        tidepool_repr::serial::write_metadata(&table, &warnings).unwrap();
+                    assert_ne!(bytes, replacement);
+                    std::fs::write(&path, replacement).unwrap();
+                    assert!(metadata_drift
+                        .insert(ordinal, (path, bytes, table, original_warnings))
+                        .is_none());
+                }
+                assert!(
+                    metadata_drift.len() >= 2,
+                    "drift multiple real World item files after capture and END"
+                );
+            }
             if cancel_after_end {
                 cancellation.cancel_host_admission();
                 let Err(CompileError::Io(error)) = prepared.seal(&admission) else {
@@ -9476,6 +9501,21 @@ mod module_product_tests {
                 .expect("same actual output after END");
             assert!(matches!(program.basis(), CellProgramBasis::World(_)));
             assert_eq!(program.items().len(), if mixed { 5 } else { 1 });
+            for (ordinal, (path, bytes, table, warnings)) in metadata_drift {
+                let native = program.items()[ordinal]
+                    .native()
+                    .expect("same captured native item after sealing");
+                assert_eq!(&table, native.table());
+                assert_eq!(warnings.captured_type, native.warnings().captured_type);
+                assert_eq!(warnings.has_io, native.warnings().has_io);
+                assert_eq!(warnings.warnings, native.warnings().warnings);
+                assert_ne!(
+                    native.warnings().captured_type.as_deref(),
+                    Some("later physical file observation")
+                );
+                std::fs::write(path, bytes).unwrap();
+            }
+
             if !declaration_only {
                 let mut coverage = crate::linked_native::tests::AuthenticationCoverage::default();
                 let mut targets = 0;
