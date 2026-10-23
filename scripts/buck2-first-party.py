@@ -1335,6 +1335,30 @@ def actor_notebook_contract_test_cases(binary):
     return "\n".join(rules)
 
 
+def runtime_world_publication_test_cases(binary):
+    tests = ["session::resident::paired_publication_tests::" + name for name in (
+        "paired_independent_authored_rebase_preserves_originals_and_current_winners",
+        "paired_first_authored_publication_preserves_atomic_visibility",
+        "paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
+    )]
+    env, resources, worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_world_publication_histories"
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_world_publication_histories",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def runtime_test_cases(binary):
     """Admission checks use native machines but do not start a compiler worker."""
     tests = ["session::admission::tests::" + name for name in (
@@ -2512,6 +2536,7 @@ tidepool_buildscript_run(
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
+            rules.append(runtime_world_publication_test_cases(unit_target["name"]))
         if package_name == "exomonad-actor":
             rules.append(actor_observation_test_cases(unit_target["name"]))
             rules.append(actor_private_publication_test_cases(unit_target["name"]))
