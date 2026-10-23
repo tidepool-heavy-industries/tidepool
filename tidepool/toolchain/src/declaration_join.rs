@@ -3194,10 +3194,19 @@ mod authored_tests {
                 matches!(import, crate::certified_products::PendingImportOwner::Source { owner, .. }
                 if owner == &result_owner)
             }));
-        assert!(compiled.certified_groups.iter().any(|group| {
-            group.owner() == &result_owner
-                && group.origin() == crate::certified_products::ProductOrigin::Cached
-        }));
+        let source_products = compiled
+            .native_source_products("result")
+            .unwrap()
+            .expect("the completed target retains its exact source selection");
+        let inherited = source_products
+            .groups()
+            .find(|row| row.group().owner() == &result_owner)
+            .expect("the consumer selects its retained authored implementation");
+        assert_eq!(inherited.binding().artifact(), result_root);
+        assert!(
+            inherited.physical_current().is_none(),
+            "a retained implementation is not a current physical output"
+        );
     }
 
     #[test]
