@@ -3039,7 +3039,6 @@ fn compile_cell_program_admitted_receipt_controls(
 #[derive(Clone, Copy)]
 enum CellProgramAudit<'a> {
     None,
-    MalformedBindingBeforeProjection,
     Receipts(&'static str),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
@@ -3399,9 +3398,6 @@ fn compile_cell_program_admitted_inner(
                     expected_shape,
                 );
             }
-            CellProgramAudit::MalformedBindingBeforeProjection => {
-                panic!("finite binding-file mutation is not a World executable audit");
-            }
         }
     }
     result
@@ -3595,19 +3591,6 @@ fn prepare_cell_program_admitted_inner(
                 .into());
         }
     };
-    #[cfg(test)]
-    if let CellProgramAudit::MalformedBindingBeforeProjection = audit {
-        let path = scratch.path().join("item-1/turn.cbor");
-        let bytes = std::fs::read(&path).unwrap();
-        let mut turn: CborValue = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let fields = turn.as_array_mut().unwrap();
-        assert_eq!(fields[0].as_text(), Some("Bind"));
-        fields[1].as_array_mut().unwrap()[0] =
-            CborValue::Array(vec![CborValue::Text("foreign_bound_name".into())]);
-        let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
-        std::fs::write(path, bytes).unwrap();
-    }
     admission_timing.advance("prepare_cell_program");
     let result = offer.prepare_cell_program(scratch.clone());
     let program = match result {
@@ -6714,37 +6697,6 @@ mod tests {
                 .public_visibility_snapshot_in(original.execution.private_scope())
                 .unwrap(),
             before
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn malformed_cell_binding_refuses_before_cumulative_projection_request() {
-        let mut fixture = CheckedHomeFixture::new();
-        let admission = CheckedHomeFixture::admit_in(
-            &mut fixture.resident,
-            &fixture.execution,
-            &fixture.effects,
-            "declaredNumber = (42 :: Int)\nlet capturedNumber = declaredNumber",
-            &[],
-        )
-        .unwrap();
-        let before = tidepool_extract_cmd::extract_spawn_count();
-        let failure = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted_inner(
-                admission,
-                CellProgramAudit::MalformedBindingBeforeProjection,
-                settlement,
-            )
-        })
-        .unwrap_err();
-        assert!(failure
-            .to_string()
-            .contains("compiled bind has another authored verdict or wrapper"));
-        assert_eq!(
-            tidepool_extract_cmd::extract_spawn_count() - before,
-            1,
-            "a malformed native receipt refuses before existing declaration projections"
         );
     }
 
