@@ -1359,16 +1359,13 @@ impl SupportDraft {
         let mut repaired = None;
         for (owner, row) in selected.rows.iter() {
             crate::host_work::checkpoint()?;
-            if std::iter::once(&row.interface)
-                .chain(row.original.iter())
-                .any(|(binding, entry)| {
-                    artifacts
-                        .lease
-                        .payloads
-                        .get(&binding.artifact)
-                        .is_none_or(|retained| !Arc::ptr_eq(entry, retained))
-                })
-            {
+            if row.bindings().any(|(binding, entry)| {
+                artifacts
+                    .lease
+                    .payloads
+                    .get(&binding.artifact)
+                    .is_none_or(|retained| !Arc::ptr_eq(entry, retained))
+            }) {
                 let mut retained = row.clone();
                 retained.retain_acquisitions(&artifacts)?;
                 repaired
@@ -1803,20 +1800,24 @@ impl IssuedInputNativeDecisions {
 
 /// Exact binding observations retained from successful compiler-role admission.
 /// These entries are acquisition owners, not a reconstruction from payload IDs.
+type AcquiredCompilerBinding = (ArtifactBinding, Arc<ArtifactEntry>);
+
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct ResolvedCompilerRole {
-    pub(super) interface: (ArtifactBinding, Arc<ArtifactEntry>),
-    pub(super) original: Option<(ArtifactBinding, Arc<ArtifactEntry>)>,
+pub(super) enum ResolvedCompilerRole {
+    InterfaceOnly {
+        interface: AcquiredCompilerBinding,
+    },
+    Original {
+        interface: AcquiredCompilerBinding,
+        original: AcquiredCompilerBinding,
+    },
 }
 
 impl Clone for ResolvedCompilerRole {
     fn clone(&self) -> Self {
         #[cfg(test)]
         type_query_work::cloned_row();
-        Self {
-            interface: self.interface.clone(),
-            original: self.original.clone(),
-        }
+        Self::from_issued_bindings(self.interface().clone(), self.original().cloned())
     }
 }
 
@@ -1842,6 +1843,55 @@ pub(super) struct SelectedCompilerRole<'a> {
 }
 
 impl ResolvedCompilerRole {
+    pub(super) fn from_issued_bindings(
+        interface: AcquiredCompilerBinding,
+        original: Option<AcquiredCompilerBinding>,
+    ) -> Self {
+        match original {
+            Some(original) => Self::Original {
+                interface,
+                original,
+            },
+            None => Self::InterfaceOnly { interface },
+        }
+    }
+
+    fn interface(&self) -> &AcquiredCompilerBinding {
+        match self {
+            Self::InterfaceOnly { interface } | Self::Original { interface, .. } => interface,
+        }
+    }
+
+    fn original(&self) -> Option<&AcquiredCompilerBinding> {
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::Original { original, .. } => Some(original),
+        }
+    }
+
+    fn bindings(&self) -> impl Iterator<Item = &AcquiredCompilerBinding> {
+        std::iter::once(self.interface()).chain(self.original())
+    }
+
+    fn bindings_mut(&mut self) -> impl Iterator<Item = &mut AcquiredCompilerBinding> {
+        let (interface, original) = match self {
+            Self::InterfaceOnly { interface } => (interface, None),
+            Self::Original {
+                interface,
+                original,
+            } => (interface, Some(original)),
+        };
+        std::iter::once(interface).chain(original)
+    }
+
+    fn select_type_only(&mut self) {
+        if let Self::Original { interface, .. } = self {
+            *self = Self::InterfaceOnly {
+                interface: interface.clone(),
+            };
+        }
+    }
+
     fn validate_original_pair(
         state: &InventoryState,
         canonical: ArtifactBinding,
@@ -1862,8 +1912,7 @@ impl ResolvedCompilerRole {
     }
 
     fn retain_acquisitions(&mut self, retained: &ArtifactView) -> Result<(), CompileError> {
-        for (binding, entry) in std::iter::once(&mut self.interface).chain(self.original.iter_mut())
-        {
+        for (binding, entry) in self.bindings_mut() {
             *entry = Arc::clone(
                 retained
                     .lease
@@ -1951,7 +2000,7 @@ impl AdmittedCompilerRoles {
         for row in rows.values() {
             #[cfg(test)]
             type_query_work::census_row();
-            if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+            if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
                 home_units.extend(interface.home_units().iter().cloned());
             }
         }
@@ -2035,18 +2084,14 @@ impl<'a> CompilerPrimaryInput<'a> {
         self.row().owner
     }
     pub(crate) fn interface(&self) -> ArtifactBinding {
-        self.row().row.interface.0
+        self.row().row.interface().0
     }
     pub(crate) fn original(&self) -> Option<ArtifactBinding> {
-        self.row()
-            .row
-            .original
-            .as_ref()
-            .map(|(binding, _)| *binding)
+        self.row().row.original().map(|(binding, _)| *binding)
     }
     pub(crate) fn entry(&self) -> &'a Arc<ArtifactEntry> {
         let row = self.row().row;
-        &row.original.as_ref().unwrap_or(&row.interface).1
+        &row.original().unwrap_or(row.interface()).1
     }
 }
 
@@ -2064,13 +2109,13 @@ enum InterfaceProjectionPurpose {
 
 impl SelectedCompilerInterfaces<'_> {
     pub(crate) fn get(&self, owner: &ExactModuleIdentity) -> Option<&Arc<ArtifactEntry>> {
-        self.selected.get(owner).map(|row| &row.interface.1)
+        self.selected.get(owner).map(|row| &row.interface().1)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ExactModuleIdentity, &Arc<ArtifactEntry>)> {
         self.selected
             .iter()
-            .map(|(owner, row)| (owner, &row.interface.1))
+            .map(|(owner, row)| (owner, &row.interface().1))
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &Arc<ArtifactEntry>> {
@@ -2124,7 +2169,7 @@ impl SelectedCompilerInterfaces<'_> {
             .keys()
             .map(|owner| {
                 let mut row = self.selected[owner].clone();
-                row.original = None;
+                row.select_type_only();
                 (owner.clone(), row)
             })
             .collect::<BTreeMap<_, _>>();
@@ -2132,7 +2177,7 @@ impl SelectedCompilerInterfaces<'_> {
         // the canonical interface's own dependency closure and seals.
         let entries = selected
             .values()
-            .map(|row| (row.interface.0.artifact, Arc::clone(&row.interface.1)))
+            .map(|row| (row.interface().0.artifact, Arc::clone(&row.interface().1)))
             .collect();
         projection.entries_from_artifacts(&entries)?;
         let artifacts = match purpose {
@@ -2192,7 +2237,7 @@ impl SelectedCompilerInterfaces<'_> {
             .expect("inventory lock");
         let roots = owners
             .iter()
-            .map(|owner| InventoryNodeKey::Artifact(self.selected[owner].interface.0))
+            .map(|owner| InventoryNodeKey::Artifact(self.selected[owner].interface().0))
             .collect::<Vec<_>>();
         let interfaces = admitted_closure(&state, roots.into_iter());
         let namespace = artifact_ids(&interfaces)
@@ -2218,9 +2263,9 @@ impl ArtifactView {
         additions: impl IntoIterator<Item = &'a (ArtifactView, ResolvedCompilerRole)>,
     ) -> Result<Self, CompileError> {
         self.append_admitted_custody(
-            additions
-                .into_iter()
-                .map(|(source, row)| (source.lease.as_ref(), row.interface.0, &row.interface.1)),
+            additions.into_iter().map(|(source, row)| {
+                (source.lease.as_ref(), row.interface().0, &row.interface().1)
+            }),
             &[],
         )
     }
@@ -2393,11 +2438,11 @@ impl crate::declaration_context::RequestCompilerInputs {
                 .selected
                 .get(owner)
                 .ok_or_else(|| failure("demanded compiler owner lacks its admitted row"))?;
-            if row.interface.0.artifact != role.interface()
-                || &row.interface.1.descriptor.owner != owner
-                || !row.interface.1.is_compiler_interface()
-                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
-                || row.original.as_ref().is_some_and(|(_, entry)| {
+            if row.interface().0.artifact != role.interface()
+                || &row.interface().1.descriptor.owner != owner
+                || !row.interface().1.is_compiler_interface()
+                || row.original().map(|(binding, _)| binding.artifact) != role.original()
+                || row.original().is_some_and(|(_, entry)| {
                     &entry.descriptor.owner != owner || !entry.is_native()
                 })
             {
@@ -2432,8 +2477,8 @@ impl crate::declaration_context::RequestCompilerInputs {
                     charge(operation.charge(original_input_identity.len()))?;
                 }
             }
-            for (original, (binding, entry)) in std::iter::once((false, &row.interface))
-                .chain(row.original.iter().map(|entry| (true, entry)))
+            for (original, (binding, entry)) in std::iter::once((false, row.interface()))
+                .chain(row.original().map(|entry| (true, entry)))
             {
                 crate::host_work::checkpoint()?;
                 work.payload_lookups += 1;
@@ -2460,7 +2505,7 @@ impl crate::declaration_context::RequestCompilerInputs {
                     pending.push(required);
                 }
             }
-            if let Some((carrier, _)) = &row.original {
+            if let Some((carrier, _)) = row.original() {
                 let state = source
                     .artifacts
                     .lease
@@ -2468,7 +2513,7 @@ impl crate::declaration_context::RequestCompilerInputs {
                     .0
                     .lock()
                     .expect("inventory lock");
-                ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *carrier)?;
+                ResolvedCompilerRole::validate_original_pair(&state, row.interface().0, *carrier)?;
             }
             owners.insert(owner.clone());
             projection.admit_role(owner.clone(), role.clone())?;
@@ -2483,14 +2528,12 @@ impl crate::declaration_context::RequestCompilerInputs {
             // Canonical requirements remain obligations even when this owner's
             // selected Original has a different interface-use census.
             projection.validate_requirements(
-                std::iter::once(&row.interface)
-                    .chain(row.original.iter())
-                    .map(|(_, entry)| entry.as_ref()),
-                |required| selected.get(required).map(|row| row.interface.1.as_ref()),
+                row.bindings().map(|(_, entry)| entry.as_ref()),
+                |required| selected.get(required).map(|row| row.interface().1.as_ref()),
             )?;
             entries.insert(
                 owner.clone(),
-                Arc::clone(&row.original.as_ref().unwrap_or(&row.interface).1),
+                Arc::clone(&row.original().unwrap_or(row.interface()).1),
             );
         }
         work.selected_rows = selected.len();
@@ -2612,8 +2655,8 @@ impl CompilerSourceSupport {
                 .selected
                 .get(owner)
                 .ok_or_else(|| failure("demanded semantic role lost its acquired bindings"))?;
-            if row.interface.0.artifact != role.interface()
-                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+            if row.interface().0.artifact != role.interface()
+                || row.original().map(|(binding, _)| binding.artifact) != role.original()
             {
                 return Err(failure(
                     "demanded semantic role differs from its acquired bindings",
@@ -2627,7 +2670,7 @@ impl CompilerSourceSupport {
             charge(operation.reserve::<(ExactModuleIdentity, [usize; 4])>(1))?;
             charge(operation.charge(owner.unit.len().saturating_add(owner.module.len())))?;
             keys.roles.insert(owner.clone());
-            for (binding, _) in std::iter::once(&row.interface).chain(row.original.iter()) {
+            for (binding, _) in row.bindings() {
                 if namespace
                     .get(&binding.artifact)
                     .is_some_and(|prior| prior != binding)
@@ -2850,11 +2893,11 @@ impl CompilerSourceSupport {
             let Some(row) = self.selected.get(&owner) else {
                 continue;
             };
-            let ArtifactPayload::Canonical(interface) = &row.interface.1.payload else {
+            let ArtifactPayload::Canonical(interface) = &row.interface().1.payload else {
                 continue;
             };
             charge(operation.charge(product.interface.len()))?;
-            if module.skinny_iface_sha256 != row.interface.1.descriptor.interface_sha256
+            if module.skinny_iface_sha256 != row.interface().1.descriptor.interface_sha256
                 || product.interface.as_slice() != interface.interface_bytes()
             {
                 continue;
@@ -2884,7 +2927,7 @@ impl CompilerSourceSupport {
                 failure("World prior produced TYPE metadata lacks its selected owner")
             })?;
             let ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface) =
-                &row.interface.1.payload
+                &row.interface().1.payload
             else {
                 return Err(failure(
                     "World prior produced TYPE metadata changed its role",
@@ -2895,11 +2938,11 @@ impl CompilerSourceSupport {
                     + expected.package_imports_bytes().len()
                     + output.requirements().len(),
             ))?;
-            if output.artifact_id() != row.interface.0.artifact
+            if output.artifact_id() != row.interface().0.artifact
                 || interface.interface_bytes() != expected.interface_bytes()
                 || interface.package_imports_bytes() != expected.package_imports_bytes()
-                || row.interface.1.requirements.as_slice() != output.requirements()
-                || returned.interface.sha256 != row.interface.1.descriptor.interface_sha256
+                || row.interface().1.requirements.as_slice() != output.requirements()
+                || returned.interface.sha256 != row.interface().1.descriptor.interface_sha256
                 || returned.interface_requirements.len() != output.requirements().len()
                 || returned
                     .interface_requirements
@@ -3227,7 +3270,7 @@ impl CompilerSourceSupport {
         owner: &'a ExactModuleIdentity,
         row: &'a ResolvedCompilerRole,
     ) -> Result<CompilerPrimaryInput<'a>, CompileError> {
-        for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+        for (binding, entry) in row.bindings() {
             if &entry.descriptor.owner != owner
                 || self
                     .artifacts
@@ -3261,7 +3304,7 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        if let Some((original, _)) = row.original.as_ref() {
+        if let Some((original, _)) = row.original() {
             let state = self
                 .artifacts
                 .lease
@@ -3269,7 +3312,7 @@ impl CompilerSourceSupport {
                 .0
                 .lock()
                 .expect("inventory lock");
-            ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *original)?;
+            ResolvedCompilerRole::validate_original_pair(&state, row.interface().0, *original)?;
             Ok(CompilerPrimaryInput::Original(CompilerPrimaryRow {
                 owner,
                 row,
@@ -3289,11 +3332,11 @@ impl CompilerSourceSupport {
         #[cfg(test)]
         type_query_work::lookup();
         let (owner, row) = self.selected.rows.get_key_value(owner)?;
-        let transport = row.original.as_ref().unwrap_or(&row.interface);
+        let transport = row.original().unwrap_or(row.interface());
         Some(WorldPrimaryTypeRow {
             owner,
-            interface_binding: &row.interface.0,
-            original_binding: row.original.as_ref().map(|(binding, _)| binding),
+            interface_binding: &row.interface().0,
+            original_binding: row.original().map(|(binding, _)| binding),
             transport_binding: &transport.0,
             entry: &transport.1,
         })
@@ -3313,40 +3356,40 @@ impl CompilerSourceSupport {
         for support in incoming {
             for (owner, row) in support.selected.iter() {
                 crate::host_work::checkpoint()?;
-                if producer == [0; 32] || row.interface.1.descriptor.producer_sha256 != producer {
+                if producer == [0; 32] || row.interface().1.descriptor.producer_sha256 != producer {
                     return Err(failure(
                         "type-interface row differs from the primary compiler producer",
                     ));
                 }
                 let role = &support.projection.roles[owner];
                 if !matches!(role, CompilerInputRole::InterfaceOnly { .. })
-                    || row.original.is_some()
+                    || row.original().is_some()
                 {
                     return Err(failure("type-interface delta contains an original role"));
                 }
                 CompilerInputProjection::validate_role_payload(
                     owner,
                     role,
-                    &row.interface.1,
+                    &row.interface().1,
                     |_| None,
                 )?;
                 if let Some(prior) = selected.get(owner) {
-                    if prior.interface.0.artifact != row.interface.0.artifact {
+                    if prior.interface().0.artifact != row.interface().0.artifact {
                         return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                             owner: owner.clone(),
                         }));
                     }
-                    if prior.interface.0 != row.interface.0 {
+                    if prior.interface().0 != row.interface().0 {
                         return Err(admission_failure(
                             ArtifactInventoryFailure::BindingAmbiguity {
-                                artifact: row.interface.0.artifact,
+                                artifact: row.interface().0.artifact,
                             },
                         ));
                     }
                     continue;
                 }
                 projection.admit_role(owner.clone(), role.clone())?;
-                if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+                if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
                     home_units.extend(interface.home_units().iter().cloned());
                 }
                 selected.rows.insert(owner.clone(), row.clone());
@@ -3364,8 +3407,8 @@ impl CompilerSourceSupport {
                 support
                     .selected
                     .iter()
-                    .map(|(_, row)| row.interface.1.as_ref()),
-                |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+                    .map(|(_, row)| row.interface().1.as_ref()),
+                |owner| selected.get(owner).map(|row| row.interface().1.as_ref()),
             )?;
         }
         selected.home_units = Arc::new(home_units);
@@ -3386,8 +3429,8 @@ impl CompilerSourceSupport {
     ) -> bool {
         match (self.selected.get(owner), issued.selected.get(owner)) {
             (Some(actual), Some(expected)) => {
-                actual.interface.0 == expected.interface.0
-                    && actual.interface.0.artifact == interface
+                actual.interface().0 == expected.interface().0
+                    && actual.interface().0.artifact == interface
             }
             _ => false,
         }
@@ -3398,9 +3441,8 @@ impl CompilerSourceSupport {
         owner: &ExactModuleIdentity,
     ) -> Option<&Arc<ArtifactEntry>> {
         self.selected.get(owner).map(|row| {
-            row.original
-                .as_ref()
-                .map_or(&row.interface.1, |(_, entry)| entry)
+            row.original()
+                .map_or(&row.interface().1, |(_, entry)| entry)
         })
     }
 
@@ -3421,18 +3463,18 @@ impl CompilerSourceSupport {
             crate::host_work::checkpoint()?;
             let role = &incoming.projection.roles[owner];
             if let Some(previous) = selected.get(owner) {
-                promotion |= previous.original.is_none() && row.original.is_some();
-                if previous.interface.0.artifact != row.interface.0.artifact {
+                promotion |= previous.original().is_none() && row.original().is_some();
+                if previous.interface().0.artifact != row.interface().0.artifact {
                     return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
                         owner: owner.clone(),
                     }));
                 }
-                if previous.interface.0 != row.interface.0 {
+                if previous.interface().0 != row.interface().0 {
                     tracing::debug!(
                         target: "tidepool::artifact_inventory::ambiguity_trace",
                         ?owner,
-                        previous_binding = ?previous.interface.0,
-                        incoming_binding = ?row.interface.0,
+                        previous_binding = ?previous.interface().0,
+                        incoming_binding = ?row.interface().0,
                         previous_role = ?self.projection.roles[owner],
                         incoming_role = ?role,
                         receiving_caller = %std::panic::Location::caller(),
@@ -3440,11 +3482,11 @@ impl CompilerSourceSupport {
                     );
                     return Err(admission_failure(
                         ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: row.interface.0.artifact,
+                            artifact: row.interface().0.artifact,
                         },
                     ));
                 }
-                if let (Some((old, _)), Some((new, _))) = (&previous.original, &row.original) {
+                if let (Some((old, _)), Some((new, _))) = (previous.original(), row.original()) {
                     if old != new {
                         return Err(admission_failure(
                             ArtifactInventoryFailure::BindingAmbiguity {
@@ -3457,11 +3499,16 @@ impl CompilerSourceSupport {
             projection.admit_role(owner.clone(), role.clone())?;
             let effective = &projection.roles[owner];
             let mut retained = row.clone();
-            if effective.original().is_some() && retained.original.is_none() {
-                retained.original = selected.get(owner).and_then(|prior| prior.original.clone());
+            if effective.original().is_some() && retained.original().is_none() {
+                retained = ResolvedCompilerRole::from_issued_bindings(
+                    retained.interface().clone(),
+                    selected
+                        .get(owner)
+                        .and_then(|prior| prior.original().cloned()),
+                );
             }
             if selected.get(owner) != Some(&retained) {
-                if let ArtifactPayload::Canonical(interface) = &row.interface.1.payload {
+                if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
                     home_units.extend(interface.home_units().iter().cloned());
                 }
                 selected.rows.insert(owner.clone(), retained);
@@ -3469,12 +3516,11 @@ impl CompilerSourceSupport {
             }
         }
         projection.validate_requirements(
-            incoming.selected.iter().flat_map(|(_, row)| {
-                std::iter::once(&row.interface)
-                    .chain(row.original.iter())
-                    .map(|(_, entry)| entry.as_ref())
-            }),
-            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+            incoming
+                .selected
+                .iter()
+                .flat_map(|(_, row)| row.bindings().map(|(_, entry)| entry.as_ref())),
+            |owner| selected.get(owner).map(|row| row.interface().1.as_ref()),
         )?;
         let mut offers = self.native_offers.to_vec();
         let mut native_offer_facts = self.native_offer_facts.clone();
@@ -3493,8 +3539,7 @@ impl CompilerSourceSupport {
         }
         let artifacts = self.artifacts.append_admitted_custody(
             incoming.selected.iter().flat_map(|(_, row)| {
-                std::iter::once(&row.interface)
-                    .chain(row.original.iter())
+                row.bindings()
                     .map(|(binding, entry)| (incoming.artifacts.lease.as_ref(), *binding, entry))
             }),
             &new_offers,
@@ -3510,10 +3555,8 @@ impl CompilerSourceSupport {
             })?;
         for (owner, _) in incoming.selected.iter() {
             let row = selected.rows.get_mut(owner).expect("incoming admitted row");
-            let interface = &artifacts.lease.payloads[&row.interface.0.artifact];
-            let mut custody_changed = !Arc::ptr_eq(&row.interface.1, interface);
-            row.interface.1 = Arc::clone(interface);
-            if let Some((binding, entry)) = &mut row.original {
+            let mut custody_changed = false;
+            for (binding, entry) in row.bindings_mut() {
                 let retained = &artifacts.lease.payloads[&binding.artifact];
                 custody_changed |= !Arc::ptr_eq(entry, retained);
                 *entry = Arc::clone(retained);
@@ -3574,14 +3617,14 @@ impl CompilerSourceSupport {
                 .ok_or_else(|| failure("program metadata lacks its changed role"))?;
             entries.insert(
                 owner.clone(),
-                Arc::clone(&row.original.as_ref().unwrap_or(&row.interface).1),
+                Arc::clone(&row.original().unwrap_or(row.interface()).1),
             );
         }
         let mut retained = prior.retained.as_ref().clone();
         let mut bindings = BTreeSet::new();
         for (_, row) in incoming.selected.iter() {
-            bindings.insert(row.interface.0);
-            bindings.extend(row.original.iter().map(|(binding, _)| *binding));
+            bindings.insert(row.interface().0);
+            bindings.extend(row.original().map(|(binding, _)| *binding));
         }
         for offer in incoming.native_offers.iter() {
             bindings.extend(offer.artifact_carriers());
@@ -3689,7 +3732,7 @@ impl CompilerSourceSupport {
         let mut retained = prior.retained.as_ref().clone();
         for owner in changed {
             let row = self.selected.get(owner).expect("newly admitted type row");
-            let (binding, entry) = &row.interface;
+            let (binding, entry) = row.interface();
             entries.insert(owner.clone(), Arc::clone(entry));
             retained
                 .artifacts
@@ -3779,7 +3822,7 @@ impl CompilerSourceSupport {
                 ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::MissingSelectedRow)
             })
         })?;
-        let (_, entry) = admitted.original.as_ref().ok_or_else(|| {
+        let (_, entry) = admitted.original().ok_or_else(|| {
             InputDecisionRefusal::ArtifactIdentityMismatch(ArtifactIdentityMismatch {
                 expected_original: Some(original),
                 expected_canonical: Some(canonical),
@@ -3789,7 +3832,7 @@ impl CompilerSourceSupport {
         if selected_original != original
             || entry.descriptor.id != original
             || role.interface() != canonical
-            || admitted.interface.1.descriptor.id != canonical
+            || admitted.interface().1.descriptor.id != canonical
         {
             return Err(InputDecisionRefusal::ArtifactIdentityMismatch(
                 ArtifactIdentityMismatch {
@@ -3797,7 +3840,7 @@ impl CompilerSourceSupport {
                     expected_original: Some(original),
                     expected_canonical: Some(canonical),
                     observed_original: Some(entry.descriptor.id),
-                    observed_canonical: Some(admitted.interface.1.descriptor.id),
+                    observed_canonical: Some(admitted.interface().1.descriptor.id),
                     observed_kind: None,
                     ..ArtifactIdentityMismatch::refused(
                         ArtifactIdentityStage::RequestedIdentityDiffers,
@@ -3812,7 +3855,7 @@ impl CompilerSourceSupport {
                     expected_original: Some(original),
                     expected_canonical: Some(canonical),
                     observed_original: Some(entry.descriptor.id),
-                    observed_canonical: Some(admitted.interface.1.descriptor.id),
+                    observed_canonical: Some(admitted.interface().1.descriptor.id),
                     observed_kind: Some(entry.payload.artifact_kind()),
                     ..ArtifactIdentityMismatch::refused(ArtifactIdentityStage::NonOriginalPayload)
                 },
@@ -4410,12 +4453,10 @@ impl CompilerSourceSupport {
         }
         let selected = projection.resolve_source_associations(artifacts)?;
         projection.validate_requirements(
-            selected.values().flat_map(|row| {
-                std::iter::once(&row.interface)
-                    .chain(row.original.iter())
-                    .map(|(_, entry)| entry.as_ref())
-            }),
-            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+            selected
+                .values()
+                .flat_map(|row| row.bindings().map(|(_, entry)| entry.as_ref())),
+            |owner| selected.get(owner).map(|row| row.interface().1.as_ref()),
         )?;
         let input_decisions = inputs
             .issued_input_decisions()
@@ -4634,7 +4675,7 @@ impl CompilerSourceSupport {
         }
         let mut entries = BTreeMap::new();
         for row in self.selected.values() {
-            for (_, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+            for (_, entry) in row.bindings() {
                 entries.insert(entry.descriptor.id, Arc::clone(entry));
             }
         }
@@ -4645,13 +4686,13 @@ impl CompilerSourceSupport {
         let mut selected = self.selected.rows.clone();
         for (owner, role) in &projection.roles {
             let row = selected.get_mut(owner).expect("existing compiler role");
-            if row.interface.0.artifact != role.interface() {
+            if row.interface().0.artifact != role.interface() {
                 return Err(failure(
                     "source policy changed its admitted canonical binding",
                 ));
             }
-            match (role.original(), row.original.as_ref()) {
-                (None, _) => row.original = None,
+            match (role.original(), row.original()) {
+                (None, _) => row.select_type_only(),
                 (Some(id), Some((binding, _))) if id == binding.artifact => {}
                 _ => {
                     return Err(failure(
@@ -4753,13 +4794,7 @@ impl CompilerSourceSupport {
                 let appended = append.issue()?;
                 let mut rows = self.selected.rows.clone();
                 for (owner, interface) in appended.selected {
-                    rows.insert(
-                        owner,
-                        ResolvedCompilerRole {
-                            interface,
-                            original: None,
-                        },
-                    );
+                    rows.insert(owner, ResolvedCompilerRole::InterfaceOnly { interface });
                 }
                 // The inventory appended only interface rows with checked
                 // targets. Earlier exact namespace bindings, scopes, roots and
@@ -5088,16 +5123,16 @@ impl CompilerSourceSupport {
             };
             let mut row = self.selected[&owner].clone();
             if role.original().is_none() {
-                row.original = None;
+                row.select_type_only();
             }
-            let entry = row.original.as_ref().unwrap_or(&row.interface);
+            let entry = row.original().unwrap_or(row.interface());
             pending.extend(entry.1.requirements.iter().cloned());
             selected.insert(owner.clone(), row);
             projection.admit_role(owner, role)?;
         }
         let entries = selected
             .values()
-            .flat_map(|row| std::iter::once(&row.interface).chain(row.original.iter()))
+            .flat_map(|row| row.bindings())
             .map(|(binding, entry)| (binding.artifact, Arc::clone(entry)))
             .collect();
         projection.entries_from_artifacts(&entries)?;
@@ -5882,15 +5917,14 @@ impl CompilerInputProjection {
             #[cfg(test)]
             type_query_work::canonical_check();
             let row = selected.get(owner).expect("merged role has its chosen row");
-            if row.interface.0.artifact != role.interface()
-                || row.interface.1.descriptor.id != role.interface()
-                || row.original.as_ref().map(|(binding, _)| binding.artifact) != role.original()
+            if row.interface().0.artifact != role.interface()
+                || row.interface().1.descriptor.id != role.interface()
+                || row.original().map(|(binding, _)| binding.artifact) != role.original()
             {
                 return Err(failure("merged compiler row differs from its chosen role"));
             }
-            Self::validate_role_payload(owner, role, &row.interface.1, |id| {
-                row.original
-                    .as_ref()
+            Self::validate_role_payload(owner, role, &row.interface().1, |id| {
+                row.original()
                     .map(|(_, entry)| entry)
                     .filter(|entry| entry.descriptor.id == id)
             })?;
@@ -5898,13 +5932,13 @@ impl CompilerInputProjection {
         self.validate_requirements(
             selected
                 .values()
-                .map(|row| row.original.as_ref().unwrap_or(&row.interface).1.as_ref()),
-            |owner| selected.get(owner).map(|row| row.interface.1.as_ref()),
+                .map(|row| row.original().unwrap_or(row.interface()).1.as_ref()),
+            |owner| selected.get(owner).map(|row| row.interface().1.as_ref()),
         )?;
         let state = view.lease.inventory.0.lock().expect("inventory lock");
         for row in selected.values() {
-            if let Some((carrier, _)) = &row.original {
-                ResolvedCompilerRole::validate_original_pair(&state, row.interface.0, *carrier)?;
+            if let Some((carrier, _)) = row.original() {
+                ResolvedCompilerRole::validate_original_pair(&state, row.interface().0, *carrier)?;
             }
         }
         Ok(())
@@ -5962,8 +5996,8 @@ impl CompilerInputProjection {
             };
             selected.insert(
                 owner.clone(),
-                ResolvedCompilerRole {
-                    interface: (
+                ResolvedCompilerRole::from_issued_bindings(
+                    (
                         canonical,
                         Arc::clone(
                             artifacts
@@ -5972,7 +6006,7 @@ impl CompilerInputProjection {
                         ),
                     ),
                     original,
-                },
+                ),
             );
         }
         Ok(selected)
@@ -6192,22 +6226,18 @@ mod tests {
         let owner = &entries[1].descriptor.owner;
         let row = &first.selected[owner];
         let foreign = &second.selected[owner];
-        assert_ne!(
-            row.original.as_ref().unwrap().0,
-            foreign.original.as_ref().unwrap().0
-        );
+        assert_ne!(row.original().unwrap().0, foreign.original().unwrap().0);
         let primary = first.compiler_primary_input(owner).unwrap().unwrap();
-        assert_eq!(primary.original(), Some(row.original.as_ref().unwrap().0));
-        assert!(Arc::ptr_eq(
-            primary.entry(),
-            &row.original.as_ref().unwrap().1
-        ));
+        assert_eq!(primary.original(), Some(row.original().unwrap().0));
+        assert!(Arc::ptr_eq(primary.entry(), &row.original().unwrap().1));
         assert!(first.issue_compiler_primary_input(owner, foreign).is_err());
         assert!(second.issue_compiler_primary_input(owner, row).is_err());
-        let mut wrong_canonical = row.clone();
-        wrong_canonical.interface = first.selected[&entries[2].descriptor.owner]
-            .interface
-            .clone();
+        let wrong_canonical = ResolvedCompilerRole::from_issued_bindings(
+            first.selected[&entries[2].descriptor.owner]
+                .interface()
+                .clone(),
+            row.original().cloned(),
+        );
         assert!(first
             .issue_compiler_primary_input(owner, &wrong_canonical)
             .is_err());
@@ -6286,7 +6316,7 @@ mod tests {
             for owner in expected.keys() {
                 assert!(Arc::ptr_eq(
                     &demanded.metadata().entries[owner],
-                    &support.selected[owner].interface.1,
+                    &support.selected[owner].interface().1,
                 ));
                 assert_eq!(
                     demanded.projection().snapshot_roles().get(owner),
@@ -6587,9 +6617,9 @@ mod tests {
                 expected_next.insert(owner, value.artifact_id());
                 for (owner, before) in base.selected.iter() {
                     let after = &next.selected[owner];
-                    proptest::prop_assert_eq!(after.interface.0, before.interface.0);
-                    proptest::prop_assert!(Arc::ptr_eq(&after.interface.1, &before.interface.1));
-                    proptest::prop_assert_eq!(&after.original, &before.original);
+                    proptest::prop_assert_eq!(after.interface().0, before.interface().0);
+                    proptest::prop_assert!(Arc::ptr_eq(&after.interface().1, &before.interface().1));
+                    proptest::prop_assert_eq!(&after.original(), &before.original());
                 }
                 worlds.push((next, expected_next));
                 if drop_parent {
@@ -6658,7 +6688,7 @@ mod tests {
                     .unwrap();
             let before = source.artifacts.capture_graph_selection();
             let old_edges = source.artifacts.binding_dependencies();
-            let required_binding = source.selected[&entry.descriptor.owner].interface.0;
+            let required_binding = source.selected[&entry.descriptor.owner].interface().0;
             let value = value_certificate("FreshAppend", vec![entry.descriptor.owner.clone()]);
             let work = inventory.metrics();
             let actual = source.admit_value_interfaces(&[value.clone()]).unwrap();
@@ -6758,12 +6788,12 @@ mod tests {
             let value = value_certificate("IssuedValue", vec![canonical.descriptor.owner.clone()]);
             let first = first.admit_value_interfaces(&[value.clone()]).unwrap();
             let second = make(extra);
-            let a = first.selected[&canonical.descriptor.owner].interface.0;
-            let b = second.selected[&canonical.descriptor.owner].interface.0;
+            let a = first.selected[&canonical.descriptor.owner].interface().0;
+            let b = second.selected[&canonical.descriptor.owner].interface().0;
             proptest::prop_assert_eq!(a.artifact, b.artifact);
             proptest::prop_assert_ne!(a, b);
             let mixed = second.merge(&first).unwrap();
-            let old_value = mixed.selected[&ExactModuleIdentity { unit: "unit".into(), module: "IssuedValue".into() }].interface.0;
+            let old_value = mixed.selected[&ExactModuleIdentity { unit: "unit".into(), module: "IssuedValue".into() }].interface().0;
             let old_edge = (InventoryNodeKey::Artifact(old_value), InventoryNodeKey::Artifact(a), ArtifactDependency::Interface);
             proptest::prop_assert!(mixed.artifacts.binding_dependencies().contains(&old_edge));
             let entry = Arc::new(ArtifactEntry::interface(value.interface().clone(), JoinedInterfaceRole::ValueInterface, value.requirements().to_vec()));
@@ -6775,7 +6805,7 @@ mod tests {
             proptest::prop_assert_eq!(repeated.artifacts.capture_graph_selection(), oracle.artifacts.capture_graph_selection());
             let unrelated = value_certificate("UnrelatedFreshValue", vec![]);
             let appended = mixed.admit_value_interfaces(&[unrelated]).unwrap();
-            proptest::prop_assert_eq!(appended.selected[&canonical.descriptor.owner].interface.0, b);
+            proptest::prop_assert_eq!(appended.selected[&canonical.descriptor.owner].interface().0, b);
             proptest::prop_assert!(appended.artifacts.binding_dependencies().contains(&old_edge));
             proptest::prop_assert_eq!(appended.artifacts.selected_native_groups(), mixed.artifacts.selected_native_groups());
         }
@@ -6989,7 +7019,7 @@ mod tests {
                 proptest::prop_assert_eq!(actual.artifacts.selection_snapshot(), oracle.artifacts.selection_snapshot());
                 proptest::prop_assert_eq!(actual.selected.home_units.iter().cloned().collect::<BTreeSet<_>>(), BTreeSet::from(["unit".to_owned()]));
                 for (owner, original) in &expected {
-                    proptest::prop_assert_eq!(&actual.selected[owner].interface.1, original);
+                    proptest::prop_assert_eq!(&actual.selected[owner].interface().1, original);
                 }
                 proptest::prop_assert!(result.compiler_source_support().artifacts().selected_native_groups().is_empty());
 
@@ -7069,12 +7099,12 @@ mod tests {
                 .is_none_or(|projection| projection.metadata.get().is_none()));
             for (owner, (binding, bytes)) in &expected_issued {
                 let row = &narrowed.selected[owner];
-                assert_eq!(row.interface.0, *binding);
-                let ArtifactPayload::Canonical(interface) = &row.interface.1.payload else {
+                assert_eq!(row.interface().0, *binding);
+                let ArtifactPayload::Canonical(interface) = &row.interface().1.payload else {
                     panic!("canonical narrowed row")
                 };
                 assert_eq!(interface.interface_bytes(), bytes.as_slice());
-                assert!(row.original.is_none());
+                assert!(row.original().is_none());
             }
             // Explicit metadata observation initializes the cache only after
             // the measured narrowing has preserved its untouched state.
@@ -7122,7 +7152,7 @@ mod tests {
             // release: the fixture still holds its original entry handle.
             assert_eq!(
                 source.selected[&selected.descriptor.owner]
-                    .interface
+                    .interface()
                     .1
                     .descriptor
                     .id,
@@ -7340,17 +7370,17 @@ mod tests {
                 narrowed.native_offer_observations().unwrap(),
                 legacy.native_offer_observations().unwrap()
             );
-            let expected_binding = legacy.selected[&historical.descriptor.owner].interface.0;
+            let expected_binding = legacy.selected[&historical.descriptor.owner].interface().0;
             drop(legacy);
             drop(reusable);
             // Retained semantic payload/canonical pairing; this fixture does
             // not establish last physical materialization release.
             let row = &narrowed.selected[&historical.descriptor.owner];
             assert_eq!(
-                row.original.as_ref().unwrap().1.descriptor.id,
+                row.original().unwrap().1.descriptor.id,
                 historical.descriptor.id
             );
-            assert_eq!(row.interface.0, expected_binding);
+            assert_eq!(row.interface().0, expected_binding);
 
             let missing =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&selected)]).unwrap();
@@ -7507,7 +7537,7 @@ mod tests {
             )
             .unwrap();
         for (_, row) in rebuilt.selected.iter() {
-            for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+            for (binding, entry) in row.bindings() {
                 assert!(
                     Arc::ptr_eq(
                         entry,
@@ -7643,12 +7673,12 @@ mod tests {
             assert_eq!(source.artifacts.capture_graph_selection(), prior_view);
             for (owner, prior) in source.selected.iter() {
                 assert!(Arc::ptr_eq(
-                    &changed.selected.rows[owner].interface.1,
-                    &prior.interface.1
+                    &changed.selected.rows[owner].interface().1,
+                    &prior.interface().1
                 ));
-                if let Some((_, original)) = &prior.original {
+                if let Some((_, original)) = prior.original() {
                     assert!(Arc::ptr_eq(
-                        &changed.selected.rows[owner].original.as_ref().unwrap().1,
+                        &changed.selected.rows[owner].original().unwrap().1,
                         original
                     ));
                 }
@@ -7770,14 +7800,11 @@ mod tests {
             });
             for (owner, row) in receiving.selected.iter() {
                 let other = &incoming.selected[owner];
-                assert_eq!(row.interface.0, other.interface.0);
-                assert_eq!(
-                    row.original.as_ref().unwrap().0,
-                    other.original.as_ref().unwrap().0
-                );
+                assert_eq!(row.interface().0, other.interface().0);
+                assert_eq!(row.original().unwrap().0, other.original().unwrap().0);
                 assert!(!Arc::ptr_eq(
-                    &row.original.as_ref().unwrap().1,
-                    &other.original.as_ref().unwrap().1,
+                    &row.original().unwrap().1,
+                    &other.original().unwrap().1,
                 ));
             }
             // Incoming offers add a different genuine contribution while the
@@ -7883,7 +7910,7 @@ mod tests {
                 ));
             }
             for row in support.selected.values() {
-                for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                for (binding, entry) in row.bindings() {
                     assert!(Arc::ptr_eq(
                         entry,
                         &support.artifacts.lease.payloads[&binding.artifact]
@@ -8308,8 +8335,8 @@ mod tests {
             .support_for_owners(vec![owner.clone()])
             .unwrap();
         assert_ne!(
-            source.selected[&owner].interface.0,
-            same_bytes.selected[&owner].interface.0
+            source.selected[&owner].interface().0,
+            same_bytes.selected[&owner].interface().0
         );
         assert!(matches!(
             source.with_type_interfaces(&[&same_bytes], [2; 32]),
@@ -8751,7 +8778,7 @@ mod tests {
             let owner = &parent.descriptor.owner;
             let pair = |support: &CompilerSourceSupport| {
                 let row = &support.selected[owner];
-                (row.interface.0, row.original.as_ref().unwrap().0)
+                (row.interface().0, row.original().unwrap().0)
             };
             assert_eq!(
                 winner.projection.snapshot_roles()[owner],
@@ -8844,7 +8871,7 @@ mod tests {
                 prior_support.native_offer_observations().unwrap()
             );
             for row in joined.selected.values() {
-                for (binding, entry) in std::iter::once(&row.interface).chain(row.original.iter()) {
+                for (binding, entry) in row.bindings() {
                     assert!(
                         Arc::ptr_eq(entry, &joined.artifacts.lease.payloads[&binding.artifact]),
                         "chosen row acquires the final payload owner"
@@ -9235,9 +9262,7 @@ mod tests {
                         assert!(Arc::ptr_eq(row, prior));
                     }
                     for row in retained.selected.values() {
-                        for (binding, entry) in
-                            std::iter::once(&row.interface).chain(row.original.iter())
-                        {
+                        for (binding, entry) in row.bindings() {
                             assert!(Arc::ptr_eq(
                                 entry,
                                 &retained.artifacts.lease.payloads[&binding.artifact]

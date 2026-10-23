@@ -9040,18 +9040,18 @@ impl ArtifactView {
                 if let Some(rows) = selected_rows.as_deref_mut() {
                     rows.insert(
                         owner.clone(),
-                        compiler_projection::ResolvedCompilerRole {
-                            interface: (
+                        compiler_projection::ResolvedCompilerRole::from_issued_bindings(
+                            (
                                 canonical,
                                 Arc::clone(&source.lease.payloads[&role.interface()]),
                             ),
-                            original: original.map(|binding| {
+                            original.map(|binding| {
                                 (
                                     binding,
                                     Arc::clone(&source.lease.payloads[&binding.artifact]),
                                 )
                             }),
-                        },
+                        ),
                     );
                 }
             }
