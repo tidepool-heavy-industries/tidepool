@@ -12913,6 +12913,114 @@ pub(crate) mod test_support {
         Ok(directory)
     }
 
+    /// One actual ordinary compile retained through its sealed output owner.
+    /// Metadata names the captured source products; it grants no completion.
+    pub(crate) struct SourcePublicationEntryFixture {
+        _directory: TempDir,
+        pub(crate) entry: ProductionEntryOutput,
+        pub(crate) root: Arc<crate::artifact_inventory::ArtifactEntry>,
+        pub(crate) helper: Arc<crate::artifact_inventory::ArtifactEntry>,
+        pub(crate) root_ordinals: [u32; 2],
+        pub(crate) producer_bytes: Vec<u8>,
+        pub(crate) includes: Vec<PathBuf>,
+    }
+
+    pub(crate) fn prepare_source_publication_entry_fixture(
+    ) -> Result<SourcePublicationEntryFixture, CompileError> {
+        use crate::artifact_inventory::ArtifactPayload;
+        let directory = compiler_input_directory()?;
+        let sources = directory.path().join("sources");
+        std::fs::create_dir(&sources)?;
+        let support = include_str!("../tests/fixtures/native-publication/SourceOriginalSupport.hs");
+        std::fs::write(
+            sources.join("PublicationHelper.hs"),
+            support.replace("module SourceOriginalSupport", "module PublicationHelper"),
+        )?;
+        std::fs::write(
+            sources.join("SourceOriginalSupport.hs"),
+            support
+                .replace("where\n", "where\n\nimport qualified PublicationHelper\n")
+                .replace("second = 23", "second = PublicationHelper.second"),
+        )?;
+        let target = sources.join("PublicationTarget.hs");
+        std::fs::write(
+            &target,
+            include_str!("../tests/fixtures/native-publication/PublicationTarget.hs")
+                .replace("where\n", "where\n\nimport qualified PublicationHelper\n")
+                .replace("(Int, Int)", "(Int, Int, Int)")
+                .replace(
+                    "__prepared = (first, second)",
+                    "__prepared = (first, second, PublicationHelper.first)",
+                ),
+        )?;
+        let includes = vec![sources];
+        let frozen = FrozenEntrySources::capture(&includes, &target)?;
+        let endpoint = ExtractCmd::new()?.bind()?;
+        let producer_bytes = endpoint.identity().producer_bytes().to_vec();
+        let entry = prepare_frozen_production_entry(
+            &frozen,
+            directory.path(),
+            &directory.path().join("entry"),
+        )?;
+        let context = entry.products().original_execution_context()?;
+        let original = |module: &str| {
+            context
+                .artifact_view()
+                .entries()
+                .into_iter()
+                .find(|entry| {
+                    entry.descriptor.owner.unit == "main"
+                        && entry.descriptor.owner.module == module
+                        && matches!(&entry.payload, ArtifactPayload::Original(_))
+                })
+                .unwrap_or_else(|| panic!("the actual producer captured {module}"))
+        };
+        let root = original("SourceOriginalSupport");
+        let helper = original("PublicationHelper");
+        assert_eq!(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &producer_bytes
+            )
+            .sha256(),
+            root.descriptor.producer_sha256,
+            "metadata and sealed entry use the same actual producer",
+        );
+        let ArtifactPayload::Original(product) = &root.payload else {
+            unreachable!()
+        };
+        let ordinal = |name: &str| {
+            let ordinals = root
+                .native_group_ordinals
+                .iter()
+                .copied()
+                .filter(|ordinal| {
+                    crate::certified_products::original_native_group_definitions(product, *ordinal)
+                        .unwrap()
+                        .export_contracts()
+                        .any(|contract| {
+                            let contract = contract.unwrap();
+                            contract.identity.unit == root.descriptor.owner.unit
+                                && contract.identity.module == root.descriptor.owner.module
+                                && contract.identity.occurrence == name
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ordinals.len(), 1, "one actual group exports {name}");
+            ordinals[0]
+        };
+        let root_ordinals = [ordinal("first"), ordinal("second")];
+        assert_ne!(root_ordinals[0], root_ordinals[1]);
+        Ok(SourcePublicationEntryFixture {
+            _directory: directory,
+            entry,
+            root,
+            helper,
+            root_ordinals,
+            producer_bytes,
+            includes,
+        })
+    }
+
     // The operation owns this observation outside the induced unwind boundary.
     // These tests expect settled compilers; uncertainty is inspected as a failure.
     pub(crate) fn with_settlement<T, E: std::fmt::Debug>(
