@@ -10072,6 +10072,23 @@ pub(crate) fn fixture_source_finalized_product(
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_source_finalized_product_with_source(
+    product: crate::recovery_artifacts::OriginalDraft,
+    producer: [u8; 32],
+    imports: Vec<CanonicalSourceImport>,
+    canonical_source_sha256: [u8; 32],
+) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fixture_finalized_product_inner(
+        product,
+        producer,
+        None,
+        Some(imports),
+        None,
+        Some(canonical_source_sha256),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn fixture_native_declaration_product(
     product: crate::recovery_artifacts::OriginalDraft,
     producer: [u8; 32],
@@ -14712,14 +14729,29 @@ pub(crate) fn certify_products_with_validation(
         .into_iter()
         .map(
             |(owner, source_sha, interface, product_bytes, package_bytes, origin)| {
+                let canonical_interface = current_module_interface(&owner, origin, candidates, &module_interfaces, &inherited_module_interfaces)?;
+                if canonical_interface.producer_sha256() != producer_sha256
+                    || canonical_interface.source_sha256() != source_sha {
+                    return Err(CertificationError::Mismatch("native canonical producer/source"));
+                }
                 if origin == ProductOrigin::Cached || sharing.0.contains(&owner) {
                     if let Some(product) = available_originals.iter().find(|product| product.owner() == &owner) {
                         if product.interface_bytes() != interface || product.product_bytes() != product_bytes
-                            || product.package_imports_bytes() != package_bytes || product.source_sha256() != Some(source_sha) {
+                            || product.package_imports_bytes() != package_bytes
+                            || product.module_interface().facts() != canonical_interface.facts() {
                             return Err(CertificationError::Mismatch("shared original native bytes"));
                         }
                         issuance_work.inherited_reuses += 1;
-                        return Ok(product.clone());
+                        if origin == ProductOrigin::RetainedCore {
+                            return Ok(product.clone());
+                        }
+                        let admission = OriginalSourceAdmission::admit(&owner, canonical_interface, Arc::clone(&completed_source))?;
+                        if product.source_admission().is_some_and(|evidence| Arc::ptr_eq(evidence, &completed_source))
+                            && admission.matches(product.owner(), product.module_interface()) {
+                            return Ok(product.clone());
+                        }
+                        return crate::recovery_artifacts::CertifiedRecoveryProduct::from_source_admission(product.clone(), admission)
+                            .map_err(|_| CertificationError::Mismatch("shared original current source"));
                     }
                 }
                 let original: Vec<_> = groups
@@ -14734,11 +14766,6 @@ pub(crate) fn certify_products_with_validation(
                     .ok_or(CertificationError::Mismatch(
                         "original interface owner receipt",
                     ))?;
-                let canonical_interface = current_module_interface(&owner, origin, candidates, &module_interfaces, &inherited_module_interfaces)?;
-                if canonical_interface.producer_sha256() != producer_sha256
-                    || canonical_interface.source_sha256() != source_sha {
-                    return Err(CertificationError::Mismatch("native canonical producer/source"));
-                }
                 let execution_source = match origin {
                     ProductOrigin::Fresh => execution_graph
                         .as_ref()
