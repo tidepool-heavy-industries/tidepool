@@ -2,11 +2,11 @@
 //! varies later demand while the real issuer's selection remains immutable.
 use super::*;
 use crate::artifact_inventory::{
-    ArtifactEntry, ArtifactPayload, CanonicalProducerIdentity, CompilerInputRole,
+    ArtifactBinding, ArtifactEntry, ArtifactPayload, CanonicalProducerIdentity, CompilerInputRole,
     NativeGroupBinding, NativeGroupKey,
 };
 use crate::declaration_context::{
-    CapturedCompilerStage, ExactCompileContext, ExactDeclarationContext,
+    CapturedCompilerStage, ExactCompileContext, ExactDeclarationContext, NativeDependencySupport,
     RecoveredArtifactAcquisition, RecoveredArtifactInventory,
 };
 use crate::declaration_join::ExactLexicalNode;
@@ -103,6 +103,33 @@ fn restored(context: &ExactDeclarationContext) -> Result<ExactDeclarationContext
         })
 }
 
+/// Candidate lookup names only the requested group. Its issuing contribution
+/// owns the transitive dependencies selected by that exact group binding.
+fn selected_group_carriers(
+    dependency: &NativeDependencySupport<'_>,
+) -> BTreeMap<NativeGroupBinding, ArtifactBinding> {
+    let mut carriers = BTreeMap::new();
+    let operation = InventoryOperation::new(Default::default());
+    for group in dependency.groups() {
+        let offer = dependency.offer_for_group(group).unwrap();
+        let contribution = Arc::new(
+            offer
+                .contribution_for(&BTreeSet::from([group.binding.artifact()]))
+                .unwrap()
+                .unwrap(),
+        );
+        let selected = contribution.for_groups(&BTreeSet::from([group])).unwrap();
+        let issued = offer.issued_group_carriers().unwrap();
+        for selected in selected.original_group_bindings(&operation).unwrap() {
+            let carrier = issued[&selected];
+            assert!(carriers
+                .insert(selected, carrier)
+                .is_none_or(|prior| prior == carrier));
+        }
+    }
+    carriers
+}
+
 fn property_config() -> proptest::test_runner::Config {
     let mut config = proptest::test_runner::Config::default();
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
@@ -163,7 +190,36 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let ArtifactPayload::Original(root_product) = &root.payload else {
         unreachable!()
     };
+    let ArtifactPayload::Original(helper_product) = &helper.payload else {
+        unreachable!()
+    };
+    let helper_second = helper
+        .native_group_ordinals
+        .iter()
+        .copied()
+        .find(|ordinal| {
+            original_native_group_definitions(helper_product, *ordinal)
+                .unwrap()
+                .export_contracts()
+                .any(|contract| {
+                    let identity = &contract.unwrap().identity;
+                    identity.unit == helper.descriptor.owner.unit
+                        && identity.module == helper.descriptor.owner.module
+                        && identity.occurrence == "second"
+                })
+        })
+        .expect("the actual helper product exports second");
     for (index, ordinal) in ordinals.iter().enumerate() {
+        let definitions = original_native_group_definitions(root_product, *ordinal).unwrap();
+        assert_eq!(
+            definitions.globals().iter().any(|global| {
+                global.identity.unit == helper.descriptor.owner.unit
+                    && global.identity.module == helper.descriptor.owner.module
+                    && global.identity.occurrence == "second"
+            }),
+            index == 1,
+            "the compiled bodies retain the distinguishing Helper.second import"
+        );
         let dependency = root_permissions
             .dependency_support(
                 NativeGroupKey {
@@ -173,12 +229,26 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 root_product.owner(),
             )
             .unwrap();
+        let candidates = dependency.groups().collect::<BTreeSet<_>>();
+        assert!(!candidates.is_empty());
+        assert!(candidates
+            .iter()
+            .all(|group| group.binding.artifact() == root.descriptor.id
+                && group.original_ordinal == *ordinal));
+        let closure = selected_group_carriers(&dependency);
+        let helper_groups = closure
+            .keys()
+            .filter(|group| group.binding.artifact() == helper.descriptor.id)
+            .map(|group| group.original_ordinal)
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            dependency
-                .groups()
-                .any(|group| group.binding.artifact() == helper.descriptor.id),
-            index == 1,
-            "the actual named exports distinguish independent and helper-dependent demand"
+            helper_groups,
+            if index == 1 {
+                BTreeSet::from([helper_second])
+            } else {
+                BTreeSet::new()
+            },
+            "the exact issued group closure distinguishes independent and helper-dependent demand"
         );
     }
     let expected_publication = original
@@ -252,11 +322,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     let dependency = row.dependency_support(NativeGroupKey {
                         artifact: root.descriptor.id, original_ordinal: ordinal,
                     }, product.owner()).unwrap();
-                    let permitted_carriers = dependency.groups().map(|group| {
-                        let offer = dependency.offer_for_group(group).unwrap();
-                        let carriers = offer.issued_group_carriers().unwrap();
-                        (group, carriers[&group])
-                    }).collect::<BTreeMap<_, _>>();
+                    let permitted_carriers = selected_group_carriers(&dependency);
                     prop_assert!(!permitted_carriers.is_empty());
                     let module = format!("HistoryOutput{ordinal}");
                     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
