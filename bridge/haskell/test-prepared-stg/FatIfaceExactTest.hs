@@ -29,6 +29,7 @@ import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
+import GHC.Unit.Module.ModIface (mi_extra_decls)
 import System.Directory
   ( copyFile, createDirectoryIfMissing
   , getTemporaryDirectory
@@ -217,22 +218,24 @@ scenario = do
   tmp <- getTemporaryDirectory
   withTempDirectory tmp $ \work -> do
     let fixtures = "test-prepared-stg" </> "fat-iface-fixtures"
-        fatSource = work </> "FatFixture.hs"
         thinSource = work </> "ThinFixture.hs"
-        missingSource = work </> "MissingFixture.hs"
+        thinPath = work </> "ThinFixture.hi"
         useSource = work </> "FatIfaceUse.hs"
     mapM_ (copyFixture fixtures work)
       ["FatFixture.hs", "ThinFixture.hs", "MissingFixture.hs", "FatIfaceUse.hs"]
     let ghc = "ghc"
-    compileFixture ghc work ["-fwrite-if-simplified-core"] fatSource
     compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fno-write-if-simplified-core"] thinSource
-    compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fwrite-if-simplified-core"] missingSource
+    -- Capture this producer's actual thin bytes before the later fat-mode
+    -- load can rebuild its dependency under different interface flags.
+    thinBytes <- BS.readFile thinPath >>= evaluate . captureArtifactBytes
     libdir <- trim <$> readProcess ghc ["--print-libdir"] ""
     runGhc (Just libdir) $ do
       flags <- getSessionDynFlags
       let fatFlags =
             (`gopt_set` Opt_WriteInterface)
             $ (`gopt_set` Opt_WriteIfSimplifiedCore)
+            $ (`gopt_set` Opt_ExposeAllUnfoldings)
+            $ (`gopt_unset` Opt_OmitInterfacePragmas)
             $ gopt_unset (updOptLevel 0 flags) Opt_IgnoreInterfacePragmas
       _ <- setSessionDynFlags fatFlags
         { importPaths = work : importPaths flags
@@ -265,7 +268,7 @@ scenario = do
       -- Production input aliases name captured bytes, never physical files.
       -- Retain the decoded owner after its original file is removed; private
       -- original lookup must consume HPT rather than reopening that alias.
-      liftIO $ do
+      thinContext <- liftIO $ do
         verifyCompletedInterfaceMerges libdir work hsc
         home <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
           (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
@@ -298,9 +301,7 @@ scenario = do
           pure ()) `finally` BS.writeFile mutable bytes
         -- Exercise the captured input owner and its NameCache-bound decoder
         -- with the same logical alias shape used by World TYPE input transport.
-        let thinPath = work </> "ThinFixture.hi"
-        thinRaw <- BS.readFile thinPath
-        let thinBytes = captureArtifactBytes thinRaw
+        loadedThinRaw <- BS.readFile thinPath
         decoder <- newRequestIfaceDecoder
         removeFile thinPath
         (do
@@ -310,7 +311,10 @@ scenario = do
                 closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
                   (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
                   environment [thinArtifact] [] >>= either fail pure
-                either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
+                products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
+                assert (all (maybe True (const False) . mi_extra_decls . snd . verifiedExactInterface) products)
+                  "the admitted captured TYPE fixture contains defining Core"
+                pure products
           forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
             products <- capture hsc alias
             fresh <- forkExactContext hsc
@@ -333,11 +337,13 @@ scenario = do
           crossed <- try (hydrateInterfaceInputs other inputs >> pure ()) :: IO (Either SomeException ())
           assert (case crossed of Left _ -> True; Right () -> False)
             "TYPE hydration accepted an interface from another NameCache"
-          installed <- hydrateInterfaceInputs hsc inputs
+          fresh <- freshExactContext hsc
+          installed <- hydrateInterfaceInputs fresh inputs
           foreignPhase <- try (restoreHydratedInterfaceEnvironment installed other >> pure ()) :: IO (Either SomeException ())
           assert (case foreignPhase of Left _ -> True; Right () -> False)
-            "interface phase restoration accepted another NameCache")
-          `finally` BS.writeFile thinPath thinRaw
+            "interface phase restoration accepted another NameCache"
+          pure (hydratedExactEnvironment installed))
+          `finally` BS.writeFile thinPath loadedThinRaw
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency
       localResult <- liftIO (lookupFatIfaceExact hsc cache
@@ -525,37 +531,40 @@ scenario = do
       absentResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn fatIdentityName))
       liftIO (assert (isBindingAbsent absentResult)
         "loaded fat interface did not distinguish an absent binding")
-      -- Loading the use site at O0 under fat flags can rebuild dependencies.
-      -- Restore the deliberately thin artifact and genuine INLINE envelopes
-      -- before reading the defining Ids for the absence/read controls.
-      liftIO (compileFixture ghc work ["-O1", "-fexpose-all-unfoldings", "-fno-write-if-simplified-core"] thinSource)
-      liftIO (compileFixture ghc work
-        ["-O1", "-fexpose-all-unfoldings", "-fwrite-if-simplified-core"] missingSource)
+      -- These actual defining interfaces retain genuine optimizer INLINE
+      -- envelopes. Their recovery outcomes depend on their selected HPT,
+      -- independently of later filesystem changes.
       (thinDeclaring, missingDeclaring) <- liftIO $ (,)
-        <$> declaringId hsc thinId <*> declaringId hsc missingId
-      thinResult <- liftIO (lookupFatIfaceExact hsc cache thinIdentityName)
+        <$> declaringId thinContext thinId <*> declaringId hsc missingId
+      thinResult <- liftIO (lookupFatIfaceExact thinContext cache thinIdentityName)
       liftIO (assert (isNoExtra thinResult)
         "thin interface was not distinguished from an absent binding")
-      thinCachedResult <- liftIO (lookupFatIfaceExact hsc cache (missingNameIn thinIdentityName))
+      thinCachedResult <- liftIO (lookupFatIfaceExact thinContext cache (missingNameIn thinIdentityName))
       liftIO (assert (isNoExtra thinCachedResult)
         "typed no-extra outcome was not retained in the cache")
-      thinRecovery <- liftIO (recoverExactBody hsc cache thinDeclaring)
+      thinRecovery <- liftIO (recoverExactBody thinContext cache thinDeclaring)
       liftIO $ case thinRecovery of
         MissingExactBody name NoExtraDeclarations -> assert (name == thinIdentityName)
           "thin recovery refusal changed the exact defining identity"
         _ -> fail "optimizer unfolding bypassed missing original fat Core"
       liftIO (removeFile (work </> "MissingFixture.hi"))
-      missingResult <- liftIO (lookupFatIfaceExact hsc cache missingIdentityName)
+      retainedCache <- liftIO newFatIfaceCache
+      retained <- liftIO (lookupFatIfaceExact hsc retainedCache missingIdentityName)
+      liftIO (assert (isFound retained)
+        "removing a physical HOME file invalidated its retained interface owner")
+      missingContext <- liftIO (freshExactContext hsc)
+      missingCache <- liftIO newFatIfaceCache
+      missingResult <- liftIO (lookupFatIfaceExact missingContext missingCache missingIdentityName)
       liftIO (assertLoadFailure "MissingFixture" missingResult)
-      missingCachedResult <- liftIO (lookupFatIfaceExact hsc cache missingIdentityName)
+      missingCachedResult <- liftIO (lookupFatIfaceExact missingContext missingCache missingIdentityName)
       liftIO (assertLoadFailure "MissingFixture" missingCachedResult)
-      missingRecovery <- liftIO (recoverExactBody hsc cache missingDeclaring)
+      missingRecovery <- liftIO (recoverExactBody missingContext missingCache missingDeclaring)
       liftIO $ case missingRecovery of
         BodyInterfaceFailure owner reason -> do
           assert (Just owner == nameModule_maybe missingIdentityName)
             "read failure changed the exact defining owner"
           assert (not (null reason)) "read failure lost its reason"
-        _ -> fail "optimizer unfolding bypassed an unreadable defining interface"
+        _ -> fail "optimizer unfolding bypassed the absent HOME interface owner"
   pure ()
 
 -- Generic outcomes exercise loading mechanics without constructing executable
