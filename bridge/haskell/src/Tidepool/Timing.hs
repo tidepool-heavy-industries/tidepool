@@ -513,7 +513,6 @@ data InterfaceStage
 data InterfaceReuse
   = HptMiss
   | MemoMiss
-  | MemoDisabled
 
 -- One process-local issuer serves cycles, invocations and task spans. Clock
 -- resolution cannot make concurrent issuance reuse an identity.
@@ -628,7 +627,6 @@ renderStage SessionRegistrationInterface = "session_registration"
 renderReuse :: InterfaceReuse -> String
 renderReuse HptMiss = "hpt_miss"
 renderReuse MemoMiss = "memo_miss"
-renderReuse MemoDisabled = "memo_disabled"
 
 cpuDelta :: Maybe Integer -> Maybe Integer -> Integer
 cpuDelta (Just before) (Just after) = delta before after `div` 1000
@@ -648,7 +646,7 @@ readMemoTraceEnabled = (== Just "1") <$> lookupEnv "TIDEPOOL_MEMO_TRACE"
 -- Selection observations describe the immutable ingress before the working
 -- memo is narrowed. They do not grant reuse or search historical alternatives.
 data MemoSelectionState = MemoOwnerAbsent | MemoIngressAbsent | MemoMatchingRejected
-  | MemoSelected | MemoTargetExcluded | MemoStandalone deriving (Eq, Show)
+  | MemoSelected | MemoTargetExcluded deriving (Eq, Show)
 data MemoSelectionTrace = MemoSelectionTrace
   { selectionState :: MemoSelectionState
   , selectionUnit :: String
