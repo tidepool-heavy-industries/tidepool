@@ -4890,6 +4890,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 .unwrap()
                 .support_for_owners(vec![owner.clone()])
                 .unwrap();
+            let program_types = types.clone();
             let type_context = Arc::new(context.clone().rebuild(|facts| {
                 facts.compiler_support = types;
             }));
@@ -4899,6 +4900,17 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 .context
                 .capture_world_primary_compiler_inputs(producer.sha256())
                 .unwrap();
+            let program = initial
+                .advance_program_support(&advanced.context, &program_types)
+                .unwrap();
+            assert_eq!(
+                program.inputs.native_selection.candidates.0,
+                cold.native_selection.candidates.0
+            );
+            assert_eq!(
+                program.inputs.native_selection.availability,
+                cold.native_selection.availability
+            );
             assert_eq!(
                 advanced.inputs.native_selection.candidates.0,
                 cold.native_selection.candidates.0
