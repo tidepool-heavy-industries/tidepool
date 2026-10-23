@@ -809,11 +809,13 @@ fn assert_world_completed_output_keeps_actual_producer(
                 })?;
                 let emissions = checked.emitted_native_modules()?;
                 let mut products = Vec::new();
+                let mut physical_stages = Vec::new();
                 let prepared =
                     crate::artifacts::prepare_world_cell_program_observing_home_contracts(
                         Arc::clone(&checked),
                         &mut |_, originals| {
                             let stage = originals.captured_stage();
+                            physical_stages.push(Arc::clone(stage));
                             for entry in stage
                                 .producer_certificates()
                                 .iter()
@@ -825,7 +827,14 @@ fn assert_world_completed_output_keeps_actual_producer(
                             }
                         },
                     )?;
-                Ok::<_, CompileError>((prepared, checked, products, emissions, origin))
+                Ok::<_, CompileError>((
+                    prepared,
+                    checked,
+                    products,
+                    physical_stages,
+                    emissions,
+                    origin,
+                ))
             },
         );
         assert!(matches!(settled.close(), CompilerTransactionClose::Clean));
@@ -833,13 +842,36 @@ fn assert_world_completed_output_keeps_actual_producer(
             .host_admission_cancellation()
             .expect("actual post-END owner")
             .clone();
-        let (prepared, _checked, products, emissions, origin) = settled
+        let (prepared, _checked, products, physical_stages, emissions, origin) = settled
             .into_outcome()
             .action
             .expect("the real World source grant completes the selected producer phase");
         let program = prepared
             .seal(&cancellation)
             .expect("seal the same actual completed World output");
+        let fresh_owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: tidepool_repr::SessionModule::lib(tidepool_repr::Generation(90 + phase * 2))
+                .module_name(),
+        };
+        let declaration = program.items()[0]
+            .checked_item()
+            .planned_declaration()
+            .expect("the actual prologue issues its fresh Original declaration");
+        let stage = physical_stages
+            .iter()
+            .find(|stage| {
+                stage.producer_certificates().iter().any(|entry| {
+                    entry.descriptor.owner == fresh_owner
+                        && matches!(entry.payload, ArtifactPayload::Original(_))
+                })
+            })
+            .expect("the actual prologue's physical producer certificate is retained");
+        assert_fresh_world_original_selection(
+            stage,
+            declaration.compiler_source_support(),
+            &fresh_owner,
+        );
         let continuation = program
             .items()
             .last()
@@ -964,6 +996,60 @@ fn assert_world_completed_output_keeps_actual_producer(
             owner,
         );
     }
+}
+
+fn assert_fresh_world_original_selection(
+    stage: &crate::declaration_context::CapturedCompilerStage,
+    selected: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+) {
+    let producer = stage
+        .producer_certificates()
+        .iter()
+        .find(|entry| {
+            &entry.descriptor.owner == owner
+                && matches!(entry.payload, ArtifactPayload::Original(_))
+        })
+        .expect("the new compiler owner has an actual prebinding Original certificate");
+    let ArtifactPayload::Original(produced) = &producer.payload else {
+        unreachable!()
+    };
+    let offer = stage
+        .source_selection()
+        .completed_compiler_output_offer(owner)
+        .unwrap()
+        .expect("the actual fresh physical receipt owns the new Original's contribution");
+    let actual = selected
+        .compiler_roles()
+        .original_acquisition(owner)
+        .expect("the public authored-declaration consumer selects its genuinely new Original row");
+    let ArtifactPayload::Original(product) = &actual.payload else {
+        unreachable!()
+    };
+    assert!(
+        product.same_admission_and_transport(produced),
+        "selected new Original keeps its independent actual producer acquisition"
+    );
+    assert!(Arc::ptr_eq(actual, offer.original_acquisition()));
+    let row = &selected.selected[owner];
+    assert!(
+        offer.matches_direct_canonical_binding(
+            producer.descriptor.id,
+            row.interface().0.artifact,
+            stage.issued_artifacts()
+        ),
+        "the selected canonical/Original pair belongs to the actual fresh producer"
+    );
+    assert!(offer
+        .artifact_carriers()
+        .contains(&row.original().unwrap().0));
+    let canonical = stage
+        .issued_artifacts()
+        .observed_payload(&row.interface().0.artifact)
+        .unwrap();
+    assert!(Arc::ptr_eq(&row.interface().1, canonical));
+    assert!(matches!(selected.compiler_roles().native_decision(owner), InputNativeDecision::UnissuedPolicy),
+        "physical production and private Full body availability do not issue a selected native root");
 }
 
 fn assert_interface_extension_preserves_native_topology(
