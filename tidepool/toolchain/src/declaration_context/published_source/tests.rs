@@ -95,6 +95,15 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     let source = publication.context();
     let root = &fixture.root;
     let helper = &fixture.helper;
+    assert!(
+        source.artifact_view().selected_native_groups().is_empty(),
+        "the SOURCE projection retains native custody without target demand"
+    );
+    let target = fixture.entry.products().native_source_products().unwrap();
+    let target_groups = target
+        .groups()
+        .map(|row| row.binding())
+        .collect::<BTreeSet<_>>();
     let genuine = source.artifact_view().capture_graph_selection();
     let genuine_groups = genuine
         .native_groups
@@ -103,9 +112,14 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         .filter(|group| group.binding.artifact() == root.descriptor.id)
         .collect::<BTreeSet<_>>();
     assert!(!genuine_groups.is_empty());
-    // Exact recovery takes the whole issued request closure, including the
-    // child groups selected by the published root.
-    let demand = source.artifact_view().selected_native_groups();
+    assert!(genuine_groups.is_subset(&target_groups));
+    let demand = target_groups
+        .iter()
+        .map(|group| NativeGroupKey {
+            artifact: group.binding.artifact(),
+            original_ordinal: group.original_ordinal,
+        })
+        .collect();
     let producer = root.descriptor.producer_sha256;
     let mut entries = source.artifact_view().entries();
     entries.push(Arc::new(ArtifactEntry::canonical(
@@ -122,9 +136,13 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     // issuer's group demand independently of its broader byte custody.
     let foreign_view = independent
         .admit_recovery_selection(&independent.empty_view(), entries, &demand)
-        .unwrap()
-        .select_roots(vec![root.descriptor.id])
         .unwrap();
+    assert_eq!(
+        foreign_view.selected_native_groups(),
+        demand,
+        "independent DATA admission preserves the completed target's whole selected closure"
+    );
+    let foreign_view = foreign_view.select_roots(vec![root.descriptor.id]).unwrap();
     let foreign = foreign_view.capture_graph_selection();
     let foreign_groups = foreign
         .native_groups
@@ -176,6 +194,10 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
             )
         {
             child_edges += 1;
+            assert!(
+                target_groups.contains(&to),
+                "the completed target selected the real native child"
+            );
             assert!(
                 foreign_edges.contains(&(
                     ArtifactBindingNode::Group(corresponding(from)),

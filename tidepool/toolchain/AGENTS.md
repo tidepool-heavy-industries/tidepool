@@ -162,6 +162,8 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
 - Shared test instrumentation must preserve the full production input domain.
   An assertion that requires executable availability belongs in a named fixture
   establishing that premise, not every receipt observed under `cfg(test)`.
+  Native-demand fixtures use the actual completed target's selected groups;
+  a source projection does not issue target demand.
   Capture compiler-generated scaffold dependencies through declared test resources;
   a module-only fixture does not establish a complete authored World environment.
   Use the existing structured logger for diagnostics, with normal filtering;

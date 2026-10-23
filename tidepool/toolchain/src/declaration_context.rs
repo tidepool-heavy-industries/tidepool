@@ -22187,89 +22187,39 @@ mod tests {
         let reconstructed = context
             .published_source_original_selections_for_target(&groups, &imports)
             .unwrap();
-        for actual in &reconstructed {
-            let actual_context = actual.context();
-            let expected_context = publication.context();
-            let actual_support = actual_context.compiler_source_support();
-            let expected_support = expected_context.compiler_source_support();
-            eprintln!(
-                "publication reconstruction: context_equal={} semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} offers_equal={} availability_equal={} decisions_equal={} lexical_equal={} templates_equal={}",
-                actual_context == expected_context,
-                actual_context.semantic_sha256() == expected_context.semantic_sha256(),
-                actual_support == expected_support,
-                actual_support.projection() == expected_support.projection(),
-                actual_support.artifacts() == expected_support.artifacts(),
-                actual_support.artifacts().capture_graph_selection() == expected_support.artifacts().capture_graph_selection(),
-                actual_support.native_offers() == expected_support.native_offers(),
-                actual_support.native_availability() == expected_support.native_availability(),
-                actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
-                actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
-                actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
-            );
-            if actual_support.artifacts() != expected_support.artifacts() {
-                eprintln!(
-                    "publication artifacts actual={:?} expected={:?}",
-                    actual_support
-                        .artifacts()
-                        .entries()
-                        .iter()
-                        .map(|entry| &entry.descriptor)
-                        .collect::<Vec<_>>(),
-                    expected_support
-                        .artifacts()
-                        .entries()
-                        .iter()
-                        .map(|entry| &entry.descriptor)
-                        .collect::<Vec<_>>()
-                );
-                eprintln!(
-                    "publication graph actual={:?} expected={:?}",
-                    actual_support.artifacts().capture_graph_selection(),
-                    expected_support.artifacts().capture_graph_selection()
-                );
-            }
-            if actual_support.native_offers() != expected_support.native_offers() {
-                eprintln!(
-                    "publication offer facts actual={:?} expected={:?}",
-                    actual_support
-                        .native_offers()
-                        .iter()
-                        .map(|offer| offer.snapshot_facts())
-                        .collect::<Vec<_>>(),
-                    expected_support
-                        .native_offers()
-                        .iter()
-                        .map(|offer| offer.snapshot_facts())
-                        .collect::<Vec<_>>()
-                );
-            }
-            if actual_support.native_availability() != expected_support.native_availability() {
-                eprintln!(
-                    "publication native rows actual={:?} expected={:?}",
-                    actual_support
-                        .native_availability()
-                        .snapshot_facts()
-                        .unwrap(),
-                    expected_support
-                        .native_availability()
-                        .snapshot_facts()
-                        .unwrap()
-                );
-            }
-            if actual_support.input_decisions().recorded_facts()
-                != expected_support.input_decisions().recorded_facts()
-            {
-                eprintln!(
-                    "publication input decisions actual={:?} expected={:?}",
-                    actual_support.input_decisions(),
-                    expected_support.input_decisions()
-                );
-            }
-        }
+        assert_eq!(reconstructed.len(), 1);
+        let current_publication = Arc::clone(&reconstructed[0]);
+        assert_eq!(current_publication.public_root(), publication.public_root());
+        assert_eq!(current_publication.revision(), publication.revision());
+        let birth = publication.context().snapshot();
+        let current = current_publication.context().snapshot();
+        let request_decision = context
+            .compiler_source_support()
+            .input_decisions()
+            .recorded_facts()
+            .get(&root)
+            .expect("the receiving request issued its published-root choice");
+        assert_eq!(request_decision.role, birth.roles[&root]);
+        assert!(request_decision.groups.is_empty());
+        let expected_decisions = std::iter::once((root.clone(), request_decision.clone()))
+            .collect::<imbl::OrdMap<_, _>>();
+        assert_eq!(current.input_decisions, expected_decisions);
+        assert_ne!(current.input_decisions, birth.input_decisions);
+        assert_eq!(current.producer, birth.producer);
         assert_eq!(
-            reconstructed.as_slice(),
-            std::slice::from_ref(&publication),
-            "source policy follows the selected consumer's lexical proof even when the published body has no remaining native call"
+            current.graph_selection().unwrap(),
+            birth.graph_selection().unwrap()
+        );
+        assert_eq!(current.roles, birth.roles);
+        assert_eq!(current.source_scope, birth.source_scope);
+        assert_eq!(current.lexical, birth.lexical);
+        assert_eq!(current.offers, birth.offers);
+        assert_eq!(current.native_availability, birth.native_availability);
+        assert_eq!(current.native_components, birth.native_components);
+        assert_eq!(current.native_closures, birth.native_closures);
+        assert_eq!(
+            current_publication.context().owner.facts.template_imports,
+            publication.context().owner.facts.template_imports
         );
 
         // Encode the contaminated current context, not only the earlier birth.
@@ -22342,49 +22292,7 @@ mod tests {
         let view = context.artifact_view();
         let graph = view.capture_graph_selection();
         let assert_publication = |actuals: &[Arc<PublishedSourceOriginalSelection>]| {
-            if actuals != std::slice::from_ref(&publication) {
-                for actual in actuals {
-                    let actual_context = actual.context();
-                    let expected_context = publication.context();
-                    let actual_support = actual_context.compiler_source_support();
-                    let expected_support = expected_context.compiler_source_support();
-                    eprintln!(
-                        "restored publication consumer: semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} ordered_offers_equal={} offer_facts_equal={} availability_equal={} row_facts_equal={} decisions_equal={} lexical_equal={} templates_equal={}",
-                        actual_context.semantic_sha256() == expected_context.semantic_sha256(),
-                        actual_support == expected_support,
-                        actual_support.projection() == expected_support.projection(),
-                        actual_support.artifacts() == expected_support.artifacts(),
-                        actual_support.artifacts().capture_graph_selection() == expected_support.artifacts().capture_graph_selection(),
-                        actual_support.native_offers() == expected_support.native_offers(),
-                        actual_support.native_offer_observations().unwrap() == expected_support.native_offer_observations().unwrap(),
-                        actual_support.native_availability() == expected_support.native_availability(),
-                        actual_support.native_availability().persistent_facts() == expected_support.native_availability().persistent_facts(),
-                        actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
-                        actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
-                        actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
-                            );
-                    eprintln!(
-                        "restored publication offer order actual={:?} expected={:?}",
-                        actual_support
-                            .native_offers()
-                            .iter()
-                            .map(|offer| (
-                                offer.original(),
-                                offer.snapshot_facts().identity().unwrap()
-                            ))
-                            .collect::<Vec<_>>(),
-                        expected_support
-                            .native_offers()
-                            .iter()
-                            .map(|offer| (
-                                offer.original(),
-                                offer.snapshot_facts().identity().unwrap()
-                            ))
-                            .collect::<Vec<_>>(),
-                    );
-                }
-            }
-            assert_eq!(actuals, std::slice::from_ref(&publication));
+            assert_eq!(actuals, std::slice::from_ref(&current_publication));
         };
         let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
             let actual = ProtectedScaffoldRequirements::default()
@@ -22464,13 +22372,13 @@ mod tests {
             let born = selections[0].context();
             assert_eq!(
                 born.semantic_sha256(),
-                publication.context().semantic_sha256()
+                current_publication.context().semantic_sha256()
             );
             assert_eq!(
                 born.compiler_source_support()
                     .input_decisions()
                     .recorded_facts(),
-                publication
+                current_publication
                     .context()
                     .compiler_source_support()
                     .input_decisions()
