@@ -2734,7 +2734,7 @@ mod authored_tests {
     #[test]
     #[ignore = "requires the matched Haskell worker and frontend"]
     fn authored_declaration_in_exact_context_keeps_its_native_origin() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::artifacts::test_support::compiler_input_directory().unwrap();
         let baseline_module = SessionModule::lib(Generation(1));
         let support_source =
             include_str!("../tests/fixtures/checked-prefix-publication/PrefixSelectedSupport.hs")
