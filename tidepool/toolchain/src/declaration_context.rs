@@ -891,7 +891,7 @@ pub struct ExactCompileContext {
 
 /// Exact implementation inputs owned by a protected compiler recipe. These
 /// roles never enter persistent declarations or grant authored lexical imports.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ProtectedScaffoldRequirements {
     projection: CompilerInputProjection,
     native: Vec<(Arc<CertifiedAuthoredDeclaration>, Arc<[String]>)>,
@@ -5124,6 +5124,28 @@ thread_local! {
 }
 
 impl ProtectedScaffoldRequirements {
+    fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.projection == other.projection
+            && self.native.len() == other.native.len()
+            && self.native.iter().zip(&other.native).all(
+                |((certificate, templates), (other_certificate, other_templates))| {
+                    templates == other_templates
+                        && certificate.same_recorded_facts(other_certificate)
+                },
+            )
+    }
+
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.projection == other.projection
+            && self.native.len() == other.native.len()
+            && self.native.iter().zip(&other.native).all(
+                |((certificate, templates), (other_certificate, other_templates))| {
+                    templates == other_templates
+                        && certificate.same_selected_acquisitions(other_certificate)
+                },
+            )
+    }
+
     pub(crate) fn role_requirements(&self) -> &CompilerInputProjection {
         &self.projection
     }
@@ -5179,14 +5201,18 @@ impl ExactCompileContext {
     /// Compare request annotations and recorded compiler observations.
     pub fn same_recorded_facts(&self, other: &Self) -> bool {
         self.request_annotations == other.request_annotations
-            && self.protected_scaffold == other.protected_scaffold
+            && self
+                .protected_scaffold
+                .same_recorded_facts(&other.protected_scaffold)
             && self.declarations.same_recorded_facts(&other.declarations)
     }
 
     /// Compare this request's annotations and actual selected compiler inputs.
     pub fn same_authenticated_context(&self, other: &Self) -> bool {
         self.request_annotations == other.request_annotations
-            && self.protected_scaffold == other.protected_scaffold
+            && self
+                .protected_scaffold
+                .same_selected_acquisitions(&other.protected_scaffold)
             && self
                 .declarations
                 .same_authenticated_context(&other.declarations)
@@ -25662,14 +25688,16 @@ mod tests {
         );
         match (expected, actual) {
             (Ok(expected), Ok(actual)) => {
-                assert_eq!(
-                    actual
-                        .availability
-                        .0
-                        .iter()
-                        .map(|(id, row)| (*id, Arc::clone(row)))
-                        .collect::<BTreeMap<_, _>>(),
-                    *expected.availability
+                assert_eq!(actual.availability.0.len(), expected.availability.len());
+                assert!(
+                    expected.availability.iter().all(|(id, expected)| {
+                        actual
+                            .availability
+                            .0
+                            .get(id)
+                            .is_some_and(|actual| actual.same_acquisition(expected))
+                    }),
+                    "the reference transport must retain each exact input acquisition"
                 );
                 assert_eq!(
                     actual.candidates.select_all().unwrap().0,
@@ -25763,16 +25791,16 @@ mod tests {
                 &physical.metadata.retained,
                 &expected.metadata.retained
             ));
-            assert_eq!(
-                physical
-                    .inputs
-                    .native_selection
-                    .availability
-                    .0
-                    .iter()
-                    .map(|(id, row)| (*id, Arc::clone(row)))
-                    .collect::<BTreeMap<_, _>>(),
-                *expected.availability
+            let actual_availability = &physical.inputs.native_selection.availability;
+            assert_eq!(actual_availability.0.len(), expected.availability.len());
+            assert!(
+                expected.availability.iter().all(|(id, expected)| {
+                    actual_availability
+                        .0
+                        .get(id)
+                        .is_some_and(|actual| actual.same_acquisition(expected))
+                }),
+                "lowering must retain the reference transport's actual input acquisitions"
             );
             assert_eq!(
                 physical
@@ -33408,10 +33436,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             &[],
         )
         .unwrap();
-        assert_eq!(
-            context.compiler_source_support().native_offers(),
-            &[partial]
-        );
+        assert_eq!(context.compiler_source_support().native_offers().len(), 1);
+        assert!(context.compiler_source_support().native_offers()[0].same_issuance(&partial));
         assert!(!context.compiler_source_support().native_offers()[0].is_full());
         assert!(context
             .lexical_graph()
@@ -33678,10 +33704,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             &captured.inputs.native_selection.candidates.0,
             &advanced.primary.inputs.native_selection.candidates.0
         ));
-        assert_eq!(
-            captured.inputs.native_selection.availability,
-            advanced.primary.inputs.native_selection.availability
-        );
+        assert!(captured
+            .inputs
+            .native_selection
+            .availability
+            .same_acquisition(&advanced.primary.inputs.native_selection.availability,));
         assert_eq!(
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
             computations
