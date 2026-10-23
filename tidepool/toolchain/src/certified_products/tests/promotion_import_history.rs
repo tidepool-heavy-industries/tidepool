@@ -923,27 +923,28 @@ fn assert_actual_selected_and_retained_history(
         .unwrap();
     let supports = [ordinary_support, promoted_support];
     let acquisitions = [[&fixture.root, &fixture.helper], promoted];
-    let native_edges =
-        |support: &crate::artifact_inventory::CompilerSourceSupport, root, helper| {
-            support
+    let native_edges = |support: &crate::artifact_inventory::CompilerSourceSupport,
+                        root: &Arc<crate::artifact_inventory::ArtifactEntry>,
+                        helper| {
+        support
                 .native_availability()
-                .issued_row(root)
+                .issued_row(root.descriptor.id)
                 .expect("selected Original has actual issued native availability")
                 .offers()
-                .filter(|offer| offer.original_acquisition().descriptor.id == root)
+                .filter(|offer| Arc::ptr_eq(offer.original_acquisition(), root))
                 .flat_map(|offer| offer.custody_snapshot().binding_dependencies().unwrap())
                 .filter(|(from, to, edge)| {
                     matches!((from, to, edge),
                 (ArtifactBindingNode::Group(parent), ArtifactBindingNode::Group(child),
                     ArtifactDependency::NativeGroup { .. })
-                    if parent.binding.artifact() == root && child.binding.artifact() == helper)
+                    if parent.binding.artifact() == root.descriptor.id && child.binding.artifact() == helper)
                 })
                 .collect::<BTreeSet<_>>()
-        };
+    };
     let expected_edges = [0, 1].map(|index| {
         let edges = native_edges(
             &supports[index],
-            acquisitions[index][0].descriptor.id,
+            acquisitions[index][0],
             acquisitions[index][1].descriptor.id,
         );
         assert!(
@@ -971,6 +972,7 @@ fn assert_actual_selected_and_retained_history(
         let context = ExactDeclarationContext::empty()
             .extend_issued_compiler_support(&selected)
             .unwrap();
+        let retained_products = context.recovery_products();
         for entry in acquisitions[index] {
             let acquired = context
                 .compiler_source_support()
@@ -1016,8 +1018,7 @@ fn assert_actual_selected_and_retained_history(
             expected_owners[index].iter().cloned().collect(),
         );
         assert_eq!(
-            context
-                .recovery_products()
+            retained_products
                 .iter()
                 .filter(
                     |product| owners.iter().any(|owner| owner.unit == product.owner().unit
@@ -1030,7 +1031,7 @@ fn assert_actual_selected_and_retained_history(
         assert_eq!(
             native_edges(
                 context.compiler_source_support(),
-                acquisitions[index][0].descriptor.id,
+                acquisitions[index][0],
                 acquisitions[index][1].descriptor.id
             ),
             expected_edges[index],
@@ -1047,8 +1048,7 @@ fn assert_actual_selected_and_retained_history(
                     let ArtifactPayload::Original(expected) = &entry.payload else {
                         unreachable!()
                     };
-                    let retained = context
-                        .recovery_products()
+                    let retained = retained_products
                         .iter()
                         .find(|product| product.owner() == expected.owner())
                         .expect("historical Original remains in certified custody");
