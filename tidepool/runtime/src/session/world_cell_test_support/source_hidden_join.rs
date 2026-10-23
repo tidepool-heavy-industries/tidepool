@@ -1,12 +1,12 @@
 //! Checked declaration shadowing keeps the earlier nominal type private.
 
 use super::*;
-use crate::CompileError;
 use crate::session::{
     run_inspections, CertifiedDeclarationPublication, InspectionQuery, InspectionRequest,
     InspectionResult, ModuleEnv, PublicManifestCommit, PublicationDecision, RecoveryPublicOwner,
     SessionId, SessionLib,
 };
+use crate::CompileError;
 use std::collections::BTreeSet;
 use tidepool_repr::SessionModule;
 
@@ -291,7 +291,8 @@ fn paired_join_compiles_source_hidden_checked_bind_in_fresh_worker() {
     );
     match hidden {
         Err(CompileError::SourceAdmission(failure)) => {
-            assert_eq!(failure.owner, *original.product().owner());
+            assert_eq!(failure.owner.unit, original.product().owner().unit);
+            assert_eq!(failure.owner.module, original.product().owner().module);
             assert_eq!(failure.reason, tidepool_toolchain::SourceAdmissionRefusal::HiddenOriginalPromotion);
         }
         Err(CompileError::Diagnostics(diagnostics) | CompileError::InputRejected(diagnostics)) => {
