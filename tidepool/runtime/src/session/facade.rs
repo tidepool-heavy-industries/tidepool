@@ -251,15 +251,12 @@ impl MaterializedFacade {
             unit: inherited.receipt().reserved().unit.clone(),
             module: inherited.module_name().to_owned(),
         };
-        let surface = super::render::AdmittedDeclarationSurface {
-            roots: vec![owner.clone()],
-            lexical: inherited.context().lexical_graph().to_vec(),
-        };
+        let surface = inherited.composition().source_surface();
         admit().map_err(super::SessionError::SourceAdmission)?;
         let projection = issue_projection(
             inherited.context(),
             &owner,
-            &surface,
+            surface,
             &exports,
             inherited.receipt().instances(),
             inherited.receipt().family_closure(),
