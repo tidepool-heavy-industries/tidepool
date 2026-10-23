@@ -1039,7 +1039,9 @@ pub struct CompilerWorldLexicalSurface {
 
 impl CompilerWorldLexicalSurface {
     /// Original TYPE selections attached by the protected source issuer.
-    pub(crate) fn observation_type_interfaces(&self) -> &[Arc<crate::declaration_context::SelectedTypeInterfaces>] {
+    pub(crate) fn observation_type_interfaces(
+        &self,
+    ) -> &[Arc<crate::declaration_context::SelectedTypeInterfaces>] {
         self.observation
             .as_ref()
             .map_or(&[], |scaffold| scaffold.type_interfaces())
@@ -2436,9 +2438,7 @@ impl CompilerWorld {
         lexical: Option<&CompilerWorldLexicalSurface>,
     ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
-        let advance = prior
-            .primary_inputs
-            .with_type_interfaces(contexts)?;
+        let advance = prior.primary_inputs.with_type_interfaces(contexts)?;
         let lexical_changed =
             lexical.is_some_and(|lexical| prior.inputs.lexical.observation != lexical.observation);
         if advance.changed_owners.is_empty() && !lexical_changed {
@@ -3848,8 +3848,8 @@ impl CompilerWorldOpenInputs {
         let primary_inputs = self
             .primary_context
             .capture_world_primary_inputs(producer)?;
-        let type_advance = primary_inputs
-            .with_type_interfaces(self.lexical.observation_type_interfaces())?;
+        let type_advance =
+            primary_inputs.with_type_interfaces(self.lexical.observation_type_interfaces())?;
         self.primary_context = type_advance.primary.context().clone();
         let primary_inputs = type_advance.primary;
         let (primary_context, primary_root, runtime_context_blocks) =

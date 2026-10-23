@@ -4488,7 +4488,7 @@ mod normalized_dependency_tests {
             .unwrap();
         let root_request = root_context
             .capture_world_primary_inputs(producer.sha256())
-            .unwrap();
+            .unwrap().inputs().clone();
         assert!(root_request
             .artifacts()
             .capture_graph_selection()

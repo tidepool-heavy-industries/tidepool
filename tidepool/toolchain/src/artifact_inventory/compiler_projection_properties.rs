@@ -794,7 +794,7 @@ fn exact_group_availability_survives_projection_clone_and_cross_inventory_merge(
                 .capture_world_primary_inputs(
                     catalog.original(0, version).descriptor.producer_sha256,
                 )
-                .unwrap();
+                .unwrap().inputs().clone();
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let receipt =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(

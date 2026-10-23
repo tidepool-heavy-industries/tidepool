@@ -12371,7 +12371,7 @@ mod tests {
                     .unwrap();
             let inputs = context
                 .capture_world_primary_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .unwrap().inputs().clone();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -12393,7 +12393,7 @@ mod tests {
                         .unwrap();
                 let inputs = context
                     .capture_world_primary_inputs(native.descriptor.producer_sha256)
-                    .unwrap();
+                    .unwrap().inputs().clone();
                 let selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         &inputs,
@@ -12523,7 +12523,7 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .unwrap().inputs().clone();
             let selected_receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
@@ -12576,7 +12576,7 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .unwrap().inputs().clone();
             let receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
@@ -12787,7 +12787,7 @@ mod tests {
                     .unwrap();
             let inputs = context
                 .capture_world_primary_inputs(roots[0].0.descriptor.producer_sha256)
-                .unwrap();
+                .unwrap().inputs().clone();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -15999,7 +15999,7 @@ mod tests {
             let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let inputs = issuer_context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap();
+                .unwrap().inputs().clone();
             let certified =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -16979,7 +16979,7 @@ mod tests {
                 let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let inputs = issuer_context
                     .capture_world_primary_inputs([2; 32])
-                    .unwrap();
+                    .unwrap().inputs().clone();
                 let receipt =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         &inputs,

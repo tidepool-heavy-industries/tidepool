@@ -1786,7 +1786,7 @@ impl ExactHostBindingPrototype {
     /// runtime pairs this proof with that site's separately owned live payload.
     pub fn from_original_input(
         witness: CanonicalInputTypeWitness,
-        original_type_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
+        original_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
     ) -> Result<Arc<Self>, CompileError> {
         let producer = original_interfaces.toolchain_identity_sha256();
         if producer == [0; 32] {
@@ -2029,7 +2029,9 @@ impl HostBindingInterfaceOffer {
                 string(&fields[10])?,
             ]),
         )?;
-        let context = self.prototype.type_interfaces
+        let context = self
+            .prototype
+            .type_interfaces
             .with_host_value_interfaces(std::slice::from_ref(&certificate))?;
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(

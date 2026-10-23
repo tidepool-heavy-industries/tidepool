@@ -1934,7 +1934,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                     .unwrap();
             let inputs = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap();
+                .unwrap().inputs().clone();
             let continuation =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,

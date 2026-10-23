@@ -6215,7 +6215,7 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap();
+                .unwrap().inputs().clone();
             let support = inputs.shared_compiler_source_support();
             let roots = BTreeSet::from([seed.descriptor.owner.clone()]);
             let retained = Arc::clone(&inputs.metadata().retained);
@@ -6332,7 +6332,7 @@ mod tests {
                 .unwrap();
             let original = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap();
+                .unwrap().inputs().clone();
             let entry = Arc::new(crate::artifact_inventory::tests::entry("AddedType", &[]));
             let owner = entry.descriptor.owner.clone();
             let incoming_inventory = ArtifactInventory::default();
@@ -6455,7 +6455,7 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap();
+                .unwrap().inputs().clone();
             let support = inputs.shared_compiler_source_support();
             let retained = Arc::clone(&inputs.metadata().retained);
             // Positive control: the original validation path really rebuilds

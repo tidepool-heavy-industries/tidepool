@@ -192,7 +192,7 @@ impl<'a> CompletedOriginalExecution<'a> {
     }
     pub(crate) fn original_display_projection(
         &self,
-        input: &ExactDeclarationContext,
+        input: &super::SelectedTypeInterfaces,
     ) -> Result<ExactDeclarationContext, CompileError> {
         self.context()
             .display_projection_for_target(input, self.target())

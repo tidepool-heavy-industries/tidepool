@@ -455,9 +455,10 @@ impl<'a> WorldNativeDemandResolver<'a> {
         } else {
             let resolved = self
                 .completion
-                .inputs
+                .primary
+                .inputs()
                 .resolve_native_demand(&unacquired, self.validation)?;
-            if !resolved.belongs_to(&self.completion.primary.inputs()) {
+            if !resolved.belongs_to(self.completion.primary.inputs()) {
                 return Err(source_failure(
                     "native demand resolved against another input owner",
                 ));
