@@ -10,7 +10,10 @@ and `producer: [u8; 32]`. Producers return this owner:
 - checked-value and host-prototype issuance use the same exact selected projection.
 
 Public observations: `toolchain_identity_sha256()`, `semantic_sha256()`,
-`same_authenticated_interfaces(&Self)`. Semantic identity is computed only when
+`same_authenticated_interfaces(&Self)`, and signature/witness narrowing through
+`select(witnesses, signatures)`. Checked-row issuance belongs to the selected
+owner through private `from_checked_value` and `from_checked_value_signature`.
+Authenticated comparison includes exact dependency facts. Semantic identity is computed only when
 consumed. No context, projection, source or execution escape is public.
 `ExactDeclarationContext::extend_type_interfaces(self, &SelectedTypeInterfaces)`
 admits the selected TYPE evidence into an existing context.
