@@ -283,7 +283,7 @@ pub(super) fn assert_actual_available_prior_source_inputs(
         // The same carried compiler support and availability, without the
         // actual program-source row, cannot manufacture prior-stage origin.
         let carried = CertifiedSourceSelection::from_compiler_inputs(
-            &continuation.inputs,
+            continuation.primary.inputs(),
             inputs.initial.operation(),
         )
         .expect("ordinary carried selection remains valid");

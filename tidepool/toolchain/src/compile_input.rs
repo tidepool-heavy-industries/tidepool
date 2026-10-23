@@ -887,7 +887,7 @@ mod tests {
                 .is_none()
         );
         let projected = validated.project_type_interfaces(&[], &[]).unwrap();
-        assert!(projected.source_scope().rows().is_empty());
+        assert!(projected.compiler_source_support().projection().roles().is_empty());
         assert_eq!(
             projected.toolchain_identity_sha256(),
             original.context().toolchain_identity_sha256()

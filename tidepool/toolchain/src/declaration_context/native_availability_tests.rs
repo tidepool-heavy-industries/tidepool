@@ -4375,7 +4375,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
-        let error = NativeCompilerTransport::lower_metadata(&cold)
+        let error = NativeCompilerTransport::lower_metadata(cold.inputs())
             .err()
             .expect("finite compiler selection must refuse competing bodies");
         assert!(matches!(error, CompileError::ArtifactInventory(error)
@@ -4406,6 +4406,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             .unwrap();
         assert_eq!(
             initial
+                .inputs
                 .native_selection
                 .candidates
                 .require_unique(owner)
@@ -4417,15 +4418,15 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             .unwrap();
         assert!(advanced.changed_owners.is_empty(), "adding a historical candidate changes availability without changing the selected canonical role");
         assert_eq!(
-            advanced.inputs.native_selection.candidates.0,
-            cold.native_selection.candidates.0
+            advanced.primary.inputs.native_selection.candidates.0,
+            cold.inputs.native_selection.candidates.0
         );
         assert_eq!(
-            advanced.inputs.native_selection.availability,
-            cold.native_selection.availability
+            advanced.primary.inputs.native_selection.availability,
+            cold.inputs.native_selection.availability
         );
         assert!(
-            matches!(advanced.inputs.native_selection.candidates.require_unique(owner),
+            matches!(advanced.primary.inputs.native_selection.candidates.require_unique(owner),
             Err(CompileError::ArtifactInventory(error))
             if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { owner: ref ambiguous }
                 if ambiguous == owner))
@@ -4605,14 +4606,18 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
                 .unwrap(),
         );
         let captured = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         let owner = &entry.descriptor.owner;
-        let prior_row = captured.native_availability(entry.descriptor.id).unwrap();
+        let prior_row = captured
+            .inputs
+            .native_availability(entry.descriptor.id)
+            .unwrap();
         assert_eq!(prior_row.mode, NativeTransportMode::IssuedGroups);
         assert!(prior_row.issued_ordinals().is_empty());
         assert_eq!(
             captured
+                .inputs
                 .native_selection
                 .candidates
                 .require_unique(owner)
@@ -4627,6 +4632,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
         .unwrap();
         assert!(incoming.native_availability().rows().next().is_none());
         let delta = captured
+            .inputs
             .source_support
             .append_program_fragment(&incoming)
             .unwrap();
@@ -4638,7 +4644,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             delta
                 .support
                 .native_availability()
-                .same_acquisition(captured.source_support.native_availability()),
+                .same_acquisition(captured.inputs.source_support.native_availability()),
             "only offer custody changes; normalized row ownership stays exact"
         );
         assert_eq!(delta.support.native_offers().len(), 2);
@@ -4649,19 +4655,21 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             .advance_program_support(&context, &incoming)
             .unwrap();
         let cold = advanced
+            .primary
             .context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         assert_eq!(
-            advanced.inputs.native_selection.candidates.0,
-            cold.native_selection.candidates.0
+            advanced.primary.inputs.native_selection.candidates.0,
+            cold.inputs.native_selection.candidates.0
         );
         assert_eq!(
-            advanced.inputs.native_selection.availability,
-            cold.native_selection.availability
+            advanced.primary.inputs.native_selection.availability,
+            cold.inputs.native_selection.availability
         );
         assert_eq!(
             advanced
+                .primary
                 .inputs
                 .native_selection
                 .candidates
@@ -4671,6 +4679,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
             "the new exact Empty offer supplies direct affinity without granting groups"
         );
         let row = advanced
+            .primary
             .inputs
             .native_availability(entry.descriptor.id)
             .unwrap();
@@ -4678,15 +4687,16 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
         assert!(row.issued_ordinals().is_empty());
         assert!(!row.permits(7) && !row.permits(9001));
         assert!(advanced
+            .primary
             .inputs
             .artifacts()
             .selected_native_groups()
             .is_empty());
         assert_eq!(
-            NativeCompilerTransport::lower_metadata(&advanced.inputs)
+            NativeCompilerTransport::lower_metadata(&advanced.primary.inputs)
                 .unwrap()
                 .entries,
-            NativeCompilerTransport::lower_metadata(&cold)
+            NativeCompilerTransport::lower_metadata(cold.inputs())
                 .unwrap()
                 .entries
         );
@@ -5038,6 +5048,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 .unwrap();
             assert_eq!(
                 initial
+                    .inputs
                     .native_selection
                     .candidates
                     .require_unique(owner)
@@ -5045,6 +5056,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 None
             );
             assert!(initial
+                .inputs
                 .native_availability(entries[0].descriptor.id)
                 .unwrap()
                 .permits(7));
@@ -5054,33 +5066,36 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 .support_for_owners(vec![owner.clone()])
                 .unwrap();
             let program_types = types.clone();
-            let type_context = Arc::new(context.clone().rebuild(|facts| {
-                facts.compiler_support = types;
-            }));
+            let type_context = Arc::new(SelectedTypeInterfaces {
+                support: types,
+                producer: context.toolchain_identity_sha256(),
+                identity: OnceLock::new(),
+            });
             let advanced = initial.with_type_interfaces(&[type_context]).unwrap();
             assert_eq!(advanced.changed_owners, vec![owner.clone()]);
             let cold = advanced
+                .primary
                 .context
                 .capture_world_primary_inputs(producer.sha256())
                 .unwrap();
             let program = initial
-                .advance_program_support(&advanced.context, &program_types)
+                .advance_program_support(&advanced.primary.context, &program_types)
                 .unwrap();
             assert_eq!(
-                program.inputs.native_selection.candidates.0,
-                cold.native_selection.candidates.0
+                program.primary.inputs.native_selection.candidates.0,
+                cold.inputs.native_selection.candidates.0
             );
             assert_eq!(
-                program.inputs.native_selection.availability,
-                cold.native_selection.availability
+                program.primary.inputs.native_selection.availability,
+                cold.inputs.native_selection.availability
             );
             assert_eq!(
-                advanced.inputs.native_selection.candidates.0,
-                cold.native_selection.candidates.0
+                advanced.primary.inputs.native_selection.candidates.0,
+                cold.inputs.native_selection.candidates.0
             );
             assert_eq!(
-                advanced.inputs.native_selection.availability,
-                cold.native_selection.availability
+                advanced.primary.inputs.native_selection.availability,
+                cold.inputs.native_selection.availability
             );
             assert_eq!(
                 advanced
@@ -5093,10 +5108,10 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 "the new TYPE role exposes only its already issued exact native child"
             );
             assert_eq!(
-                NativeCompilerTransport::lower_metadata(&advanced.inputs)
+                NativeCompilerTransport::lower_metadata(&advanced.primary.inputs)
                     .unwrap()
                     .entries,
-                NativeCompilerTransport::lower_metadata(&cold)
+                NativeCompilerTransport::lower_metadata(cold.inputs())
                     .unwrap()
                     .entries
             );
@@ -7255,7 +7270,23 @@ pub(crate) fn assert_selected_authored_private_inputs(
     // A fresh receiver gains TYPE evidence without the source's native owner.
     let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
         .unwrap()
-        .extend_interface_context(&native_context)
+        .extend_type_interfaces(&SelectedTypeInterfaces {
+            support: native_context
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
+                    native_context
+                        .compiler_input_projection()
+                        .roles()
+                        .keys()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap(),
+            producer: native_context.toolchain_identity_sha256(),
+            identity: OnceLock::new(),
+        })
         .unwrap();
     assert!(fresh
         .owner
@@ -7290,7 +7321,23 @@ pub(crate) fn assert_selected_authored_private_inputs(
     // receiver without selecting any executable group.
     let retained = captured
         .clone()
-        .extend_interface_context(&native_context)
+        .extend_type_interfaces(&SelectedTypeInterfaces {
+            support: native_context
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
+                    native_context
+                        .compiler_input_projection()
+                        .roles()
+                        .keys()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap(),
+            producer: native_context.toolchain_identity_sha256(),
+            identity: OnceLock::new(),
+        })
         .unwrap();
     assert_eq!(
         retained
@@ -9789,7 +9836,23 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .all(|edge| retained_again.binding_dependencies().contains(edge)));
             let extended = original
                 .clone()
-                .extend_interface_context(&original)
+                .extend_type_interfaces(&SelectedTypeInterfaces {
+                    support: original
+                        .compiler_source_support()
+                        .selected_interfaces()
+                        .unwrap()
+                        .type_interfaces_for_owners(
+                            original
+                                .compiler_input_projection()
+                                .roles()
+                                .keys()
+                                .cloned()
+                                .collect(),
+                        )
+                        .unwrap(),
+                    producer: original.toolchain_identity_sha256(),
+                    identity: OnceLock::new(),
+                })
                 .unwrap();
             contexts.push(original.clone());
             assert_eq!(extended.lexical_graph(), original.lexical_graph());
@@ -9836,7 +9899,10 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
         }
         if changed_canonical {
             assert!(
-                matches!(contexts[0].clone().extend_interface_context(&contexts[1]),
+                matches!(contexts[0].clone().extend_type_interfaces(&SelectedTypeInterfaces {
+            support: contexts[1].compiler_source_support().selected_interfaces().unwrap().type_interfaces_for_owners(contexts[1].compiler_input_projection().roles().keys().cloned().collect()).unwrap(),
+            producer: contexts[1].toolchain_identity_sha256(), identity: OnceLock::new(),
+        }),
                 Err(CompileError::ArtifactInventory(error))
                 if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { .. })
                 && matches!(error.owner_conflict, Some(crate::artifact_inventory::ArtifactOwnerConflictEvidence::CompilerRole { .. })))
@@ -10336,7 +10402,23 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
     let source = current_source
         .as_ref()
         .clone()
-        .extend_interface_context(&fallback_context)
+        .extend_type_interfaces(&SelectedTypeInterfaces {
+            support: fallback_context
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
+                    fallback_context
+                        .compiler_input_projection()
+                        .roles()
+                        .keys()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap(),
+            producer: fallback_context.toolchain_identity_sha256(),
+            identity: OnceLock::new(),
+        })
         .unwrap();
     let publication = current_output
         .products()
@@ -10346,7 +10428,23 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         .context()
         .as_ref()
         .clone()
-        .extend_interface_context(&fallback_context)
+        .extend_type_interfaces(&SelectedTypeInterfaces {
+            support: fallback_context
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
+                    fallback_context
+                        .compiler_input_projection()
+                        .roles()
+                        .keys()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap(),
+            producer: fallback_context.toolchain_identity_sha256(),
+            identity: OnceLock::new(),
+        })
         .expect("publication narrows to B; the type owner explicitly admits unrelated C afterward");
     for published in [false, true] {
         let baseline = if published {

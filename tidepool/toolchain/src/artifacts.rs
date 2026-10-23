@@ -9530,7 +9530,7 @@ mod module_product_tests {
                 )
                 .expect("actual checked-value type projection");
             assert!(
-                types.compiler_input_roles().is_empty(),
+                types.compiler_source_support().projection().roles().is_empty(),
                 "Int has only package type owners"
             );
             assert_eq!(

@@ -807,7 +807,23 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
         .rebuild(|facts| facts.compiler_support = support.clone());
     let extended = demanded
         .clone()
-        .extend_interface_context(&demanded)
+        .extend_type_interfaces(&SelectedTypeInterfaces {
+            support: demanded
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
+                    demanded
+                        .compiler_input_projection()
+                        .roles()
+                        .keys()
+                        .cloned()
+                        .collect(),
+                )
+                .unwrap(),
+            producer: demanded.toolchain_identity_sha256(),
+            identity: OnceLock::new(),
+        })
         .unwrap();
     assert_eq!(
         extended.artifact_view().capture_graph_selection().roots,

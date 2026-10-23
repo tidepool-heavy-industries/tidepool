@@ -6215,7 +6215,9 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap().inputs().clone();
+                .unwrap()
+                .inputs()
+                .clone();
             let support = inputs.shared_compiler_source_support();
             let roots = BTreeSet::from([seed.descriptor.owner.clone()]);
             let retained = Arc::clone(&inputs.metadata().retained);
@@ -6330,9 +6332,7 @@ mod tests {
                     [2; 32], &view, roles,
                 )
                 .unwrap();
-            let original = context
-                .capture_world_primary_inputs([2; 32])
-                .unwrap().inputs().clone();
+            let original = context.capture_world_primary_inputs([2; 32]).unwrap();
             let entry = Arc::new(crate::artifact_inventory::tests::entry("AddedType", &[]));
             let owner = entry.descriptor.owner.clone();
             let incoming_inventory = ArtifactInventory::default();
@@ -6349,8 +6349,14 @@ mod tests {
                 )
                 .unwrap(),
             );
+            let signature = type_signature("unit", "AddedType");
+            let incoming = Arc::new(
+                incoming
+                    .select_original_type_interfaces(&[], &[&signature])
+                    .unwrap(),
+            );
             let changed = original.with_type_interfaces(&[incoming]).unwrap();
-            let artifacts = changed.inputs.artifacts();
+            let artifacts = changed.primary.inputs().artifacts();
             assert!(artifacts.reads.read_projection.get().is_none());
             let observed_inventory = artifacts.inventory();
             let before = observed_inventory.metrics();
@@ -6359,13 +6365,15 @@ mod tests {
                 ..Default::default()
             });
             let empty = changed
-                .inputs
+                .primary
+                .inputs()
                 .demanded_compiler_projection(&BTreeSet::new(), &empty_budget)
                 .unwrap();
             assert!(empty.owners().is_empty());
             assert_eq!(empty.work(), DemandCompilerProjectionWork::default());
             let empty_native = changed
-                .inputs
+                .primary
+                .inputs()
                 .demanded_native_inputs(empty, &BTreeSet::new(), &empty_budget)
                 .unwrap();
             assert!(empty_native
@@ -6375,7 +6383,8 @@ mod tests {
             assert_eq!(empty_budget.work_usage().unwrap(), (0, 0));
             let operation = InventoryOperation::new(Default::default());
             let demanded = changed
-                .inputs
+                .primary
+                .inputs()
                 .demanded_compiler_projection(&BTreeSet::from([owner.clone()]), &operation)
                 .unwrap();
             assert_eq!(demanded.owners(), &BTreeSet::from([owner]));
@@ -6383,10 +6392,11 @@ mod tests {
             assert_eq!(demanded.work().payload_lookups, 1);
             assert!(Arc::ptr_eq(
                 &demanded.metadata().retained,
-                &changed.inputs.metadata().retained
+                &changed.primary.inputs().metadata().retained
             ));
             let selected = changed
-                .inputs
+                .primary
+                .inputs()
                 .demanded_native_inputs(demanded, &BTreeSet::new(), &operation)
                 .unwrap();
             assert!(selected.native_availability().persistent_facts().is_empty());
@@ -6398,7 +6408,7 @@ mod tests {
             // Recompute from the actual immutable lease through a fresh read
             // owner, independently of the maintained metadata and hot demand.
             let cold = ArtifactView::from_custody(Arc::clone(&artifacts.lease)).metadata_snapshot();
-            let maintained = &changed.inputs.metadata().retained;
+            let maintained = &changed.primary.inputs().metadata().retained;
             assert!(!Arc::ptr_eq(&cold, maintained));
             assert_eq!(cold.entries, maintained.entries);
             assert_eq!(cold.artifacts, maintained.artifacts);
@@ -6455,7 +6465,9 @@ mod tests {
                 .unwrap();
             let inputs = context
                 .capture_world_primary_inputs([2; 32])
-                .unwrap().inputs().clone();
+                .unwrap()
+                .inputs()
+                .clone();
             let support = inputs.shared_compiler_source_support();
             let retained = Arc::clone(&inputs.metadata().retained);
             // Positive control: the original validation path really rebuilds
@@ -6939,16 +6951,16 @@ mod tests {
                 for (owner, original) in &expected {
                     proptest::prop_assert_eq!(&actual.selected[owner].interface.1, original);
                 }
-                proptest::prop_assert!(result.artifact_view().selected_native_groups().is_empty());
-                proptest::prop_assert!(result.lexical_graph().is_empty());
+                proptest::prop_assert!(result.compiler_source_support().artifacts().selected_native_groups().is_empty());
+
             }
             // The same Name is a missing home in the full owner, but an external
             // unit in the restricted owner. Its classification must not leak.
             if unrelated > 0 {
                 let absent = type_signature("other_unit_0", "Absent");
                 proptest::prop_assert!(context.select_original_type_interfaces(&[], &[&absent]).is_err());
-                let external = narrowed[0].select_original_type_interfaces(&[], &[&absent]).unwrap();
-                proptest::prop_assert!(external.compiler_input_roles().is_empty());
+                let external = narrowed[0].select(&[], &[&absent]).unwrap();
+                proptest::prop_assert!(external.compiler_source_support().projection().roles().is_empty());
             }
             let missing_home = type_signature("unit", "Absent");
             proptest::prop_assert!(context.select_original_type_interfaces(&[], &[&missing_home]).is_err());
@@ -8383,7 +8395,7 @@ mod tests {
                 .unwrap();
             let projected = projected_context.compiler_source_support();
             let (changed, owners) = baseline
-                .with_type_interfaces(&[projected], [2; 32])
+                .with_type_interfaces(&[projected.compiler_source_support()], [2; 32])
                 .unwrap();
             let maintained = changed.type_interface_metadata(&metadata, &owners).unwrap();
             let work = type_query_work::take();

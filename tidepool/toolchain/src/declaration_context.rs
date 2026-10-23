@@ -32846,7 +32846,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
             before + 1,
         );
-        assert!(captured.metadata.entries.is_empty());
+        assert!(captured.inputs.metadata.entries.is_empty());
     }
 
     #[test]
@@ -32860,10 +32860,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .collect::<BTreeSet<_>>();
         assert!(!expected_originals.is_empty());
         let captured = context.capture_world_primary_inputs(canonical).unwrap();
-        assert_eq!(captured.projection().roles(), roles);
-        assert!(!captured.metadata.entries.is_empty());
+        assert_eq!(captured.inputs.projection().roles(), roles);
+        assert!(!captured.inputs.metadata.entries.is_empty());
         assert_eq!(
             captured
+                .inputs
                 .native_selection
                 .availability
                 .0
@@ -32873,7 +32874,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             expected_originals,
         );
         let retained = context.artifact_view().metadata_snapshot();
-        for (id, availability) in captured.native_selection.availability.0.iter() {
+        for (id, availability) in captured.inputs.native_selection.availability.0.iter() {
             assert_eq!(availability.original.descriptor.id, *id);
             let selected = retained.artifacts.get(id).unwrap();
             assert!(Arc::ptr_eq(&availability.original, selected));
@@ -32909,6 +32910,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 template_imports: None,
             },
         ));
+        let incoming = Arc::new(SelectedTypeInterfaces {
+            support: incoming.compiler_source_support().clone(),
+            producer,
+            identity: OnceLock::new(),
+        });
         let computations = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
         let metadata_snapshots = COMPILER_METADATA_SNAPSHOTS.with(|count| count.get());
         let native_lowerings = NATIVE_TRANSPORT_LOWERINGS.with(|count| count.get());
@@ -32919,34 +32925,30 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap()
         });
         assert_eq!(advanced.changed_owners, vec![owner.clone()]);
-        assert!(!Arc::ptr_eq(&captured, &advanced.inputs));
+        assert!(!Arc::ptr_eq(&captured.inputs, &advanced.primary.inputs));
         assert_eq!(
-            advanced.context.owner.facts.lexical,
+            advanced.primary.context.owner.facts.lexical,
             primary.owner.facts.lexical
         );
         assert_eq!(
-            advanced.context.owner.facts.template_imports,
+            advanced.primary.context.owner.facts.template_imports,
             primary.owner.facts.template_imports
         );
         assert_eq!(
-            advanced.context.owner.facts.producer,
+            advanced.primary.context.owner.facts.producer,
             primary.owner.facts.producer
         );
         assert!(Arc::ptr_eq(
-            advanced.inputs.world_primary_context.as_ref().unwrap(),
-            &advanced.context
+            &captured.inputs.original_sources,
+            &advanced.primary.inputs.original_sources
         ));
         assert!(Arc::ptr_eq(
-            &captured.original_sources,
-            &advanced.inputs.original_sources
-        ));
-        assert!(Arc::ptr_eq(
-            &captured.native_selection.candidates.0,
-            &advanced.inputs.native_selection.candidates.0
+            &captured.inputs.native_selection.candidates.0,
+            &advanced.primary.inputs.native_selection.candidates.0
         ));
         assert_eq!(
-            captured.native_selection.availability,
-            advanced.inputs.native_selection.availability
+            captured.inputs.native_selection.availability,
+            advanced.primary.inputs.native_selection.availability
         );
         assert_eq!(
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
@@ -32973,35 +32975,35 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             );
         }
         let row = advanced
-            .inputs
+            .primary.inputs
             .compiler_source_support()
             .world_primary_type_row(&owner)
             .unwrap();
         assert!(row.original_binding.is_none());
         assert_eq!(row.entry.descriptor.owner, owner);
         assert_eq!(
-            advanced.context.snapshot().compiler_roles(),
-            advanced.inputs.projection().roles()
+            advanced.primary.context.snapshot().compiler_roles(),
+            advanced.primary.inputs.projection().roles()
         );
-        let repeated = advanced.inputs.with_type_interfaces(&[incoming]).unwrap();
+        let repeated = advanced.primary.with_type_interfaces(&[incoming]).unwrap();
         assert!(repeated.changed_owners.is_empty());
-        assert!(Arc::ptr_eq(&repeated.inputs, &advanced.inputs));
-        assert!(Arc::ptr_eq(&repeated.context, &advanced.context));
-        let empty = repeated.inputs.with_type_interfaces(&[]).unwrap();
-        assert!(Arc::ptr_eq(&empty.inputs, &repeated.inputs));
-        // A generic scaffold/private request has no World-primary owner.
-        let generic = Arc::new(
-            ProtectedScaffoldRequirements::default()
-                .compiler_inputs(&primary, None)
-                .unwrap(),
-        );
-        assert!(generic.with_type_interfaces(&[]).is_err());
+        assert!(Arc::ptr_eq(
+            &repeated.primary.inputs,
+            &advanced.primary.inputs
+        ));
+        assert!(Arc::ptr_eq(
+            &repeated.primary.context,
+            &advanced.primary.context
+        ));
+        let empty = repeated.primary.with_type_interfaces(&[]).unwrap();
+        assert!(Arc::ptr_eq(&empty.primary.inputs, &repeated.primary.inputs));
         let foreign = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
                 .admit_producer([99; 32])
                 .unwrap(),
         );
+        let foreign = Arc::new(foreign.select_original_type_interfaces(&[], &[]).unwrap());
         assert!(
             captured.with_type_interfaces(&[foreign]).is_err(),
             "even empty type evidence must match the producer"

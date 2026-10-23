@@ -24,7 +24,7 @@ pub use crate::declaration_context::{
     IncompleteOriginalExecution, MaterializedExactDeclarationContext, OriginalExecutionEvidence,
     OriginalExecutionSource, RecoveredArtifactAcquisition, RecoveredArtifactInventory,
     RecoveryInventoryError, RecoveryPayloadReference, RequestAnnotations, RequestHelperRecipe,
-    ValidatedOriginalSource,
+    SelectedTypeInterfaces, ValidatedOriginalSource,
 };
 
 mod recovery;
