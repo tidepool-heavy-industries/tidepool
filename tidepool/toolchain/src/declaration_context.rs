@@ -1345,9 +1345,9 @@ impl OriginalCompilerInputs {
 
     pub(crate) fn issued_input_decisions(
         &self,
-    ) -> Option<&crate::artifact_inventory::IssuedInputNativeDecisions> {
-        // Absence of an owner's fact retains role policy. An issued empty fact
-        // remains present and suppresses that policy at request closure.
+    ) -> Option<&crate::artifact_inventory::RecordedInputNativeDecisions> {
+        // These are transport observations. Actual native support remains with
+        // the selected row; an empty choice remains distinct from no choice.
         Some(self.support.input_decisions())
     }
 
@@ -19261,7 +19261,7 @@ mod tests {
         };
         let old = restore(&selections[0]).unwrap();
         let new = restore(&selections[1]).unwrap();
-        assert_ne!(old, new);
+        assert!(!old.same_recorded_facts(&new));
         assert!(!old.same_authenticated_context(&new));
         assert!(!old.same_display_observations(&new));
         assert_context_observation_wire(&old);
@@ -34746,8 +34746,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .iter()
             .filter(|offer| offer.original() == support_entry.descriptor.id)
             .collect::<Vec<_>>();
-        assert_eq!(
-            propagated_support, issued_support,
+        assert_eq!(propagated_support.len(), issued_support.len());
+        assert!(
+            propagated_support.iter().zip(&issued_support)
+                .all(|(propagated, issued)| propagated.same_issuance(issued)),
             "type-only support must retain its issuer's exact carrier, interface, availability class and selection"
         );
         // Opaque availability survives type-only roles independently of
