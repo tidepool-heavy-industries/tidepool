@@ -14312,6 +14312,10 @@ impl ExactDeclarationContext {
         self = self.rebuild(|facts| facts.compiler_support = updated);
         self.finish()
     }
+    pub fn compiler_roles(&self) -> AdmittedCompilerRoles<'_> {
+        self.owner.facts.compiler_support.compiler_roles()
+    }
+
     pub fn compiler_input_projection(&self) -> &CompilerInputProjection {
         &self.owner.facts.compiler_support.projection()
     }
