@@ -1,5 +1,34 @@
 # Compiler reuse evidence
 
+## Retained HOME interfaces and physical views
+
+The supported GHC 9.12.2 resident compiler runs in `CompManager` with one
+definite active HOME unit. A reusable environment keeps the completed HPT and
+the fixed package owner, but receives fresh HOME Finder cells and an empty
+request graph, target list and knot-variable table. Its recorded HOME usages,
+direct imports, orphan modules and family-instance modules must resolve to the
+same HPT; missing dependencies produce a typed refusal.
+The target HMI survives only when another retained HOME interface reaches it;
+this preserves SOURCE cycles without adding the target to the source memo.
+
+GHC typechecks interface declarations lazily. Those actions retain their
+original environment and consult the HPT for HOME declarations. Retaining
+those actions does not extend the lifetime of temporary interface files:
+GHC rejects a `CompManager` HOME filesystem load before its file-reading step.
+See the versioned primary sources for
+[interface knot tying and lazy lookup](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/IfaceToCore.hs),
+[HPT declaration lookup](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Driver/Env.hs),
+and [HOME interface load refusal](https://github.com/ghc/ghc/blob/ghc-9.12.2-release/compiler/GHC/Iface/Load.hs).
+
+Tidepool HOME recovery therefore consumes captured HPT interfaces rather than
+bypassing GHC's refusal with a raw interface-file read. Package recovery uses
+the fixed package closure. Temporary make views stay within their compile
+cycle; actual World lexical backing remains with its existing World lease.
+The active successful attempt remains available through END, independently of
+the cleaned reusable view.
+
+## Reuse tracing
+
 Reuse is a decision at an owning stage, not a synonym for a fast request.
 Enable `TIDEPOOL_TIMING=1` before starting a private matched daemon and worker.
 Retain the JSON trace with span context, request start/terminal rows, and raw

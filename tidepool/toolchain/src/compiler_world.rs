@@ -4736,6 +4736,7 @@ pub(crate) struct CheckedWorldCellStage {
     ordinals: Vec<usize>,
     outputs: WorldStageOutputs,
     selected_inputs: Vec<WorldCellRuntimeInput>,
+    dependency_terminals: Vec<DependencyTerminalReference>,
     demanded_rows: Vec<Arc<CheckedValueArtifact>>,
     demanded_session_bindings: Vec<tidepool_repr::SessionVarId>,
 }
@@ -4760,6 +4761,9 @@ impl CheckedWorldCellStage {
     }
     pub(crate) fn demanded_session_bindings(&self) -> &[tidepool_repr::SessionVarId] {
         &self.demanded_session_bindings
+    }
+    pub(crate) fn dependency_terminals(&self) -> &[DependencyTerminalReference] {
+        &self.dependency_terminals
     }
     fn selected(&self, reference: &WorldInputRef) -> bool {
         self.selected_inputs
@@ -4850,6 +4854,7 @@ struct DecodedWorldCellStage {
     ordinals: Vec<usize>,
     outputs: WorldStageOutputs,
     selected_inputs: Vec<WorldInputRef>,
+    dependency_terminals: Vec<DependencyTerminalReference>,
 }
 #[cfg(test)]
 impl DecodedWorldCellStage {
@@ -5165,6 +5170,28 @@ impl CheckedWorldCellProgram {
         self.items.get(ordinal)
     }
 
+    pub(crate) fn selected_dependency_terminals(
+        &self,
+        ordinal: usize,
+    ) -> Result<Vec<SelectedDependencyTerminal>, CompileError> {
+        let item = self
+            .item(ordinal)
+            .ok_or_else(|| world_response_error(true))?;
+        let stage = item.proof.stage();
+        let issuer =
+            self.native_demand_completion()
+                .checked_stage(self, stage, self.validation())?;
+        issuer
+            .operation()
+            .reserve::<SelectedDependencyTerminal>(stage.dependency_terminals().len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        stage
+            .dependency_terminals()
+            .iter()
+            .map(|reference| issuer.select_dependency_terminal(reference))
+            .collect()
+    }
+
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
         self.output.primary_context()
     }
@@ -5335,7 +5362,7 @@ fn world_cell_output_certificate(
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolCheckedWorldCellProgram5");
+    frame(b"TidepoolCheckedWorldCellProgram6");
     frame(reservation.admission_digest());
     frame(&output.plan_receipt_sha256);
     frame(logical.logical_id());
@@ -5415,6 +5442,10 @@ fn world_cell_output_certificate(
                 .map(|selected| &selected.reference),
             &mut frame,
         );
+        frame(&(stage.dependency_terminals.len() as u64).to_le_bytes());
+        for terminal in &stage.dependency_terminals {
+            frame_dependency_terminal(terminal, &mut frame);
+        }
     }
     for id in &output.demanded_session_bindings {
         frame(&id.raw().to_le_bytes());
@@ -5433,6 +5464,61 @@ fn world_cell_output_certificate(
         frame(file.sha256());
     }
     *digest.finalize().as_bytes()
+}
+
+fn frame_dependency_terminal(
+    terminal: &DependencyTerminalReference,
+    frame: &mut impl FnMut(&[u8]),
+) {
+    let symbol = |symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+                  frame: &mut dyn FnMut(&[u8])| {
+        for part in [
+            &symbol.unit,
+            &symbol.module,
+            &symbol.namespace,
+            &symbol.occurrence,
+        ] {
+            frame(part.as_bytes());
+        }
+        match &symbol.record_parent {
+            None => frame(&[0]),
+            Some(parent) => {
+                frame(&[1]);
+                frame(parent.as_bytes());
+            }
+        }
+    };
+    let binding = |binding: crate::artifact_inventory::ArtifactBinding,
+                   frame: &mut dyn FnMut(&[u8])| {
+        frame(&binding.artifact.0);
+        frame(&binding.selection.0);
+    };
+    frame(&[match terminal.origin {
+        DependencyTerminalOrigin::SourceDefinition => 0,
+        DependencyTerminalOrigin::NativeOriginal => 1,
+    }]);
+    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+        unit,
+        module,
+        interface,
+        original,
+        binder,
+    } = &terminal.original_use
+    else {
+        unreachable!("a decoded terminal names an Original binding")
+    };
+    frame(unit.as_bytes());
+    frame(module.as_bytes());
+    binding(*interface, frame);
+    binding(*original, frame);
+    symbol(binder, frame);
+    frame(&terminal.demander.binding.artifact().0);
+    frame(&terminal.demander.binding.selection().0);
+    frame(&terminal.demander.original_ordinal.to_le_bytes());
+    frame(&terminal.global_index.to_le_bytes());
+    binding(terminal.binding, frame);
+    symbol(&terminal.identity, frame);
+    frame(&terminal.generation.to_le_bytes());
 }
 
 fn frame_world_stage_selection<'a>(
@@ -5805,6 +5891,132 @@ impl WorldInputRef {
     }
 }
 
+/// The compiler reports why this exact acquired dependency was reached. The
+/// tag does not grant source or native permission without its request owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DependencyTerminalOrigin {
+    SourceDefinition,
+    NativeOriginal,
+}
+
+/// Untrusted observations decoded from one emitted stage. In particular, a
+/// retained value has no SessionVarId until the runtime binds the selected
+/// occurrence to its own live value and custody.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DependencyTerminalReference {
+    origin: DependencyTerminalOrigin,
+    original_use: crate::certified_products::ReceiptImportOwner,
+    demander: crate::artifact_inventory::NativeGroupBinding,
+    global_index: u32,
+    binding: crate::artifact_inventory::ArtifactBinding,
+    identity: tidepool_repr::execution_schema::SymbolIdentity,
+    generation: u64,
+}
+
+impl DependencyTerminalReference {
+    fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
+        use crate::artifact_inventory::{
+            ArtifactBinding, ArtifactId, ArtifactSelectionId, NativeGroupBinding, NativeGroupIssuer,
+        };
+        let fields = answer_array(value, 7)?;
+        let origin = match answer_u64(&fields[0])? {
+            0 => DependencyTerminalOrigin::SourceDefinition,
+            1 => DependencyTerminalOrigin::NativeOriginal,
+            _ => return Err(world_response_error(false)),
+        };
+        let decode_binding = |value: &ciborium::value::Value| {
+            let fields = answer_array(value, 2)?;
+            Ok::<_, CompileError>(ArtifactBinding {
+                artifact: ArtifactId(answer_hash(&fields[0])?),
+                selection: ArtifactSelectionId(answer_hash(&fields[1])?),
+            })
+        };
+        // Dependency receipts use the certified-product identity codec. Its
+        // nullable parent is distinct from WorldInputRef's execution option.
+        let decode_identity = |value: &ciborium::value::Value| {
+            let fields = answer_array(value, 5)?;
+            Ok::<_, CompileError>(tidepool_repr::execution_schema::SymbolIdentity {
+                unit: answer_text(&fields[0])?.to_owned(),
+                module: answer_text(&fields[1])?.to_owned(),
+                namespace: answer_text(&fields[2])?.to_owned(),
+                occurrence: answer_text(&fields[3])?.to_owned(),
+                record_parent: match &fields[4] {
+                    ciborium::value::Value::Null => None,
+                    parent => Some(answer_text(parent)?.to_owned()),
+                },
+            })
+        };
+        let original = answer_array(&fields[1], 5)?;
+        let original_use = crate::certified_products::ReceiptImportOwner::OriginalBinding {
+            unit: answer_text(&original[0])?.to_owned(),
+            module: answer_text(&original[1])?.to_owned(),
+            interface: decode_binding(&original[2])?,
+            original: decode_binding(&original[3])?,
+            binder: decode_identity(&original[4])?,
+        };
+        let demander = answer_array(&fields[2], 3)?;
+        Ok(Self {
+            origin,
+            original_use,
+            demander: NativeGroupBinding {
+                binding: NativeGroupIssuer::from_observation(
+                    ArtifactId(answer_hash(&demander[0])?),
+                    ArtifactSelectionId(answer_hash(&demander[1])?),
+                ),
+                original_ordinal: u32::try_from(answer_u64(&demander[2])?)
+                    .map_err(|_| world_response_error(false))?,
+            },
+            global_index: u32::try_from(answer_u64(&fields[3])?)
+                .map_err(|_| world_response_error(false))?,
+            binding: decode_binding(&fields[4])?,
+            identity: decode_identity(&fields[5])?,
+            generation: answer_u64(&fields[6])?,
+        })
+    }
+}
+
+/// An exact terminal selected by the issuing source or native dependency
+/// owner of this request and stage. Runtime value authority remains separate.
+#[derive(Clone, Debug)]
+pub struct SelectedDependencyTerminal {
+    reference: DependencyTerminalReference,
+    issuer: native_demand::CheckedWorldStageNativeInputs,
+}
+
+impl SelectedDependencyTerminal {
+    /// Compare immutable compiler evidence only. The receiving runtime must
+    /// independently resolve and retain its actual scoped prepared value.
+    pub fn matches_checked_value(&self, row: &CheckedValueArtifact) -> Result<bool, CompileError> {
+        self.issuer
+            .matches_dependency_terminal_checked_value(&self.reference, row)
+    }
+
+    pub fn origin(&self) -> DependencyTerminalOrigin {
+        self.reference.origin
+    }
+    pub fn original_use(&self) -> &crate::certified_products::ReceiptImportOwner {
+        &self.reference.original_use
+    }
+    pub fn demander(&self) -> crate::artifact_inventory::NativeGroupBinding {
+        self.reference.demander
+    }
+    pub fn global_index(&self) -> u32 {
+        self.reference.global_index
+    }
+    pub fn binding(&self) -> crate::artifact_inventory::ArtifactBinding {
+        self.reference.binding
+    }
+    pub fn identity(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
+        &self.reference.identity
+    }
+    pub fn generation(&self) -> u64 {
+        self.reference.generation
+    }
+    pub fn stage_first_ordinal(&self) -> usize {
+        self.issuer.stage().ordinals()[0]
+    }
+}
+
 fn admit_world_stage_inputs(
     decoded: DecodedWorldCellStage,
     plan: &crate::cell_plan::CompilerWorldCellPlan,
@@ -5911,6 +6123,7 @@ fn admit_world_stage_inputs(
         ordinals: decoded.ordinals,
         outputs: decoded.outputs,
         selected_inputs,
+        dependency_terminals: decoded.dependency_terminals,
         demanded_rows: rows.into_values().collect(),
         demanded_session_bindings: bindings
             .into_iter()
@@ -6000,7 +6213,7 @@ fn admit_world_preparation_response(
     let plan = reservation.plan();
     let base = plan.world().logical_id();
     let plan_digest = world_digest(plan.receipt());
-    if answer_text(&fields[0])? != "TPCWPREP5"
+    if answer_text(&fields[0])? != "TPCWPREP6"
         || answer_hash(&fields[1])? != *base
         || answer_hash(&fields[2])? != plan_digest
         || answer_hash(&fields[3])? != *reservation.admission_digest()
@@ -6380,7 +6593,7 @@ fn decode_world_stages(
     let mut next = 0usize;
     let mut next_segment = 0usize;
     for row in rows {
-        let fields = answer_array(row, 4)?;
+        let fields = answer_array(row, 5)?;
         let identity = WorldCellStageIdentity::decode(&fields[0])?;
         let ciborium::value::Value::Array(raw_ordinals) = &fields[1] else {
             return Err(world_response_error(false));
@@ -6472,6 +6685,23 @@ fn decode_world_stages(
         }) {
             return Err(world_response_error(true));
         }
+        let ciborium::value::Value::Array(raw_terminals) = &fields[4] else {
+            return Err(world_response_error(false));
+        };
+        operation
+            .reserve::<DependencyTerminalReference>(raw_terminals.len())
+            .map_err(|e| CompileError::CompilerEvidence(Box::new(e.into())))?;
+        let mut dependency_terminals = raw_terminals
+            .iter()
+            .map(DependencyTerminalReference::decode)
+            .collect::<Result<Vec<_>, _>>()?;
+        dependency_terminals.sort_unstable();
+        if dependency_terminals
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+        {
+            return Err(world_response_error(true));
+        }
         next += ordinals.len();
         stages.push(DecodedWorldCellStage {
             index: stages.len(),
@@ -6479,6 +6709,7 @@ fn decode_world_stages(
             ordinals,
             outputs,
             selected_inputs,
+            dependency_terminals,
         });
     }
     if next != slots.len() || next_segment != segments.len() {
@@ -6918,6 +7149,104 @@ mod answer_tests {
         }
     }
     #[test]
+    fn dependency_terminal_wire_preserves_occurrence_and_refuses_other_identity_codecs() {
+        use ciborium::value::Value;
+        let integer = |n: u64| Value::Integer(n.into());
+        let binding = |artifact, selection| {
+            world_array(vec![
+                world_blob([artifact; 32]),
+                world_blob([selection; 32]),
+            ])
+        };
+        let symbol = world_array(vec![
+            world_text("main"),
+            world_text("Tidepool.Session.Val.G7"),
+            world_text("value"),
+            world_text("captured"),
+            Value::Null,
+        ]);
+        let packet = world_array(vec![
+            integer(0),
+            world_array(vec![
+                world_text("main"),
+                world_text("Source"),
+                binding(1, 2),
+                binding(3, 4),
+                symbol.clone(),
+            ]),
+            world_array(vec![world_blob([5; 32]), world_blob([6; 32]), integer(9)]),
+            integer(2),
+            binding(7, 8),
+            symbol,
+            integer(7),
+        ]);
+        let decoded = DependencyTerminalReference::decode(&packet).unwrap();
+        assert_eq!(decoded.origin, DependencyTerminalOrigin::SourceDefinition);
+        assert_eq!(decoded.demander.binding.artifact().0, [5; 32]);
+        assert_eq!(decoded.demander.binding.selection().0, [6; 32]);
+        assert_eq!(decoded.demander.original_ordinal, 9);
+        assert_eq!(decoded.global_index, 2);
+        assert_eq!(decoded.binding.artifact.0, [7; 32]);
+        assert_eq!(decoded.binding.selection.0, [8; 32]);
+        assert_eq!(decoded.generation, 7);
+        let commitment = |terminal: &DependencyTerminalReference| {
+            let mut digest = blake3::Hasher::new();
+            frame_dependency_terminal(terminal, &mut |bytes| {
+                digest.update(&(bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            });
+            *digest.finalize().as_bytes()
+        };
+        let original_commitment = commitment(&decoded);
+        for field in 0..5 {
+            let mut different = decoded.clone();
+            match field {
+                0 => different.origin = DependencyTerminalOrigin::NativeOriginal,
+                1 => different.demander.original_ordinal += 1,
+                2 => different.global_index += 1,
+                3 => different.binding.selection.0[0] ^= 1,
+                _ => {
+                    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                        original,
+                        ..
+                    } = &mut different.original_use
+                    else {
+                        unreachable!()
+                    };
+                    original.selection.0[0] ^= 1;
+                }
+            }
+            assert_ne!(original_commitment, commitment(&different));
+        }
+        for (field, replacement) in [
+            (0, integer(2)),
+            (
+                2,
+                world_array(vec![world_blob([5; 32]), world_blob([6; 32])]),
+            ),
+            (3, integer(u64::MAX)),
+            (
+                4,
+                world_array(vec![world_blob([7; 31]), world_blob([8; 32])]),
+            ),
+        ] {
+            let Value::Array(mut fields) = packet.clone() else {
+                unreachable!()
+            };
+            fields[field] = replacement;
+            assert!(DependencyTerminalReference::decode(&world_array(fields)).is_err());
+        }
+        let Value::Array(mut fields) = packet else {
+            unreachable!()
+        };
+        let Value::Array(identity) = &mut fields[5] else {
+            unreachable!()
+        };
+        identity[4] = world_array(vec![integer(0)]);
+        assert!(DependencyTerminalReference::decode(&world_array(fields)).is_err());
+    }
+
+    #[test]
     fn input_refs_keep_closed_origins_and_actual_prior_stage_scope_distinct() {
         use ciborium::value::Value;
         let integer = |value: u64| Value::Integer(value.into());
@@ -6981,6 +7310,7 @@ mod answer_tests {
                     certified_products: file("certified"),
                 },
                 selected_inputs: vec![],
+                dependency_terminals: vec![],
                 demanded_rows: vec![],
                 demanded_session_bindings: vec![],
             })
@@ -7269,6 +7599,7 @@ mod answer_tests {
                     world_array(vec![world_integer(ordinal)]),
                     world_array(refs),
                     world_array(vec![]),
+                    world_array(vec![]),
                 ])
             };
         let rows = vec![
@@ -7356,7 +7687,7 @@ mod answer_tests {
         old_fields.pop();
         assert!(
             decode(old_rows, &manifest).is_err(),
-            "PREP4 stage rows have no selected-input owner"
+            "PREP5 stage rows have no dependency-terminal owner"
         );
         assert!(decode(vec![], &manifest).is_err());
         assert!(decode(rows[..1].to_vec(), &manifest).is_err());

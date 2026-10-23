@@ -2676,7 +2676,78 @@ pub struct RuntimeCheckedPrefix {
     admission: Arc<RuntimeCellAdmission>,
     first_item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    retained_inputs: Option<BoundRetainedInputs>,
     state: parking_lot::Mutex<RuntimeCheckedState>,
+}
+
+/// Runtime access is issued only after the stage's selected dependency
+/// occurrence is paired with this lease's actual scoped checked value.
+#[derive(Debug)]
+struct BoundRetainedInput {
+    terminal: tidepool_toolchain::compiler_world::SelectedDependencyTerminal,
+    id: tidepool_repr::SessionVarId,
+    defining_scope: ScopeId,
+    handle: tidepool_codegen::prepared_program::PreparedHandle,
+    row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+}
+
+#[derive(Debug)]
+struct BoundRetainedInputs {
+    scope: Arc<RuntimeLexicalScopeLease>,
+    stages: BTreeMap<usize, Vec<BoundRetainedInput>>,
+}
+
+impl BoundRetainedInputs {
+    fn validate_item(
+        &self,
+        session: &PersistentSession,
+        item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
+    ) -> Result<(), SessionError> {
+        session.validate_lexical_scope_lease(self.scope.scope, &self.scope)?;
+        let stage = item
+            .world_selected_runtime_inputs()
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .stage_first_ordinal();
+        let bound = self
+            .stages
+            .get(&stage)
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if bound.is_empty() {
+            return Ok(());
+        }
+        let reachable = session
+            .bindings()
+            .scope_reachable_binding_ids(session.scope_tree(), self.scope.scope)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        for input in bound {
+            let entry = session
+                .bindings()
+                .get(input.id)
+                .filter(|entry| {
+                    reachable.contains(&entry.id)
+                        && entry.scope == input.defining_scope
+                        && entry.value.identity == *input.terminal.identity()
+                        && entry.module
+                            == tidepool_repr::SessionModule::val(Generation(
+                                input.terminal.generation(),
+                            ))
+                        && entry.value.handle == input.handle
+                })
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            if session
+                .prepared()
+                .and_then(|engine| engine.prepared_handle_of(input.handle.raw()))
+                != Some(input.handle)
+                || session
+                    .retained_checked_value_artifact(entry.module)
+                    .is_none_or(|row| !Arc::ptr_eq(row, &input.row))
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -2963,6 +3034,9 @@ impl RuntimeCheckedPrefix {
                 );
                 error
             })?;
+        if let Some(retained) = &self.retained_inputs {
+            retained.validate_item(session, execution.item())?;
+        }
         execution
             .validate_required_native_imports(state.snapshot.actual_retained_imports())
             .map_err(|error| {
@@ -4134,6 +4208,9 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        if let Some(retained) = &prefix.retained_inputs {
+            retained.validate_item(self, execution.item())?;
+        }
         execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
         let admission = store
@@ -4480,6 +4557,9 @@ impl PersistentSession {
             let selected = item
                 .world_selected_runtime_inputs()
                 .ok_or(SessionError::StaleStagedDeclaration)?;
+            if let Some(retained) = &prefix.retained_inputs {
+                retained.validate_item(self, item)?;
+            }
             for input in selected.inputs() {
                 let entry = self
                     .bindings()
@@ -5120,7 +5200,10 @@ impl PersistentSession {
             .map(AdmittedValueInterface::from_checked)
             .collect::<Vec<_>>();
         let (interfaces, interface_index) = CheckedInterfaces::base(&baseline);
-        let native_imports = Arc::new(self.capture_world_native_imports(scope, &program)?);
+        let retained_inputs =
+            self.bind_world_retained_inputs(&program, Arc::clone(&admission._retained_scope))?;
+        let native_imports =
+            Arc::new(self.capture_world_native_imports(scope, &program, &retained_inputs)?);
         let snapshot = Arc::new(world_checked_snapshot(
             reservation.plan().world_owned().clone(),
             private_key.clone(),
@@ -5153,6 +5236,7 @@ impl PersistentSession {
             admission,
             first_item,
             program,
+            retained_inputs: Some(retained_inputs),
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
@@ -5236,6 +5320,7 @@ impl PersistentSession {
             admission,
             first_item,
             program,
+            retained_inputs: None,
             state: parking_lot::Mutex::new(RuntimeCheckedState {
                 snapshot,
                 in_flight: None,
@@ -6466,10 +6551,64 @@ impl PersistentSession {
         Ok(())
     }
 
+    fn bind_world_retained_inputs(
+        &self,
+        program: &tidepool_toolchain::checked_cell::CellProgram,
+        scope: Arc<RuntimeLexicalScopeLease>,
+    ) -> Result<BoundRetainedInputs, SessionError> {
+        self.validate_lexical_scope_lease(scope.scope, &scope)?;
+        let scoped = self.scoped_prepared_bindings_in(scope.scope);
+        let mut stages = BTreeMap::new();
+        for item in program.items() {
+            let checked = item.checked_item();
+            let stage = checked
+                .world_selected_runtime_inputs()
+                .ok_or(SessionError::StaleStagedDeclaration)?
+                .stage_first_ordinal();
+            if stages.contains_key(&stage) {
+                continue;
+            }
+            let selected = checked.world_selected_dependency_terminals()?;
+            let mut bound = Vec::with_capacity(selected.len());
+            for terminal in selected {
+                let module = tidepool_repr::SessionModule::val(Generation(terminal.generation()));
+                let entry = scoped
+                    .get(&(terminal.identity(), module))
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                let row = self
+                    .retained_checked_value_artifact(entry.module)
+                    .ok_or(SessionError::MissingRetainedValueInterface(entry.module))?;
+                let interface = row.certified_interface().interface();
+                let handle = entry.value.handle;
+                if row.owner() != entry.module
+                    || interface.unit() != terminal.identity().unit
+                    || interface.module() != terminal.identity().module
+                    || !terminal.matches_checked_value(row)?
+                    || self
+                        .prepared()
+                        .and_then(|engine| engine.prepared_handle_of(handle.raw()))
+                        != Some(handle)
+                {
+                    return Err(SessionError::StaleStagedDeclaration);
+                }
+                bound.push(BoundRetainedInput {
+                    terminal,
+                    id: entry.id,
+                    defining_scope: entry.scope,
+                    handle,
+                    row: Arc::clone(row),
+                });
+            }
+            stages.insert(stage, bound);
+        }
+        Ok(BoundRetainedInputs { scope, stages })
+    }
+
     fn capture_world_native_imports(
         &self,
         scope: ScopeId,
         program: &tidepool_toolchain::checked_cell::CellProgram,
+        retained: &BoundRetainedInputs,
     ) -> Result<AdmittedNativeImports, SessionError> {
         use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
         let own_values = program
@@ -6495,7 +6634,14 @@ impl PersistentSession {
                         && identity.module
                             == tidepool_repr::SessionModule::val(Generation(*generation))
                                 .module_name())
-                }),
+                })
+                .chain(
+                    retained
+                        .stages
+                        .values()
+                        .flatten()
+                        .map(|input| (input.terminal.identity(), input.terminal.generation())),
+                ),
         )
     }
 
@@ -6507,11 +6653,14 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let scoped = self.scoped_prepared_bindings_in(scope);
         let mut owners = BTreeMap::new();
         for (identity, generation) in required {
-            let entry = self
-                .bindings()
-                .resolve_exact_prepared_in(self.scope_tree(), scope, identity, generation)
+            let entry = scoped
+                .get(&(
+                    identity,
+                    tidepool_repr::SessionModule::val(Generation(generation)),
+                ))
                 .ok_or(SessionError::StaleStagedDeclaration)?;
             let handle = entry.value.handle;
             if self
@@ -7965,6 +8114,20 @@ mod tests {
             assert_eq!(
                 selected.owners.get(&(identity.clone(), 460)),
                 Some(&first_root)
+            );
+            assert!(session
+                .capture_selected_native_imports(public, [(&identity, 461)])
+                .is_ok());
+            assert!(matches!(
+                session.capture_selected_native_imports(private, [(&identity, 461)]),
+                Err(SessionError::StaleStagedDeclaration)
+            ), "a later value that is live in the issuer scope cannot replace the captured generation");
+            assert!(
+                matches!(
+                    session.capture_selected_native_imports(private, [(&identity, 9999)]),
+                    Err(SessionError::StaleStagedDeclaration)
+                ),
+                "an absent runtime generation is refused before native execution"
             );
             let isolated = session.mint_isolated_scope();
             assert!(matches!(

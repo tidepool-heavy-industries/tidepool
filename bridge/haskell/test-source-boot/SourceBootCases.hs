@@ -72,6 +72,7 @@ import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hscEPS)
+import GHC.Driver.Env.KnotVars (knotVarElems)
 import GHC.Driver.Env.Types (hsc_unit_env)
 import GHC.Unit.Env (UnitEnv(..), HomeUnitEnv(..), unitEnv_insert, unitEnv_delete, ue_currentHomeUnitEnv, ue_units)
 import GHC.Unit.Info (PackageName(..))
@@ -82,7 +83,7 @@ import GHC.Unit.Module.Env (lookupModuleEnv, extendModuleEnv)
 import GHC.Iface.Load (loadInterface, WhereFrom(ImportBySystem))
 import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Data.Maybe qualified as MaybeErr
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt, emptyHomePackageTable)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt, emptyHomePackageTable, filterHpt)
 import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLogHook)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
@@ -200,7 +201,7 @@ import Tidepool.TypedSegment.Source
   , moduleImportRequests, moduleDemandCapturedImports )
 import Tidepool.ExactHydration (captureGeneratedScaffoldSource, parseCapturedGeneratedImports)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
+import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProof, admittedOriginalInterface)
 import Tidepool.GhcPipeline
@@ -7678,14 +7679,18 @@ packageFinderHistoryIsolation = withScratch $ \work -> do
 lazyHomePackageInstances :: IO ()
 lazyHomePackageInstances = withScratch $ \work -> do
   let helperName = mkModuleName "LazyMemberHelper"
+      dependencyName = mkModuleName "LazyMemberDependency"
+      dependencySource = work </> "LazyMemberDependency.hs"
       helperSource = work </> "LazyMemberHelper.hs"
       consumerSource = work </> "LazyMemberConsumer.hs"
+  writeFile dependencySource "module LazyMemberDependency where\ndata Payload = Payload\n"
   writeFile helperSource $ unlines
     [ "{-# LANGUAGE DataKinds, GADTs, FlexibleContexts, TypeOperators #-}"
     , "module LazyMemberHelper where"
     , "import Control.Monad.Freer (Eff, Member, send)"
+    , "import LazyMemberDependency (Payload)"
     , "data Signal a where Signal :: Signal ()"
-    , "data Hidden = Hidden"
+    , "data Hidden = Hidden Payload"
     , "instance Show Hidden where show _ = \"private home\""
     , "request :: Member Signal effects => Eff effects ()"
     , "request = send Signal"
@@ -7703,6 +7708,8 @@ lazyHomePackageInstances = withScratch $ \work -> do
   let producer = prHscEnv (pprPipelineResult original)
   home <- maybe (fail "Member producer omitted helper HMI") pure
     (lookupHpt (hsc_HPT producer) helperName)
+  dependencyHome <- maybe (fail "Member producer omitted dependency HMI") pure
+    (lookupHpt (hsc_HPT producer) dependencyName)
   requestId <- case [identifier | identifier <- typeEnvIds (md_types (hm_details home))
     , getOccString identifier == "request"] of
       [identifier] -> pure identifier
@@ -7713,7 +7720,8 @@ lazyHomePackageInstances = withScratch $ \work -> do
       [name] -> pure name
       _ -> fail "Member helper has another class constraint"
   let owner = mi_module (hm_iface home)
-      ifacePath = work </> "LazyMemberHelper.hi"
+      interfaceDirectory = work </> "retained-interfaces"
+      ifacePath = interfaceDirectory </> "LazyMemberHelper.hi"
       packageInstances env = do
         external <- hscEPS env
         pure (Set.fromList [is_dfun_name instance_ | instance_ <- instEnvElts (eps_inst_env external)
@@ -7722,25 +7730,59 @@ lazyHomePackageInstances = withScratch $ \work -> do
         Left actual | actual == expected -> pure ()
         Left actual -> throwIO actual
         Right () -> fail "unsupported exact context acquired shared package state"
+  createDirectory interfaceDirectory
   writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression
     ifacePath (hm_iface home)
+  let dependencyPath = interfaceDirectory </> "LazyMemberDependency.hi"
+      dependencyOwner = mi_module (hm_iface dependencyHome)
+  writeBinIface (targetProfile (hsc_dflags producer)) QuietBinIFace NormalCompression
+    dependencyPath (hm_iface dependencyHome)
   bytes <- BS.readFile ifacePath
+  dependencyBytes <- BS.readFile dependencyPath
   let artifact = ExactIfaceArtifact (unitString (moduleUnit owner))
         (moduleNameString (moduleName owner)) ifacePath (digest bytes) []
+      dependencyArtifact = ExactIfaceArtifact (unitString (moduleUnit dependencyOwner))
+        (moduleNameString (moduleName dependencyOwner)) dependencyPath (digest dependencyBytes) []
       consumerNodes = [ModuleNode [] summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph producer)
         , ms_mod_name summary == mkModuleName "LazyMemberConsumer"]
       consumerGraph = mkModuleGraph consumerNodes
   fresh <- freshExactState producer
   packages <- newPackageFinderFacts fresh
-  loaded <- readExactIfaceArtifacts fresh [artifact] >>= either fail pure
+  loaded <- readExactIfaceArtifacts fresh [artifact,dependencyArtifact] >>= either fail pure
   hydrated <- hydrateExactScope fresh loaded
   before <- packageInstances hydrated
   unless (Set.null before) $
     fail "Member interface fixture forced its package instances before the fork"
-  selected <- forkExactContextWithPackageFacts packages hydrated
+  requireModeFailure (ExactContextMissingHomeDependency owner dependencyOwner) $
+    retainClosedHomeContext packages Nothing (hscUpdateHPT
+      (filterHpt ((/= dependencyOwner) . mi_module . hm_iface)) hydrated)
+  trimmed <- retainClosedHomeContext packages (Just owner) hydrated
+  unless (isNothing (lookupHpt (hsc_HPT trimmed) helperName)
+      && isJust (lookupHpt (hsc_HPT trimmed) dependencyName)) $
+    fail "reusable context retained an unreferenced target HMI"
+  let finderOwner = toUnitId (moduleUnit owner)
+      finderKey = GWIB (mkModule finderOwner helperName) NotBoot
+  addToFinderCache (hsc_FC hydrated) finderKey (InstalledNotFound [] (Just finderOwner))
+  selected <- retainClosedHomeContext packages (Just dependencyOwner) hydrated
+    {hsc_mod_graph=hsc_mod_graph producer,hsc_targets=hsc_targets producer}
+  unless (null (mgModSummaries' (hsc_mod_graph selected)) && null (hsc_targets selected)
+      && null (knotVarElems (hsc_type_env_vars selected))) $
+    fail "reusable home context retained the completed request's graph, targets or knot variables"
+  selectedFinder <- lookupFinderCache (hsc_FC selected) finderKey
+  unless (isNothing selectedFinder) $
+    fail "reusable home context retained a transient HOME Finder entry"
+  removeDirectoryRecursive interfaceDirectory
   -- Selecting the genuine helper type forces its captured interface actions.
   selectedHome <- maybe (fail "fork lost the original helper") pure
     (lookupHpt (hsc_HPT selected) helperName)
+  originalHome <- maybe (fail "hydration lost the original helper") pure
+    (lookupHpt (hsc_HPT hydrated) helperName)
+  originalIdentity <- evaluate originalHome >>= makeStableName
+  selectedIdentity <- evaluate selectedHome >>= makeStableName
+  unless (originalIdentity == selectedIdentity) $
+    fail "reusable context replaced the successful HOME details knot"
+  unless (isJust (lookupHpt (hsc_HPT selected) dependencyName)) $
+    fail "reusable context discarded a target required by a retained HOME interface"
   selectedRequest <- case [identifier | identifier <- typeEnvIds (md_types (hm_details selectedHome))
     , getOccString identifier == "request"] of
       [identifier] -> pure identifier
@@ -7791,7 +7833,7 @@ lazyHomePackageInstances = withScratch $ \work -> do
         && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts (hm_iface home))
       _ -> False) $ fail "valid HPT interface remained poisoned by its failed lookup"
   requireModeFailure ExactContextRequiresCompilationManager $
-    forkExactContextWithPackageFacts packages
+    retainClosedHomeContext packages Nothing
       (selected {hsc_dflags = (hsc_dflags selected) {ghcMode = OneShot}})
   let units = hsc_unit_env selected
       extraHome = toUnitId (stringToUnit "unsupported-second-home")

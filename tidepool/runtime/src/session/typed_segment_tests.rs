@@ -1463,6 +1463,94 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 }
 
 #[test]
+fn historical_source_captures_bind_the_original_value_after_shadowing() {
+    use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
+    for (label, source, expected_origin) in [
+        (
+            "inline_historical_capture",
+            include_str!("fixtures/typed-segment-inline-historical-capture.hs"),
+            DependencyTerminalOrigin::SourceDefinition,
+        ),
+        (
+            "noinline_historical_capture",
+            include_str!("fixtures/typed-segment-noinline-historical-capture.hs"),
+            DependencyTerminalOrigin::NativeOriginal,
+        ),
+    ] {
+        let mut session = SemanticSession::new();
+        session
+            .execute(label, "historyValue0 <- pure (23 :: Int)", 0)
+            .unwrap();
+        let original = session
+            .resident
+            .current_binding_in(session.public, "historyValue0")
+            .unwrap();
+        let original_interface = session
+            .resident
+            .retained_checked_value_artifact(original.1)
+            .unwrap()
+            .certified_interface()
+            .artifact_id();
+        session.execute(label, source, 1).unwrap();
+        session
+            .execute(label, "historyValue0 <- pure (91 :: Int)", 0)
+            .unwrap();
+        let replacement = session
+            .resident
+            .current_binding_in(session.public, "historyValue0")
+            .unwrap();
+        assert_ne!(original.0, replacement.0);
+        assert_ne!(original.1, replacement.1);
+        let before_effects = Arc::clone(&session.trace);
+        session
+            .execute_observed(
+                label,
+                "segmentRecord historicalCapture",
+                CellDeclarationExpectation::Total(0),
+                SemanticChecks::None,
+                &SourceImports::new(),
+                None,
+                |program| {
+                    assert!(before_effects.lock().is_empty());
+                    let terminals = program
+                        .items()
+                        .iter()
+                        .flat_map(|item| {
+                            item.checked_item()
+                                .world_selected_dependency_terminals()
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(terminals.iter().any(|terminal| {
+                        terminal.origin() == expected_origin
+                            && terminal.identity().module == original.1.module_name()
+                            && terminal.generation() == original.1.gen.0
+                            && terminal.binding().artifact == original_interface
+                    }), "the actual selected {expected_origin:?} occurrence must retain the historical value");
+                    assert!(terminals.iter().all(|terminal| {
+                        terminal.identity().module != replacement.1.module_name()
+                    }), "the new visible spelling cannot replace the captured dependency");
+                },
+            )
+            .unwrap();
+        assert_eq!(session.observed(), [23]);
+        session.assert_no_compiler_since_last_effect();
+        session
+            .execute(label, "segmentRecord historyValue0", 0)
+            .unwrap();
+        assert_eq!(session.observed(), [23, 91]);
+        let before_retirement = session.resident.residency().unwrap().persistent_roots;
+        let retired = session.resident.retire_scope(session.public);
+        assert!(retired.roots_released > 0);
+        assert_eq!(
+            session.resident.residency().unwrap().persistent_roots,
+            before_retirement - retired.roots_released,
+            "retiring the runtime owner releases its actual prepared binding roots"
+        );
+    }
+}
+
+#[test]
 fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
     let mut session = SemanticSession::new();
     let roots = |resident: &ProbeSession| {

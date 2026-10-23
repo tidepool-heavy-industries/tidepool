@@ -10,7 +10,7 @@ module Tidepool.ExactHydration
   , ExactIfaceArtifact(..)
   , ExactInterfaceOperations, exactInterfaceOperations, runExactInterfaceOperation
   , depanalSourceModules, freshExactState, freshExactContext, forkExactContext
-  , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
+  , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext
   , ExactContextForkFailure(..)
   , readExactIfaceArtifacts, readExactIfaceArtifactsWith
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
@@ -70,7 +70,7 @@ import GHC.Data.Strict qualified as Strict
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
 import GHC.Driver.Env
-  ( HscEnv(..), hscUpdateHPT_lazy, hscUpdateFlags, hptSomeThingsBelowUs, hsc_home_unit, hsc_home_unit_maybe, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
+  ( HscEnv(..), hscUpdateHPT, hscUpdateHPT_lazy, hscUpdateFlags, hptSomeThingsBelowUs, hsc_home_unit, hsc_home_unit_maybe, hsc_HPT, hscEPS, discardIC, hsc_all_home_unit_ids )
 import GHC.Driver.Plugins
   ( Plugin(..), PluginWithArgs(..), Plugins(..), StaticPlugin(..), PluginRecompile(..), defaultPlugin )
 import GHC.Tc.Types (TcGblEnv(..), ImportAvails(..))
@@ -85,7 +85,7 @@ import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
-  , lookupHpt )
+  , lookupHpt, eltsHpt, filterHpt )
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
@@ -127,7 +127,7 @@ import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Parser.Annotation (getLocA)
 import Language.Haskell.Syntax (HsModule(..))
 import GHC.Hs (ImportDecl(..), ImportDeclQualifiedStyle(..))
-import GHC.Unit.Module.Deps (dep_orphs, dep_finsts)
+import GHC.Unit.Module.Deps (dep_orphs, dep_finsts, dep_direct_mods)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit, isHomeUnitDefinite)
 import GHC.Unit.Types (GenWithIsBoot(..), InstalledModuleWithIsBoot, UnitId)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
@@ -137,8 +137,8 @@ import GHC.Builtin.Names (gHC_PRIM)
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.FatIface.Internal (withCapturedIface)
 import Tidepool.ResumePackage (resolveResumeInterface)
-import GHC.Unit.Types (unitString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
-import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface)
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
+import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModule.Internal (serializeOriginalInterface)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
@@ -940,6 +940,8 @@ data ExactContextForkFailure
   = ExactContextRequiresCompilationManager
   | ExactContextRequiresSingleDefiniteHomeUnit
   | ExactContextContainsHomePackageInterface
+  | ExactContextContainsForeignHome Module
+  | ExactContextMissingHomeDependency Module Module
   deriving (Eq, Show)
 
 instance Exception ExactContextForkFailure
@@ -994,6 +996,37 @@ forkExactContextWithPackageFacts (PackageFinderFacts packageHomes packages) env 
     { hsc_FC = finder, hsc_targets = [], hsc_type_env_vars = emptyKnotVars
     , hsc_unit_env = (hsc_unit_env env) { ue_eps = eps }
     }
+
+-- Completed HOME details retain their original HPT knot. They need no HOME
+-- filesystem fallback in CompManager, but every recorded HOME dependency must
+-- remain in that table. Publish no request-local Finder or source graph.
+retainClosedHomeContext :: PackageFinderFacts -> Maybe Module -> HscEnv -> IO HscEnv
+retainClosedHomeContext packages excluded env = do
+  retained <- forkExactContextWithPackageFacts packages env
+  let active = homeUnitAsUnit (hsc_home_unit retained)
+      dependencyModules iface = Set.fromList $
+        [mkModule (stringToUnit unit) (mkModuleName name)
+        | (unit,name) <- homeInterfaceUsageOwners retained iface]
+        ++ [mkModule (stringToUnit (unitIdString unit)) (gwib_mod name)
+           | (unit,name) <- Set.toList (dep_direct_mods (mi_deps iface))]
+        ++ dep_orphs (mi_deps iface) ++ dep_finsts (mi_deps iface)
+      roots = Set.toAscList (Set.fromList
+        [mi_module (hm_iface home) | home <- eltsHpt (hsc_HPT retained)
+          , Just (mi_module (hm_iface home)) /= excluded])
+      close seen [] = pure seen
+      close seen ((issuer,owner):pending)
+        | owner `Set.member` seen = close seen pending
+        | otherwise = do
+            unless (moduleUnit owner == active) (throwIO (ExactContextContainsForeignHome owner))
+            home <- case lookupHpt (hsc_HPT retained) (moduleName owner) of
+              Just selected | mi_module (hm_iface selected) == owner -> pure selected
+              _ -> throwIO (ExactContextMissingHomeDependency issuer owner)
+            let dependencies = [dependency | dependency <- Set.toAscList (dependencyModules (hm_iface home))
+                  , moduleUnit dependency == active]
+            close (Set.insert owner seen) ([(owner,dependency) | dependency <- dependencies] ++ pending)
+  selected <- close Set.empty [(owner,owner) | owner <- roots]
+  pure (hscUpdateHPT (filterHpt ((`Set.member` selected) . mi_module . hm_iface)) retained)
+    {hsc_mod_graph=mkModuleGraph [],hsc_targets=[],hsc_type_env_vars=emptyKnotVars}
 
 -- Reading every interface before installing any of them prevents a corrupt
 -- member of an implementation SCC from partially mutating the HPT.

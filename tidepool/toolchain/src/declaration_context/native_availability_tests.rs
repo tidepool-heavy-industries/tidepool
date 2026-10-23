@@ -3140,7 +3140,8 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let mut demand_bytes = Vec::new();
     ciborium::ser::into_writer(
         &Value::Array(vec![
-            text("TPNATIVEDEMAND1"),
+            text("TPDEPENDENCYQUERY1"),
+            Value::Integer(1u64.into()),
             Value::Array(vec![Value::Array(vec![
                 text(&owner.unit),
                 text(&owner.module),

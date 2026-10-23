@@ -143,12 +143,13 @@ import Tidepool.GhcPipeline
   , preparedFreshDependencies, preparedExactCompilation
   , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
-import Tidepool.GhcPipeline (WorldCellInputs, worldCellTypeInterfaces)
+import Tidepool.GhcPipeline (WorldCellInputs, worldCellTypeInterfaces, worldCellDependencyBasis)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..))
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces)
 import Tidepool.PreparedTime (resolveTimeAuthority)
+import Tidepool.DependencyPlan (requireUnambiguousDependencySymbols)
 import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply, requireNativeDemandOwner, exchangeNativeDemand)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
@@ -989,6 +990,9 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
                 , toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
                 , owner `Set.notMember` sourceOwners
                 , Map.notMember owner modules, owner `Set.notMember` attempted])
+        forM_ sourceInputs $ \inputs -> withPreparedWorldStageInputs inputs $ \_ facts _ ->
+          forM_ (worldCellDependencyBasis facts) $ \basis ->
+            requireUnambiguousDependencySymbols basis missing
         modifyIORef' attemptedRef (`Set.union` Set.fromList pending)
         let siblings = Map.unions (frozenSiblings : map pmSitedSiblings (Map.elems modules))
         acquired <- fmap (Map.fromList . mapMaybe id) $ forM pending $ \owner -> do

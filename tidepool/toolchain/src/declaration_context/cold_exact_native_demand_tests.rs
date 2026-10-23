@@ -180,7 +180,8 @@ fn packet(
         ])
     };
     let wire = Value::Array(vec![
-        text("TPNATIVEDEMAND1"),
+        text("TPDEPENDENCYQUERY1"),
+        Value::Integer(1u64.into()),
         Value::Array(vec![Value::Array(vec![
             text(unit),
             text(module),

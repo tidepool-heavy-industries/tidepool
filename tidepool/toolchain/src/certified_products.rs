@@ -26047,7 +26047,11 @@ pub(crate) mod tests {
         let batch_uses = uses.clone();
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(
-            &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
+            &value_array([
+                value_text("TPDEPENDENCYQUERY1"),
+                Value::Integer(1u64.into()),
+                value_array(uses),
+            ]),
             &mut bytes,
         )
         .unwrap();
@@ -26057,7 +26061,11 @@ pub(crate) mod tests {
             .unwrap();
         let packet = |uses: Vec<Value>, operation: &InventoryOperation| {
             let bytes = encode_value_with_operation(
-                &value_array([value_text("TPNATIVEDEMAND1"), value_array(uses)]),
+                &value_array([
+                    value_text("TPDEPENDENCYQUERY1"),
+                    Value::Integer(1u64.into()),
+                    value_array(uses),
+                ]),
                 CertificationFormat::ProductReceipt,
                 COMPILER_RECEIPT_BYTES_LIMIT,
                 operation,

@@ -81,7 +81,7 @@ import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Env (plusNameEnv, emptyNameEnv, disjointNameEnv)
 import GHC.Unit.Types (Module, moduleUnit)
-import GHC.Unit.Module.Location (ModLocation)
+import GHC.Unit.Module.Location (ModLocation(..))
 import GHC.Unit.Module.ModIface (ModIface, mi_iface_hash, mi_final_exts)
 import GHC.Unit.Module.ModDetails (md_types)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
@@ -110,7 +110,7 @@ import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emi
   , ReuseContext, TaskAttempt, TaskComponent(..), TaskOwner(..), timeTaskDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
-  ( ExactInterfaceFailure(..), readExactInterface, readCapturedDefiningInterface
+  ( ExactInterfaceFailure(..), readHomeInterface, readCapturedDefiningInterface
   , FatOriginalVersion, fatOriginalOwner, fatOriginalFingerprints, FatIfaceComponent, fatComponentVersion
   , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
@@ -961,7 +961,7 @@ newPreparedBodyTaskPreparerWithWorkers workers environment env owners bodyCache 
 -- manufacture a 'ModSummary' for a package module (whose source path may be
 -- absent) or attach the group to the caller's module.
 --
--- The interface read ('readExactInterface') and typecheck
+-- Defining-interface acquisition and typechecking
 -- ('loadDefiningDetails') are the expensive, owner-only part of this call and
 -- do not depend on 'bindings'; a daemon-lifetime 'OwnerInterfaceCache' lets a
 -- re-preparation of the same owner (a later recovery round finds more of its
@@ -1015,7 +1015,7 @@ acquireRecoveredContext hscEnv ownerCache owner = do
     Just hit -> pure (Right hit)
     Nothing -> do
       exact <- if isHomeUnit (hsc_home_unit hscEnv) (moduleUnit owner)
-        then fmap (fmap (\(iface,location) -> (iface,location,Nothing))) (readExactInterface hscEnv owner)
+        then fmap (fmap (\iface -> (iface,logicalHomeLocation,Nothing))) (readHomeInterface hscEnv owner)
         else fmap (fmap (\(iface,location,body) -> (iface,location,Just body)))
           (readCapturedDefiningInterface hscEnv owner)
       case exact of
@@ -1034,6 +1034,12 @@ acquireRecoveredContext hscEnv ownerCache owner = do
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   where
+    -- CorePrep uses a source location for generated names and diagnostics.
+    -- HOME interface custody is the decoded HPT owner above; this logical
+    -- location is never registered with Finder or opened as an interface.
+    logicalHomeLocation = let label = "<captured-home>/" ++ showSDocUnsafe (ppr owner) in ModLocation
+      { ml_hs_file = Nothing, ml_hi_file = label, ml_dyn_hi_file = label
+      , ml_obj_file = label, ml_dyn_obj_file = label, ml_hie_file = label }
     loadDefiningDetails :: HscEnv -> ModIface -> IO ([TyCon], [Id])
     loadDefiningDetails env iface = do
       let doc = text "Tidepool recovered defining interface"

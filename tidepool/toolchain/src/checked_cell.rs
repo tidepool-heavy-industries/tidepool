@@ -4125,6 +4125,17 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
+    pub fn world_selected_dependency_terminals(
+        &self,
+    ) -> Result<Vec<crate::compiler_world::SelectedDependencyTerminal>, CompileError> {
+        match &self.cell.specification {
+            CheckedCellSpecification::World { program, .. } => {
+                program.selected_dependency_terminals(self.index)
+            }
+            CheckedCellSpecification::Finite(_) => Ok(Vec::new()),
+        }
+    }
+
     pub fn world_selected_runtime_inputs(
         &self,
     ) -> Option<crate::compiler_world::WorldCellRuntimeInputs<'_>> {

@@ -175,14 +175,14 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing Nothing (\_ _ _ -> pure [])
+newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing (const (pure ())) Nothing Nothing (\_ _ _ -> pure [])
 
 -- | All recovery jobs use the request's existing allowance. Module contexts
 -- are acquired by its coordinator before lowering tasks enter the executor.
 newPreparedRecoveryWithExecutor :: CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing Nothing (Just executor) (\_ _ _ -> pure [])
+newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing (const (pure ())) Nothing (Just executor) (\_ _ _ -> pure [])
 
 -- The demand owner projects only a quiescent component selection and returns
 -- canonical package roots from actual executable globals. Root growth stays
@@ -192,20 +192,20 @@ newPreparedRecoveryWithDemand :: Maybe CompilerExecutor
   -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache -> PreparedBodyCache
   -> ProjectionContext -> [PreparedModule] -> [Id]
   -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithDemand = newPreparedRecoveryUsing Nothing
+newPreparedRecoveryWithDemand = newPreparedRecoveryUsing (const (pure ())) Nothing
 
-newPreparedRecoveryWithDemandAndReuse :: Maybe ReuseContext -> Maybe CompilerExecutor
+newPreparedRecoveryWithDemandAndReuse :: (SymbolIdentity -> IO ()) -> Maybe ReuseContext -> Maybe CompilerExecutor
   -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id])
   -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache -> PreparedBodyCache
   -> ProjectionContext -> [PreparedModule] -> [Id]
   -> IO (SymbolIdentity -> IO PreparedRecovery)
 newPreparedRecoveryWithDemandAndReuse = newPreparedRecoveryUsing
 
-newPreparedRecoveryUsing :: Maybe ReuseContext -> Maybe CompilerExecutor
+newPreparedRecoveryUsing :: (SymbolIdentity -> IO ()) -> Maybe ReuseContext -> Maybe CompilerExecutor
   -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id]) -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache baseContext home initialRoots = do
+newPreparedRecoveryUsing checkDependency reuse executor demand env cache ownerCache bodyCache baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
@@ -283,7 +283,8 @@ newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache ba
                 UnsupportedBodyCapability name -> addFailure current (UnsupportedExternalCapability name)
                 where addFailure current failure = current
                         { recoveryFailures = recoveryFailures current ++ [failure] }
-              lookupNeeded binder
+              lookupNeeded binder = checkDependency (preparedRootIdentity binder) >> lookupClassified binder
+              lookupClassified binder
                 | Just _ <- wiredInErrorKind binder = pure Nothing
                 | Just _ <- deferredFunction binder = pure Nothing
                 | Map.member (varName binder) (projectionCurrentOriginals baseContext) = pure Nothing
