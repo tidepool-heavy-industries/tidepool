@@ -10208,6 +10208,9 @@ impl<'a> ExactProductAdmission<'a> {
                 .collect::<Vec<_>>()
                 .iter(),
         )?;
+        // Retained requests carry no predecessor completion census. This new
+        // output derives its requirements from actual request/receipt facts;
+        // World continuation transfers native custody without output completion.
         let required = imports
             .keys()
             .cloned()
@@ -14328,7 +14331,7 @@ impl ExactDeclarationContext {
     /// A pure preview observes every instance visible to the original request,
     /// including orphan instances unrelated to the input's nominal type owner.
     /// This compiler-issued context grants graph edges, never authored imports.
-    fn preview_interface_graph_for_target(
+    pub(crate) fn preview_interface_graph_for_target(
         &self,
         target: &ExactModuleIdentity,
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
