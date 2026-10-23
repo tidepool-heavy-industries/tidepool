@@ -1135,7 +1135,7 @@ impl CapturedCompilerStage {
         };
         timing.finish(true);
         Ok(Self {
-            producer_certificates: producer_certificates,
+            producer_certificates,
             physical_artifacts: physical,
             output,
             operation: Arc::clone(&validation.inventory),

@@ -24972,7 +24972,7 @@ pub(crate) mod tests {
             .issued_artifacts()
             .inventory()
             .select_native_target(
-                issued.certified.physical_cohort().unwrap(),
+                issued.certified.physical_cohort(),
                 observed,
                 None,
                 None,

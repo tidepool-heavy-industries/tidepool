@@ -4240,7 +4240,7 @@ fn seal_turn_outputs_with_validation(
                 output_dir,
                 &validation.inventory,
             );
-            let mut products = certified_products::certify_products_with_validation(
+            let products = certified_products::certify_products_with_validation(
                 offer.selected.as_deref(),
                 ordinary_receipt.as_ref().expect("ordinary receipt"),
                 fresh_products,
@@ -6278,7 +6278,7 @@ fn compile_invocation_inner(
             .filter(|module| module.origin == certified_products::ProductOrigin::Cached)
             .collect();
         invocation_timing.advance("product_certification");
-        let mut certified = if let Some(valid) = valid_evidence {
+        let certified = if let Some(valid) = valid_evidence {
             let certified = certified_products::certify_products_with_validation(
                 candidate_set.as_ref(),
                 &receipt,
