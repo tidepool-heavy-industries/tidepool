@@ -13,10 +13,11 @@ use crate::session::paired_publication::{
     DeclarationPublicationRejection, ExecutionPublication, FrozenWorldExecution,
 };
 use crate::session::{
-    recovery, ExactDeclarationContext, Generation, ModuleEnv, PublicManifestCommit,
-    PublicationDecision, PublicationPhase, RecoveryPublicOwner, SessionId, SessionLib,
+    recovery, Generation, ModuleEnv, PublicManifestCommit, PublicationDecision, PublicationPhase,
+    RecoveryPublicOwner, SessionId, SessionLib,
 };
 use std::collections::BTreeSet;
+use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 
 #[derive(Clone)]
 struct QuietOutput;

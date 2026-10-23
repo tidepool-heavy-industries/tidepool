@@ -1477,7 +1477,9 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 
 #[test]
 fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() {
-    use crate::session::{ResidentHole, ResidentResumeError, SessionTransitionReason};
+    use crate::session::{
+        ResidentHole, ResidentResumeError, SessionError, SessionTransitionReason,
+    };
     #[derive(Clone, Copy)]
     enum Scenario {
         Complete,

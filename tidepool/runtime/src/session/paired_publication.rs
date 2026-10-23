@@ -2013,7 +2013,6 @@ pub(in crate::session) mod tests {
         let admission = session.begin_ephemeral_private_execution(public).unwrap();
         let value =
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "local", 703);
-        let id = value.id;
         session.bind_in(admission.private_scope(), value).unwrap();
         let before_freeze = session.lib().generation();
         let before_freeze_revision = session.lib().log.publication_revision();

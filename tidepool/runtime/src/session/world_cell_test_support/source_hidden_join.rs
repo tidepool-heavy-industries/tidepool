@@ -329,7 +329,7 @@ fn paired_join_compiles_source_hidden_checked_bind_in_fresh_worker() {
     assert!(certification
         .checked_execution()
         .unwrap()
-        .shares_target(&compiled.prepared));
+        .shares_target(compiled.prepared()));
     assert!(certification
         .groups
         .iter()
