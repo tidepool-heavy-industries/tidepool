@@ -1078,6 +1078,9 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        'recovery_record_is_not_certified_product': (),
+        'certified_product_has_no_digest_admission': (),
+        'original_draft_is_private': (),
         "checked_cell_request_digest_is_issued": (),
         "retained_context_is_not_completed_execution": (),
         "original_execution_census_is_private": (),

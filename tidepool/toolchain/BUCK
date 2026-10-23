@@ -2030,6 +2030,17 @@ runtime_executable(
 )
 
 rust_compile_fail(
+    name = "compile_fail_certified_product_has_no_digest_admission",
+    source = "tests/compile_fail/certified_product_has_no_digest_admission.rs",
+    control = "tests/compile_pass/certified_product_has_no_digest_admission.rs",
+    expected = "tests/compile_fail/certified_product_has_no_digest_admission.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_checked_cell_request_digest_is_issued",
     source = "tests/compile_fail/checked_cell_request_digest_is_issued.rs",
     control = "tests/compile_pass/checked_cell_request_digest_is_issued.rs",
@@ -2096,10 +2107,32 @@ rust_compile_fail(
 )
 
 rust_compile_fail(
+    name = "compile_fail_original_draft_is_private",
+    source = "tests/compile_fail/original_draft_is_private.rs",
+    control = "tests/compile_pass/original_draft_is_private.rs",
+    expected = "tests/compile_fail/original_draft_is_private.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
     name = "compile_fail_original_execution_census_is_private",
     source = "tests/compile_fail/original_execution_census_is_private.rs",
     control = "tests/compile_pass/original_execution_census_is_private.rs",
     expected = "tests/compile_fail/original_execution_census_is_private.stderr",
+    dependencies = {
+        "tidepool_toolchain": ":tidepool_toolchain",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_recovery_record_is_not_certified_product",
+    source = "tests/compile_fail/recovery_record_is_not_certified_product.rs",
+    control = "tests/compile_pass/recovery_record_is_not_certified_product.rs",
+    expected = "tests/compile_fail/recovery_record_is_not_certified_product.stderr",
     dependencies = {
         "tidepool_toolchain": ":tidepool_toolchain",
     },
