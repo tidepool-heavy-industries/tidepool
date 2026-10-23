@@ -1063,6 +1063,10 @@ fn prepare_world_cell_program_inner(
                         package_interfaces: admitted.package_interfaces,
                     });
                     let output = ProgramNativeOutput {
+                        origin: ProgramNativeOutputOrigin::World {
+                            program: Arc::clone(&program),
+                            ordinal: index,
+                        },
                         directory,
                         target,
                         program: package_program,
@@ -2494,6 +2498,7 @@ impl SelectedModuleCandidateOffer {
             DecodeLimits::default(),
         )?;
         let mut output = ProgramNativeOutput {
+            origin: ProgramNativeOutputOrigin::Finite,
             directory: directory.to_path_buf(),
             target,
             program,
@@ -3265,6 +3270,7 @@ impl SelectedModuleCandidateOffer {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProgramNativeOutput {
+    origin: ProgramNativeOutputOrigin,
     directory: PathBuf,
     target: Arc<PreparedProgram>,
     program: crate::prepared_artifact::BoundPackageProgram,
@@ -3274,7 +3280,36 @@ pub(crate) struct ProgramNativeOutput {
     source: String,
 }
 
+#[derive(Clone)]
+enum ProgramNativeOutputOrigin {
+    Finite,
+    World {
+        program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
+        ordinal: usize,
+    },
+}
+
+impl std::fmt::Debug for ProgramNativeOutputOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finite => formatter.write_str("Finite"),
+            Self::World { ordinal, .. } => formatter
+                .debug_struct("World")
+                .field("ordinal", ordinal)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 impl ProgramNativeOutput {
+    pub(crate) fn belongs_to_world_item(
+        &self,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
+        ordinal: usize,
+    ) -> bool {
+        matches!(&self.origin, ProgramNativeOutputOrigin::World { program: issuer, ordinal: issued }
+            if std::ptr::eq(issuer.as_ref(), program) && *issued == ordinal)
+    }
     pub(crate) fn sealed_products_shared(&self) -> Result<&Arc<SealedTurnProducts>, CompileError> {
         self.products
             .as_ref()
@@ -3361,6 +3396,7 @@ fn read_native_turn_artifacts(
         metadata.len() as u64,
     );
     Ok(ProgramNativeOutput {
+        origin: ProgramNativeOutputOrigin::Finite,
         directory: directory.to_owned(),
         target,
         program,
@@ -9090,6 +9126,7 @@ mod module_product_tests {
         } else {
             None
         };
+        let mut prior_world_output = None;
         for cancel_after_end in [false, true] {
             let cancellation = CompilerTransactionCancellation::new();
             let mut observed_close = None;
@@ -9346,6 +9383,22 @@ mod module_product_tests {
                 .into_outcome()
                 .action
                 .expect("actual World native preparation");
+            if mixed {
+                if let Some(foreign) = &prior_world_output {
+                    crate::declaration_context::assert_world_foreign_output_refusal(
+                        &checked, foreign,
+                    );
+                } else {
+                    prior_world_output = Some(
+                        prepared.items[0]
+                            .native
+                            .as_ref()
+                            .expect("actual first native item")
+                            .output
+                            .clone(),
+                    );
+                }
+            }
             if mixed && !cancel_after_end {
                 crate::declaration_context::assert_world_repeated_source_refusals(
                     &checked,
