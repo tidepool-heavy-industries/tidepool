@@ -242,6 +242,29 @@ pub fn certify_recovered_declaration_tip_in_context(
         source_bindings: Default::default(),
     };
     let lexical = source_surface.lexical_graph().to_vec();
+    for node in &lexical {
+        let selected = context
+            .compiler_source_support()
+            .world_primary_type_row(&node.owner)
+            .ok_or_else(|| contract("recovered surface lacks its selected interface binding"))?;
+        if matches!(
+            &selected.entry.payload,
+            crate::artifact_inventory::ArtifactPayload::Interface(
+                _,
+                crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin
+            )
+        ) {
+            if selected.original_binding.is_some() {
+                return Err(contract("recovered facade carries an Original binding"));
+            }
+            source_surface.source_bindings.insert(
+                node.owner.clone(),
+                DeclarationSurfaceBinding::Facade {
+                    interface: *selected.interface_binding,
+                },
+            );
+        }
+    }
     source_surface.retain_source_bindings(context.compiler_source_support(), &lexical)?;
     Ok(RecoveredDeclarationTip {
         origin,
