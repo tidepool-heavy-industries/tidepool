@@ -878,10 +878,152 @@ fn check_actual_retained_core_promotion_history() {
         assert!(!graph.native_groups.iter().any(|group|
             group.binding.artifact() == fixture.root.descriptor.id || group.binding.artifact() == fixture.helper.descriptor.id),
             "the prior ordinary products are independent evidence, not selected promoted group owners");
+        assert_actual_selected_and_retained_history(
+            &fixture,
+            root_stage,
+            [actual[0].0, actual[1].0],
+        );
         let (raw, packet) =
             packet.expect("the actual producer recorded retained-Core helper receipt bytes");
         assert_actual_selected_native_refusal(&fixture, raw, packet);
     }
+}
+
+fn assert_actual_selected_and_retained_history(
+    fixture: &crate::artifacts::test_support::SourcePublicationEntryFixture,
+    promoted_stage: &crate::declaration_context::CapturedCompilerStage,
+    promoted: [&Arc<crate::artifact_inventory::ArtifactEntry>; 2],
+) {
+    use crate::artifact_inventory::{ArtifactBindingNode, ArtifactDependency, ArtifactPayload};
+
+    let ordinary = fixture
+        .entry
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let owners = BTreeSet::from([
+        fixture.root.descriptor.owner.clone(),
+        fixture.helper.descriptor.owner.clone(),
+    ]);
+    let completed = promoted_stage.compiler_inputs().compiler_source_support();
+    let promoted_support = completed
+        .promote_issued_authored_originals(completed, &owners)
+        .expect("the actual completed cohort qualifies its own carried Original offers")
+        .source_support(&owners)
+        .unwrap()
+        .finalize_namespace()
+        .unwrap();
+    let supports = [
+        ordinary
+            .compiler_source_support()
+            .source_support(&owners)
+            .unwrap(),
+        promoted_support,
+    ];
+    let acquisitions = [[&fixture.root, &fixture.helper], promoted];
+    let native_edges =
+        |support: &crate::artifact_inventory::CompilerSourceSupport, root, helper| {
+            support
+                .artifacts()
+                .binding_dependencies()
+                .into_iter()
+                .filter(|(from, to, edge)| {
+                    matches!((from, to, edge),
+                (ArtifactBindingNode::Group(parent), ArtifactBindingNode::Group(child),
+                    ArtifactDependency::NativeGroup { .. })
+                    if parent.binding.artifact() == root && child.binding.artifact() == helper)
+                })
+                .collect::<BTreeSet<_>>()
+        };
+    let expected_edges = [0, 1].map(|index| {
+        let edges = native_edges(
+            &supports[index],
+            acquisitions[index][0].descriptor.id,
+            acquisitions[index][1].descriptor.id,
+        );
+        assert!(
+            !edges.is_empty(),
+            "each real acquisition retains its nonempty source dependency"
+        );
+        edges
+    });
+    let expected_owners = acquisitions.map(|entries| {
+        entries.map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            product.owner().clone()
+        })
+    });
+    let mut custody = supports[0].artifacts().clone();
+    let mut retained = BTreeSet::new();
+    // This selects already issued acquisitions. The compiler is not invoked
+    // again, and ordinary and retained-Core versions have different domains.
+    for index in [0, 1, 0] {
+        custody = custody.retain_custody(supports[index].artifacts()).unwrap();
+        retained.extend(expected_owners[index].iter().cloned());
+        let selected = supports[index].retain_custody(&custody).unwrap();
+        let context = ExactDeclarationContext::empty()
+            .extend_issued_compiler_support(&selected)
+            .unwrap();
+        for entry in acquisitions[index] {
+            let acquired = context
+                .compiler_source_support()
+                .compiler_roles()
+                .original_acquisition(&entry.descriptor.owner)
+                .expect("the selected real Original remains a compiler role");
+            assert!(
+                Arc::ptr_eq(acquired, entry),
+                "custody growth cannot choose another actual acquisition"
+            );
+            let availability = context
+                .compiler_source_support()
+                .native_availability()
+                .issued_row(entry.descriptor.id)
+                .expect("the selected original retains its issued native availability");
+            assert!(availability
+                .offers()
+                .any(|offer| Arc::ptr_eq(offer.original_acquisition(), entry)));
+        }
+        assert_eq!(
+            context
+                .compiler_original_products()
+                .unwrap()
+                .iter()
+                .filter(
+                    |product| owners.iter().any(|owner| owner.unit == product.owner().unit
+                        && owner.module == product.owner().module)
+                )
+                .map(|product| product.owner().clone())
+                .collect::<BTreeSet<_>>(),
+            expected_owners[index].iter().cloned().collect(),
+        );
+        assert_eq!(
+            context
+                .recovery_products()
+                .iter()
+                .filter(
+                    |product| owners.iter().any(|owner| owner.unit == product.owner().unit
+                        && owner.module == product.owner().module)
+                )
+                .map(|product| product.owner().clone())
+                .collect::<BTreeSet<_>>(),
+            retained,
+        );
+        for history in 0..2 {
+            if expected_owners[history]
+                .iter()
+                .all(|owner| retained.contains(owner))
+            {
+                assert_eq!(
+                    native_edges(&selected, acquisitions[history][0].descriptor.id, acquisitions[history][1].descriptor.id),
+                    expected_edges[history],
+                    "retaining another actual original cannot rebind a historical root's helper groups",
+                );
+            }
+        }
+    }
+    assert_eq!(retained.len(), 4);
 }
 
 fn assert_actual_selected_native_refusal(
