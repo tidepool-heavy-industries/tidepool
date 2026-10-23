@@ -227,7 +227,9 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
 fn assert_private_future_dependency(
     checked: &Arc<CheckedWorldCellProgram>,
 ) -> Result<(), CompileError> {
-    use crate::artifact_inventory::{ArtifactBindingNode, ArtifactDependency};
+    use crate::artifact_inventory::{
+        ArtifactBindingNode, ArtifactDependency, NativeRequirementRoot,
+    };
     assert_eq!(checked.stages().len(), 1);
     assert_eq!(checked.stages()[0].ordinals(), &[0, 1, 2]);
     let mut validation =
@@ -352,6 +354,7 @@ fn assert_private_future_dependency(
             &segment.source().generated_source_owner(),
             &certified.data().recovery_products,
         )?;
+        let entry_key = entry.native_group_key();
         let values = segment
             .originals
             .selected_value_entries(&certified.data().value_interfaces)
@@ -370,8 +373,22 @@ fn assert_private_future_dependency(
         )?;
         assert_eq!(inventory.metrics().issued_scope_nodes, before_target);
         native_cursor = target.artifacts().clone();
+        assert!(native_cursor.selected_native_groups().contains(&entry_key));
         if index == 0 {
-            assert!(!native_cursor.artifact_ids().contains(&later));
+            assert!(native_cursor.artifact_ids().contains(&later));
+            assert!(!native_cursor.contains_namespace_artifact(later));
+            let roots = native_cursor
+                .selected_native_groups()
+                .into_iter()
+                .map(|group| NativeRequirementRoot::Group {
+                    artifact: group.artifact,
+                    original_ordinal: group.original_ordinal,
+                })
+                .collect::<Vec<_>>();
+            assert!(native_cursor
+                .native_binding_requirements_from_roots(&roots)?
+                .iter()
+                .all(|required| required.artifact_id != later));
             assert!(!certified
                 .source_selection()
                 .interface_only_artifact(&crate::declaration_join::ExactModuleIdentity {
