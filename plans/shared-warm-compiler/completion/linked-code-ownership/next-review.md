@@ -145,17 +145,61 @@ discarded lexical reconstruction inside authored artifact validation. Both calle
 already retain the actual SourceScope; that obsolete traversal and adapter are
 deleted, preserving canonical dependency validation. The `f5e8cb121a` execution
 cleared the old `TextFormat` refusal but reached retained-template capture with
-incomplete original instance evidence. A bounded diagnostic now distinguishes an
-unknown environment from its missing-owner census; root and the independent
-reviewer are tracing the actual stage selection before changing that contract.
+incomplete original instance evidence. The scoped diagnostic at `03c5eaefd2`
+locates the failure at item 4/generation 3: stage 4 selects Val.G2 but inherits a
+Val.G1 requirement from accumulated publication state. Both World and finite
+value publication had converted nominal TYPE requirements into lexical rows.
+At `536be83679`, both producers preserve the lexical graph; the original-output
+owner derives thin, instance-empty leaves from actual checked inputs and their
+matching selected interfaces. Missing selected interfaces refuse explicitly.
+Canonical adjacency, SOURCE permissions, native demand and the completeness
+guard remain intact. Astra source review accepted the repair; joined execution
+is recorded separately in the current handoff.
+
+The first joined execution at `536be83679` completes sealing but fails a new
+test assertion that expected same-cell prior-stage values to use checked-input
+instance leaves. That expectation was wrong: prior-stage values use their
+produced-TYPE issuer, while the checked-input authority covers base-World values
+and the operand. The assertion is corrected at `c92fb6217b` to observe the actual
+selected TYPE role. Do not broaden runtime authority to satisfy the old assertion.
+Three component failures and the quotation test's compiler-ownership setup are
+retained explicitly for the next pass; source acceptance is not execution proof.
+The final `c92fb6217b` runtime execution clears preparation and those callback
+assertions, then fails with duplicate selected lexical owner
+`main:Tidepool.Session.Lib.G1` inside the initial history. Its later effects,
+publication assertions and fresh consumer remain unqualified. Exact outcomes and
+the stopping boundary are in [review-checkpoint.md](review-checkpoint.md).
 
 The planned validator's package-path mutation control also expected recovered
 immutable custody to reread an ambient path. Its corrected control checks exact
 retained bytes after mutation; the existing fresh-path refusal control remains
-separate. Both need joined execution. Prior-source adjacency widening remains an
+separate. The paired four-case selection passes at `acd6ea2259`. Prior-source adjacency widening remains an
 unproven follow-up, not a demonstrated production defect or release blocker.
 Prior-World/runtime recovery and ordinary G2 remain pending.
 Exact commands, source pins, cleanup outcomes and limits remain in V's records.
+
+## Consolidation before the next planning pass
+
+The current bounded wave ends after compilation and focused execution of the
+joined checked-value repair. Do not expand it into another repair campaign or
+call it G2 qualification. `handoff.tmp.md` records the exact tested revision,
+terminal results, preserved parcels and next gates. No bundle or Persona launch
+has been qualified.
+
+Questions for the next architectural review:
+
+- Which facts describe cumulative availability, and which describe the exact
+  current compiler selection? Can their owning types prevent publication from
+  silently enlarging a later request's obligations?
+- Are nominal TYPE dependencies, source permission and original instance edges
+  still convertible through overly general context mutation APIs? Preserve real
+  inherited instance evidence; merely filtering inconvenient missing rows is not
+  a repair.
+- Which component fixtures reconstruct SOURCE or compiler roles that the real
+  producer never emits? Keep fast component refusal controls, paired with a
+  small real multistage producer/consumer history that tests the relationship.
+
+These are review questions, not approved new implementation assignments.
 
 ## Parallel corrections
 

@@ -1,6 +1,7 @@
 # Compiler work and authority map
 
-This map was checked against joined source `f5e8cb121a` (2026-10-22).
+This map was checked against joined source `f5e8cb121a` (2026-10-22), with the
+checked-value instance-scope boundary updated for `c92fb6217b`.
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -212,7 +213,19 @@ of reconstructing them from module names, generation labels or retained catalogs
   inherited and protected occurrences separately from exact import authorization.
   TYPE-only support extensions add no source scope. Value and source publication
   project admitted roots through their own source closure; retained unrelated
-  compiler facts do not become public roots. The
+  compiler facts do not become public roots. Both World and finite publication
+  retain a checked value's nominal dependencies as TYPE artifact edges without
+  adding that value to the accumulated lexical graph. Original-output admission
+  issues an instance-empty leaf only for this preparation's actual checked-value
+  authority and matching selected thin interface. SOURCE receipt membership is
+  neither required nor sufficient for that authority; missing or mismatched
+  selected interfaces refuse. Thin interfaces contain no instances, while real
+  canonical source adjacency and missing-owner refusals remain unchanged.
+  Same-cell prior-stage values have a separate issuer:
+  `ProducedValueTypeInterfaces` and exact prior-produced TYPE anchoring. They are
+  not rows in `CheckedValueImportAuthority`, which covers admitted base-World
+  values and the operation operand. Observe their selected compiler roles, not
+  a presumed checked-value instance leaf or mere artifact custody. The
   [SourceScope/Context9 contract](../plans/shared-warm-compiler/completion/linked-code-ownership/source-scope.md)
   is implemented in the joined source, including separate snapshot facts and
   restore validation against actual selected support. Context9 restoration and
@@ -253,6 +266,10 @@ compiler prefix, one immutable code graph and actual acquired/source owners feed
 the existing installer. This supersedes the old completion-scope repair plan.
 Implementation and focused predecessor results do not qualify the current
 ordinary journey, snapshot recovery or frozen bundle.
+The [consolidated review checkpoint](../plans/shared-warm-compiler/completion/linked-code-ownership/review-checkpoint.md)
+records the current `c92fb6217b` run: preparation and callback assertions clear,
+but the initial runtime history refuses duplicate lexical owner Lib.G1. The
+component fixture and compiler-test setup failures are recorded separately.
 
 | Boundary | Remaining acceptance |
 |---|---|
