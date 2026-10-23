@@ -653,12 +653,7 @@ impl CertifiedAuthoredDeclaration {
                 "authored publication source differs from its selected original",
             ));
         }
-        let sources = visible
-            .contains(&owner)
-            .then_some(owner)
-            .into_iter()
-            .collect();
-        self.compiler_support.for_source_owners(&sources)
+        self.compiler_support.for_source_owners(visible)
     }
 
     /// Extend an issued source surface without acquiring compiler roles from
@@ -1208,29 +1203,7 @@ impl AcceptedJoin {
         &self,
         visible: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<crate::artifact_inventory::CompilerSourceSupport, CompileError> {
-        let metadata = self.compiler_support.artifacts().metadata_snapshot();
-        let mut sources = BTreeSet::new();
-        for (owner, role) in self.compiler_support.projection().snapshot_roles() {
-            let Some(original) = role.original() else {
-                continue;
-            };
-            let entry = metadata
-                .artifacts
-                .get(&original)
-                .ok_or_else(|| contract("joined publication source is outside its custody"))?;
-            if entry.descriptor.owner != *owner {
-                return Err(contract("joined publication source has a different owner"));
-            }
-            if visible.contains(owner)
-                && matches!(&entry.payload,
-                    crate::artifact_inventory::ArtifactPayload::Original(product)
-                        if matches!(product.module_interface().map(|interface| interface.origin()),
-                            Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
-            {
-                sources.insert(owner.clone());
-            }
-        }
-        self.compiler_support.for_source_owners(&sources)
+        self.compiler_support.for_source_owners(visible)
     }
 
     pub fn input(&self) -> &DeclarationJoinInput {
@@ -2751,6 +2724,113 @@ mod authored_tests {
             ExactDeclarationContext::empty()
                 .admit_authored_publication(std::slice::from_ref(&baseline), &source_surface)
                 .unwrap(),
+        );
+        let issued_source = baseline
+            .compiler_source_support()
+            .world_primary_type_row(&selected_support)
+            .unwrap();
+        let issued_source_original = issued_source
+            .original_binding
+            .expect("the real home SOURCE dependency must issue an Original role");
+        let admitted_source = context
+            .compiler_source_support()
+            .world_primary_type_row(&selected_support)
+            .unwrap();
+        assert_eq!(
+            admitted_source.interface_binding,
+            issued_source.interface_binding
+        );
+        assert_eq!(
+            admitted_source.original_binding,
+            Some(issued_source_original)
+        );
+        let visible = BTreeSet::from([selected_support.clone()]);
+        let selected = baseline.publication_compiler_support(&visible).unwrap();
+        assert_eq!(
+            selected
+                .world_primary_type_row(&selected_support)
+                .unwrap()
+                .original_binding,
+            Some(issued_source_original)
+        );
+        let hidden = baseline
+            .publication_compiler_support(&BTreeSet::new())
+            .unwrap();
+        assert!(hidden
+            .world_primary_type_row(&selected_support)
+            .unwrap()
+            .original_binding
+            .is_none());
+        assert!(
+            hidden
+                .artifacts()
+                .artifact_ids()
+                .contains(&issued_source_original.artifact),
+            "demoting SOURCE selection must retain exact native byte custody"
+        );
+        let demand_before = hidden.artifacts().selected_native_groups();
+        let still_type_only = hidden.for_source_owners(&visible).unwrap();
+        assert!(still_type_only.world_primary_type_row(&selected_support).unwrap().original_binding.is_none(),
+            "explicit owner names cannot promote an interface-only role from retained native custody");
+        assert_eq!(
+            still_type_only.artifacts().selected_native_groups(),
+            demand_before
+        );
+        let publication_scratch = Arc::new(tempfile::tempdir().unwrap());
+        let publication_inputs = context
+            .publication_join_inputs(publication_scratch.clone(), &source_surface)
+            .unwrap();
+        let original_owner = ExactModuleIdentity {
+            unit: "main".into(),
+            module: baseline_module.module_name(),
+        };
+        let anchor = publication_inputs.interface(&original_owner).unwrap();
+        let publication_spec = DeclarationJoinSpec {
+            expected_public_version: "explicit-source-intent".into(),
+            public_module: None,
+            private_base: None,
+            private_tip: Some(ModuleSnapshot {
+                module: anchor.module.clone(),
+                path: anchor.path.clone(),
+                sha256: anchor.sha256.clone(),
+            }),
+            writes: Vec::new(),
+            reserved: ReservedJoin {
+                unit: "main".into(),
+                module: "Tidepool.Actor.Surface.ExplicitSourceIntent".into(),
+                path: publication_scratch.path().join("projection.hi"),
+            },
+            family_closure: baseline.family_closure().to_vec(),
+            expected_exports: baseline.lexical_exports().to_vec(),
+            expected_instances: baseline.instances().clone(),
+        };
+        let CertifiedPublicationJoin::Accepted(publication) =
+            crate::artifacts::test_support::with_settlement(|settlement| {
+                certify_publication_join(
+                    publication_spec,
+                    publication_inputs,
+                    &[root.path().to_path_buf()],
+                    root.path(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("actual home SOURCE Original publication must be accepted")
+        };
+        let published_source = publication
+            .context()
+            .compiler_source_support()
+            .world_primary_type_row(&selected_support)
+            .unwrap();
+        assert_eq!(
+            published_source.interface_binding,
+            issued_source.interface_binding
+        );
+        assert_eq!(
+            published_source.original_binding,
+            Some(issued_source_original),
+            "the accepted join must preserve the exact explicitly selected SOURCE Original"
         );
         let repeated_preflight = context
             .as_ref()
