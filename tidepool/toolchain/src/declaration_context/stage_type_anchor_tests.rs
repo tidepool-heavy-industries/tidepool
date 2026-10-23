@@ -206,11 +206,11 @@ pub(super) fn assert_actual_available_prior_source_inputs(
         ));
         if matches!(compiler_entry.payload, ArtifactPayload::Canonical(_)) {
             assert!(
-                !selection.has_native_group_support(key.artifact, product.owner(), ordinal),
+                !selection.permits_native_group(key.artifact, product.owner(), ordinal),
                 "a canonical compiler role does not gain native permission from prior membership"
             );
         } else {
-            assert!(selection.has_native_group_support(key.artifact, product.owner(), ordinal));
+            assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
         }
         for binding in expected {
             assert!(std::ptr::eq(
@@ -267,7 +267,7 @@ pub(super) fn assert_actual_available_prior_source_inputs(
                 "target Source exact native membership"
             ))
         ));
-        assert!(!selection.has_native_group_support(
+        assert!(!selection.permits_native_group(
             absent.artifact,
             product.owner(),
             absent.original_ordinal
@@ -385,11 +385,7 @@ pub(super) fn assert_completed_current_stage_ceiling(
                         !own.is_empty(),
                         "dormant current group is already physically available"
                     );
-                    assert!(selection.has_native_group_support(
-                        key.artifact,
-                        product.owner(),
-                        ordinal
-                    ));
+                    assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
                     assert!(
                         inputs
                             .original_bindings
@@ -431,11 +427,7 @@ pub(super) fn assert_completed_current_stage_ceiling(
                     assert_eq!(physical.capture_graph_selection().native_groups, native);
                     assert_eq!(inputs.support.recorded_input_decisions(), &decisions);
                     assert_eq!(receipt.groups(key).collect::<BTreeSet<_>>(), own);
-                    assert!(selection.has_native_group_support(
-                        key.artifact,
-                        product.owner(),
-                        ordinal
-                    ));
+                    assert!(selection.permits_native_group(key.artifact, product.owner(), ordinal));
                     assert!(inputs
                         .original_bindings
                         .executable(reference, inputs.initial.operation())

@@ -7870,6 +7870,21 @@ impl ArtifactView {
                     .is_none_or(|provided| proof.proof().as_ref() != provided.proof().as_ref())
             })
         {
+            tracing::warn!(
+                target: "tidepool::artifact_inventory::recovery",
+                roots_equal = live.roots == snapshot.roots,
+                namespace_equal = live.namespace == snapshot.namespace,
+                custody_equal = live.custody_roots == snapshot.custody_roots,
+                live_roots = live.roots.len(),
+                recorded_roots = snapshot.roots.len(),
+                live_namespace = live.namespace.len(),
+                recorded_namespace = snapshot.namespace.len(),
+                live_custody = live.custody_roots.len(),
+                recorded_custody = snapshot.custody_roots.len(),
+                live_scopes = live.scopes.len(),
+                recorded_scopes = snapshot.scopes.len(),
+                "hydrated selection snapshot differs from inventory-issued facts"
+            );
             return Err(failure(
                 "hydrated selection snapshot differs from inventory-issued facts",
             ));

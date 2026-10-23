@@ -281,6 +281,20 @@ pub(super) mod tests {
         assert_eq!(restored.len(), 2);
         let mut shared_components = 0;
         for (context, (_, receipt)) in restored.iter().zip(&receipts) {
+            assert_eq!(
+                context.snapshot().selection(),
+                receipt.snapshot().selection(),
+                "restoration preserves roots, namespace, custody seeds and proof scopes"
+            );
+            let mut rebound = context.clone();
+            for _ in 0..2 {
+                rebound.bind_snapshot_baseline(receipt).unwrap();
+                assert_eq!(
+                    rebound.snapshot().selection(),
+                    receipt.snapshot().selection(),
+                    "baseline sharing must not replay live custody composition"
+                );
+            }
             let held = context.compiler_source_support();
             assert!(held
                 .native_component_records()

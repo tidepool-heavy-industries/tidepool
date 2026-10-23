@@ -2958,10 +2958,45 @@ impl RequestNativeAvailability {
     }
 }
 
-/// Native selection can own dependency bodies without issuing compiler namespace roles.
-/// Exact issuer bindings remain in the offers; this map records direct body availability.
+/// An unambiguous direct body selection, separate from retained candidates and
+/// compiler namespace roles. Exact issuer bindings remain in the offers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AdvertisedNativeOriginals(Arc<imbl::OrdMap<ExactModuleIdentity, ArtifactId>>);
+
+/// Direct bodies compatible with the received compiler roles. Availability may
+/// retain several exact historical bodies for one nominal owner; receiving them
+/// does not choose which body a nominal demand or finite compiler launch uses.
+#[derive(Clone, Debug, Default)]
+struct NativeOwnerCandidates(Arc<imbl::OrdMap<ExactModuleIdentity, imbl::OrdSet<ArtifactId>>>);
+
+impl NativeOwnerCandidates {
+    fn require_unique(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> Result<Option<ArtifactId>, CompileError> {
+        let Some(candidates) = self.0.get(owner) else {
+            return Ok(None);
+        };
+        if candidates.len() > 1 {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeOwnerAmbiguity {
+                    owner: owner.clone(),
+                },
+            ));
+        }
+        Ok(candidates.iter().next().copied())
+    }
+
+    fn select_all(&self) -> Result<AdvertisedNativeOriginals, CompileError> {
+        let mut selected = imbl::OrdMap::new();
+        for owner in self.0.keys() {
+            if let Some(id) = self.require_unique(owner)? {
+                selected.insert(owner.clone(), id);
+            }
+        }
+        Ok(AdvertisedNativeOriginals(Arc::new(selected)))
+    }
+}
 
 impl AdvertisedNativeOriginals {
     pub(crate) fn receipt_original<'a>(
@@ -2993,9 +3028,25 @@ impl AdvertisedNativeOriginals {
 pub(crate) struct DemandNativeInputs {
     cold: Arc<RequestCompilerInputs>,
     demand: crate::artifact_inventory::DemandCompilerProjection,
-    native_selection: NativeInputSelection,
+    native_selection: SelectedNativeInputs,
     permission_delta: IssuedNativePermissionDelta,
     work: DemandNativeInputsWork,
+}
+
+/// Executable demand keeps exact resolved uses distinct from nominal requests.
+/// A resolved use already carries its issuer; it must not choose a body again
+/// through a module-name index.
+enum NativeRootDemand<'a> {
+    Nominal(&'a BTreeSet<ExactModuleIdentity>),
+    Exact {
+        bindings: &'a crate::certified_products::ResolvedOriginalBindings,
+        operation: &'a Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    },
+}
+
+struct SelectedNativeInputs {
+    availability: RequestNativeAvailability,
+    advertised: AdvertisedNativeOriginals,
 }
 
 /// The exact rows one demand owner narrowed from its own acquired cold
@@ -3633,10 +3684,35 @@ impl DemandNativeInputs {
                 .snapshot_roles()
                 .get(&owner)
                 .ok_or_else(|| failure("receipt native group lacks its demanded compiler role"))?;
-            let id = role
-                .original()
-                .or_else(|| self.native_selection.advertised.0.get(&owner).copied())
-                .ok_or_else(|| failure("receipt native group lacks its issued body choice"))?;
+            let id = match original_use {
+                Some(
+                    reference @ crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                        original,
+                        ..
+                    },
+                ) => {
+                    let resolved = inputs.resolved_originals.as_ref().ok_or_else(|| {
+                        failure("exact native use lacks its resolved input owner")
+                    })?;
+                    let (resolved_owner, resolved_ordinal) =
+                        resolved.get(reference).ok_or_else(|| {
+                            failure("exact native use is outside its resolved input owner")
+                        })?;
+                    if resolved_owner.unit != unit.as_ref()
+                        || resolved_owner.module != module.as_ref()
+                        || module_version.as_deref() != Some(&resolved_owner.module_version)
+                        || resolved_ordinal != original_ordinal
+                    {
+                        return Err(failure("exact native use differs from its resolved input"));
+                    }
+                    original.artifact
+                }
+                Some(_) => return Err(failure("native Original use has another reference kind")),
+                None => role
+                    .original()
+                    .or_else(|| self.native_selection.advertised.0.get(&owner).copied())
+                    .ok_or_else(|| failure("receipt native group lacks its issued body choice"))?,
+            };
             let row = self
                 .native_selection
                 .availability
@@ -3981,11 +4057,18 @@ impl RequestCompilerInputs {
         }
         let inputs = ReceiptNativeInputDemand {
             sources,
-            resolved_originals: Some(resolved),
+            resolved_originals: Some(Arc::clone(&resolved)),
         };
         let projection = self.demanded_compiler_projection(&roots, &validation.inventory)?;
         let demand = self
-            .demanded_native_inputs(projection, &roots, &validation.inventory)
+            .demanded_native_inputs_for(
+                projection,
+                NativeRootDemand::Exact {
+                    bindings: &resolved,
+                    operation: &validation.inventory,
+                },
+                &validation.inventory,
+            )
             .map_err(|error| match error {
                 DemandNativeInputsError::Compiler(error) => error,
                 other => failure(format!("native demand refused: {other}")),
@@ -4006,6 +4089,15 @@ impl RequestCompilerInputs {
         native_roots: &BTreeSet<ExactModuleIdentity>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<DemandNativeInputs, DemandNativeInputsError> {
+        self.demanded_native_inputs_for(demand, NativeRootDemand::Nominal(native_roots), operation)
+    }
+
+    fn demanded_native_inputs_for(
+        self: &Arc<Self>,
+        demand: crate::artifact_inventory::DemandCompilerProjection,
+        roots: NativeRootDemand<'_>,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<DemandNativeInputs, DemandNativeInputsError> {
         crate::host_work::checkpoint().map_err(CompileError::from)?;
         if !Arc::ptr_eq(&self.source_support, demand.source_support())
             || !Arc::ptr_eq(&self.metadata.retained, &demand.metadata().retained)
@@ -4014,14 +4106,30 @@ impl RequestCompilerInputs {
         }
         let budget = NativeDemandBudget(Some(operation));
         let mut work = DemandNativeInputsWork::default();
-        for owner in native_roots {
-            budget.checkpoint()?;
-            work.owner_lookups += 1;
-            if !demand.owners().contains(owner) {
-                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
-                return Err(DemandNativeInputsError::MissingRole {
-                    owner: owner.clone(),
-                });
+        let nominal_roots = match &roots {
+            NativeRootDemand::Nominal(owners) => Some(*owners),
+            NativeRootDemand::Exact {
+                bindings,
+                operation: issued_operation,
+            } => {
+                if !bindings.belongs_to(&self.source_support, issued_operation)
+                    || !std::ptr::eq(operation, issued_operation.as_ref())
+                {
+                    return Err(DemandNativeInputsError::ForeignBasis);
+                }
+                None
+            }
+        };
+        if let Some(native_roots) = nominal_roots {
+            for owner in native_roots {
+                budget.checkpoint()?;
+                work.owner_lookups += 1;
+                if !demand.owners().contains(owner) {
+                    budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                    return Err(DemandNativeInputsError::MissingRole {
+                        owner: owner.clone(),
+                    });
+                }
             }
         }
         let mut direct = BTreeSet::new();
@@ -4035,8 +4143,17 @@ impl RequestCompilerInputs {
                     owner: owner.clone(),
                 });
             };
-            let chosen = self.native_selection.advertised.0.get(owner).copied();
+            let nominal = nominal_roots.is_some_and(|roots| roots.contains(owner));
+            let chosen = if role.original().is_some() || nominal {
+                self.native_selection.candidates.require_unique(owner)?
+            } else {
+                None
+            };
             if role.original().is_some() && chosen.is_some_and(|id| Some(id) != role.original()) {
+                tracing::warn!(target: "tidepool::artifact_inventory::admission",
+                    obligation = "demanded_original_matches_advertisement", ?owner,
+                    selected_original = ?role.original(), advertised_original = ?chosen,
+                    "native owner selection conflicts with its carried role");
                 budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
                 return Err(
                     admission_failure(ArtifactInventoryFailure::NativeOwnerAmbiguity {
@@ -4047,9 +4164,9 @@ impl RequestCompilerInputs {
             }
             let direct_choice = role
                 .original()
-                .or_else(|| native_roots.contains(owner).then_some(chosen).flatten());
+                .or_else(|| nominal.then_some(chosen).flatten());
             let Some(id) = direct_choice else {
-                if native_roots.contains(owner) {
+                if nominal {
                     budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
                     return Err(DemandNativeInputsError::UnadvertisedOwner {
                         owner: owner.clone(),
@@ -4093,6 +4210,65 @@ impl RequestCompilerInputs {
                 budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
                 advertised.insert(owner.clone(), id);
                 work.advertised += 1;
+            }
+        }
+        if let NativeRootDemand::Exact {
+            bindings: resolved, ..
+        } = roots
+        {
+            for reference in resolved.authenticated().references() {
+                budget.checkpoint()?;
+                let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                    original, ..
+                } = reference
+                else {
+                    return Err(
+                        failure("resolved native use lacks an exact Original binding").into(),
+                    );
+                };
+                let (owner, _) = resolved.get(reference).ok_or_else(|| {
+                    failure("resolved native use lost its authenticated reference")
+                })?;
+                budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
+                let owner = identity(&owner.unit, &owner.module);
+                work.owner_lookups += 1;
+                let role = demand
+                    .projection()
+                    .snapshot_roles()
+                    .get(&owner)
+                    .ok_or_else(|| DemandNativeInputsError::MissingRole {
+                        owner: owner.clone(),
+                    })?;
+                let id = original.artifact;
+                work.row_lookups += 1;
+                let row = self
+                    .native_selection
+                    .availability
+                    .0
+                    .get(&id)
+                    .ok_or_else(|| {
+                        admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                            artifact: id,
+                        })
+                    })?;
+                let payload = self.metadata.retained.artifacts.get(&id).ok_or_else(|| {
+                    admission_failure(ArtifactInventoryFailure::NativeRootOutsideView {
+                        artifact: id,
+                    })
+                })?;
+                if !Arc::ptr_eq(payload, &row.original)
+                    || row.original.descriptor.owner != owner
+                    || row.canonical != role.interface()
+                {
+                    return Err(
+                        admission_failure(ArtifactInventoryFailure::MetadataConflict {
+                            artifact: id,
+                        })
+                        .into(),
+                    );
+                }
+                budget.reserve::<(ArtifactId, [usize; 4])>(1)?;
+                direct.insert(id);
             }
         }
         let availability = self.native_selection.availability.for_compiler_roots(
@@ -4158,7 +4334,7 @@ impl RequestCompilerInputs {
         Ok(DemandNativeInputs {
             cold: Arc::clone(self),
             demand,
-            native_selection: NativeInputSelection {
+            native_selection: SelectedNativeInputs {
                 availability,
                 advertised: AdvertisedNativeOriginals(Arc::new(advertised.into_iter().collect())),
             },
@@ -4171,7 +4347,7 @@ impl RequestCompilerInputs {
 #[derive(Clone)]
 struct NativeInputSelection {
     availability: RequestNativeAvailability,
-    advertised: AdvertisedNativeOriginals,
+    candidates: NativeOwnerCandidates,
 }
 
 impl NativeInputSelection {
@@ -4181,7 +4357,7 @@ impl NativeInputSelection {
     ) -> Result<Self, CompileError> {
         Ok(Self {
             availability: self.availability.retain_acquisitions(support.artifacts())?,
-            advertised: self.advertised.clone(),
+            candidates: self.candidates.clone(),
         })
     }
 
@@ -4204,7 +4380,7 @@ impl NativeInputSelection {
         normalized: RequestNativeAvailability,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
-        let mut advertised = BTreeMap::new();
+        let mut candidates = imbl::OrdMap::<ExactModuleIdentity, imbl::OrdSet<ArtifactId>>::new();
         for row in normalized.rows() {
             row.validate_full_evidence()?;
             if row.mode == NativeTransportMode::Full
@@ -4249,21 +4425,16 @@ impl NativeInputSelection {
                             })))
                 }
             };
-            if direct
-                && advertised
-                    .insert(owner.clone(), row.original.descriptor.id)
-                    .is_some_and(|previous| previous != row.original.descriptor.id)
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeOwnerAmbiguity {
-                        owner: owner.clone(),
-                    },
-                ));
+            if direct {
+                candidates
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(row.original.descriptor.id);
             }
         }
         Ok(Self {
             availability: normalized,
-            advertised: AdvertisedNativeOriginals(Arc::new(advertised.into_iter().collect())),
+            candidates: NativeOwnerCandidates(Arc::new(candidates)),
         })
     }
 
@@ -4412,6 +4583,10 @@ impl NativeInputSelection {
                 .insert(entry.descriptor.owner.clone(), offer.original())
                 .is_some_and(|previous| previous != offer.original())
             {
+                tracing::warn!(target: "tidepool::artifact_inventory::admission",
+                    obligation = "unique_qualified_native_original", owner = ?entry.descriptor.owner,
+                    original = ?offer.original(),
+                    "multiple private native originals qualify in the receiving namespace");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeOwnerAmbiguity {
                         owner: entry.descriptor.owner.clone(),
@@ -4538,17 +4713,20 @@ struct NativeCompilerTransport {
 }
 
 impl NativeCompilerTransport {
-    fn lower(inputs: RequestCompilerInputs) -> Self {
-        let metadata = Self::lower_metadata(&inputs);
-        Self { inputs, metadata }
+    fn lower(inputs: RequestCompilerInputs) -> Result<Self, CompileError> {
+        let metadata = Self::lower_metadata(&inputs)?;
+        Ok(Self { inputs, metadata })
     }
 
-    fn lower_metadata(inputs: &RequestCompilerInputs) -> Arc<CompilerArtifactMetadata> {
+    fn lower_metadata(
+        inputs: &RequestCompilerInputs,
+    ) -> Result<Arc<CompilerArtifactMetadata>, CompileError> {
+        let advertised = inputs.native_selection.candidates.select_all()?;
         let mut metadata = CompilerArtifactMetadata {
             retained: Arc::clone(&inputs.metadata.retained),
             entries: inputs.metadata.entries.clone(),
         };
-        for (owner, id) in inputs.native_selection.advertised.0.iter() {
+        for (owner, id) in advertised.0.iter() {
             metadata.entries.insert(
                 owner.clone(),
                 Arc::clone(&inputs.native_selection.availability.0[id].original),
@@ -4556,7 +4734,7 @@ impl NativeCompilerTransport {
         }
         #[cfg(test)]
         NATIVE_TRANSPORT_LOWERINGS.with(|count| count.set(count.get() + 1));
-        Arc::new(metadata)
+        Ok(Arc::new(metadata))
     }
 }
 
@@ -4727,45 +4905,13 @@ impl RequestCompilerInputs {
             incoming,
             &delta.changed_owners,
         )?;
-        let mut advertised = self.native_selection.advertised.0.as_ref().clone();
-        let changed_direct = RequestNativeAvailability::from_issued_rows(
-            delta
-                .changed_owners
-                .iter()
-                .filter_map(|owner| {
-                    delta
-                        .support
-                        .projection()
-                        .snapshot_roles()
-                        .get(owner)
-                        .and_then(CompilerInputRole::original)
-                        .map(|id| {
-                            delta
-                                .support
-                                .native_availability()
-                                .issued_row(id)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    failure("program Original role lacks its issued native row")
-                                })
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )?;
-        let checked_direct = NativeInputSelection::from_normalized_rows(
+        let native_selection = NativeInputSelection::receive(
             delta.support.projection(),
             &metadata,
             delta.support.artifacts(),
-            changed_direct,
-            incoming.native_offers(),
+            delta.support.native_availability(),
+            delta.support.native_offers(),
         )?;
-        for (owner, id) in checked_direct.advertised.0.iter() {
-            advertised.insert(owner.clone(), *id);
-        }
-        let native_selection = NativeInputSelection {
-            availability: delta.support.native_availability().clone(),
-            advertised: AdvertisedNativeOriginals(Arc::new(advertised)),
-        };
         primary
             .source_scope()
             .preserve_support(primary.compiler_source_support(), &delta.support)?;
@@ -4877,8 +5023,10 @@ impl RequestCompilerInputs {
         self.native_selection.availability.clone()
     }
 
-    pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
-        self.native_selection.advertised.clone()
+    pub(crate) fn advertised_native_originals(
+        &self,
+    ) -> Result<AdvertisedNativeOriginals, CompileError> {
+        self.native_selection.candidates.select_all()
     }
 
     pub(crate) fn available_original_sources(
@@ -9208,10 +9356,32 @@ impl CompilerArtifactMetadata {
 pub(crate) struct ProductCompilerInputs<'a> {
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
     pub(crate) metadata: &'a CompilerArtifactMetadata,
-    native_selection: &'a NativeInputSelection,
+    native_selection: ProductNativeInputs<'a>,
     original_sources: &'a crate::certified_products::RetainedOriginalSources,
     original_bindings: Option<crate::certified_products::OriginalBindingSelection>,
     program_support: Option<&'a ProgramSourceSupport>,
+}
+
+#[derive(Clone, Copy)]
+enum ProductNativeInputs<'a> {
+    Candidates(&'a NativeInputSelection),
+    Selected(&'a SelectedNativeInputs),
+}
+
+impl ProductNativeInputs<'_> {
+    fn availability(&self) -> &RequestNativeAvailability {
+        match self {
+            Self::Candidates(inputs) => &inputs.availability,
+            Self::Selected(inputs) => &inputs.availability,
+        }
+    }
+
+    fn select_all(&self) -> Result<AdvertisedNativeOriginals, CompileError> {
+        match self {
+            Self::Candidates(inputs) => inputs.candidates.select_all(),
+            Self::Selected(inputs) => Ok(inputs.advertised.clone()),
+        }
+    }
 }
 
 impl<'a> ProductCompilerInputs<'a> {
@@ -9219,7 +9389,7 @@ impl<'a> ProductCompilerInputs<'a> {
         Self {
             source_support: Arc::clone(&inputs.source_support),
             metadata: &inputs.metadata,
-            native_selection: &inputs.native_selection,
+            native_selection: ProductNativeInputs::Candidates(&inputs.native_selection),
             original_sources: &inputs.original_sources,
             original_bindings: None,
             program_support: None,
@@ -9305,7 +9475,7 @@ impl<'a> ProductCompilerInputs<'a> {
         Self {
             source_support: support,
             metadata: inputs.demand.metadata(),
-            native_selection: &inputs.native_selection,
+            native_selection: ProductNativeInputs::Selected(&inputs.native_selection),
             original_sources,
             original_bindings: Some(original_bindings),
             program_support: None,
@@ -9384,15 +9554,21 @@ impl<'a> ProductCompilerInputs<'a> {
         &self,
         original: ArtifactId,
     ) -> Option<Arc<NativeTransportAvailability>> {
-        self.native_selection.availability.0.get(&original).cloned()
+        self.native_selection
+            .availability()
+            .0
+            .get(&original)
+            .cloned()
     }
 
     pub(crate) fn private_native_availability(&self) -> RequestNativeAvailability {
-        self.native_selection.availability.clone()
+        self.native_selection.availability().clone()
     }
 
-    pub(crate) fn advertised_native_originals(&self) -> AdvertisedNativeOriginals {
-        self.native_selection.advertised.clone()
+    pub(crate) fn advertised_native_originals(
+        &self,
+    ) -> Result<AdvertisedNativeOriginals, CompileError> {
+        self.native_selection.select_all()
     }
 }
 
@@ -9954,7 +10130,7 @@ impl<'a> ExactProductAdmission<'a> {
             }
             ProductCompilationBinding::World(_) => {
                 OriginalSourceMembershipBasis(OriginalSourceMembershipOwner::World(Arc::downgrade(
-                    &compiler.native_selection.availability.0,
+                    &compiler.native_selection.availability().0,
                 )))
             }
         };
@@ -15939,7 +16115,7 @@ impl ExactDeclarationContext {
         producer: &[u8],
     ) -> Result<ExactCompilationRequest, CompileError> {
         let scaffold = ProtectedScaffoldRequirements::default();
-        let transport = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?);
+        let transport = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?)?;
         let metadata = &transport.metadata;
         if !root.is_absolute()
             || self
@@ -16040,7 +16216,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             authorization,
-            NativeCompilerTransport::lower(inputs),
+            NativeCompilerTransport::lower(inputs)?,
             scaffold,
             private,
             RequestInputTransport::OwnedArena,
@@ -16085,7 +16261,7 @@ impl ExactDeclarationContext {
             root,
             producer,
             Some(authorization),
-            NativeCompilerTransport::lower(inputs),
+            NativeCompilerTransport::lower(inputs)?,
             scaffold,
             private,
             RequestInputTransport::OwnedArena,
@@ -24456,7 +24632,12 @@ mod tests {
             assert!(cold.projection().snapshot_roles()[&child_owner]
                 .original()
                 .is_none());
-            let child = cold.native_selection.advertised.0[&child_owner];
+            let child = cold
+                .native_selection
+                .candidates
+                .require_unique(&child_owner)
+                .unwrap()
+                .unwrap();
             let row = &cold.native_selection.availability.0[&child];
             assert_eq!(row.classification, NativeInputClassification::PrivateInput);
             assert_eq!(
@@ -24729,7 +24910,10 @@ mod tests {
                         .collect::<BTreeMap<_, _>>(),
                     *expected.availability
                 );
-                assert_eq!(actual.advertised.0, expected.advertised.0);
+                assert_eq!(
+                    actual.candidates.select_all().unwrap().0,
+                    expected.advertised.0
+                );
                 Some(expected)
             }
             (Err(expected), Err(actual)) => {
@@ -24739,8 +24923,13 @@ mod tests {
             (Ok(_), Err(error)) => {
                 panic!("new native selection refused reference success: {error:?}")
             }
-            (Err(error), Ok(_)) => {
-                panic!("new native selection accepted reference refusal: {error:?}")
+            (Err(expected), Ok(actual)) => {
+                let actual = actual
+                    .candidates
+                    .select_all()
+                    .expect_err("finite selection retains the reference ambiguity refusal");
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                None
             }
         }
     }
@@ -24803,7 +24992,7 @@ mod tests {
                     .get(owner)
                     .is_some_and(|semantic| semantic.descriptor.id != entry.descriptor.id)
             });
-            let physical = NativeCompilerTransport::lower(inputs);
+            let physical = NativeCompilerTransport::lower(inputs).unwrap();
             assert_eq!(
                 NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
                 before + 1
@@ -24825,7 +25014,13 @@ mod tests {
                 *expected.availability
             );
             assert_eq!(
-                physical.inputs.native_selection.advertised.0,
+                physical
+                    .inputs
+                    .native_selection
+                    .candidates
+                    .select_all()
+                    .unwrap()
+                    .0,
                 expected.advertised.0
             );
             let source = physical.inputs.compiler_source_support();
@@ -25544,8 +25739,12 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_ne!(first_request_bindings, second_request_bindings);
         assert_eq!(
-            NativeCompilerTransport::lower_metadata(&first_inputs).materialization_key(),
-            NativeCompilerTransport::lower_metadata(&second_inputs).materialization_key()
+            NativeCompilerTransport::lower_metadata(&first_inputs)
+                .unwrap()
+                .materialization_key(),
+            NativeCompilerTransport::lower_metadata(&second_inputs)
+                .unwrap()
+                .materialization_key()
         );
         let scratch = tempfile::tempdir().unwrap();
         let prepare =
@@ -25555,7 +25754,7 @@ mod tests {
                         &scratch.path().join(name),
                         producer,
                         None,
-                        NativeCompilerTransport::lower(inputs),
+                        NativeCompilerTransport::lower(inputs).unwrap(),
                         &scaffold,
                         Some(private),
                         RequestInputTransport::OwnedArena,
@@ -27600,7 +27799,7 @@ mod tests {
             .unwrap(),
         );
         ExactCompilationRequest {
-            transport_metadata: NativeCompilerTransport::lower_metadata(&inputs.compiler),
+            transport_metadata: NativeCompilerTransport::lower_metadata(&inputs.compiler).unwrap(),
             inputs,
             manifest,
             request_sha256: sha256(b"scope"),
@@ -32632,8 +32831,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             &advanced.inputs.original_sources
         ));
         assert!(Arc::ptr_eq(
-            &captured.native_selection.advertised.0,
-            &advanced.inputs.native_selection.advertised.0
+            &captured.native_selection.candidates.0,
+            &advanced.inputs.native_selection.candidates.0
         ));
         assert_eq!(
             captured.native_selection.availability,

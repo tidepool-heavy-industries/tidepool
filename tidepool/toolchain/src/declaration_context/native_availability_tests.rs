@@ -2941,7 +2941,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             text(hex(&[7; 32])),
         ])]),
     ]);
-    let transport_metadata = NativeCompilerTransport::lower_metadata(inputs);
+    let transport_metadata = NativeCompilerTransport::lower_metadata(inputs).unwrap();
     assert!(transport_metadata
         .entries
         .values()
@@ -3079,8 +3079,8 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .complete_native_entries(&inputs.artifacts(), &validation.inventory)
         .unwrap()
         .is_empty());
-    assert!(!cloned.has_native_group_support(ArtifactId([255; 32]), native.owner(), 9001));
-    assert!(!cloned.has_native_group_support(
+    assert!(!cloned.permits_native_group(ArtifactId([255; 32]), native.owner(), 9001));
+    assert!(!cloned.permits_native_group(
         entry.descriptor.id,
         product("WrongPrivateOwner", 128).owner(),
         9001
@@ -3114,7 +3114,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         &validation.inventory,
     )
     .unwrap();
-    assert!(next_selection.has_native_group_support(entry.descriptor.id, native.owner(), 9001));
+    assert!(next_selection.permits_native_group(entry.descriptor.id, native.owner(), 9001));
     let group = crate::certified_products::original_available_groups(&native)
         .unwrap()
         .find(|group| group.original_ordinal() == 9001)
@@ -3423,7 +3423,9 @@ fn interface_only_partial_union_and_custody_cannot_issue_private_full() {
             unreachable!()
         };
         assert!(transport
-            .advertised
+            .candidates
+            .select_all()
+            .unwrap()
             .receipt_original(
                 &transport.availability,
                 &original.owner().unit,
@@ -3523,7 +3525,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             assert!(row.permits(7) && row.permits(9001));
         }
         let availability = inputs.private_native_availability();
-        let direct = inputs.advertised_native_originals();
+        let direct = inputs.advertised_native_originals().unwrap();
         for index in 0..2 {
             let native = products[index].owner();
             let row = direct
@@ -3577,7 +3579,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             ArtifactPayload::Canonical(_)
         ));
         assert!(
-            transport.advertised.0.is_empty(),
+            transport.candidates.select_all().unwrap().0.is_empty(),
             "same canonical ID in another scope has no affine direct candidate"
         );
         assert_eq!(transport.availability.0.len(), 2);
@@ -3607,7 +3609,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
             BTreeSet::from([entries[winner].descriptor.id])
         );
         assert_eq!(
-            transport.advertised.0.get(&owner),
+            transport.candidates.select_all().unwrap().0.get(&owner),
             Some(&entries[winner].descriptor.id)
         );
         assert!(
@@ -3744,7 +3746,7 @@ fn direct_native_advertisement_uses_descendant_contribution_without_sibling_cust
     assert!(inputs.native_availability(ids[2]).is_none());
     assert_eq!(wire_mode(&request, &owners[0].module), issued_mode(&[7]));
     let private = inputs.private_native_availability();
-    let direct = inputs.advertised_native_originals();
+    let direct = inputs.advertised_native_originals().unwrap();
     let receipt = direct
         .receipt_original(
             &private,
@@ -4251,7 +4253,7 @@ fn native_availability_failed_merge_preserves_qualified_owner() {
 }
 
 #[test]
-fn private_full_availability_requires_exact_namespace_and_refuses_historical_ambiguity() {
+fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
     use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let natives = [
@@ -4320,25 +4322,119 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         .merge(&separate_rows[1])
         .unwrap()
         .into_rows();
-    let error =
-        NativeInputSelection::receive(&projection, &metadata, &custody, &normalized, &offers)
-            .err()
-            .expect(
-                "two distinct IDs affine to the same exact canonical remain ambiguous at receive",
-            );
-    assert!(
-        matches!(error, CompileError::ArtifactInventory(ref error) if matches!(error.failure,
-        ArtifactInventoryFailure::NativeOwnerAmbiguity { ref owner } if owner == &entries[0].descriptor.owner)),
-        "actual_error={error:?}"
-    );
     for reversed in [false, true] {
-        let selected = if reversed {
+        let selected_offers = if reversed {
             vec![offers[1].clone(), offers[0].clone()]
         } else {
             offers.clone()
         };
+        let normalized = if reversed {
+            separate_rows[1]
+                .merge(&separate_rows[0])
+                .unwrap()
+                .into_rows()
+        } else {
+            normalized.clone()
+        };
+        let received = NativeInputSelection::receive(
+            &projection,
+            &metadata,
+            &custody,
+            &normalized,
+            &selected_offers,
+        )
+        .expect("cold receive preserves each independently issued historical body");
+        let owner = &entries[0].descriptor.owner;
+        assert_eq!(received.availability.0.len(), 2);
+        assert_eq!(
+            received.candidates.0[owner]
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            entries.iter().map(|entry| entry.descriptor.id).collect()
+        );
+        let error = received.candidates.require_unique(owner).unwrap_err();
+        assert!(matches!(error, CompileError::ArtifactInventory(error)
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { owner: ref ambiguous }
+                if ambiguous == owner)));
+        let support = recover_fixture_compiler_support(
+            projection.clone(),
+            custody.clone(),
+            selected_offers.iter().cloned(),
+        )
+        .unwrap()
+        .retain_normalized_availability(&normalized)
+        .unwrap();
+        let context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&support)
+            .unwrap()
+            .admit_producer(producer.sha256())
+            .unwrap();
+        let cold = context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
+        let error = NativeCompilerTransport::lower_metadata(&cold)
+            .err()
+            .expect("finite compiler selection must refuse competing bodies");
+        assert!(matches!(error, CompileError::ArtifactInventory(error)
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { owner: ref ambiguous }
+                if ambiguous == owner)));
+        assert_eq!(
+            NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get),
+            before
+        );
+
+        let first = usize::from(reversed);
+        let initial_support = recover_fixture_compiler_support(
+            projection.clone(),
+            custody.clone(),
+            [offers[first].clone()],
+        )
+        .unwrap()
+        .retain_normalized_availability(&separate_rows[first])
+        .unwrap();
+        let initial_context = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&initial_support)
+            .unwrap()
+            .admit_producer(producer.sha256())
+            .unwrap();
+        let initial = initial_context
+            .capture_world_primary_compiler_inputs(producer.sha256())
+            .unwrap();
+        assert_eq!(
+            initial
+                .native_selection
+                .candidates
+                .require_unique(owner)
+                .unwrap(),
+            Some(entries[first].descriptor.id)
+        );
+        let advanced = initial
+            .advance_program_support(&Arc::new(context), &support)
+            .unwrap();
+        assert!(advanced.changed_owners.is_empty(), "adding a historical candidate changes availability without changing the selected canonical role");
+        assert_eq!(
+            advanced.inputs.native_selection.candidates.0,
+            cold.native_selection.candidates.0
+        );
+        assert_eq!(
+            advanced.inputs.native_selection.availability,
+            cold.native_selection.availability
+        );
+        assert!(
+            matches!(advanced.inputs.native_selection.candidates.require_unique(owner),
+            Err(CompileError::ArtifactInventory(error))
+            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { owner: ref ambiguous }
+                if ambiguous == owner))
+        );
+
+        // Fresh Full qualification still requires one exact body per namespace;
+        // retained competing choices cannot grant a new combined Full offer.
         let error =
-            NativeInputSelection::issue_checked(&projection, &metadata, &custody, &selected)
+            NativeInputSelection::issue_checked(&projection, &metadata, &custody, &selected_offers)
                 .err()
                 .expect("type-only role cannot choose among distinct qualified historical Fulls");
         assert!(matches!(error, CompileError::ArtifactInventory(error)
@@ -4356,7 +4452,9 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
     let original = duplicate.availability.0[&entries[0].descriptor.id].original_owner();
     let private = duplicate.availability.clone();
     let receipt_owner = duplicate
-        .advertised
+        .candidates
+        .select_all()
+        .unwrap()
         .receipt_original(
             &private,
             &original.unit,
@@ -4367,18 +4465,47 @@ fn private_full_availability_requires_exact_namespace_and_refuses_historical_amb
         .unwrap();
     assert_eq!(receipt_owner.original_owner(), original);
     assert!(receipt_owner.permits(9001));
-    for index in 0..2 {
-        let selected =
-            CompilerInputProjection::from_issued_entries(&[entries[index].clone()]).unwrap();
-        let view = views[index].retain_custody(&views[1 - index]).unwrap();
-        let metadata = selected.project_metadata(view.metadata_snapshot()).unwrap();
-        let transport =
-            NativeInputSelection::issue_checked(&selected, &metadata, &view, &offers).unwrap();
-        assert!(transport.availability.0[&entries[index].descriptor.id].permits(9001));
-        assert!(!transport
-            .availability
-            .0
-            .contains_key(&entries[1 - index].descriptor.id));
+    for reversed in [false, true] {
+        let selected_offers = if reversed {
+            vec![offers[1].clone(), offers[0].clone()]
+        } else {
+            offers.clone()
+        };
+        for index in 0..2 {
+            let selected =
+                CompilerInputProjection::from_issued_entries(&[entries[index].clone()]).unwrap();
+            let view = views[index].retain_custody(&views[1 - index]).unwrap();
+            let metadata = selected.project_metadata(view.metadata_snapshot()).unwrap();
+            for transport in [
+                NativeInputSelection::receive(
+                    &selected,
+                    &metadata,
+                    &view,
+                    &normalized,
+                    &selected_offers,
+                )
+                .unwrap(),
+                NativeInputSelection::issue_checked(&selected, &metadata, &view, &selected_offers)
+                    .unwrap(),
+            ] {
+                assert!(transport.availability.0[&entries[index].descriptor.id].permits(9001));
+                assert!(!transport
+                    .availability
+                    .0
+                    .contains_key(&entries[1 - index].descriptor.id));
+                assert_eq!(
+                    transport
+                        .candidates
+                        .require_unique(&entries[index].descriptor.owner)
+                        .unwrap(),
+                    Some(entries[index].descriptor.id)
+                );
+                assert_eq!(
+                    transport.candidates.select_all().unwrap().0[&entries[index].descriptor.owner],
+                    entries[index].descriptor.id
+                );
+            }
+        }
     }
     let wrong = Arc::new(ArtifactEntry::canonical(fixture_module_core(
         match &entries[0].payload {
@@ -4802,6 +4929,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         let dependency_owner = products[0].owner();
         let advertised_dependency = inputs
             .advertised_native_originals()
+            .unwrap()
             .receipt_original(
                 &availability,
                 &dependency_owner.unit,
@@ -4827,6 +4955,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         assert!(
             inputs
                 .advertised_native_originals()
+                .unwrap()
                 .receipt_original(
                     &availability,
                     &available_owner.unit,
@@ -6685,12 +6814,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .artifacts()
         .selected_native_groups();
     let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
-        let before = context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .selected_native_groups();
+        let before = context.clone();
         let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
             producer_bytes,
             &[root.to_path_buf()],
@@ -6731,15 +6855,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 "custody or partial demand grants no full original offer"
             );
         }
-        assert_eq!(
-            context
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .selected_native_groups(),
-            before
-        );
+        assert_eq!(context, &before);
     };
     let authored_groups = selected_before
         .iter()
@@ -6775,44 +6891,84 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .iter()
         .any(|product| product.owner() == certificate.product().owner()));
     assert_eq!(native_request.context().as_ref(), &native_context);
-    assert_eq!(
-        native_request
-            .compiler_inputs()
-            .metadata
-            .retained
-            .selected_native_groups
-            .as_ref()
-            .clone(),
-        selected_before
+    assert!(native_request
+        .compiler_inputs()
+        .metadata
+        .retained
+        .selected_native_groups
+        .is_empty());
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let available = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        native_request.compiler_inputs(),
+        &operation,
+    )
+    .unwrap();
+    for group in &authored_groups {
+        assert!(available.permits_native_group(
+            authored_root,
+            certificate.product().owner(),
+            group.original_ordinal,
+        ));
+        assert!(
+            crate::certified_products::original_native_group_definitions(
+                certificate.product(),
+                group.original_ordinal,
+            )
+            .is_some()
+        );
+    }
+    let absent_ordinal = authored_groups
+        .iter()
+        .map(|group| group.original_ordinal)
+        .max()
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
+    // Full native permission does not assert that an ordinal has a body.
+    // Authenticate body membership and issued candidates independently.
+    assert!(
+        crate::certified_products::original_native_group_definitions(
+            certificate.product(),
+            absent_ordinal,
+        )
+        .is_none()
     );
+    assert!(available
+        .native_group_candidates(
+            crate::artifact_inventory::NativeGroupKey {
+                artifact: authored_root,
+                original_ordinal: absent_ordinal,
+            },
+            certificate.product().owner(),
+        )
+        .unwrap()
+        .bindings()
+        .is_empty());
     assert_exact_offer(&native_context, "full-authored-exact-offer", true);
     // Source-role demotion preserves the issuer's complete native group graph
     // as custody. A later private offer must keep that graph without restoring
     // lexical visibility or selecting executable groups in the captured context.
     let mut captured = native_context.clone();
+    let permissions = captured
+        .compiler_source_support()
+        .native_availability()
+        .snapshot_facts()
+        .unwrap();
     let support = captured
         .compiler_source_support()
-        .selected_interfaces()
-        .unwrap()
-        .support_for_owners(
-            captured
+        .source_support(
+            &captured
                 .compiler_input_projection()
                 .snapshot_roles()
                 .keys()
                 .cloned()
                 .collect(),
         )
-        .unwrap()
-        .retain_custody(captured.artifact_view())
-        .unwrap()
-        .retain_offers(
-            captured
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )
         .unwrap();
+    assert_eq!(
+        support.native_availability().snapshot_facts().unwrap(),
+        permissions
+    );
     captured = captured.rebuild(|facts| facts.compiler_support = support);
     assert!(captured
         .owner
@@ -6851,8 +7007,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .is_empty());
     assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
     assert_eq!(captured, before_custody);
-    // Fresh request-type authentication extends only interfaces. The issued
-    // parent's complete body graph must survive that handoff as private custody.
+    // A fresh receiver gains TYPE evidence without the source's native owner.
     let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
         .unwrap()
         .extend_interface_context(&native_context)
@@ -6868,7 +7023,44 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .compiler_input_roles()
         .iter()
         .all(|role| role.original().is_none()));
-    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", true);
+    assert_eq!(
+        fresh.compiler_input_projection(),
+        native_context.compiler_input_projection()
+    );
+    assert!(fresh.compiler_source_support().native_offers().is_empty());
+    assert!(fresh
+        .compiler_source_support()
+        .native_availability()
+        .snapshot_facts()
+        .unwrap()
+        .is_empty());
+    assert!(OriginalCompilerInputs::reuse_selected_authored(&fresh)
+        .unwrap()
+        .is_none());
+    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", false);
+
+    // The same TYPE extension preserves availability already issued to its
+    // receiver without selecting any executable group.
+    let retained = captured
+        .clone()
+        .extend_interface_context(&native_context)
+        .unwrap();
+    assert_eq!(
+        retained
+            .compiler_source_support()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap(),
+        captured
+            .compiler_source_support()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+    );
+    assert!(retained.artifact_view().selected_native_groups().is_empty());
+    assert_eq!(retained.lexical_graph(), captured.lexical_graph());
+    assert_eq!(retained.source_scope(), captured.source_scope());
+    assert_exact_offer(&retained, "retained-request-type-authored-offer", true);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.
@@ -7176,7 +7368,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
             )
             .unwrap();
         let permissions = [7, 9001].map(|ordinal| {
-            selection.has_native_group_support(entry.descriptor.id, native.owner(), ordinal)
+            selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
         });
         // This target has no fresh native products. Empty physical issuance
         // records that cohort without changing its request's input permissions.
@@ -7189,7 +7381,7 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
         .unwrap();
         assert_eq!(
             [7, 9001].map(|ordinal| {
-                selection.has_native_group_support(entry.descriptor.id, native.owner(), ordinal)
+                selection.permits_native_group(entry.descriptor.id, native.owner(), ordinal)
             }),
             permissions,
         );
@@ -7592,7 +7784,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     unreachable!()
                 };
                 assert_eq!(
-                    selection.has_native_group_support(entry.descriptor.id, native.owner(), 9001),
+                    selection.permits_native_group(entry.descriptor.id, native.owner(), 9001),
                     index == 0
                 );
                 assert!(selection.receipt_native_body_owners().next().is_none());
@@ -9578,7 +9770,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
             // Full availability supplies exact body/dependency support in both
             // requests. Executable demand remains the separate carried choice.
             for ordinal in &fixture.own_ordinals {
-                assert!(selection.has_native_group_support(
+                assert!(selection.permits_native_group(
                     entry.descriptor.id,
                     native.owner(),
                     *ordinal,
@@ -11041,7 +11233,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         );
         let inputs = request.compiler_inputs();
         let private = inputs.private_native_availability();
-        let advertised = inputs.advertised_native_originals();
+        let advertised = inputs.advertised_native_originals().unwrap();
         let receipt = advertised
             .receipt_original(
                 &private,

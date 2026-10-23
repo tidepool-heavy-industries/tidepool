@@ -256,7 +256,7 @@ pub(super) fn select_target_group(
                     (binding, offer, false)
                 }
                 crate::certified_products::TargetSourceOrigin::SelectedInput => {
-                    if !selection.has_native_group_support(key.artifact, product.owner(), ordinal) {
+                    if !selection.permits_native_group(key.artifact, product.owner(), ordinal) {
                         return Err(native_admission_failure(
                             key,
                             NativeAdmissionRefusal::InputPermissionDenied {
@@ -1420,7 +1420,7 @@ pub(super) fn bind_certified_input_demand(
         };
         let owner = product.owner();
         let (chosen, support, issuer) = {
-            if !selection.has_native_group_support(key.artifact, owner, key.original_ordinal) {
+            if !selection.permits_native_group(key.artifact, owner, key.original_ordinal) {
                 tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
                         stage = "input_demand_permission", ?key, ?owner,
                         permitted = false, body_present = entry.native_group_ordinals.contains(&key.original_ordinal),

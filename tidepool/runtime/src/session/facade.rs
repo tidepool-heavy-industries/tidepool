@@ -9,7 +9,7 @@ use tidepool_toolchain::declaration_join::{
     DeclarationExport, ExactModuleIdentity, ExportIdentity,
 };
 
-use super::lexical_projection::{DeclarationProjectionBaseline, issue_projection};
+use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
 use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
-        use tidepool_toolchain::artifacts::{CompileInvocation, compile_invocation_in_context};
+        use tidepool_toolchain::artifacts::{compile_invocation_in_context, CompileInvocation};
         use tidepool_toolchain::declaration_join::ExactModuleIdentity;
 
         let root = tempfile::tempdir().unwrap();
@@ -591,15 +591,8 @@ mod tests {
             .unwrap();
         assert_eq!(nested_root.imports, vec![inherited_owner]);
 
-        let preamble =
-            crate::session::insert_preamble_imports(effects.preamble(), narrowed.module_name());
-        let source = crate::session::assemble_expression_module(
-            &preamble,
-            "entry",
-            "'[]",
-            "pure (keptNumber (Kept (41 :: KeptPayload Bool)))",
-            crate::session::ExpressionLift::Effectful,
-        );
+        let source = include_str!("fixtures/inherited-facade-subset-consumer.hs")
+            .replace("DECLARATION_FACADE_MODULE", narrowed.module_name());
         let invocation = CompileInvocation {
             source: &source,
             targets: &[crate::session::PREPARED_SCAFFOLD_TARGET],
@@ -825,9 +818,7 @@ mod tests {
         let surface = ExactExportSurface::legacy(
             SessionId(8),
             Some(SessionModule::lib(Generation(4))),
-            vec![ExportItem::Pattern {
-                name: ":~:".into(),
-            }],
+            vec![ExportItem::Pattern { name: ":~:".into() }],
         );
         let identity = FacadeIdentity::for_legacy_surface(&surface);
         let rendered = render_legacy_facade(&identity, &surface);

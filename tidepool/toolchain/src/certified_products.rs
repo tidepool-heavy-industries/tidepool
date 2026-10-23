@@ -5967,7 +5967,9 @@ impl CertifiedSourceSelection {
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         selected.original_bindings = inputs.original_bindings().cloned();
         selected.private_native = inputs.private_native_availability();
-        selected.private_advertised = inputs.advertised_native_originals();
+        selected.private_advertised = inputs
+            .advertised_native_originals()
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
@@ -6836,11 +6838,11 @@ impl CertifiedSourceSelection {
         Ok(NativeGroupCandidates::IssuedAvailability(candidates))
     }
 
-    /// Reports available exact body/dependency support, not executable demand.
-    /// Root admission separately consumes the request's recorded native choices.
-    /// A completed fresh product owns its body; retained request bodies use their
-    /// closed availability and exact dependency proofs.
-    pub(crate) fn has_native_group_support(
+    /// Checks carried native permission separately from body membership. Full input
+    /// permission and new-product policy do not assert that the body exists.
+    /// Root admission separately checks authenticated body membership, issued
+    /// group candidates and the request's recorded native choice.
+    pub(crate) fn permits_native_group(
         &self,
         original: crate::artifact_inventory::ArtifactId,
         owner: &CachedHomeOwner,
@@ -19705,7 +19707,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 vec![native.clone()]
             );
-            assert!(selection.has_native_group_support(native.descriptor.id, original.owner(), 9));
+            assert!(selection.permits_native_group(native.descriptor.id, original.owner(), 9));
             let projected = selection.compiler_projection(&view).unwrap();
             assert_eq!(
                 projected.roles()[0].original().is_some(),
@@ -19771,11 +19773,7 @@ pub(crate) mod tests {
                     carried.compiler_namespace_originals().count(),
                     usize::from(namespace_original)
                 );
-                assert!(carried.has_native_group_support(
-                    native.descriptor.id,
-                    original.owner(),
-                    9
-                ));
+                assert!(carried.permits_native_group(native.descriptor.id, original.owner(), 9));
                 assert_namespace_ids(&carried, inputs.artifacts(), namespace_original);
                 continuation =
                     crate::declaration_context::OriginalCompilerInputs::from_issued_support(
@@ -26495,7 +26493,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             assert_eq!(
-                selection.has_native_group_support(entry.descriptor.id, dependency.owner(), 9001),
+                selection.permits_native_group(entry.descriptor.id, dependency.owner(), 9001),
                 full,
                 "custody and canonical visibility do not replace the carried body permission"
             );
@@ -26821,7 +26819,7 @@ pub(crate) mod tests {
                     artifact: original.descriptor.id,
                     original_ordinal: 9001,
                 };
-                assert!(input_selection.has_native_group_support(
+                assert!(input_selection.permits_native_group(
                     key.artifact,
                     dependency.owner(),
                     key.original_ordinal
@@ -33197,10 +33195,11 @@ None,
                 artifact: *id,
                 original_ordinal: 7,
             };
-            assert!(planned
-                .certified
-                .source_selection()
-                .has_native_group_support(*id, product.owner(), 7));
+            assert!(planned.certified.source_selection().permits_native_group(
+                *id,
+                product.owner(),
+                7
+            ));
             let NativeGroupCandidates::IssuedAvailability(candidates) = planned
                 .certified
                 .source_selection()

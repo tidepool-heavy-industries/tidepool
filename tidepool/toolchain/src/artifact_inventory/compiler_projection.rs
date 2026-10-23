@@ -3950,11 +3950,12 @@ impl CompilerSourceSupport {
             crate::host_work::checkpoint()?;
             restored = restored.append(&AcquiredNativeClosures::one(closure)?)?;
         }
-        // The snapshot replaces the entire prefix. Receiver custody cannot fill
-        // missing recorded grants or components.
+        // Restoration authenticated every grant against the held snapshot.
+        // Attaching those owners must preserve its exact custody seeds, including
+        // seeds that also occur as selected roots. Live custody composition may
+        // normalize those seeds and is not a restoration operation.
         let mut draft = self.reopen();
-        draft.native_closures = AcquiredNativeClosures::default();
-        draft.append_acquired_closures(&restored)?;
+        draft.native_closures = restored;
         draft.close()
     }
 
@@ -4175,15 +4176,19 @@ impl CompilerSourceSupport {
             .iter()
             .map(|offer| Ok((offer.snapshot_facts().identity()?, offer.clone())))
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
-        let artifacts = self
-            .artifacts
-            .retain_issued_offer_custody(offers.iter().cloned())?;
         let availability = crate::declaration_context::RequestNativeAvailability::restore(
             availability_facts,
             &proof_map,
-            &artifacts,
+            &self.artifacts,
         )?;
-        let restored = Self::new(self.projection.clone(), artifacts, offers, availability)?;
+        // Each restored offer checked its exact bindings, payloads and scopes
+        // against this selection. Reattaching it does not issue new carrier
+        // seeds or change the recorded compiler selection.
+        let mut draft = self.reopen();
+        draft.native_offers = offers.into();
+        draft.native_offer_facts = offer_facts.clone();
+        draft.native_availability = availability;
+        let restored = draft.close()?;
         restored
             .native_availability
             .validate_role_coverage(&restored.projection)?;
@@ -4613,10 +4618,11 @@ impl CompilerSourceSupport {
         projection.bind_snapshot_roles(&snapshot.roles)?;
         let mut artifacts = self.artifacts.clone();
         artifacts.bind_selection_snapshot_baseline(snapshot.selection().clone())?;
-        let mut rebound =
-            self.rebuild(projection, artifacts, self.native_offers.iter().cloned())?;
-        rebound.native_closures = rebound.native_closures.bind_record_baseline(snapshot)?;
-        Ok(rebound)
+        let mut draft = self.reopen();
+        draft.projection = projection;
+        draft.artifacts = artifacts;
+        draft.native_closures = self.native_closures.bind_record_baseline(snapshot)?;
+        draft.close()
     }
 
     pub(crate) fn finalize_namespace(&self) -> Result<Self, CompileError> {
@@ -8617,6 +8623,11 @@ mod tests {
             )
             .unwrap();
         assert_sources(&recovered, &[], true);
+        assert_eq!(
+            recovered.artifacts.selection_snapshot(),
+            a.artifacts.selection_snapshot(),
+            "restoring native facts must preserve the exact selection, including custody seeds"
+        );
         assert_eq!(
             recovered.input_decisions.recorded_facts(),
             a.input_decisions.recorded_facts()
