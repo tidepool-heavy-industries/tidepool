@@ -9070,6 +9070,24 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             fixture.source.artifact_view(),
         )
         .unwrap();
+    captured
+        .evidence
+        .validate(
+            fixture.source.toolchain_identity_sha256(),
+            captured.compiler_support.artifacts(),
+        )
+        .expect("the actual template evidence validates against its narrowed TYPE custody");
+    assert!(captured
+        .compiler_support
+        .projection()
+        .roles()
+        .iter()
+        .all(|role| role.original().is_none()));
+    assert!(captured
+        .compiler_support
+        .artifacts()
+        .selected_native_groups()
+        .is_empty());
     let mut wrong_seal = captured.evidence.clone();
     wrong_seal
         .graph
@@ -10912,6 +10930,10 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         .evidence
         .validate(producer, source.artifact_view())
         .unwrap();
+    captured
+        .evidence
+        .validate(producer, captured.compiler_support.artifacts())
+        .expect("the actual template evidence validates against its narrowed TYPE custody");
     let interfaces = source
         .compiler_source_support()
         .selected_interfaces()
