@@ -1557,7 +1557,7 @@ fn context_v9_requires_normalized_availability_root() {
 #[test]
 fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
     use crate::artifact_inventory::{
-        ArtifactEntry, ArtifactInventory, IssuedNativeOffer, NativeGroupKey,
+        ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         NativeOriginalRequirement,
     };
     use crate::certified_products::tests::{
@@ -1629,7 +1629,14 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let proof = NativeOriginalRequirement::from_selected_view(root.descriptor.id, &view)
             .unwrap()
             .unwrap();
-        let offer = IssuedNativeOffer::issue(&root, &view, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap(),
+            view.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&root.descriptor.owner, Some(proof))
+            .unwrap();
         let facts = offer.snapshot_facts();
         let offer_id = facts.identity().unwrap();
         assert_ne!(facts.original, hidden_entry.descriptor.id);

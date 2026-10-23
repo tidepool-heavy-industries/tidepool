@@ -53,8 +53,14 @@ impl History {
                     NativeOriginalRequirement::from_selected_view(entry.descriptor.id, view)
                         .unwrap()
                         .unwrap();
-                let offer =
-                    IssuedNativeOffer::issue(entry, view, Some(proof)).unwrap();
+                let issuer = issue_fixture_compiler_support(
+                    CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
+                    view.clone(),
+                )
+                .unwrap();
+                let offer = issuer
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .unwrap();
                 assert!(offer.is_full());
                 offer
             })
@@ -440,8 +446,15 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
     let proof = NativeOriginalRequirement::from_selected_view(parent.descriptor.id, &parent_view)
         .unwrap()
         .unwrap();
-    let parent_offer =
-        IssuedNativeOffer::issue(&parent, &parent_view, Some(proof)).unwrap();
+    let issuer = issue_fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&[history.entries[0].clone(), parent.clone()])
+            .unwrap(),
+        parent_view.clone(),
+    )
+    .unwrap();
+    let parent_offer = issuer
+        .issue_native_offer(&parent.descriptor.owner, Some(proof))
+        .unwrap();
     assert!(parent_offer.is_full());
     let expected = *parent_offer
         .issued_group_carriers()
