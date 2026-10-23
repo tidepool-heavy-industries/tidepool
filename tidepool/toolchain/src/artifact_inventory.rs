@@ -9005,19 +9005,25 @@ impl ArtifactView {
             }
         }
         timing.advance("merge_projection");
-        let selected = projection.merge(incoming)?;
+        let selected_roles = projection.merged_roles(incoming);
+        let mut selected = projection.clone();
         timing.advance("resolve_namespace_and_native_choices");
         let mut namespace = BTreeMap::new();
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
-        for (owner, role) in selected.snapshot_roles() {
-            let source = if projection.snapshot_roles().get(owner) == Some(role) {
-                self
-            } else if incoming.snapshot_roles().get(owner) == Some(role) {
-                other
-            } else {
-                return Err(failure("merged compiler role lost its issuer"));
+        for selected_role in selected_roles {
+            let compiler_projection::SelectedCompilerRole {
+                owner,
+                role,
+                issuer,
+            } = selected_role?;
+            let source = match issuer {
+                compiler_projection::CompilerRoleIssuer::Receiving => self,
+                compiler_projection::CompilerRoleIssuer::Incoming => other,
             };
+            if matches!(issuer, compiler_projection::CompilerRoleIssuer::Incoming) {
+                selected.admit_role(owner.clone(), role.clone())?;
+            }
             {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;

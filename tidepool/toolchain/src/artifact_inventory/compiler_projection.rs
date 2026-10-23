@@ -1829,6 +1829,18 @@ pub(super) struct ResolvedCompilerInputs {
     pub(super) input_decisions: IssuedInputNativeDecisions,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum CompilerRoleIssuer {
+    Receiving,
+    Incoming,
+}
+
+pub(super) struct SelectedCompilerRole<'a> {
+    pub(super) owner: &'a ExactModuleIdentity,
+    pub(super) role: &'a CompilerInputRole,
+    pub(super) issuer: CompilerRoleIssuer,
+}
+
 impl ResolvedCompilerRole {
     fn validate_original_pair(
         state: &InventoryState,
@@ -5548,61 +5560,115 @@ impl CompilerInputProjection {
         })
     }
 
+    fn choose_role(
+        owner: &ExactModuleIdentity,
+        previous: &CompilerInputRole,
+        incoming: &CompilerInputRole,
+    ) -> Result<CompilerRoleIssuer, CompileError> {
+        if previous == incoming {
+            return Ok(CompilerRoleIssuer::Receiving);
+        }
+        if let (Some(existing), Some(new)) = (previous.original(), incoming.original()) {
+            if existing != new {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::CompilerOriginalOfferConflict {
+                        owner: owner.clone(),
+                        existing,
+                        incoming: new,
+                    },
+                ));
+            }
+        }
+        if previous.interface() != incoming.interface() {
+            return Err(ArtifactInventoryError {
+                failure: ArtifactInventoryFailure::OwnerConflict {
+                    owner: owner.clone(),
+                },
+                diagnostic_artifacts: None,
+                native_refusal: None,
+                owner_conflict: Some(ArtifactOwnerConflictEvidence::CompilerRole {
+                    existing: previous.clone(),
+                    incoming: incoming.clone(),
+                }),
+            }
+            .into());
+        }
+        if previous.is_published_source_original() && incoming.is_published_source_original() {
+            return Err(failure("conflicting published source original selection"));
+        }
+        Ok(match (previous.original(), incoming.original()) {
+            (None, Some(_)) => CompilerRoleIssuer::Incoming,
+            _ if incoming.is_published_source_original() => CompilerRoleIssuer::Incoming,
+            _ => CompilerRoleIssuer::Receiving,
+        })
+    }
+
     pub(crate) fn admit_role(
         &mut self,
         owner: ExactModuleIdentity,
         incoming: CompilerInputRole,
     ) -> Result<(), CompileError> {
-        if self.roles.get(&owner) == Some(&incoming) {
-            return Ok(());
+        if let Some(previous) = self.roles.get(&owner) {
+            if matches!(
+                Self::choose_role(&owner, previous, &incoming)?,
+                CompilerRoleIssuer::Receiving
+            ) {
+                return Ok(());
+            }
         }
-        if let Some(previous) = self.roles.get_mut(&owner) {
-            if let (Some(existing), Some(new)) = (previous.original(), incoming.original()) {
-                if existing != new {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::CompilerOriginalOfferConflict {
-                            owner,
-                            existing,
-                            incoming: new,
-                        },
-                    ));
-                }
-            }
-            if previous.interface() != incoming.interface() {
-                return Err(ArtifactInventoryError {
-                    failure: ArtifactInventoryFailure::OwnerConflict { owner },
-                    diagnostic_artifacts: None,
-                    native_refusal: None,
-                    owner_conflict: Some(ArtifactOwnerConflictEvidence::CompilerRole {
-                        existing: previous.clone(),
-                        incoming,
-                    }),
-                }
-                .into());
-            }
-            if previous.is_published_source_original()
-                && incoming.is_published_source_original()
-                && *previous != incoming
-            {
-                return Err(failure("conflicting published source original selection"));
-            }
-            match (previous.original(), incoming.original()) {
-                (None, Some(_)) => *previous = incoming,
-                _ if incoming.is_published_source_original() => *previous = incoming,
-                _ => {}
-            }
-        } else {
-            self.roles.insert(owner.clone(), incoming);
-        }
-        let role = self.roles.get(&owner).expect("admitted role");
-        if self
-            .recorded_roles
-            .get(&owner)
-            .is_none_or(|fact| fact != role)
-        {
-            self.recorded_roles.insert(owner, role.recorded_fact());
-        }
+        self.recorded_roles
+            .insert(owner.clone(), incoming.recorded_fact());
+        self.roles.insert(owner, incoming);
         Ok(())
+    }
+
+    /// Select each role and its issuer in one decision. Equal roles preserve
+    /// receiving precedence without asking equality to recover ownership later.
+    pub(super) fn merged_roles<'a>(
+        &'a self,
+        incoming: &'a Self,
+    ) -> impl Iterator<Item = Result<SelectedCompilerRole<'a>, CompileError>> + 'a {
+        let mut receiving = self.roles.iter().peekable();
+        let mut incoming = incoming.roles.iter().peekable();
+        std::iter::from_fn(move || {
+            use std::cmp::Ordering;
+            let ordering = match (receiving.peek(), incoming.peek()) {
+                (Some((left, _)), Some((right, _))) => left.cmp(right),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => return None,
+            };
+            Some(match ordering {
+                Ordering::Less => {
+                    let (owner, role) = receiving.next().expect("receiving role");
+                    Ok(SelectedCompilerRole {
+                        owner,
+                        role,
+                        issuer: CompilerRoleIssuer::Receiving,
+                    })
+                }
+                Ordering::Greater => {
+                    let (owner, role) = incoming.next().expect("incoming role");
+                    Ok(SelectedCompilerRole {
+                        owner,
+                        role,
+                        issuer: CompilerRoleIssuer::Incoming,
+                    })
+                }
+                Ordering::Equal => {
+                    let (owner, previous) = receiving.next().expect("receiving role");
+                    let (_, next) = incoming.next().expect("incoming role");
+                    Self::choose_role(owner, previous, next).map(|issuer| SelectedCompilerRole {
+                        owner,
+                        role: match issuer {
+                            CompilerRoleIssuer::Receiving => previous,
+                            CompilerRoleIssuer::Incoming => next,
+                        },
+                        issuer,
+                    })
+                }
+            })
+        })
     }
 
     pub(crate) fn merge(&self, other: &Self) -> Result<Self, CompileError> {
