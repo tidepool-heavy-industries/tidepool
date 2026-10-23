@@ -81,13 +81,27 @@ consumer owners. Root owns compiler-World integration repairs. Do not restore
 optional accessors or turn decoded records into admitted authority to satisfy
 these callers.
 
-The independent native Haskell check is admitted at `f6557528c4`; its resource
-closure also builds the Rust candidate fixture issuer, so a Rust dependency
-failure may prevent execution. Validation owns that exact pin until settlement.
-Root source additionally contains the mandatory canonical-interface consumer
-repair from `33545adac8`. P8's complete selected-evidence accessor and targeted
+The native Haskell checks at `f6557528c4` and `1952d6661c` could not execute.
+The first also found a missing Haskell authority-type import, repaired at
+`1952d6661c`. Both targets depend on the Rust production consumers: the smaller
+FatIface target reaches them through `effects_generated` and its generator.
+Inspecting direct resource labels alone incorrectly suggested independence;
+retain the transitive producer closure when choosing the next check. Both pins
+are released. No Haskell passing compilation or execution is inferred from the
+absence of further Haskell diagnostics.
+Root source contains the canonical-interface consumer repair from `33545adac8`,
+consumer batch `0b0851c666`, and selected-row narrowing repairs `3f561010e5`.
+These are pushed at source checkpoint `de9bf4588f`; joined compilation is pending
+the remaining context/certified-product callers. P8's complete selected-evidence accessor and targeted
 sidecar controls (`92c094eefa`) and P14's compiler-mode registrations
 (`bbd69359a7`) are integrated.
+
+The inherited-facade execution test exposed a production gap: initial World
+capture ignores the actor's exact selected declaration facades. The compiler
+reviewer owns once-only initial adoption, explicit durable selected references,
+and recovery through authenticated context ownership. Replacement's empty-source
+reset is intentional and must remain unchanged. Do not repair this with a
+per-cell overlay or choose facade roots by scanning broad retained inventory.
 
 ## Required next sequence
 
