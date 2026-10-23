@@ -28388,12 +28388,25 @@ mod tests {
         let mut missing = original.clone();
         missing.as_array_mut().unwrap()[10] = Value::Array(vec![]);
         write_receipt(&receipt, &missing);
-        assert!(request
-            .validate_receipt(&receipt, None, &empty)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("root HOME edges"));
+        assert!(matches!(
+            request.validate_receipt(&receipt, None, &empty),
+            Err(CompileError::ExtractFailed(message))
+                if message == "exact declaration context: source import roles differ from authenticated root HOME edges"
+        ));
+        // InstanceOwner is genuinely consumed through InstanceRelay, but it is
+        // not a direct import of Target. A sorted, otherwise valid role row
+        // for that transitive HOME owner must not enlarge the root's census.
+        let mut extra = original.clone();
+        let rows = extra.as_array_mut().unwrap()[10].as_array_mut().unwrap();
+        let mut transitive = rows[0].clone();
+        transitive.as_array_mut().unwrap()[1] = text("InstanceOwner");
+        rows.insert(0, transitive);
+        write_receipt(&receipt, &extra);
+        assert!(matches!(
+            request.validate_receipt(&receipt, None, &empty),
+            Err(CompileError::ExtractFailed(message))
+                if message == "exact declaration context: source import roles differ from authenticated root HOME edges"
+        ));
         let mut old = original.clone();
         old.as_array_mut().unwrap()[1] = text("3");
         write_receipt(&receipt, &old);
