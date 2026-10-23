@@ -622,8 +622,9 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
     use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
     let native_id = ArtifactDescriptor::from_recovery_product(&native).id;
     let context = child_domain.declaration_context(generation).unwrap();
-    let selected_interfaces = context.snapshot().compiler_roles().into_iter()
-        .filter_map(|role| match child_domain.artifact(role.interface()).unwrap() {
+    // Inspect the retained namespace selection, not the wider custody inventory.
+    let selected_interfaces = context.snapshot().graph_selection().unwrap().namespace.into_iter()
+        .filter_map(|binding| match child_domain.artifact(binding.artifact()).unwrap() {
             Some(RecoveryArtifactClosure::Join(reference)) => Some(reference),
             _ => None,
         }).collect::<Vec<_>>();
