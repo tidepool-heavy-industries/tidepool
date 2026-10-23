@@ -9423,9 +9423,9 @@ diagnosticCollectorHook
 diagnosticCollectorHook coordinates targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
   case msgClass of
     MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
-      modifyIORef' warningRef ((rendered, structured DiagWarning) :)
+      atomicModifyIORef' warningRef (\warnings -> ((rendered, structured DiagWarning) : warnings, ()))
     MCDiagnostic SevError _ _ -> case coordinates of
-      PhysicalTargetCoordinates -> modifyIORef' errorRef (structured DiagError :)
+      PhysicalTargetCoordinates -> atomicModifyIORef' errorRef (\errors -> (structured DiagError : errors, ()))
       AuthoredCellCoordinates -> pure ()
     _ -> pure ()
   fallback flags msgClass srcSpan msg
