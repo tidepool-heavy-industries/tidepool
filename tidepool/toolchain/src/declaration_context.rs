@@ -30204,7 +30204,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let refusal = request
             .admit_fixture_support(context.clone(), &support, &[], None)
             .expect_err("a type certificate alone cannot supply fresh source or reserved outputs");
-        assert!(matches!(refusal, CompileError::ExtractFailed(_)));
+        assert!(
+            matches!(&refusal, CompileError::ExtractFailed(_)),
+            "unexpected fresh-value admission refusal: {refusal:?}"
+        );
         assert!(request.program.program_support.is_none());
         assert_eq!(
             request.program.program_source_lexical,
