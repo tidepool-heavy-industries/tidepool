@@ -726,12 +726,6 @@ impl ExtractCmd {
         self
     }
 
-    /// Select whole-cell split/classify/typecheck mode.
-    pub fn cell(&mut self) -> &mut Self {
-        self.request.cell();
-        self
-    }
-
     /// Parse an ordered cell plan without checking types or compiling products.
     /// Its bounded receipt is written to the request's `cell_out` path.
     pub fn cell_plan(&mut self) -> &mut Self {
@@ -739,13 +733,13 @@ impl ExtractCmd {
         self
     }
 
-    /// Runtime-authored module template containing the two cell placeholders.
+    /// Runtime-authored template for the ordered cell-plan parser.
     pub fn cell_template(&mut self, path: &Path) -> &mut Self {
         self.request.cell_template(path);
         self
     }
 
-    /// CBOR output path for whole-cell analysis.
+    /// CBOR output path for the ordered cell-plan parser receipt.
     pub fn cell_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
         self.request.cell_out(path);
         self

@@ -679,7 +679,6 @@ enum Field {
     TurnVerdict(OsString),
     Classify,
     ClassifyOut(OsString),
-    Cell,
     CellPlan,
     CheckSource,
     CellTemplate(PathBuf),
@@ -753,7 +752,6 @@ pub(crate) enum RequestMode {
     DeclarationInterface,
     CellPlan,
     CheckSource,
-    CellProgram,
     Classify,
     Inspection,
     Turn,
@@ -772,7 +770,6 @@ impl std::fmt::Display for RequestMode {
             Self::DeclarationInterface => "declaration_interface",
             Self::CellPlan => "cell_plan",
             Self::CheckSource => "check_source",
-            Self::CellProgram => "cell_program",
             Self::Classify => "classify",
             Self::Inspection => "inspection",
             Self::Turn => "turn",
@@ -912,10 +909,6 @@ impl ExtractRequest {
                 RequestMode::CellPlan,
             ),
             (
-                has(|field| matches!(field, Field::Cell)),
-                RequestMode::CellProgram,
-            ),
-            (
                 has(|field| matches!(field, Field::Classify)),
                 RequestMode::Classify,
             ),
@@ -1025,14 +1018,13 @@ impl ExtractRequest {
                 Some("--turn-verdict") => request.turn_verdict(value(&mut args, "--turn-verdict")?),
                 Some("--classify") => request.classify(),
                 Some("--classify-out") => request.classify_out(value(&mut args, "--classify-out")?),
-                Some("--cell") => request.cell(),
                 Some("--cell-plan") => request.cell_plan(),
                 Some("--check-source") => request.check_source(),
                 Some("--cell-template") => {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
                 Some("--cell-out") => request.cell_out(value(&mut args, "--cell-out")?),
-                Some(option @ ("--cell-fold-turn" | "--turn-pin")) => {
+                Some(option @ ("--cell" | "--cell-fold-turn" | "--turn-pin")) => {
                     return Err(CliError::new(format!("retired compiler option: {option}")));
                 }
                 Some("--build-products-dir") => {
@@ -1195,7 +1187,7 @@ impl ExtractRequest {
                     let query = decoder.string()?;
                     Field::InspectSearchBounded(query, nonzero_budget(decoder.u32()?)?)
                 }
-                31 => Field::Cell,
+                31 => return Err(ProtocolError::RetiredFieldTag(31)),
                 51 => Field::CellPlan,
                 52 => Field::CheckSource,
                 32 => Field::CellTemplate(PathBuf::from(decoder.os_string()?)),
@@ -1536,10 +1528,6 @@ impl ExtractRequest {
             .push(Field::ClassifyOut(value.as_ref().to_owned()));
     }
 
-    pub(crate) fn cell(&mut self) {
-        self.fields.push(Field::Cell);
-    }
-
     pub(crate) fn check_source(&mut self) {
         self.fields.push(Field::CheckSource);
     }
@@ -1754,7 +1742,6 @@ impl ExtractRequest {
                 Field::TurnVerdict(value) => flag(&mut flags, "--turn-verdict", value),
                 Field::Classify => flags.push("--classify".into()),
                 Field::ClassifyOut(value) => flag(&mut flags, "--classify-out", value),
-                Field::Cell => flags.push("--cell".into()),
                 Field::CellPlan => flags.push("--cell-plan".into()),
                 Field::CheckSource => flags.push("--check-source".into()),
                 Field::CellTemplate(value) => {
@@ -2188,7 +2175,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::TurnVerdict(value) => tagged_frame(out, 19, value),
         Field::Classify => out.push(20),
         Field::ClassifyOut(value) => tagged_frame(out, 21, value),
-        Field::Cell => out.push(31),
         Field::CellPlan => out.push(51),
         Field::CheckSource => out.push(52),
         Field::CellTemplate(value) => tagged_frame(out, 32, value.as_os_str()),
@@ -2759,7 +2745,6 @@ mod tests {
         assert_eq!(decoded.admitted_mode().unwrap(), RequestMode::Source);
         for conflicting in [
             Field::Turn,
-            Field::Cell,
             Field::CellPlan,
             Field::CheckSource,
             Field::Classify,
@@ -3102,7 +3087,6 @@ mod tests {
             (&[], RequestMode::Source),
             (&["--turn"], RequestMode::Turn),
             (&["--classify"], RequestMode::Classify),
-            (&["--cell"], RequestMode::CellProgram),
             (&["--cell-plan"], RequestMode::CellPlan),
             (&["--check-source"], RequestMode::CheckSource),
             (
@@ -3178,7 +3162,10 @@ mod tests {
             vec!["--declaration-join", "join"],
             vec!["--declaration-join-out", "receipt"],
         ] {
-            for (recipe, _) in recipes.iter().take(7) {
+            for (recipe, _) in recipes
+                .iter()
+                .filter(|(_, mode)| *mode != RequestMode::DeclarationInterface)
+            {
                 let mut args = vec!["input.hs"];
                 args.extend_from_slice(recipe);
                 args.extend_from_slice(&orphan);
@@ -3188,13 +3175,7 @@ mod tests {
                 );
             }
         }
-        for mode in [
-            "--turn",
-            "--classify",
-            "--cell",
-            "--cell-plan",
-            "--check-source",
-        ] {
+        for mode in ["--turn", "--classify", "--cell-plan", "--check-source"] {
             assert!(parse(vec!["input.hs", "--certify-home-products", mode]).is_err());
         }
         assert_eq!(
@@ -3267,7 +3248,7 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_retired_fields_explicitly() {
-        for tag in [6, 7, 9, 10, 14, 34, 39, 45] {
+        for tag in [6, 7, 9, 10, 14, 31, 34, 39, 45] {
             let mut request = ExtractRequest::default().encode()[..17].to_vec();
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);
@@ -3279,13 +3260,27 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_retired_cell_fold_and_type_pin_options() {
-        for option in ["--cell-fold-turn", "--turn-pin", "--target-module-only"] {
+    fn cli_rejects_retired_cell_and_type_pin_options() {
+        for option in [
+            "--cell",
+            "--cell-fold-turn",
+            "--turn-pin",
+            "--target-module-only",
+        ] {
             let error = ExtractRequest::from_cli(&[option.into()]).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 format!("retired compiler option: {option}")
             );
+        }
+        for args in [
+            ["input.hs", "--cell", "--turn"],
+            ["input.hs", "--cell-plan", "--cell"],
+        ] {
+            let error =
+                ExtractRequest::from_cli(&args.into_iter().map(OsString::from).collect::<Vec<_>>())
+                    .unwrap_err();
+            assert_eq!(error.to_string(), "retired compiler option: --cell");
         }
     }
 
