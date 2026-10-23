@@ -280,7 +280,9 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   invariants. Trace joined production consumers, incomplete migrations, surviving
   bypasses and obsolete paths; challenge whether tests exercise the promised
   behavior and detect its failure. Resolve findings, verify repairs in the joined
-  tree, and record untested boundaries before declaring completion. Compilation,
+  tree, and repeat the scoped independent audit until it reports no unresolved
+  findings. Record the reviewed revision, scope, and untested boundaries; a clean
+  scoped audit is not evidence of repository-wide correctness. Compilation,
   component passes and the implementer's own review do not replace this audit.
 - The coordinator owns technical and editorial judgment throughout delivery.
   Read critical diffs and production consumers directly; challenge proposed

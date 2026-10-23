@@ -96,11 +96,13 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The current joined validation candidate is `cf62ac30f1`;
+The current joined validation candidate is `186ec14118`; last settled is `791f7498a4`;
 see `STATE.md` for exact compile/execution evidence and pending gates.
 Adversarial closeout found a demand/catalog identity conflation and surviving
 test-only transport and SOURCE-authority issuers. The demand repair is integrated;
-test migrations and independent review remain open. Delete alternate issuers,
+test migrations and independent review remain open. The actual future-value
+permission defect is fixed and its three-item regression passed at `791f`.
+Delete alternate issuers,
 preserve refusal controls and execute the repaired join before completion. The actual
 World history now passes initial capture/declaration/publication, then fails at
 retained-value reuse through an authored native declaration. This is a distinct
