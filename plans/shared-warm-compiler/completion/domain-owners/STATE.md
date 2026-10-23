@@ -1,115 +1,107 @@
 # Current implementation and qualification
 
-Updated 2026-10-23. G2/G3 remain unqualified.
+Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
-`integration/g2-domain-runtime-20261023`. Accepted plan: `LIVE-COMPLETION.md`.
-Current implementation checkpoint: `4d2da2e663`; joined validation in progress.
-This is a review branch, not a release-qualified checkpoint.
+`integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
+Warm validation pin: `cf62ac30f1`. This is a review candidate, not a release.
 
-| Work | State | Evidence / remaining check |
+## Integrated boundaries
+
+- Selected compiler rows retain their issuing acquisitions through certification,
+  continuation and demand. Broad catalogs retain certified byte custody; catalog
+  object identity cannot choose a request's selected acquisition.
+- Pending drafts are consumed into captured products with mandatory stage/prefix
+  ownership. Item projection shares the physical stage and advances its prefix.
+- Native input, pending-current, completed-current and completed-prior states
+  carry actual owners. Carried availability is independent of executable demand;
+  equal compiler roles preserve whole-row Receiving precedence.
+- Checked extensions bind their receiver and decide row selection once. Strict
+  same-namespace append and independent reconciliation remain separate.
+- Prepared transport owns exact inputs, metadata, backing and delivery mode;
+  packet and arena cleanup lifetimes remain distinct.
+- Terminal SOURCE projection keeps actual output roles and consumed obligations.
+  Persistent source extension stays strict.
+- The checked-value installer now restores actual operand interfaces before
+  demand renaming and across compiler phases; execution evidence is pending.
+
+Deleted production surfaces include live projection-to-receipt reconstruction,
+optional captured-product fallback, unchecked stage attachment and the native
+origin/version/availability cross-product. The unused
+`from_certified_continuation` route is also deleted. Test-only alternatives are
+not fully removed: the following migrations are still open.
+
+## Adversarial findings and disposition
+
+| Finding | Disposition | Remaining proof |
 |---|---|---|
-| Receiver-bound checked extension | Integrated | Promotion and equal-witness controls passed at 9db5; decisions are applied once |
-| Strict append versus independent reconciliation | Integrated | Actual source-grant premise corrected; joined history execution pending |
-| Actual selected rows and paired index base | Integrated | 051e compiled; independent no-operand prefix case registered at32b6; corrected production operand recipe integrated at22c7, execution pending |
-| Pending certificate data / mandatory captured products | Integrated | Consuming capture and legal native phases; all25 production/cfg consumers compile at051e; capture/selection separation control passes |
-| Prepared exact request/backing owner | Integrated | All four transport controls have passing evidence across 9db5/a840/de968 |
-| Module-local Haskell fixture producers | Integrated | FatIface 11/11 and sourceboot 4/4 passed at 9db5 |
-| Independent producer-B history | Integrated, failing | 051e proves terminal output drops unused Lib.G90 while inherited SOURCE scope still requires it; bounded projection repair in flight |
-| Actual World declaration/capture history | Still failing at b493 | Initial capture/publication pass; post-declaration reuse rejects Val.G1.historyValue0 |
+| Demand conflated selected acquisition with catalog object identity | Repaired `dfd09fd83d`, independently source-reviewed | Actual crossed-acquisition demand and custody-only refusal |
+| Producer-B test equated ordinary and World identity domains | Repaired `71ebeb1b4f`, registration updated | Actual B acquisition control; equal-Original history retained separately |
+| Physical test used full-stage cohort at item-target boundary | Actual three-item history integrated through `cf62ac30f1` | Correct custody/visibility oracle, early future-target refusal, successor success; then delete stale synthetic tail |
+| Test-only `program_request` allowed absent transport backing | Candidate `7fd9d50812`, review repairs ongoing | Sole real constructor, all recursive callers compiled, meaningful lifetime/refusal checks |
+| Helpers and inline receipts fabricated successful SOURCE authority | Confirmed, actual-producer and caller migrations ongoing | Genuine compiler-issued positive control before corruption; no replacement authority factory |
+| Focused compiler tests do not execute runtime values | Explicit qualification limit | Joined runtime/actor execution and observed values before G2 |
 
-The live projection-to-receipt reconstruction route, optional capture fallback,
-unchecked stage attachment, and native origin/version/availability cross-product
-are deleted. Input, pending-current, completed-current and completed-prior native
-states retain their actual owners. Item projection shares a physical stage while
-advancing its selected prefix. Physical issuance and Receiving selection remain
-distinct. Raw reconstruction remains test-only; recovery authenticates records.
+The transport review found a missed nested caller, stale producer constants,
+invalid wrong-producer setup, missing source-search context and an admission
+issued for another request. Repairs preserve owner checks; these failures are
+not permission to relax request identity or source admission.
 
-## Current failure and discriminating observation
+The new actual three-item test established its physical Full-to-future-VALUE
+edge and passed the first item target admission. It then incorrectly asserted
+that the target retained no future VALUE bytes. Retained bytes are distinct from
+visible/authorized values. The oracle is being corrected. A separate review is
+checking whether the target guard itself improperly counts prior retained custody
+as prior executable selection; this is a hypothesis, not yet an executed finding.
 
-At de968 the actual World test reaches `segmentRecord historyCaptured` in the
-second cell. The compiler reports `UnavailableOriginalHomeDependencies` for
-`Tidepool.Session.Val.G1.historyValue0` after final prepared projection. Cleanup
-is confirmed; no passing G2 outcome is inferred from the later failure point.
+Raw malformed receipt bytes remain valid input to decoder/refusal tests. They
+must not issue successful source authority for publication or continuation.
+Each repaired join receives another independent bounded adversarial review.
 
-The b493 structured trace establishes zero direct/SOURCE/inherited retained
-references, only the newly produced value in the retained map, no exact Original
-reference, and no native reply acquired. The precise GHC transformation is not yet
-captured. `NATIVE-REUSE-FRONTIER.md` records the bounded next design problem and
-rejected shortcuts; changing source authority or broadening eager native demand
-is not an accepted repair.
+## Evidence and pending checks
 
-## Open tranche closeout work
+- Last full production/cfg compile: **25 consumers passed at `051e6b7e1c`**.
+  Later changes do not inherit a new full25 passing claim.
+- At **`2adbab51a9`**, owning toolchain production/cfg compiled; **9 tests ran,
+  6 passed and 3 failed**, cleanup confirmed. Passes cover terminal SOURCE scope,
+  Unissued rival refusal, whole-row Receiving, native handoff, Full without demand,
+  and authored promotion. Failures: B identity premise, physical-cohort fixture,
+  used-operand Finder boundary. Current repairs are above.
+- At **`cf62ac30f1`**, matched Haskell worker plus owning toolchain production/cfg
+  **3 targets compiled** in 79.46s. Expanded prefix **1 ran/failed** at the custody
+  assertion above; original two-item sealing passed before that assertion, but
+  final three-item sealing and its later refusal checks were not reached.
+  Cleanup is confirmed. B/authored acquisition and actual operand/package tests
+  are continuing independently; do not report pending cases as passes.
+- Earlier evidence includes four transport controls across recorded checkpoints
+  and FatIface11/sourceboot4 at9db5. Newly changed owners require current checks.
 
-- Choice/demand repair: 7d203/aafa preserves each surviving Original's native
-  choice through role, output and request projection, without manufacturing
-  executable roots. Unissued policy retains actual exact roots until the request
-  issuer decides. Source-reviewed; warm execution pending. Additional rival-issuer
-  and refusal controls are in flight. A stale merge test must test whole Receiving
-  precedence, not require distinct native choices to compare as identical facts.
-- Physical future-value fixture: supplying bytes without selecting the physical
-  TYPE role cannot issue its dependency. Repair the positive full physical cohort,
-  then narrow through the existing item projection. Keep missing dependency and
-  invisible runtime value refusals. No production authority change is approved.
-- Authored history: 4d2d branches source and World continuation from the same
-  actual published helper. The prior test installed incoming TYPE rows before
-  asserting a nonempty World delta. Wrong-owner and issuance-phase checks remain.
-- Producer B: exact retained diagnostics identify missing `main:Tidepool.Session.Lib.G90`,
-  not a changed Helper identity. Terminal output must project inherited lexical
-  scope using actual output roles plus consumed obligations. Persistent extension
-  stays strict; required missing and changed canonical owners must still refuse.
-- Operand controls: 22c7 restores the production qualified import and input alias;
-  unused operand TYPE retention is checked separately from emitted/demanded values.
-  The new no-operand prefix case isolates physical/current-prefix ownership from
-  any operand installation defect. A possible compiler Finder/interface installation
-  gap remains an unqualified lead, not permission to grant SOURCE authority.
-
-After these checks settle, independent adversarial reviewers must challenge the
-ownership boundaries, production consumers and discriminating test evidence.
-A later failure boundary does not by itself qualify this tranche or G2.
-
-## Compilation and execution evidence
-
-- 9db5: toolchain production/cfg passed; 22 executions, 19 passed / 3 failed.
-  The two transport fixture premises are repaired and subsequently pass. The
-  authored promotion fixture now preserves its genuine Published source grant.
-- de968: toolchain/runtime production/cfg passed (14 consumers); graph transport
-  passed; actual World history fails at the later reuse boundary above.
-- 5a2, 2393 and ea23: phase migration compile attempts failed; zero tests ran.
-  All observed compile errors were repaired atb493.
-- b493 and97264: all14 toolchain/runtime production and cfg consumers compile.
-  At97264 five behavioral tests executed: capture/selection separation passed;
-  the four closeout failures are retained above. A prior producer-B startup
-  attempt executed zero tests; its unconfirmed cleanup receipt remains unchanged.
-  The independent new B execution started successfully and confirmed cleanup.
-- c2a: four behavioral tests executed and failed; all process/compiler cleanup
-  confirmed. No Rust subscriber was established for the filtered debug event.
-  At1ebf the final25-consumer compile found three ordinary borrow/privacy errors;
-  051e repairs all three.
-- 051e: all25 production/cfg consumers compiled, including actor and host. Nine
-  controls executed: four passed, five failed. Exact issuer/demand merge, affinity,
-  and capture/selection controls pass. Failures: native choices lost on handoff,
-  physical fixture dependency, authored delta premise, producer-B scope, and merge
-  fixture premise. All process and resident compiler cleanup was confirmed.
-- 4d2d: owning toolchain production/cfg compile and focused execution are running.
-  Later test evidence must name this pin; the prior25 pass is not a new full25 pass.
-
-Exact evidence lives in `051e-checkpoint.json`, `9726-checkpoint.json`, `b493-checkpoint.json`, and the
-individual logs/reports. Next: settle the bounded owner repairs and execute the
-actual World operand controls, then perform adversarial review of the consolidated
-revision. G2 cohorts and matched frozen Persona qualification remain pending;
-no new bundle, Persona launch, or G2/G3 acceptance is claimed.
+Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`, including
+`2adb-checkpoint.json` and subsequent checkpoint files. Audits and caller
+classifications: `/srv/swarm/evidence/inanna/c-ownership-20261023/audits/`.
 
 Warm checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-Validator owns its source pin while commands run. Preserve 100 GiB scratch plus
-prospective growth; use admitted local-only Buck with existing warm outputs.
-Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
+The validator owns its immutable source pin until commands settle. Use admitted
+local-only pinned workflows; preserve100GiB scratch plus prospective growth.
+Current warm forecast3GiB; recheck actual resources before admission.
+
+## Separate G2 frontier
+
+Actual World capture/declaration/publication succeeds, then
+`segmentRecord historyCaptured` fails with `UnavailableOriginalHomeDependencies`
+for `Val.G1.historyValue0`. Structured evidence shows no exact retained Original
+reference survives into final demand. The responsible GHC transformation remains
+unproven. `NATIVE-REUSE-FRONTIER.md` retains competing explanations and rejected
+shortcuts: do not grant SOURCE authority, match owners by name or eagerly acquire
+all pre-optimization native references to conceal this boundary.
+
+After tranche closeout: refresh affected joined compilation, resolve native reuse
+with discriminating execution, run maintained G2 gates and freeze one matched
+bundle. G3 and fresh Persona remain pending. No new bundle or deployment exists.
 
 ## Bounded adjacent finding
 
 The joined-interface materializer keys `.hi` and `.packages` by only the `.hi`
-digest although their artifact descriptor commits both. Exact package-module
-witnesses can vary independently from interface package-unit metadata. This is a
-source-established contract gap, not an executed genuine collision or current
-release failure. A future repair should key the pair by both digests and first
-retain a real same-owner producer witness. Existing writes refuse mismatches
-without overwriting prior files. Canonical/native variants remain unproven.
+digest although the artifact descriptor commits both. This is a source-level
+contract gap, not a reproduced live collision. Writes refuse mismatches without
+overwriting. A later repair should first retain a real same-owner witness and
+key the pair by both digests; canonical/native collision variants are unproven.

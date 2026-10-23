@@ -96,11 +96,12 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The accepted structural boundaries are integrated through `4d2da2e663`;
+The current joined validation candidate is `cf62ac30f1`;
 see `STATE.md` for exact compile/execution evidence and pending gates.
-Closeout still includes actual demand versus carried choices and fixture-owner
-contracts. These remain unqualified until the joined behavior and independent
-adversarial reviews settle. The actual
+Adversarial closeout found a demand/catalog identity conflation and surviving
+test-only transport and SOURCE-authority issuers. The demand repair is integrated;
+test migrations and independent review remain open. Delete alternate issuers,
+preserve refusal controls and execute the repaired join before completion. The actual
 World history now passes initial capture/declaration/publication, then fails at
 retained-value reuse through an authored native declaration. This is a distinct
 boundary under direct root investigation; G2/G3 remain unqualified.
