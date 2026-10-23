@@ -942,7 +942,20 @@ data ExactContextForkFailure
   | ExactContextContainsHomePackageInterface
   | ExactContextContainsForeignHome Module
   | ExactContextMissingHomeDependency Module Module
-  deriving (Eq, Show)
+  deriving Eq
+
+instance Show ExactContextForkFailure where
+  show ExactContextRequiresCompilationManager = "exact context requires the compilation manager"
+  show ExactContextRequiresSingleDefiniteHomeUnit = "exact context requires one definite HOME unit"
+  show ExactContextContainsHomePackageInterface = "exact context contains a HOME package interface"
+  show (ExactContextContainsForeignHome owner) =
+    "exact context contains foreign HOME module " ++ exactModuleLabel owner
+  show (ExactContextMissingHomeDependency owner dependency) =
+    "exact context HOME module " ++ exactModuleLabel owner
+      ++ " is missing dependency " ++ exactModuleLabel dependency
+
+exactModuleLabel :: Module -> String
+exactModuleLabel owner = unitString (moduleUnit owner) ++ ":" ++ moduleNameString (moduleName owner)
 
 instance Exception ExactContextForkFailure
 
