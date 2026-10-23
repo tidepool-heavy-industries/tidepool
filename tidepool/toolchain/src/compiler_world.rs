@@ -4576,11 +4576,6 @@ impl WorldCellOutputAdmission {
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
         self.native_demands.primary.context()
     }
-    pub(crate) fn primary_compiler_inputs(
-        &self,
-    ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
-        self.native_demands.primary.inputs()
-    }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
     }

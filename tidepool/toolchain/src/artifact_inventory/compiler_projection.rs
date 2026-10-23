@@ -8395,7 +8395,7 @@ mod tests {
                 .unwrap();
             let projected = projected_context.compiler_source_support();
             let (changed, owners) = baseline
-                .with_type_interfaces(&[projected.compiler_source_support()], [2; 32])
+                .with_type_interfaces(&[projected], [2; 32])
                 .unwrap();
             let maintained = changed.type_interface_metadata(&metadata, &owners).unwrap();
             let work = type_query_work::take();
