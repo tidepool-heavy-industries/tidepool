@@ -480,7 +480,9 @@ proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config { cases: 32, ..proptest::test_runner::Config::default() })]
     #[test]
     fn bounded_interference_then_fair_drain_preserves_public_owners(
-        interference in proptest::collection::vec(0u8..4, 0..12),
+        interference in proptest::collection::vec(0u8..4, 0..6),
+        value_a in -100i16..100,
+        value_b in -100i16..100,
     ) {
         let root = tempfile::tempdir().unwrap();
         let (mut resident, recipe, recovery) = captured_session(root.path(), 9893, true);
@@ -489,48 +491,66 @@ proptest::proptest! {
         let source_a = bootstrap_scope(&mut resident, &recipe, Some(&owner_a));
         let source_b = bootstrap_scope(&mut resident, &recipe, Some(&owner_b));
         let admission_a = begin(&mut resident, &source_a, Some(&owner_a));
+        execute_fixture_cell_for(&mut resident, &source_a, &recipe, &admission_a, &format!("let winner = ({value_a} :: Int)"));
+        let expected_a = resident.state.resolve_in(admission_a.private_scope(), "winner").unwrap().id;
         let intent_a = resident.freeze_private_execution(&admission_a).unwrap();
         let ExecutionPublication::Bindings(base) = resident.state.restage_execution_publication(owner_a.clone(), intent_a.clone()).unwrap() else { panic!("bindings") };
         let mut ticket = Some(base.stage().unwrap());
         let decision = PublicationDecision::new();
-        let mut model_owners = BTreeSet::from([owner_a.clone(), owner_b.clone()]);
+        let model_owners = BTreeSet::from([owner_a.clone(), owner_b.clone()]);
+        let mut expected_b = None;
+        let mut expected_b_value = value_b;
+        let mut metadata_retries = 0;
+        let mut semantic_retries = 0;
         let mut last_generation = resident.state.lib().generation();
-        for action in interference {
+        // Every history reaches both metadata refresh and semantic rebase before
+        // its generated suffix. Neither can silently settle an empty intent.
+        for (step, action) in [1, 2, 3].into_iter().chain(interference).enumerate() {
             let revision = resident.state.lib().log.publication_revision();
             match action {
                 0 => { resident.state.lib_mut().reserve_join_generation_durable().unwrap(); }
                 1 => { resident.state.lib_mut().reserve_declaration_generations_durable(65).unwrap(); }
                 2 => {
                     let b = begin(&mut resident, &source_b, Some(&owner_b));
+                    expected_b_value = value_b + step as i16;
+                    execute_fixture_cell_for(&mut resident, &source_b, &recipe, &b, &format!("let sibling = ({expected_b_value} :: Int)"));
+                    let id = resident.state.resolve_in(b.private_scope(), "sibling").unwrap().id;
+                    if let Some(previous) = expected_b { proptest::prop_assert_ne!(id, previous); }
+                    expected_b = Some(id);
                     let intent_b = resident.freeze_private_execution(&b).unwrap();
                     let ExecutionPublication::Bindings(base) = resident.state.restage_execution_publication(owner_b.clone(), intent_b).unwrap() else { panic!("bindings") };
                     proptest::prop_assert!(matches!(resident.state.attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicationAttempt::Settled(PublicManifestCommit::Durable)));
-                    model_owners.insert(owner_b.clone());
                 }
-                3 => { publish_observation(&mut resident, &source_a, &recipe, &owner_a); }
+                3 => {
+                    let concurrent = begin(&mut resident, &source_a, Some(&owner_a));
+                    execute_fixture_cell_for(&mut resident, &source_a, &recipe, &concurrent, &format!("let winner = ({} :: Int)", value_a as i32 + 1000 + step as i32));
+                    let id = resident.state.resolve_in(concurrent.private_scope(), "winner").unwrap().id;
+                    proptest::prop_assert_ne!(id, expected_a);
+                    let frozen = resident.freeze_private_execution(&concurrent).unwrap();
+                    let ExecutionPublication::Bindings(base) = resident.state.restage_execution_publication(owner_a.clone(), frozen).unwrap() else { panic!("concurrent binding") };
+                    proptest::prop_assert!(matches!(resident.state.attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicationAttempt::Settled(PublicManifestCommit::Durable)));
+                }
                 _ => unreachable!(),
             }
-            proptest::prop_assert_eq!(resident.state.lib().log.publication_revision(), revision);
+            if action <= 1 { proptest::prop_assert_eq!(resident.state.lib().log.publication_revision(), revision); }
             proptest::prop_assert!(resident.state.lib().generation() >= last_generation);
             last_generation = resident.state.lib().generation();
             let compiler_requests = tidepool_extract_cmd::extract_spawn_count();
-            // The adversary stops before each next capture. No effects or declarations rerun.
+            // Retrying publication must preserve completed values and request no compiler work.
             if action == 0 { continue; }
             ticket = Some(match resident.state.attempt_public_manifest(ticket.take().unwrap(), &decision).unwrap() {
                 PublicationAttempt::RestageMetadata(certified) => {
+                    metadata_retries += 1;
                     let PublicationAttempt::RestageMetadata(certified) = resident.state.restage_publication_metadata(certified).unwrap() else { panic!("no new interference during refresh") };
                     certified.stage().unwrap()
                 }
                 PublicationAttempt::Rebase(retained) => {
+                    semantic_retries += 1;
                     proptest::prop_assert!(Arc::ptr_eq(&retained, &intent_a));
                     let ExecutionPublication::Bindings(base) = resident.state.restage_execution_publication(owner_a.clone(), retained).unwrap() else { panic!("binding-only intent never reserves a join") };
                     base.stage().unwrap()
                 }
-                PublicationAttempt::Settled(PublicManifestCommit::Durable) => {
-                    model_owners.insert(owner_a.clone());
-                    // A fair drain already won; remaining operations are not execution retries.
-                    break;
-                }
+                PublicationAttempt::Settled(PublicManifestCommit::Durable) => panic!("each attempted interference changed the captured baseline"),
                 _ => panic!("bounded valid interference cannot terminate execution"),
             });
             proptest::prop_assert_eq!(decision.phase(), PublicationPhase::Running);
@@ -542,12 +562,13 @@ proptest::proptest! {
             if decision.phase() == PublicationPhase::Published { break; }
             let compiler_requests = tidepool_extract_cmd::extract_spawn_count();
             match resident.state.attempt_public_manifest(ticket.take().unwrap(), &decision).unwrap() {
-                PublicationAttempt::Settled(PublicManifestCommit::Durable) => { model_owners.insert(owner_a.clone()); }
+                PublicationAttempt::Settled(PublicManifestCommit::Durable) => {}
                 PublicationAttempt::RestageMetadata(certified) => {
                     let PublicationAttempt::RestageMetadata(certified) = resident.state.restage_publication_metadata(certified).unwrap() else { panic!("fair refresh") };
                     ticket = Some(certified.stage().unwrap());
                 }
                 PublicationAttempt::Rebase(retained) => {
+                    semantic_retries += 1;
                     proptest::prop_assert!(Arc::ptr_eq(&retained, &intent_a));
                     let ExecutionPublication::Bindings(base) = resident.state.restage_execution_publication(owner_a.clone(), retained).unwrap() else { panic!("binding-only fair rebase") };
                     ticket = Some(base.stage().unwrap());
@@ -557,9 +578,22 @@ proptest::proptest! {
             proptest::prop_assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_requests);
         }
         proptest::prop_assert_eq!(decision.phase(), PublicationPhase::Published);
+        proptest::prop_assert!(metadata_retries >= 1, "durable metadata interference must be observed");
+        proptest::prop_assert!(semantic_retries >= 1, "public-winner interference must be observed");
+        let expected_b = expected_b.unwrap();
+        for (scope, name, id, value) in [
+            (source_a.scope(), "winner", expected_a, value_a),
+            (source_b.scope(), "sibling", expected_b, expected_b_value),
+        ] {
+            proptest::prop_assert_eq!(resident.state.resolve_in(scope, name).unwrap().id, id);
+            let custody = resident.retain_binding_custody_in(scope, name, id).unwrap().unwrap();
+            proptest::prop_assert_eq!(resident.render_retained_preview(&custody, 64), Some(value.to_string()));
+        }
         let cold = recovery::load_domain_graph(Arc::new(RunRecoveryStore::open(recovery.as_ref().unwrap().store.path()).unwrap()), RecoveryDomainId::Root).unwrap();
         let observed = cold.public_surfaces().map(|surface| surface.owner.clone()).collect::<BTreeSet<_>>();
         proptest::prop_assert_eq!(observed, model_owners);
+        proptest::prop_assert_eq!(cold.surface(&owner_a).unwrap().unwrap().bindings["winner"].variable, expected_a.raw());
+        proptest::prop_assert_eq!(cold.surface(&owner_b).unwrap().unwrap().bindings["sibling"].variable, expected_b.raw());
         proptest::prop_assert_eq!(resident.state.lib().generation(), last_generation);
     }
 }
