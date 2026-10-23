@@ -95,6 +95,134 @@ fn complete_recovery_cell(
         source,
     )
 }
+
+fn publish_recovery_world(
+    world: &mut RecoveryWorld,
+    execution: &Arc<PrivateExecutionAdmission>,
+    public_owner: RecoveryPublicOwner,
+) {
+    let frozen = world.resident.freeze_private_execution(execution).unwrap();
+    let certified = super::world_cell_test_support::source_action_with_original(
+        &mut world.resident,
+        world.source.original_source().clone(),
+        |resident, report| {
+            resident
+                .state
+                .restage_declaration_publication(public_owner, frozen)
+                .unwrap()
+                .certify(report)
+        },
+    )
+    .unwrap();
+    let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
+        panic!("completed recovery World must publish");
+    };
+    assert!(matches!(
+        world
+            .resident
+            .state
+            .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+}
+
+pub(in crate::session) struct PublishedShadowRecovery {
+    pub old_root: tidepool_toolchain::exact_context::ContextRoot,
+    pub old_lexical_root: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    pub old_selection: tidepool_toolchain::artifact_inventory::ArtifactGraphSelection,
+    pub current_root: tidepool_toolchain::exact_context::ContextRoot,
+    pub current_lexical_root: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+}
+
+pub(in crate::session) fn published_shadow_recovery(
+    lib: SessionLib,
+    effects: &TestEffectSurface,
+    public_owner: RecoveryPublicOwner,
+) -> PublishedShadowRecovery {
+    let mut world = recovery_world(lib, effects, Some(public_owner.clone()));
+    let execution = begin_recovery_execution(&mut world);
+    let (old_tip, _, _) = complete_recovery_cell(
+        &mut world,
+        &execution,
+        include_str!("fixtures/recovery-original.hs"),
+    );
+    let old_node = graph(world.resident.state.lib())
+        .node(old_tip)
+        .unwrap()
+        .unwrap();
+    let old_root = old_node.context_root.clone();
+    let old_lexical_root = old_node.lexical_roots[0].clone();
+    let old_selection = world
+        .resident
+        .compile_view_in(execution.private_scope())
+        .unwrap()
+        .exact_declaration_context()
+        .unwrap()
+        .artifact_view()
+        .capture_graph_selection();
+    complete_recovery_cell(
+        &mut world,
+        &execution,
+        "answer :: Int -> Int\nanswer value = value + 100",
+    );
+    publish_recovery_world(&mut world, &execution, public_owner.clone());
+    let public = world.source.scope();
+    let state = world.resident.state.lib();
+    let current_node = graph(state).node(state.scope_tip(public)).unwrap().unwrap();
+    let current_lexical_root = current_node.lexical_roots[0].clone();
+    let current_root = graph(state)
+        .surface(&public_owner)
+        .unwrap()
+        .unwrap()
+        .context_root
+        .clone()
+        .unwrap();
+    assert_ne!(old_root, current_root);
+    // Acquire the persisted selection independently of the live World before
+    // lending only immutable expectations to the hydration owner's test.
+    let reopened = graph(state).acquire_context(&current_root).unwrap();
+    assert_eq!(
+        reopened.snapshot().graph_selection().unwrap(),
+        world
+            .resident
+            .compile_view_in(public)
+            .unwrap()
+            .exact_declaration_context()
+            .unwrap()
+            .artifact_view()
+            .capture_graph_selection()
+    );
+    PublishedShadowRecovery {
+        old_root,
+        old_lexical_root,
+        old_selection,
+        current_root,
+        current_lexical_root,
+    }
+}
+
+fn assert_durable_recovery_admission(
+    resident: &mut ResidentSession<frunk::HNil, EmptyOutput>,
+    recipe: &super::world_cell_test_support::InputRecipe,
+    scope: ScopeId,
+    public_owner: &RecoveryPublicOwner,
+    expected: &PublicVisibilitySnapshot,
+) -> Arc<RuntimeLexicalScopeLease> {
+    let source = resident.state.prepared_lexical_scope_lease(scope).unwrap();
+    super::world_cell_test_support::bootstrap_world_for(resident, recipe, &source);
+    let execution = super::world_cell_test_support::source_action_with_original(
+        resident,
+        source.original_source().clone(),
+        |resident, _| resident.begin_durable_private_execution(public_owner, scope),
+    )
+    .unwrap();
+    assert_eq!(execution.admitted_public().unwrap(), expected);
+    resident.retire_scope(execution.private_scope());
+    source
+}
+
 struct TestSuccessor {
     run: Arc<TestRunOwner>,
     session: SessionId,
@@ -129,69 +257,6 @@ fn library(id: u64, recovery: &RecoveryFixture, include: &[PathBuf]) -> SessionL
     tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
         .unwrap();
     lib
-}
-
-fn adopt_recovery_declaration(
-    session: &mut PersistentSession,
-    execution: Arc<PrivateExecutionAdmission>,
-    effects: &TestEffectSurface,
-    source: &str,
-) -> Generation {
-    use crate::session::turn::compile_cell_program_admitted;
-    use tidepool_toolchain::checked_cell::{CellRecipe, CheckedItemKind};
-
-    let view = session.compile_view_for_execution(&execution).unwrap();
-    let imports = view.turn_imports(&SourceImports::new());
-    let specification = Arc::new(
-        CellRecipe::new(
-            source.to_string(),
-            resident_cell_check_template(effects.preamble(), effects.row(), &imports),
-            resident_workbench_templates(effects.preamble(), effects.row(), &imports)
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        TemplateSelector::Decl => "decl",
-                        TemplateSelector::Bind => "bind",
-                        TemplateSelector::BindDiscard => "binddiscard",
-                        TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap(),
-    );
-    let include = view.include_paths(effects.include_paths());
-    let plan = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
-    })
-    .unwrap();
-    let admission = session
-        .admit_planned_cell_for_execution(
-            execution,
-            plan,
-            specification.clone(),
-            specification.specification_digest(),
-            [1; 32],
-            include,
-            None,
-        )
-        .unwrap();
-    let (_, program) = tidepool_testing::with_settlement(|settlement| {
-        compile_cell_program_admitted(admission.clone(), settlement)
-    })
-    .unwrap();
-    let [item] = program.items() else {
-        panic!("recovery fixture must issue one original declaration");
-    };
-    let item = item.checked_item().clone();
-    assert_eq!(item.kind(), CheckedItemKind::Declaration);
-    let prefix = session.begin_cell_program(program).unwrap().unwrap();
-    let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
-    let commit = session.adopt_checked_declaration(reservation).unwrap();
-    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
-    commit.generation
 }
 
 #[test]
@@ -347,8 +412,9 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
     session
         .initialize_durable_public_scope(owner(1), public)
         .unwrap();
-    let execution = session.begin_private_execution(public).unwrap();
-    let private = execution.private_scope();
+    // This compiler-only API control deliberately does not claim a completed
+    // executable World or attempt public publication after raw retraction.
+    let private = session.mint_detached_scope(public).unwrap();
     let public_before = session.public_visibility_snapshot_in(public).unwrap();
     let original = tidepool_testing::with_settlement(|settlement| {
         session.define_scoped_in(
@@ -534,34 +600,22 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     tidepool_testing::eval_harness::require_extract();
     let durable = tempfile::tempdir().unwrap();
     let recovery = RecoveryFixture::create(durable.path());
-    let mut session = PersistentSession::new(Some(library(4412, &recovery, &[])), 1024 * 1024);
-    let public = session.mint_isolated_scope();
-    session
-        .initialize_durable_public_scope(owner(1), public)
-        .unwrap();
-    let admission = session.begin_private_execution(public).unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let mut world = recovery_world(
+        library(4412, &recovery, effects.include_paths()),
+        &effects,
+        Some(owner(1)),
+    );
+    let admission = begin_recovery_execution(&mut world);
     let private = admission.private_scope();
-    tidepool_testing::with_settlement(|settlement| {
-        session.define_scoped_in(
-            private,
-            &[include_str!("fixtures/recovery-original.hs")],
-            settlement,
-        )
-    })
-    .unwrap();
-    // A previously materialized value remains visible while this next binding
-    // moves from the declaration environment into the binding store.
-    let mut existing = prepared::tests::rooted_publication_fixture(&mut session, "existing", 4413);
-    existing.scope = private;
-    session.bind_in(private, existing).unwrap();
-    let mut entry = prepared::tests::rooted_publication_fixture(&mut session, "answer", 4414);
-    entry.scope = private;
-    tidepool_testing::with_settlement(|settlement| {
-        session.bind_replacing_decl_in(private, entry, settlement)
-    })
-    .unwrap();
-    let generation = session.lib().scope_tip(private);
-    let authored_owner = session
+    let (generation, _, _) = complete_recovery_cell(
+        &mut world,
+        &admission,
+        include_str!("fixtures/recovery-original.hs"),
+    );
+    let authored_owner = world
+        .resident
+        .state
         .lib()
         .log
         .certified_authored_at(generation)
@@ -569,6 +623,21 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         .product()
         .owner()
         .clone();
+    complete_recovery_cell(&mut world, &admission, "let existing = (7 :: Int)");
+    complete_recovery_cell(&mut world, &admission, "let answer = (42 :: Int)");
+    for (name, preview) in [("existing", "7"), ("answer", "42")] {
+        let (id, ..) = world.resident.current_binding_in(private, name).unwrap();
+        let custody = world
+            .resident
+            .retain_binding_custody_in(private, name, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            world.resident.render_retained_preview(&custody, 64),
+            Some(preview.into())
+        );
+    }
+    let session = &mut world.resident.state;
     let selection = session
         .bindings()
         .source_domain_selection_in(session.scope_tree(), private)
@@ -588,25 +657,17 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         session.public_visibility_snapshot_in(private).unwrap(),
         before
     );
-    let intent = session.freeze_private_execution(&admission).unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) =
-        tidepool_testing::with_settlement(|settlement| {
-            session
-                .restage_declaration_publication(owner(1), intent)
+    publish_recovery_world(&mut world, &admission, owner(1));
+    for name in ["existing", "answer"] {
+        assert_eq!(
+            world
+                .resident
+                .current_binding_in(world.source.scope(), name)
                 .unwrap()
-                .certify(settlement)
-        })
-        .unwrap()
-    else {
-        panic!("materialized declaration retraction must publish");
-    };
-    assert!(matches!(
-        session
-            .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
-            .map(crate::session::settled_manifest_attempt)
-            .unwrap(),
-        PublicManifestCommit::Durable
-    ));
+                .0,
+            world.resident.current_binding_in(private, name).unwrap().0
+        );
+    }
 }
 
 fn capture_earned_context(
@@ -652,7 +713,7 @@ fn capture_earned_context(
 }
 
 #[test]
-fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_dependencies_and_retractions(
+fn exact_publication_recovery_in_fresh_worker_preserves_originals_checked_shadows_and_raw_retraction_refusal(
 ) {
     tidepool_testing::eval_harness::require_extract();
     assert!(
@@ -678,40 +739,36 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         }
     };
     let recovery = RecoveryFixture::create(&durable_root);
-    let mut producer = PersistentSession::new(
-        Some(library(4402, &recovery, effects.include_paths())),
-        1024 * 1024,
-    );
-    let public = producer.mint_isolated_scope();
-    assert!(matches!(
-        producer
-            .initialize_durable_public_scope(owner(1), public)
-            .unwrap(),
-        PublicManifestCommit::Durable
-    ));
-    let admission = Arc::new(producer.begin_private_execution(public).unwrap());
-    let original = adopt_recovery_declaration(
-        &mut producer,
-        admission.clone(),
+    let mut world = recovery_world(
+        library(4402, &recovery, effects.include_paths()),
         &effects,
+        Some(owner(1)),
+    );
+    let public = world.source.scope();
+    let admission = begin_recovery_execution(&mut world);
+    let (original, original_declarations, _) = complete_recovery_cell(
+        &mut world,
+        &admission,
         include_str!("fixtures/recovery-original.hs"),
     );
+    assert_eq!(original_declarations, vec![original]);
+    let producer = &mut world.resident.state;
     let (retained_a, root_a) =
-        capture_earned_context(&mut producer, admission.private_scope(), owner(41));
-    let dependent = adopt_recovery_declaration(
-        &mut producer,
-        admission.clone(),
-        &effects,
+        capture_earned_context(producer, admission.private_scope(), owner(41));
+    let (dependent, dependent_declarations, _) = complete_recovery_cell(
+        &mut world,
+        &admission,
         include_str!("fixtures/recovery-dependent.hs"),
     );
+    assert_eq!(dependent_declarations, vec![dependent]);
+    let producer = &mut world.resident.state;
     let (retained_b, root_b) =
-        capture_earned_context(&mut producer, admission.private_scope(), owner(42));
+        capture_earned_context(producer, admission.private_scope(), owner(42));
     assert_ne!(
         root_a, root_b,
         "the dependent declaration changes exact compiler facts"
     );
-    let (retained_a_again, root_a_again) =
-        capture_earned_context(&mut producer, retained_a, owner(43));
+    let (retained_a_again, root_a_again) = capture_earned_context(producer, retained_a, owner(43));
     assert_ne!(retained_a_again, retained_b);
     assert_eq!(
         root_a_again, root_a,
@@ -770,33 +827,54 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .as_ref(),
         Some(&root_a),
     );
-    tidepool_testing::with_settlement(|settlement| {
-        producer.retract_in(admission.private_scope(), "HiddenResult", settlement)
-    })
+    // Checked shadows advance the actual compiler World while the earlier
+    // Original remains the authority for its hidden transitive dependency.
+    complete_recovery_cell(
+        &mut world,
+        &admission,
+        "answer :: Int -> Int\nanswer value = value + 100",
+    );
+    complete_recovery_cell(
+        &mut world,
+        &admission,
+        "data HiddenResult = PublicResult deriving Show",
+    );
+    publish_recovery_world(&mut world, &admission, owner(1));
+    // A raw declaration retraction does not issue completed World progress.
+    let unsupported = begin_recovery_execution(&mut world);
+    let (_, _, completed) = complete_recovery_cell(&mut world, &unsupported, "pure ()");
+    let before_public = world
+        .resident
+        .public_visibility_snapshot_in(public)
+        .unwrap();
+    let before_prefix = completed.snapshot();
+    super::world_cell_test_support::source_action_with_original(
+        &mut world.resident,
+        world.source.original_source().clone(),
+        |resident, report| {
+            resident.state.retract_many_in(
+                unsupported.private_scope(),
+                &["HiddenResult".into(), "answer".into()],
+                report,
+            )
+        },
+    )
     .unwrap();
-    tidepool_testing::with_settlement(|settlement| {
-        producer.retract_in(admission.private_scope(), "answer", settlement)
-    })
-    .unwrap();
-    let intent = producer.freeze_private_execution(&admission).unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) =
-        tidepool_testing::with_settlement(|settlement| {
-            producer
-                .restage_declaration_publication(owner(1), intent)
-                .unwrap()
-                .certify(settlement)
-        })
-        .unwrap()
-    else {
-        panic!("real retained declarations must publish");
-    };
+    let before_store = recovery.state();
+    let before_freeze = tidepool_extract_cmd::extract_spawn_count();
     assert!(matches!(
-        producer
-            .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
-            .map(crate::session::settled_manifest_attempt)
-            .unwrap(),
-        PublicManifestCommit::Durable
+        world.resident.freeze_private_execution(&unsupported),
+        Err(SessionError::WorldCellPublicationBaseStale)
     ));
+    assert_eq!(
+        world.resident.public_visibility_snapshot_in(public),
+        Some(before_public)
+    );
+    assert_eq!(recovery.state(), before_store);
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before_freeze);
+    assert!(Arc::ptr_eq(&before_prefix, &completed.snapshot()));
+    world.resident.retire_scope(unsupported.private_scope());
+    let producer = &mut world.resident.state;
     let expected = producer.public_visibility_snapshot_in(public).unwrap();
     let child_owner = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
@@ -824,14 +902,14 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .unwrap(),
         Some(parent_surface)
     );
-    let child_admission = producer
-        .begin_durable_private_execution(&child_owner, child)
-        .unwrap();
-    assert_eq!(
-        child_admission.admitted_public().unwrap().declaration_tip,
-        expected.declaration_tip
+    let _child_source = assert_durable_recovery_admission(
+        &mut world.resident,
+        &world.recipe,
+        child,
+        &child_owner,
+        &child_snapshot,
     );
-    drop(child_admission);
+    let producer = &mut world.resident.state;
     let additional_owner = RecoveryPublicOwner::new(
         &ActorPath::parse("root/exact-recovery/second-child").unwrap(),
         4,
@@ -844,17 +922,26 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .unwrap(),
         PublicManifestCommit::Durable
     ));
+    let additional_snapshot = producer
+        .public_visibility_snapshot_in(additional_child)
+        .unwrap();
     assert_eq!(
-        producer
-            .begin_durable_private_execution(&additional_owner, additional_child)
-            .unwrap()
-            .admitted_public()
-            .unwrap()
-            .declaration_tip,
+        additional_snapshot.declaration_tip,
         expected.declaration_tip
     );
+    let _additional_source = assert_durable_recovery_admission(
+        &mut world.resident,
+        &world.recipe,
+        additional_child,
+        &additional_owner,
+        &additional_snapshot,
+    );
     drop(admission);
-    drop(producer);
+    drop(completed);
+    drop(unsupported);
+    drop(_child_source);
+    drop(_additional_source);
+    drop(world);
     let removed_source = durable_root.join("compiler/Tidepool/Session");
     assert!(
         removed_source.is_dir(),
@@ -1039,14 +1126,6 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         );
         assert_eq!(child_snapshot.epoch, 1);
         assert!(child_snapshot.bindings.is_empty());
-        assert_eq!(
-            consumer
-                .begin_durable_private_execution(&child_owner, child_scope)
-                .unwrap()
-                .admitted_public()
-                .unwrap(),
-            &child_snapshot
-        );
         recovered_scopes.push((child_scope, path));
     }
     assert_same_content(&recovery, &before);
@@ -1078,9 +1157,12 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         && head.module == SessionModule::lib(original).module_name()));
     assert!(heads.iter().any(|head| head.occurrence == "recoveredAnswer"
         && head.module == SessionModule::lib(dependent).module_name()));
-    assert!(heads
-        .iter()
-        .all(|head| head.occurrence != "HiddenResult" && head.occurrence != "answer"));
+    for name in ["HiddenResult", "answer"] {
+        assert!(heads.iter().any(|head| head.occurrence == name
+            && head.module != SessionModule::lib(original).module_name()));
+        assert!(heads.iter().all(|head| head.occurrence != name
+            || head.module != SessionModule::lib(original).module_name()));
+    }
     let imports = view.turn_imports(&SourceImports::new());
     let include = view.include_paths(effects.include_paths());
     let include = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -1088,7 +1170,8 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     let queries = [
         InspectionQuery::TypeOf("recoveredAnswer (41 :: Int)".into()),
         InspectionQuery::TypeOf("answer (41 :: Int)".into()),
-        InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
+        InspectionQuery::TypeOf("PublicResult :: HiddenResult".into()),
+        InspectionQuery::TypeOf("makeResult (41 :: Int) :: HiddenResult".into()),
     ];
     let inspected = tidepool_testing::with_settlement(|settlement| {
         run_inspections(
@@ -1109,8 +1192,9 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     })
     .unwrap();
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
-    assert!(matches!(&inspected[1], InspectionResult::Rejected { .. }));
-    assert!(matches!(&inspected[2], InspectionResult::Rejected { .. }));
+    assert!(matches!(&inspected[1], InspectionResult::Type { display, .. } if display == "Int"));
+    assert!(matches!(&inspected[2], InspectionResult::Type { .. }));
+    assert!(matches!(&inspected[3], InspectionResult::Rejected { .. }));
     let templates = vec![TurnTemplate {
         kind: TemplateSelector::Expr,
         source: assemble_expression_module(
@@ -1128,7 +1212,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
                     tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
                 )),
                 session_id: Some(view.session()),
-                turn_text: "recoveredAnswer (41 :: Int)",
+                turn_text: "[recoveredAnswer (41 :: Int), answer (41 :: Int)]",
                 templates: &templates,
                 include: &include,
                 session_root: view.session_root(),
@@ -1147,6 +1231,11 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     assert_same_content(&recovery, &before);
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, EmptyOutput, consumer);
+    let recovered_child_scopes = recovered_scopes
+        .iter()
+        .skip(1)
+        .map(|(scope, _)| *scope)
+        .collect::<Vec<_>>();
     for (scope, path) in recovered_scopes {
         let selected = resident.compile_view_in(scope).unwrap();
         assert_eq!(selected.turn_imports(&SourceImports::new()), imports);
@@ -1181,137 +1270,86 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         else {
             panic!("real recovered original dependency must execute in each selected scope");
         };
-        assert_eq!(result.to_json(), serde_json::json!(42));
+        assert_eq!(result.to_json(), serde_json::json!([42, 141]));
         assert_same_content(&recovery, &before);
         println!(
-            "fresh recovery native execution: pid={} owner={path} scope={scope:?} result=42",
+            "fresh recovery native execution: pid={} owner={path} scope={scope:?} result=[42,141]",
             std::process::id()
         );
     }
+    // Recovered compiler facts become executable only after the actual source
+    // owner issues a World over the recovered selection.
+    let recipe = super::world_cell_test_support::InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut recovered_sources = Vec::new();
+    for (scope, path, incarnation) in [
+        (public, "root/recovered", 2),
+        (recovered_child_scopes[0], "root/exact-recovery/child", 3),
+        (
+            recovered_child_scopes[1],
+            "root/exact-recovery/second-child",
+            4,
+        ),
+    ] {
+        let expected = resident.public_visibility_snapshot_in(scope).unwrap();
+        let public_owner =
+            RecoveryPublicOwner::new(&ActorPath::parse(path).unwrap(), incarnation).unwrap();
+        recovered_sources.push(assert_durable_recovery_admission(
+            &mut resident,
+            &recipe,
+            scope,
+            &public_owner,
+            &expected,
+        ));
+    }
+    let source = recovered_sources[0].clone();
     let public_before = resident.public_visibility_snapshot_in(public).unwrap();
     let handles_before = resident.value_handle_count();
-    let private;
-    {
-        use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
-        use tidepool_toolchain::checked_cell::{CellRecipe, CheckedItemKind};
-
-        // The standalone probe above covers immutable code reuse. Notebook cells
-        // must also consume the recovered selection through whole-cell admission.
-        let execution = Arc::new(resident.begin_private_execution(public).unwrap());
-        private = execution.private_scope();
-        let view = resident.compile_view_for_execution(&execution).unwrap();
-        let imports = view.turn_imports(&SourceImports::new());
-        let source = "let recoveredCellAnswer = recoveredAnswer (41 :: Int)";
-        let specification = Arc::new(
-            CellRecipe::new(
-                source.to_string(),
-                resident_cell_check_template(effects.preamble(), effects.row(), &imports),
-                resident_workbench_templates(effects.preamble(), effects.row(), &imports)
-                    .iter()
-                    .map(|template| {
-                        let kind = match template.kind {
-                            TemplateSelector::Decl => "decl",
-                            TemplateSelector::Bind => "bind",
-                            TemplateSelector::BindDiscard => "binddiscard",
-                            TemplateSelector::Expr => "expr",
-                        };
-                        (kind.to_owned(), template.source.clone())
-                    })
-                    .collect(),
-                view.injected_module_names(),
-            )
-            .unwrap(),
-        );
-        let include = view.include_paths(effects.include_paths());
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &include,
-                settlement,
-            )
-        })
+    let execution = Arc::new(
+        super::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            source.original_source().clone(),
+            |resident, _| resident.begin_private_execution(public),
+        )
+        .unwrap(),
+    );
+    let private = execution.private_scope();
+    let (_, declarations, prefix) = super::world_cell_test_support::execute_fixture_cell_for(
+        &mut resident,
+        &source,
+        &recipe,
+        &execution,
+        "let recoveredCellAnswer = recoveredAnswer (41 :: Int)",
+    );
+    assert!(declarations.is_empty());
+    let (id, ..) = resident
+        .current_binding_in(private, "recoveredCellAnswer")
         .unwrap();
-        let admission = resident
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                [1; 32],
-                include,
-                None,
-            )
-            .unwrap();
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
+    let custody = resident
+        .retain_binding_custody_in(private, "recoveredCellAnswer", id)
+        .unwrap()
         .unwrap();
-        assert_eq!(checked.items.len(), 1);
-        let [item] = program.items() else {
-            panic!("recovered cell must issue exactly one executable item");
-        };
-        let item = item.checked_item().clone();
-        assert_eq!(item.kind(), CheckedItemKind::Bind);
-        assert_eq!(item.binders(), ["recoveredCellAnswer"]);
-        let prefix = resident.begin_cell_program(program).unwrap().unwrap();
-        let reservation = resident.admit_checked_item(prefix.clone(), item).unwrap();
-        let TurnResult::Bind {
-            bound, compiled, ..
-        } = consume_cell_program_item(reservation.clone()).unwrap()
-        else {
-            panic!("recovered cell must consume its certified native bind");
-        };
-        let [binder] = bound.as_slice() else {
-            panic!("recovered cell must retain its exact checked binder");
-        };
-        resident
-            .set_run_context(SessionRunContext {
-                lexical_scope: private,
-                ..SessionRunContext::ROOT
-            })
-            .unwrap();
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            resident.run_bind_with_sites(
-                &binder.name,
-                compiled.code(),
-                binder,
-                reservation.generation(),
-                settlement,
-            )
-        })
-        .unwrap();
-        assert!(
-            matches!(
-                outcome,
-                ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
-            ),
-            "recovered whole-cell bind did not complete: {outcome:?}"
-        );
-        let (id, ..) = resident.current_binding_in(private, &binder.name).unwrap();
-        assert_eq!(id, SessionVarId::from_extract(binder.var_id));
-        let custody = resident
-            .retain_binding_custody_in(private, &binder.name, id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            resident.render_retained_preview(&custody, 64),
-            Some("42".into())
-        );
-        assert_eq!(
-            prefix.snapshot().compiler_prefix().next_item(),
-            checked.items.len()
-        );
-        assert_eq!(
-            resident.public_visibility_snapshot_in(public).unwrap(),
-            public_before
-        );
-        assert_same_content(&recovery, &before);
-    }
+    assert_eq!(
+        resident.render_retained_preview(&custody, 64),
+        Some("42".into())
+    );
+    drop(custody);
+    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+    assert_eq!(
+        resident.public_visibility_snapshot_in(public),
+        Some(public_before.clone())
+    );
+    assert_same_content(&recovery, &before);
+    drop(prefix);
+    drop(execution);
     resident.retire_scope(private);
     assert_eq!(resident.value_handle_count(), handles_before);
     assert_eq!(
-        resident.public_visibility_snapshot_in(public).unwrap(),
-        public_before
+        resident.public_visibility_snapshot_in(public),
+        Some(public_before)
     );
     assert_same_content(&recovery, &before);
     std::fs::write(
@@ -1414,13 +1452,21 @@ fn owned_domain_attachment_refuses_foreign_run_and_artifact_directory() {
 
 #[test]
 fn successor_transfer_fences_old_admissions_after_commit_or_commit_error() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
     for uncertain in [false, true] {
         let durable = tempfile::tempdir().unwrap();
         let recovery = RecoveryFixture::create(durable.path());
         persist_empty_public(&recovery, 4420);
-        let mut session = PersistentSession::new(Some(library(4421, &recovery, &[])), 1024);
-        let target = session.mint_scope(ScopeId::ROOT).unwrap();
-        let old = session.begin_private_execution(target).unwrap();
+        let mut world = recovery_world(
+            library(4421, &recovery, effects.include_paths()),
+            &effects,
+            None,
+        );
+        let target = world.source.scope();
+        let old = begin_recovery_execution(&mut world);
+        complete_recovery_cell(&mut world, &old, "pure ()");
+        let session = &mut world.resident.state;
         let old_intent = session.freeze_private_execution(&old).unwrap();
         let before = session.public_visibility_snapshot_in(target).unwrap();
         if uncertain {
