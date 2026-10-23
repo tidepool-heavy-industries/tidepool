@@ -5134,7 +5134,7 @@ impl WorldPrimaryInputs {
     ) -> Result<WorldPrimaryProgramSupport, CompileError> {
         let primary = &self.context;
         if primary.owner.facts.producer == [0; 32]
-            || projection_context.producer != primary.owner.facts.producer
+            || projection_context.owner.facts.producer != primary.owner.facts.producer
         {
             return Err(failure(
                 "program support delta differs from its primary producer",
@@ -5152,13 +5152,13 @@ impl WorldPrimaryInputs {
         let unchanged_native_types = delta
             .support
             .native_availability()
-            .same_acquisition(self.source_support.native_availability())
-            && delta.support.native_offers().len() == self.source_support.native_offers().len()
+            .same_acquisition(self.inputs.source_support.native_availability())
+            && delta.support.native_offers().len() == self.inputs.source_support.native_offers().len()
             && delta
                 .support
                 .native_offers()
                 .iter()
-                .zip(self.source_support.native_offers())
+                .zip(self.inputs.source_support.native_offers())
                 .all(|(current, previous)| current.same_issuance(previous))
             && delta.changed_owners.iter().all(|owner| {
                 delta.support.projection().snapshot_roles()[owner]
@@ -5166,7 +5166,7 @@ impl WorldPrimaryInputs {
                     .is_none()
             });
         let native_selection = if unchanged_native_types {
-            self.native_selection.with_added_type_owners(
+            self.inputs.native_selection.with_added_type_owners(
                 &delta.support,
                 &metadata,
                 &delta.changed_owners,
@@ -5213,7 +5213,7 @@ impl WorldPrimaryInputs {
         let projection_context = publication.context();
         let owner = identity(joined.interface().unit(), joined.interface().module());
         let incoming = joined.compiler_source_support();
-        if joined.toolchain_identity_sha256() != projection_context.producer
+        if joined.toolchain_identity_sha256() != projection_context.owner.facts.producer
             || !projection_context
                 .compiler_source_support()
                 .same_interface_binding(incoming, &owner, joined.artifact_id())
