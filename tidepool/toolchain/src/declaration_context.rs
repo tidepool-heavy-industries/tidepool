@@ -15041,6 +15041,12 @@ impl ExactDeclarationContext {
                         .dependencies())
     }
 
+    /// Identity of the exact retained observations, including dependency bindings
+    /// omitted from the logical compiler-context digest.
+    pub(crate) fn authenticated_observation_identity(&self) -> [u8; 32] {
+        self.display_identity(&[])
+    }
+
     pub(crate) fn display_identity(&self, witness: &[u8]) -> [u8; 32] {
         use sha2::Digest;
         let observation = self.observation();
@@ -18037,6 +18043,10 @@ mod tests {
         );
         assert_eq!(old_again.semantic_sha256(), old.semantic_sha256());
         assert_ne!(old.semantic_sha256(), new.semantic_sha256());
+        assert_ne!(
+            old.authenticated_observation_identity(),
+            new.authenticated_observation_identity()
+        );
         assert!(work_a.read_bytes > 0 && work_b.read_bytes > 0);
         eprintln!("recovery acquisition overlap: A={work_a:?} B={work_b:?}");
         let mut acquisition = RecoveredArtifactAcquisition::new(pair.directory.path());
@@ -18660,6 +18670,10 @@ mod tests {
         let reopened = restore(&selections[0]).unwrap();
         assert_context_observation_wire(&reopened);
         assert_eq!(reopened.semantic_sha256(), old.semantic_sha256());
+        assert_eq!(
+            reopened.authenticated_observation_identity(),
+            old.authenticated_observation_identity()
+        );
         assert_eq!(
             CONTEXT_OBSERVATION_WORK.with(std::cell::Cell::get).0,
             before_clones.0 + 1

@@ -112,7 +112,7 @@ impl OriginalExecutionEvidence {
             };
             let facts = Value::Array(vec![
                 text("TPEXACTEXECUTION1"),
-                Value::Bytes(self.context.semantic_sha256().to_vec()),
+                Value::Bytes(self.context.authenticated_observation_identity().to_vec()),
                 module_value(&self.target),
                 census,
             ]);
