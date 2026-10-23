@@ -1139,12 +1139,19 @@ activationPreviewOriginalOrphanScope = withTiming $ withScratch $ \work -> do
     unless (hasIntResultLiteral 99 (prBinds (pprPipelineResult ownOrphan)))
       (fail "preview original target lost the orphan it defines itself")
     writeFile target protected
-    requireMissing "ordinary target after scoped preview" $
+    requireOriginalSourceRejection "authored import after scoped preview"
+      (ExecutionSourceUnavailable ("main","ExecutionClass")) $
       compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [] Nothing
+    ordinary <- generatedScaffoldRecipe parserFlags
+      (CheckedTemplateImports [("main","ExecutionClass")] graph)
+      protected protected target "Expr" >>= either fail pure
+    requireMissing "ordinary protected template after scoped preview" $
+      compile CheckedEnvironment Set.empty (GeneratedScaffoldCompile ordinary GeneralCompile)
+        (Just scope) target [] Nothing
     recovered <- compile (PreparedProducts Nothing) Set.empty purpose (Just scope) target [] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult recovered)))
       (fail "preview orphan visibility did not recover after refusal")
-  putStrLn "activation preview orphan scope: original dictionary, graph-present sibling refusal, target-owned orphan, ordinary isolation, recovery"
+  putStrLn "activation preview orphan scope: original dictionary, graph-present sibling refusal, target-owned orphan, authored SOURCE refusal, ordinary template isolation, recovery"
 
 generatedScaffoldImports :: IO ()
 generatedScaffoldImports = withTiming $ withScratch $ \work -> do
@@ -1203,10 +1210,12 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
   (_,originalAnswerBody) <- uniqueBinding "original scaffold capture" supportModule "answer" original
   unless (boxedInt 42 originalAnswerBody) $
     fail "original scaffold capture did not contain exactly boxed Int 42"
-  case [product | product <- scopeProducts hidden
+  unless (all (null . originalGroups) (scopeProducts hidden)) $
+    fail "original scaffold custody selected native groups before its compiler consumer"
+  case [product | product <- scopeAvailableOriginalProducts hidden
       , (originalUnit product,originalModule product) == supportOwner] of
     [product] | answerIdentity `elem` concatMap originalBinders (originalGroups product) -> pure ()
-    _ -> fail "original scaffold answer was absent from the selected native group inventory"
+    _ -> fail "original scaffold answer was absent from its issued native availability"
   supportInterface <- case [artifact | (artifact,_,_) <- scopeInterfaces hidden
       , exactUnit artifact == fst supportOwner, exactModule artifact == snd supportOwner] of
     [artifact] -> pure artifact
