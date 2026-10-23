@@ -766,7 +766,7 @@ impl ProgramProvenance {
         Ok(())
     }
 
-    fn source_custody(&self) -> NativeSourceCustody {
+    pub(super) fn source_custody(&self) -> NativeSourceCustody {
         let mut sources = self.original_sources.clone();
         for site in self.sites.keys().copied().chain(self.native_sites.ids()) {
             if !sources.sites.contains_key(&site) {
@@ -3219,31 +3219,31 @@ impl CapturedCheckedValueSet {
     pub(super) fn commit(
         self,
         session: &mut PersistentSession,
-        provenance: &mut HashMap<u64, Arc<ProgramProvenance>>,
         scope: ScopeId,
         epoch: Option<u64>,
     ) {
         if let CapturedCheckedValuePayload::Values { stage, values } = self.payload {
             let mut entries = Vec::with_capacity(values.len());
             for mut value in values {
-                provenance.insert(value.id().raw(), Arc::clone(&self.provenance));
                 value.custody.handle.take();
                 entries.push(value.entry);
             }
+            let ids = entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>();
             session.commit_checked_private_values_in(
                 scope,
                 entries,
                 stage,
                 epoch.expect("prepared value epoch"),
             );
+            for id in ids {
+                session.record_binding_provenance(id, Arc::clone(&self.provenance));
+            }
             if let Some((id, dependencies)) = self.observation {
                 session.save_observation(id, &dependencies);
-                provenance.retain(|id, _| {
-                    session
-                        .bindings()
-                        .get(SessionVarId::from_extract(*id))
-                        .is_some()
-                });
+                session.prune_binding_provenance();
             }
         }
     }
@@ -4177,7 +4177,6 @@ pub struct ResidentSession<H, O> {
     parked: Vec<ParkedContinuation>,
     continuation_resource_owner: Option<ContinuationResourceOwner>,
     continuation_observer: Option<Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>>,
-    binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
     /// Host-owned text identities for materialized bindings whose equality is
     /// meaningful to a caller (currently retained command jobs). The binding
     /// table remains the owner of reachability and scope retirement; this map
@@ -4320,7 +4319,6 @@ where
             parked: Vec::new(),
             continuation_resource_owner: None,
             continuation_observer: None,
-            binding_provenance: HashMap::new(),
             host_text_bindings: HashMap::new(),
             hidden_host_bindings: HashMap::new(),
             host_binding_prototypes: Vec::new(),
@@ -5035,13 +5033,8 @@ where
         prepared: tidepool_repr::execution_schema::PreparedProgram,
         metadata: &DataConTable,
     ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
-        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-            self.binding_provenance
-                .get(&input.id().raw())
-                .map(|provenance| provenance.source_custody())
-        };
         self.state
-            .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
+            .install_prepared_with_sources(prepared, Some(metadata))
     }
 
     fn retire_failed_turn_source_instances(
@@ -5387,7 +5380,6 @@ where
         {
             return Err(BindingAliasError::StaleGeneration.into());
         }
-        let provenance = self.binding_provenance.get(&source.raw()).cloned();
         let committed = self.state.publish_alias_in(
             scope,
             BindingEntry {
@@ -5404,20 +5396,12 @@ where
         )?;
         self.state.set_val_gen(generation);
         self.advance_public_visibility(scope);
-        if let Some(provenance) = provenance {
-            self.binding_provenance.insert(id.raw(), provenance);
-        }
         self.prune_binding_metadata();
         Ok(committed)
     }
 
     fn prune_binding_metadata(&mut self) {
-        self.binding_provenance.retain(|id, _| {
-            self.state
-                .bindings()
-                .get(SessionVarId::from_extract(*id))
-                .is_some()
-        });
+        self.state.prune_binding_provenance();
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
         let mut removed_generic = false;
@@ -5796,18 +5780,12 @@ where
             super::prepared::NativeInstantiationPlan::prepare_code(crossed, &registry)
                 .expect("crossed selections keep compatible import shapes"),
         );
-        let provenance = &self.binding_provenance;
-        let retained = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-            provenance
-                .get(&input.id().raw())
-                .map(|owner| owner.source_custody())
-        };
         let before = self.state.public_visibility_snapshot_in(scope).unwrap();
         let residency = self.state.residency();
         assert!(
             matches!(
                 self.state
-                    .resolve_native_turn_in(scope, crossed, crossed_plan, &retained),
+                    .resolve_native_turn_in(scope, crossed, crossed_plan),
                 Err(PreparedRuntimeError::NativeSourceEvidence(_))
             ),
             "the actual source consumer must refuse a different checked target selection"
@@ -5818,7 +5796,7 @@ where
             before
         );
         self.state
-            .resolve_native_turn_in(scope, code, plan, &retained)
+            .resolve_native_turn_in(scope, code, plan)
             .expect("honest checked target resolves its own physical current source");
         assert_eq!(self.state.residency(), residency);
         assert_eq!(
@@ -6338,8 +6316,8 @@ where
                 defining_expr: None,
                 scope: ScopeId::ROOT,
             }).expect("all library identities preflighted before native import under exclusive checkout");
-            self.binding_provenance
-                .insert(id.raw(), Arc::clone(&provenance));
+            self.state
+                .record_binding_provenance(id.raw(), Arc::clone(&provenance));
             self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
@@ -8254,16 +8232,9 @@ where
                     &self.state.certified_image_registry(),
                 )?),
             };
-            let provenance = &self.binding_provenance;
-            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                provenance
-                    .get(&input.id().raw())
-                    .map(|owner| owner.source_custody())
-            };
             match certification.purpose() {
                 super::turn::TurnPurpose::Execution { .. } => NativeTurnAdmission::Native(
-                    self.state
-                        .resolve_native_turn_in(scope, &code, plan, &retained_sources)?,
+                    self.state.resolve_native_turn_in(scope, &code, plan)?,
                 ),
                 super::turn::TurnPurpose::Ordinary {
                     original: Some(original),
@@ -8342,7 +8313,7 @@ where
         if let NativeTurnAdmission::Native(resolved) = &admission.resolved {
             retained = resolved
                 .retained_ids()
-                .filter_map(|id| self.binding_provenance.get(&id.raw()))
+                .filter_map(|id| self.state.binding_provenance(id.raw()))
                 .collect();
         }
         {
@@ -9252,7 +9223,7 @@ where
         ) {
             if let Some(captured) = captured {
                 let (ticket, values) = captured.into_parts();
-                ticket.settle(&mut self.state, values, &mut self.binding_provenance)?;
+                ticket.settle(&mut self.state, values)?;
             }
         }
         Ok(outcome)
@@ -9490,8 +9461,8 @@ where
             self.state.commit_staged_value_interface(host.interface);
         }
         for (binder, _) in bound {
-            self.binding_provenance
-                .insert(binder.var_id, Arc::clone(provenance));
+            self.state
+                .record_binding_provenance(binder.var_id, Arc::clone(provenance));
             self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
@@ -10615,8 +10586,8 @@ where
         }
         Ok(Some((
             entry.value.handle.raw(),
-            self.binding_provenance
-                .get(&expected.raw())
+            self.state
+                .binding_provenance(expected.raw())
                 .cloned()
                 .unwrap_or_default(),
         )))
@@ -10747,7 +10718,7 @@ mod custody_release_tests {
                 })) if fields == fields_count
             ));
             assert!(resident.state.bindings().get(entries[0].id).is_none());
-            assert!(!resident.binding_provenance.contains_key(&binder.var_id));
+            assert!(resident.state.binding_provenance(binder.var_id).is_none());
             for handle in handles {
                 assert!(resident
                     .state
@@ -10951,8 +10922,8 @@ mod custody_release_tests {
         let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 41);
         let provenance = Arc::new(ProgramProvenance::default());
         session
-            .binding_provenance
-            .insert(id.raw(), provenance.clone());
+            .state
+            .record_binding_provenance(id.raw(), provenance.clone());
         let original = session.value_handle_count();
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         assert!(Arc::ptr_eq(&custody.provenance, &provenance));
@@ -10991,16 +10962,16 @@ mod custody_release_tests {
             let other_id = bind_fixture(&mut session, &other_source, other_scope, 43);
             let other_provenance = Arc::new(ProgramProvenance::default());
             session
-                .binding_provenance
-                .insert(other_id.raw(), Arc::clone(&other_provenance));
+                .state
+                .record_binding_provenance(other_id.raw(), Arc::clone(&other_provenance));
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
             let source = session.adopt_initial_notebook_scope(scope).unwrap();
             let id = bind_fixture(&mut session, &source, scope, 42);
             let provenance = Arc::new(ProgramProvenance::default());
             let weak = Arc::downgrade(&provenance);
             session
-                .binding_provenance
-                .insert(id.raw(), Arc::clone(&provenance));
+                .state
+                .record_binding_provenance(id.raw(), Arc::clone(&provenance));
             let binding_lease = retain_binding.then(|| session.lease_bindings(&[id.var()]));
             let lexical_lease =
                 retain_lexical.then(|| session.retain_lexical_scope(scope).unwrap());
@@ -11024,9 +10995,9 @@ mod custody_release_tests {
             drop(source);
             session.settle_dropped_custody();
             assert_eq!(session.state.bindings().get(id).is_some(), leased);
-            assert_eq!(session.binding_provenance.contains_key(&id.raw()), leased);
+            assert_eq!(session.state.binding_provenance(id.raw()).is_some(), leased);
             assert!(Arc::ptr_eq(
-                &session.binding_provenance[&other_id.raw()],
+                session.state.binding_provenance(other_id.raw()).unwrap(),
                 &other_provenance
             ));
             assert!(
@@ -11054,13 +11025,13 @@ mod custody_release_tests {
                 assert!(!session.state.scope_tree().is_live(retained_scope));
             }
             assert!(session.state.bindings().get(id).is_none());
-            assert!(!session.binding_provenance.contains_key(&id.raw()));
+            assert!(session.state.binding_provenance(id.raw()).is_none());
             assert!(
                 weak.upgrade().is_none(),
                 "last metadata share retires after the owning lease cleanup"
             );
             assert!(Arc::ptr_eq(
-                &session.binding_provenance[&other_id.raw()],
+                session.state.binding_provenance(other_id.raw()).unwrap(),
                 &other_provenance
             ));
             major_collect(&mut session);
@@ -11068,7 +11039,7 @@ mod custody_release_tests {
             session.retire_scope(other_scope);
             drop(other_source);
             session.settle_dropped_custody();
-            assert!(!session.binding_provenance.contains_key(&other_id.raw()));
+            assert!(session.state.binding_provenance(other_id.raw()).is_none());
             major_collect(&mut session);
             assert_eq!(session.value_handle_count(), 0);
         }
@@ -11254,8 +11225,9 @@ mod authored_publication_tests {
                 .is_none());
             assert!(!fixture
                 .resident
-                .binding_provenance
-                .contains_key(&binder.var_id));
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
         }
         let completed = source_action(
             &mut fixture.resident,
@@ -11293,8 +11265,9 @@ mod authored_publication_tests {
             );
             assert!(fixture
                 .resident
-                .binding_provenance
-                .contains_key(&binder.var_id));
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
         }
         fixture
             .resident
@@ -11477,7 +11450,7 @@ mod authored_publication_tests {
             resident.state.bindings().get(id).is_none(),
             "row refusal must precede private binding installation"
         );
-        assert!(!resident.binding_provenance.contains_key(&id.raw()));
+        assert!(resident.state.binding_provenance(id.raw()).is_none());
         drop(before);
         drop(compiled);
         drop(checked);
@@ -13151,7 +13124,7 @@ mod authored_publication_tests {
                 &identities[1].occurrence,
             )))
             .is_none());
-        assert!(destination.binding_provenance.is_empty());
+        assert!(destination.state.binding_provenance_is_empty());
         let reexported = destination.export_shared(&custody).unwrap();
         let carried = reexported
             .native

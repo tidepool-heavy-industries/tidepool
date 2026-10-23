@@ -77,18 +77,11 @@ impl InstalledCertifiedTurn {
     }
 }
 
-/// Borrowed only after the actual scoped binding identity and generation match.
-pub(crate) struct ValidatedRetainedSourceRef<'a> {
-    entry: &'a BindingEntry,
-}
-
-impl ValidatedRetainedSourceRef<'_> {
-    pub(crate) fn id(&self) -> SessionVarId {
-        self.entry.id
-    }
-    pub(crate) fn handle(&self) -> tidepool_codegen::prepared_program::PreparedHandle {
-        self.entry.value.handle
-    }
+/// Runtime provenance is optional only for genuinely closed/bootstrap values.
+/// A missing binding is distinct from an existing value without compiler metadata.
+pub(super) enum BindingRuntimeOrigin<'a> {
+    Program(&'a Arc<super::resident::ProgramProvenance>),
+    Closed,
 }
 
 pub(crate) struct ResolvedNativeTurn {
@@ -105,6 +98,51 @@ impl ResolvedNativeTurn {
 
     pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
         self.captures.values().map(|capture| capture.id)
+    }
+}
+
+impl PersistentSession {
+    pub(super) fn binding_runtime_origin(
+        &self,
+        id: SessionVarId,
+    ) -> Option<BindingRuntimeOrigin<'_>> {
+        self.bindings.get(id)?;
+        Some(match self.binding_provenance.get(&id.raw()) {
+            Some(provenance) => BindingRuntimeOrigin::Program(provenance),
+            None => BindingRuntimeOrigin::Closed,
+        })
+    }
+
+    pub(super) fn binding_provenance(
+        &self,
+        id: u64,
+    ) -> Option<&Arc<super::resident::ProgramProvenance>> {
+        match self.binding_runtime_origin(SessionVarId::from_extract(id))? {
+            BindingRuntimeOrigin::Program(provenance) => Some(provenance),
+            BindingRuntimeOrigin::Closed => None,
+        }
+    }
+
+    pub(super) fn record_binding_provenance(
+        &mut self,
+        id: u64,
+        provenance: Arc<super::resident::ProgramProvenance>,
+    ) {
+        assert!(
+            self.bindings.get(SessionVarId::from_extract(id)).is_some(),
+            "provenance accompanies an installed binding"
+        );
+        self.binding_provenance.insert(id, provenance);
+    }
+
+    pub(super) fn prune_binding_provenance(&mut self) {
+        self.binding_provenance
+            .retain(|id, _| self.bindings.get(SessionVarId::from_extract(*id)).is_some());
+    }
+
+    #[cfg(test)]
+    pub(super) fn binding_provenance_is_empty(&self) -> bool {
+        self.binding_provenance.is_empty()
     }
 }
 
@@ -268,6 +306,7 @@ pub struct PersistentSession {
     /// The persistent binding store: `name → (SessionVarId, PreparedHandle, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
+    binding_provenance: HashMap<u64, Arc<super::resident::ProgramProvenance>>,
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
     /// Request counters and the ambient injection inventory are refreshed separately.
     compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
@@ -526,6 +565,7 @@ impl PersistentSession {
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
+            binding_provenance: HashMap::new(),
             compile_views: parking_lot::Mutex::new(HashMap::new()),
             compiler_input_revision: 1,
             #[cfg(test)]
@@ -800,7 +840,6 @@ impl PersistentSession {
         scope: ScopeId,
         code: &super::turn::TurnCode<'_>,
         plan: Arc<super::prepared::NativeInstantiationPlan>,
-        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<ResolvedNativeTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) || !plan.matches_code(code) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
@@ -838,7 +877,10 @@ impl PersistentSession {
                     identity: requirement.identity().clone(),
                     generation: requirement.generation(),
                 })?;
-            let sources = retained_sources(ValidatedRetainedSourceRef { entry })
+            let sources = self
+                .binding_provenance
+                .get(&entry.id.raw())
+                .map(|owner| owner.source_custody())
                 .ok_or(PreparedRuntimeError::MissingRetainedSource { id: entry.id })?;
             captures.insert(
                 key,
@@ -1113,6 +1155,7 @@ impl PersistentSession {
     pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
         let mut released = 0usize;
         for entry in entries {
+            self.binding_provenance.remove(&entry.id.raw());
             let module = entry.module;
             // `on_evict` is the single point of truth for whether any OTHER
             // live entry still shares this handle (an alias published by
@@ -1452,7 +1495,7 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
-        self.install_prepared_with_sources(prepared, metadata, &|_| None)
+        self.install_prepared_with_sources(prepared, metadata)
             .map(|(program, _)| program)
     }
 
@@ -1460,7 +1503,6 @@ impl PersistentSession {
         &mut self,
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
-        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
         self.admit_source_work_in(ScopeId::ROOT)?;
 
@@ -1483,7 +1525,9 @@ impl PersistentSession {
             }
             Some(engine) => {
                 engine.install(prepared, &self.bindings, &self.binding_index, &|entry| {
-                    retained_sources(ValidatedRetainedSourceRef { entry })
+                    self.binding_provenance
+                        .get(&entry.id.raw())
+                        .map(|owner| owner.source_custody())
                 })?
             }
         };
@@ -4544,6 +4588,8 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let provenance = self.binding_provenance.get(&source.raw()).cloned();
+        let alias_id = entry.id;
         let name = entry.name.0.clone();
         self.bindings.validate_bind_in(scope, &entry)?;
         self.retract_value_heads_in(scope, std::slice::from_ref(&name), settlement)?;
@@ -4565,6 +4611,9 @@ impl PersistentSession {
             .bind_alias_in(scope, entry, source)
             .expect("source and alias identity validated before declaration retraction");
         self.binding_index.on_bind_record(&record);
+        if let Some(provenance) = provenance {
+            self.record_binding_provenance(alias_id.raw(), provenance);
+        }
         self.release_binding_roots(expired);
         Ok(receipt)
     }
