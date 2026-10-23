@@ -19,7 +19,7 @@ module Tidepool.GhcPipeline
   , NativeProductConfigurationUnavailable(..), scopedNativeProductProvenance
   , captureSupportedPackageProfile
   , runPipelineSessionSelectedWithProducer
-  , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose, withSourceImportIntents
+  , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose
   , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
   , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
   , prTargetRdrEnv, prTargetTcGblEnv
@@ -227,7 +227,7 @@ import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, locatedImportIntent, locatedImportNamespaces, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, locatedImportNamespaces, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, nativeParsedModule, nativeImportSyntax, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
@@ -333,7 +333,7 @@ import Tidepool.ImportAdmission.Internal
   , CompletedFiniteImportAdmission(..), CompletedWorldImportAdmission(..), WorldImportCompletionIdentity(..), IssuedSourceImports(..) )
 import Tidepool.ImportSyntax
   ( DriverImportSyntax, captureImportSyntax, matchDriverImports, beginImportRefinement, driverParsedModule
-  , driverImportOccurrences, importOccurrenceId, refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
+  , driverImportOccurrences, importOccurrenceId, capturedParsedSource, refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
 import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportOccurrenceId(..))
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
@@ -814,7 +814,6 @@ withProgramSourceImports (Just imports) = CompletedProgramImports imports
 
 programSourceImports :: CompilePurpose -> Maybe ProgramSourceImports
 programSourceImports (CompletedProgramImports imports _) = Just imports
-programSourceImports (ParsedImportSelection _ inner) = programSourceImports inner
 programSourceImports (GeneratedInstanceCheck _ inner) = programSourceImports inner
 programSourceImports (GeneratedScaffoldCompile _ inner) = programSourceImports inner
 programSourceImports (ExactScopeCompile inner _) = programSourceImports inner
@@ -1346,6 +1345,25 @@ data TierPolicy
 -- | A pipeline variant: everything the shared skeleton cannot decide for
 -- itself. 'pvPlan' runs after @depanal@ (it needs the downsweep graph) and
 -- before @load'@.
+data ImportCaptureRoute = OrdinaryRootImports | GeneratedRootImports GeneratedScaffoldRecipe
+
+-- Ordinary source is an explicit entry contract. Generated-only purposes may
+-- never downgrade a missing recipe to an all-authored import census.
+importCaptureRoute :: CompilePurpose -> IO ImportCaptureRoute
+importCaptureRoute purpose = case generatedRecipe purpose of
+  Just recipe -> pure (GeneratedRootImports recipe)
+  Nothing -> case originalPurpose purpose of
+    GeneralCompile -> pure OrdinaryRootImports
+    InspectionTypeCompile -> pure OrdinaryRootImports
+    CertifyHomeProductsCompile -> pure OrdinaryRootImports
+    OriginalDeclarationCompile -> pure OrdinaryRootImports
+    _ -> fail "generated compile purpose lacks its captured import recipe"
+
+pvGeneratedScaffold :: PipelineVariant -> Maybe GeneratedScaffoldRecipe
+pvGeneratedScaffold variant = case pvImportCapture variant of
+  OrdinaryRootImports -> Nothing
+  GeneratedRootImports recipe -> Just recipe
+
 data PipelineVariant = PipelineVariant
   { pvLabel :: String
     -- ^ Prefix on this variant's own error messages.
@@ -1360,7 +1378,7 @@ data PipelineVariant = PipelineVariant
   , pvHostBindingTypeInputs :: IO [WorldTypeClosureEntry]
     -- ^ This operation's selected TYPE inputs, resolved before the target callback.
   , pvCompilerProducer :: Maybe CompilerProducerIdentity
-  , pvGeneratedScaffold :: Maybe GeneratedScaffoldRecipe
+  , pvImportCapture :: ImportCaptureRoute
     -- ^ The protected target and its compiler-owned support import.
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
@@ -1368,7 +1386,6 @@ data PipelineVariant = PipelineVariant
   , pvPlan :: FilePath -> Bool -> ModuleName -> ModuleGraph -> Maybe ExactScope -> MatchedImportDriver -> Ghc CompilePlan
     -- ^ @pvPlan compilerViewDirectory timingEnabled targetName downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
-  , pvSourceImportIntents :: [ImportIntent]
   , pvTransformParsed :: ModuleName -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
   }
 
@@ -2739,8 +2756,7 @@ prepareWorldCellNameStage baseEnv
   writeFile path source
   generated <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
     mapped template rendering path owner >>= either fail pure
-  pure (WorldCellNameStage (withSourceImportIntents (cellPlanPrologue importsOnly)
-    (GeneratedScaffoldCompile generated WorldObservationCompile)) path directory)
+  pure (WorldCellNameStage (GeneratedScaffoldCompile generated WorldObservationCompile) path directory)
 
 data WorldObservationStage = WorldObservationStage WorldObservationScaffold WorldObservationQuery
   CompilePurpose FilePath FilePath Int ObservationOperand [String] (SegmentDemandScope WorldDemandBinding)
@@ -2966,8 +2982,10 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         throwIO (case cause of
           WorldInputsUnavailable -> WorldCellUnavailable
           WorldInputsCorrupt -> WorldCellCorrupt)
+  capturedRequests <- either (liftIO . fail) pure
+    (capturedImportIntents (moduleDemandCapturedImports parsedDemand))
   pendingImports <- liftIO (readWorldImportBasis (universeOriginalInputs universe) current facts verifiedDeclaration
-    (sourceImportIntents purpose) parsedDemand `catch` importFailure)
+    capturedRequests parsedDemand `catch` importFailure)
   traceStage "import-basis-issued" []
   prefixImports <- liftIO $ case operation of
     WorldCellSource _ _ prefix _ _ _ -> worldCellPrefixLexicalOwners current prefix
@@ -3251,9 +3269,8 @@ renderHeldWorldCellStage flags (WorldCellNameScope unavailable) question plan it
       mapped <- either fail pure (renderProtectedTemplateImports (plannedSourceLineOffset original) imports)
       scaffold <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
         mapped wrapper (plannedSourceImports original) path (plannedModule original) >>= either fail pure
-      let purpose = withSourceImportIntents (cellPlanPrologue plan)
-            (GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
-              (WorldPlannedDeclarationCompile original)))
+      let purpose = GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+              (WorldPlannedDeclarationCompile original))
       pure (WorldRenderedOriginal original purpose path)
     _ -> do
       checking <- either fail pure (replaceTemplateModuleHeader "module CellCheck where" (worldCellTemplate recipe))
@@ -3276,16 +3293,14 @@ renderHeldWorldCellStage flags (WorldCellNameScope unavailable) question plan it
       writeFile path (preparedTypedSegmentSource source)
       scaffold <- generatedTypedSegmentRecipeWithImportRendering (preparedTypedSegmentOperations source) flags
         (CheckedTemplateImports [] []) mapped protected (preparedTypedSegmentImports source) path owner >>= either fail pure
-      let purpose = withSourceImportIntents (cellPlanPrologue plan)
-            (GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
+      let purpose = GeneratedScaffoldCompile scaffold (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
               (TypedSegmentCompile (preparedTypedSegmentPlan source) (preparedTypedSegmentOperations source)
-                (CheckedItemCompile [] Nothing []))))
+                (CheckedItemCompile [] Nothing [])))
       pure (WorldRenderedTyped source purpose path)
   pure (HeldWorldCellStage plan items offset rendered)
 
 worldPlannedDeclaration :: CompilePurpose -> Maybe PlannedDeclaration
 worldPlannedDeclaration (WorldPlannedDeclarationCompile planned) = Just planned
-worldPlannedDeclaration (ParsedImportSelection _ inner) = worldPlannedDeclaration inner
 worldPlannedDeclaration (GeneratedScaffoldCompile _ inner) = worldPlannedDeclaration inner
 worldPlannedDeclaration (GeneratedInstanceCheck _ inner) = worldPlannedDeclaration inner
 worldPlannedDeclaration _ = Nothing
@@ -3725,10 +3740,10 @@ resolveWorldCellInputs owner facts path consumer sourceOwners environment scope 
   pure (hydrated,resolved)
 
 closedWorldCellPurpose :: CompilePurpose -> Bool
-closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
-    (GeneratedInstanceCheck _ (TypedSegmentCompile _ _ (CheckedItemCompile [] Nothing []))))) = True
-closedWorldCellPurpose (ParsedImportSelection _ (GeneratedScaffoldCompile _
-    (GeneratedInstanceCheck _ (WorldPlannedDeclarationCompile _)))) = True
+closedWorldCellPurpose (GeneratedScaffoldCompile _
+    (GeneratedInstanceCheck _ (TypedSegmentCompile _ _ (CheckedItemCompile [] Nothing [])))) = True
+closedWorldCellPurpose (GeneratedScaffoldCompile _
+    (GeneratedInstanceCheck _ (WorldPlannedDeclarationCompile _))) = True
 closedWorldCellPurpose _ = False
 
 -- Executable seals come from the same module-version owner as the products.
@@ -3798,7 +3813,6 @@ data CompilePurpose = GeneralCompile | InspectionTypeCompile | WorldObservationC
   | ExactScopeCompile CompilePurpose ExactScope
   | GeneratedScaffoldCompile GeneratedScaffoldRecipe CompilePurpose
   | GeneratedInstanceCheck GeneratedInstanceRecipe CompilePurpose
-  | ParsedImportSelection [ImportIntent] CompilePurpose
   | CompletedProgramImports ProgramSourceImports CompilePurpose
   deriving (Eq, Show)
 
@@ -3816,7 +3830,6 @@ instance Exception CompilePurposeConflict
 data CompilePurposeSettings = CompilePurposeSettings
   { settingsExactScopes :: [ExactScope]
   , settingsProgramImports :: Maybe ProgramSourceImports
-  , settingsImportIntents :: Maybe [ImportIntent]
   , settingsScaffold :: Maybe GeneratedScaffoldRecipe
   , settingsInstance :: Maybe GeneratedInstanceRecipe
   , settingsSegment :: Maybe (TypedSegmentPlan, GeneratedSegmentOperations)
@@ -3824,7 +3837,7 @@ data CompilePurposeSettings = CompilePurposeSettings
   }
 
 emptyCompilePurposeSettings :: CompilePurposeSettings
-emptyCompilePurposeSettings = CompilePurposeSettings [] Nothing Nothing Nothing Nothing Nothing Nothing
+emptyCompilePurposeSettings = CompilePurposeSettings [] Nothing Nothing Nothing Nothing Nothing
 
 normalizeCompilePurpose :: CompilePurpose -> Either CompilePurposeConflict CompilePurpose
 normalizeCompilePurpose purpose = rebuild =<< collect purpose emptyCompilePurposeSettings
@@ -3835,10 +3848,6 @@ normalizeCompilePurpose purpose = rebuild =<< collect purpose emptyCompilePurpos
       | isJust (settingsProgramImports settings) =
           Left (DuplicateCompilePurposeSetting "CompletedProgramImports")
       | otherwise = collect inner settings { settingsProgramImports = Just imports }
-    collect (ParsedImportSelection intents inner) settings
-      | isJust (settingsImportIntents settings) =
-          Left (DuplicateCompilePurposeSetting "ParsedImportSelection")
-      | otherwise = collect inner settings { settingsImportIntents = Just intents }
     collect (GeneratedScaffoldCompile recipe inner) settings
       | isJust (settingsScaffold settings) =
           Left (DuplicateCompilePurposeSetting "GeneratedScaffoldCompile")
@@ -3863,31 +3872,13 @@ normalizeCompilePurpose purpose = rebuild =<< collect purpose emptyCompilePurpos
             (settingsInstance settings)
           scaffold = maybe instanceCheck (\recipe -> GeneratedScaffoldCompile recipe instanceCheck)
             (settingsScaffold settings)
-          intents = maybe scaffold (\selected -> ParsedImportSelection selected scaffold)
-            (settingsImportIntents settings)
-          imports = maybe intents (\selected -> CompletedProgramImports selected intents)
+          imports = maybe scaffold (\selected -> CompletedProgramImports selected scaffold)
             (settingsProgramImports settings)
       pure (foldr (\scope inner -> ExactScopeCompile inner scope) imports
         (settingsExactScopes settings))
 
--- The original parser supplies demand intent; rendered template imports and
--- inferred type requirements cannot manufacture a current-source request.
-withSourceImportIntents :: SourcePrologue -> CompilePurpose -> CompilePurpose
-withSourceImportIntents prologue = ParsedImportSelection
-  (map locatedImportIntent (prologueImports prologue))
-
-sourceImportIntents :: CompilePurpose -> [ImportIntent]
-sourceImportIntents (TypedSegmentCompile _ _ inner) = sourceImportIntents inner
-sourceImportIntents (ParsedImportSelection intents inner) = intents ++ sourceImportIntents inner
-sourceImportIntents (CompletedProgramImports _ inner) = sourceImportIntents inner
-sourceImportIntents (GeneratedInstanceCheck _ inner) = sourceImportIntents inner
-sourceImportIntents (GeneratedScaffoldCompile _ inner) = sourceImportIntents inner
-sourceImportIntents (ExactScopeCompile inner _) = sourceImportIntents inner
-sourceImportIntents _ = []
-
 generatedInstanceRecipe :: CompilePurpose -> Maybe GeneratedInstanceRecipe
 generatedInstanceRecipe (TypedSegmentCompile _ _ inner) = generatedInstanceRecipe inner
-generatedInstanceRecipe (ParsedImportSelection _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (CompletedProgramImports _ inner) = generatedInstanceRecipe inner
 generatedInstanceRecipe (GeneratedInstanceCheck recipe _) = Just recipe
 generatedInstanceRecipe (GeneratedScaffoldCompile _ inner) = generatedInstanceRecipe inner
@@ -3898,7 +3889,6 @@ generatedInstanceRecipe _ = Nothing
 -- carry a scope extended with freshly admitted originals from that request.
 purposeExactScope :: CompilePurpose -> Maybe ExactScope
 purposeExactScope (TypedSegmentCompile _ _ inner) = purposeExactScope inner
-purposeExactScope (ParsedImportSelection _ inner) = purposeExactScope inner
 purposeExactScope (CompletedProgramImports _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedInstanceCheck _ inner) = purposeExactScope inner
 purposeExactScope (GeneratedScaffoldCompile _ inner) = purposeExactScope inner
@@ -3908,7 +3898,6 @@ purposeExactScope _ = Nothing
 
 generatedRecipe :: CompilePurpose -> Maybe GeneratedScaffoldRecipe
 generatedRecipe (TypedSegmentCompile _ _ inner) = generatedRecipe inner
-generatedRecipe (ParsedImportSelection _ inner) = generatedRecipe inner
 generatedRecipe (CompletedProgramImports _ inner) = generatedRecipe inner
 generatedRecipe (GeneratedScaffoldCompile recipe _) = Just recipe
 generatedRecipe (ExactScopeCompile inner _) = generatedRecipe inner
@@ -3917,7 +3906,6 @@ generatedRecipe _ = Nothing
 
 originalPurpose :: CompilePurpose -> CompilePurpose
 originalPurpose (TypedSegmentCompile _ _ inner) = originalPurpose inner
-originalPurpose (ParsedImportSelection _ inner) = originalPurpose inner
 originalPurpose (CompletedProgramImports _ inner) = originalPurpose inner
 originalPurpose (GeneratedScaffoldCompile _ inner) = originalPurpose inner
 originalPurpose (ExactScopeCompile inner _) = originalPurpose inner
@@ -3927,7 +3915,6 @@ originalPurpose purpose = purpose
 
 typedPurposePlan :: CompilePurpose -> Maybe TypedSegmentPlan
 typedPurposePlan (TypedSegmentCompile plan _ _) = Just plan
-typedPurposePlan (ParsedImportSelection _ inner) = typedPurposePlan inner
 typedPurposePlan (CompletedProgramImports _ inner) = typedPurposePlan inner
 typedPurposePlan (GeneratedInstanceCheck _ inner) = typedPurposePlan inner
 typedPurposePlan (GeneratedScaffoldCompile _ inner) = typedPurposePlan inner
@@ -3943,11 +3930,11 @@ scopedImportAdmission
 scopedImportAdmission variant request incarnation root summary context = do
   path <- maybe (liftIO (fail "import admission root lacks a source path"))
     (liftIO . canonicalizePath) (ml_hs_file (ms_location summary))
-  captured <- case pvGeneratedScaffold variant of
-    Nothing -> liftIO $ do
+  captured <- case pvImportCapture variant of
+    OrdinaryRootImports -> liftIO $ do
       bytes <- BS.readFile path
       pure (OrdinaryImportCapture path (captureArtifactBytes bytes) (fingerprintByteString bytes))
-    Just recipe -> case pvWorldSources variant of
+    GeneratedRootImports recipe -> case pvWorldSources variant of
       Just (WorldSourceInputBasis _ _ _ demand _ _ _) -> do
         let whole = moduleDemandCapturedImports demand
             source = capturedGeneratedImportSource whole
@@ -4019,6 +4006,18 @@ generatedImportDriver :: MatchedImportDriver -> Either String (CapturedGenerated
 generatedImportDriver (MatchedImportDriver (ScopedImportAdmission capture _ _) driver _ _) = case capture of
   GeneratedImportCapture whole -> Right (whole,driver)
   OrdinaryImportCapture{} -> Left "generated import authority lacks its captured generated root"
+
+capturedImportIntents :: CapturedGeneratedImports -> Either String [ImportIntent]
+capturedImportIntents whole = do
+  let declarations = hsmodImports (unLoc (capturedParsedSource (capturedGeneratedImportSyntax whole)))
+      occurrences = capturedGeneratedImportOccurrences whole
+  unless (length declarations == length occurrences)
+    (Left "captured import origin association is incomplete")
+  pure [case capturedGeneratedImportOccurrenceOrigin occurrence of
+      AuthoredCurrent -> AuthoredSourceImport (unLoc (ideclName declaration)) (ideclPkgQual declaration)
+      InheritedLexical -> InheritedLexicalImport
+      ProtectedCompiler -> ProtectedCompilerImport
+    | (located,occurrence) <- zip declarations occurrences,let declaration = unLoc located]
 
 matchedImportIntents :: MatchedImportDriver -> [ImportIntent]
 matchedImportIntents (MatchedImportDriver _ _ selected _) =
@@ -4172,7 +4171,6 @@ transformFor (TypedSegmentCompile plan operations inner) target env summary
 transformFor (ExactScopeCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
 transformFor (GeneratedInstanceCheck _ purpose) target env summary = transformFor purpose target env summary
-transformFor (ParsedImportSelection _ purpose) target env summary = transformFor purpose target env summary
 transformFor (CompletedProgramImports _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
@@ -4183,7 +4181,6 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
         transformWithCompletedValues captured inner target env summary parsed
           >>= mapNativeModule (rewriteParsedSegmentRoot operations plan (ms_hspp_opts summary))
     | otherwise -> transformWithCompletedValues captured inner target env summary
-  ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
   CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
   ExactScopeCompile inner _ -> transformWithCompletedValues captured inner target env summary
   GeneratedScaffoldCompile _ inner -> transformWithCompletedValues captured inner target env summary
@@ -7422,7 +7419,6 @@ compilePurposeLabel purpose = case purpose of
   ExactScopeCompile inner _ -> compilePurposeLabel inner
   GeneratedScaffoldCompile _ inner -> compilePurposeLabel inner
   GeneratedInstanceCheck _ inner -> compilePurposeLabel inner
-  ParsedImportSelection _ inner -> compilePurposeLabel inner
   CompletedProgramImports _ inner -> compilePurposeLabel inner
 
 -- | Hash every source and compare it with the fingerprint captured by GHC's
@@ -9408,6 +9404,7 @@ installPreparedInterface name hmi = do
 -- from the pre-optimization Core reference closure.
 normalVariant :: CompilePurpose -> IO PipelineVariant
 normalVariant purpose = do
+  captureRoute <- importCaptureRoute purpose
   let effectivePurpose = originalPurpose purpose
   case effectivePurpose of
     HostActivationPreviewCompile {} -> fail "activation preview requires its sealed session admission"
@@ -9422,9 +9419,8 @@ normalVariant purpose = do
    , pvWorldSources = Nothing
    , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing
-   , pvGeneratedScaffold = generatedRecipe purpose
+   , pvImportCapture = captureRoute
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
-   , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose
    , pvPlan = \_compilerViewDirectory _timing _targetName modGraphRaw _selectedExact _resolved -> pure CompilePlan
@@ -10183,6 +10179,7 @@ planExactExecutionLoad directory admitted interfaces checkedInterfaces targetNam
 
 sessionVariant :: CompilePurpose -> SessionScope -> IO PipelineVariant
 sessionVariant purpose scope = do
+  captureRoute <- importCaptureRoute purpose
   completedValuesRef <- newIORef Nothing
   let effectivePurpose = originalPurpose purpose
       completedValues = case effectivePurpose of
@@ -10223,9 +10220,8 @@ sessionVariant purpose scope = do
    , pvWorldSources = Nothing
    , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing
-   , pvGeneratedScaffold = generatedRecipe purpose
+   , pvImportCapture = captureRoute
    , pvGeneratedInstanceCheck = generatedInstanceRecipe purpose
-   , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = excludedOwners
    , pvTransformParsed = \targetModName' env summary parsed -> do
        captured <- readIORef completedValuesRef
