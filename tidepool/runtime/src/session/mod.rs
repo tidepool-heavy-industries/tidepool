@@ -394,8 +394,30 @@ pub enum DurablePublicAdmissionFailure {
     ManifestChecksum { published: String, current: String },
 }
 
+/// Mutable runtime conditions checked by the owning transition on session re-entry.
+/// Immutable fact and permission failures retain their own error types.
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTransitionReason {
+    #[error("the runtime owner or its epoch changed")]
+    OwnerChanged,
+    #[error("the runtime scope was revoked")]
+    ScopeRevoked,
+    #[error("the execution is in the wrong phase")]
+    WrongPhase,
+    #[error("the retained source was revoked")]
+    SourceRevoked,
+    #[error("the retained runtime value is unavailable")]
+    RetainedValueUnavailable,
+    #[error("the prepared value or its checked row changed")]
+    PreparedValueChanged,
+    #[error("the public publication baseline changed")]
+    PublicBaselineChanged,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    TransitionRefused(#[from] SessionTransitionReason),
     #[error(transparent)]
     SourceAdmission(#[from] SourceAdmissionError),
     #[error(transparent)]
