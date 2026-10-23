@@ -1049,7 +1049,7 @@ checkingSourceRequestRoundTrip = do
       assertEqual "complete input retained" ["Complete.hs"] (requestFiles request)
       assertEqual "candidate manifest retained" (Just "candidates.cbor") (requestModuleCandidates request)
       assertEqual "no product output" Nothing (requestOutDir request)
-      assertEqual "no cell rewriting" False (requestCell request)
+      assertEqual "no cell planning" False (requestCellPlan request)
     other -> fail ("checking source request round trip failed: " ++ show other)
   case workerRequestFromArgv ["--worker-request-v18", payload] of
     Left _ -> pure ()
@@ -1065,6 +1065,24 @@ checkingSourceRequestRoundTrip = do
     case workerRequestFromArgv [singleFlag, retiredField] of
       Left message | "retired field tag" `isInfixOf` message -> pure ()
       other -> fail ("retired fold/type-pin field accepted: " ++ show other)
+
+  let planning = [Input "Cell.hs", CellPlan, CellTemplate "template", CellOut "cell-out"]
+  [planningFlag, planningPayload] <- pure (workerArgv planning)
+  assertEqual "cell planning retains the current launcher protocol" "--worker-request-v29" planningFlag
+  assertEqual "cell plan 51 and template/output 32/33 retain their wire grammar"
+    "545052455130323800010000000100000004000000010700000043656c6c2e687333200800000074656d706c617465210800000063656c6c2d6f7574"
+    planningPayload
+  case workerRequestFromArgv [planningFlag,planningPayload] of
+    Right (Just request) -> do
+      assertEqual "cell planning mode survives decoding" True (requestCellPlan request)
+      assertEqual "cell planning template survives decoding" (Just "template") (requestCellTemplate request)
+      assertEqual "cell planning output survives decoding" (Just "cell-out") (requestCellOut request)
+      assertEqual "cell planning admits its supported operation" (Right CellPlanOperation)
+        (requestOperation <$> admitWorkerRequest request)
+    other -> fail ("current cell planning request refused: " ++ show other)
+  case workerRequestFromArgv [planningFlag,"5450524551303238000100000001000000010000001f"] of
+    Left message | "retired field tag 31" `isInfixOf` message -> pure ()
+    other -> fail ("retired finite cell field 31 was not explicitly refused: " ++ show other)
 
   let world = replicate 64 'a'
       realization = replicate 64 '1' ++ ".7"
@@ -1247,7 +1265,7 @@ portableOutputRequestValidation = do
   (_, mixedAccepted) <- admit (valid ++ [InspectInfo "value"])
   assertEqual "inspection cannot acquire portable output intent"
     (Left InvalidPortableOutputShape) mixedAccepted
-  forM_ [Turn, Cell, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
+  forM_ [Turn, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
     , SessionArtifacts "scope", CertifyHomeProducts, InjectVal "Binding"
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
     case workerRequestFromArgv (workerArgv (valid ++ [conflict])) of
@@ -1280,7 +1298,7 @@ certificationRequestValidation = do
     Right (Just request) | requestCertifyHomeProducts request
       && requestModuleCandidates request == Just "/candidates.cbor" -> pure ()
     other -> fail ("home-product certification rejected authenticated candidate input: " ++ show other)
-  forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
+  forM_ [ CellPlan, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
         , ActivationPreview
         , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
@@ -1327,7 +1345,7 @@ requestShapeValidation = do
       , ("turn mode", Turn), ("turn template", TurnTemplate "kind" "template")
       , ("turn output", TurnOut "turn"), ("turn verdict", TurnVerdict "ok")
       , ("classification mode", Classify), ("classification output", ClassifyOut "classify")
-      , ("cell mode", Cell), ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
+      , ("cell plan mode", CellPlan), ("cell template", CellTemplate "template")
       , ("cell output", CellOut "cell"), ("harness profile", HarnessProfile)
       , ("declaration join", DeclarationJoin "join"), ("declaration join output", DeclarationJoinOut "join-out")
       , ("activation preview", ActivationPreview)
@@ -1337,7 +1355,7 @@ requestShapeValidation = do
       , ("retained generation", RetainedGeneration (SymbolIdentity "main" "M" "value" "x" Nothing) 1)
       ]
     cellPlanExcludedFields =
-      [ ("cell mode", Cell), ("turn mode", Turn), ("classification mode", Classify)
+      [ ("turn mode", Turn), ("classification mode", Classify)
       , ("inspection query", InspectType "Int"), ("session artifacts", SessionArtifacts "scope")
       , ("declaration join", DeclarationJoin "join"), ("candidate authority", ModuleCandidates "scope")
       , ("activation preview", ActivationPreview)
@@ -1356,7 +1374,6 @@ requestOperationAdmission = do
         , ([Turn, TurnOut "turn"], TurnOperation)
         , ([Turn, ActivationPreview, TurnOut "turn"], ActivationPreviewOperation)
         , ([Classify, ClassifyOut "classify"], ClassificationOperation)
-        , ([Cell, CellTemplate "template", CellOut "cell"], CellOperation)
         , ([CellPlan, CellTemplate "template", CellOut "cell"], CellPlanOperation)
         , ([CheckSource], SourceCheckOperation)
         , ([InspectType "Int", InspectOut "inspect"], InspectionOperation)
@@ -1381,11 +1398,11 @@ requestOperationAdmission = do
       Right operation -> fail ("preview with another operation admitted as " ++ show operation)
   forM_ [ [Input "source"]
         , [Input "unreadable-fifo", Turn, HarnessProfile]
-        , [Input "unreadable-fifo", Cell, CellOut "output", HarnessProfile]
+        , [Input "unreadable-fifo", CellPlan, CellOut "output", HarnessProfile]
         , [Input "unreadable-fifo", Classify, HarnessProfile]
         , [Input "unreadable-fifo", InspectInfo "value", HarnessProfile]
         , [Input "unreadable-fifo", InspectInfo "value", InspectInfo "other", InspectOut "output", HarnessProfile]
-        , [Input "unreadable-fifo", Turn, TurnOut "output", Cell, HarnessProfile]
+        , [Input "unreadable-fifo", Turn, TurnOut "output", CellPlan, HarnessProfile]
         , [Input "source", Input "", Target "value"]
         , [Input "source", TurnOut "orphan-output", HarnessProfile]
         , [Input "source", CellTemplate "orphan-template", HarnessProfile]
@@ -1400,7 +1417,7 @@ requestOperationAdmission = do
     case admit (context ++ fields) of
       Left _ -> pure ()
       Right operation -> fail ("incomplete request admitted as " ++ show operation)
-  forM_ (take 8 recipes) $ \(fields, _) ->
+  forM_ (filter (\(_, operation) -> case operation of DeclarationOperation{} -> False; _ -> True) recipes) $ \(fields, _) ->
     forM_ [DeclarationJoin "join", DeclarationJoinOut "receipt"] $ \orphan ->
       case admit (context ++ fields ++ [orphan]) of
         Left _ -> pure ()

@@ -842,19 +842,29 @@ workerRequestAdmissionBeforeEffects = withScratch $ \root -> do
         ,"TIDEPOOL_COMPILER_WORLD_DIRECTORY"]
       fifo = root </> "unreadable-source.hs"
       scratch = root </> "harness-copies"
-      bad = workerArgv [Input fifo, OutputDir scratch, HarnessProfile, Turn, Cell
+      bad = workerArgv [Input fifo, OutputDir scratch, HarnessProfile, Turn, CellPlan
         ,TurnOut (root </> "turn.cbor"), CellTemplate "unused", CellOut (root </> "cell.cbor")]
       command arguments = (proc worker arguments) {env=Just environment}
       bounded action = timeout 30000000 action >>= maybe (fail "worker request admission timed out") pure
       noScratch = doesDirectoryExist scratch >>= \exists -> when exists (fail "refused request wrote harness scratch")
       noRequestWork diagnostics = forM_ ["BodyStarted", "CleanupStarted ExecutorStop", "CleanupStarted CapabilitiesRestore"] $ \phase ->
         when (phase `isInfixOf` diagnostics) (fail ("refused request entered " ++ phase))
+  [retiredFlag,retiredPayload] <- pure (workerArgv
+    [CellPlan, Input fifo, OutputDir scratch, HarnessProfile, CellTemplate "unused", CellOut (root </> "cell.cbor")])
+  [_,oneField] <- pure (workerArgv [CellPlan])
+  let fieldOffset = length oneField - 2
+      retired = [retiredFlag,take fieldOffset retiredPayload ++ "1f" ++ drop (fieldOffset+2) retiredPayload]
+      refused = [("conflicting supported operations",bad,Nothing)
+        ,("retired finite cell field",retired,Just "retired field tag 31")]
   createNamedPipe fifo (ownerReadMode `unionFileModes` ownerWriteMode)
-  (directCode,directOut,directErr) <- bounded (readCreateProcessWithExitCode (command bad) "")
-  unless (directCode /= ExitSuccess && "input-rejected" `isInfixOf` directOut)
-    (fail "malformed direct request did not retain input rejection")
-  noRequestWork directErr
-  noScratch
+  forM_ refused $ \(label,arguments,expected) -> do
+    (directCode,directOut,directErr) <- bounded (readCreateProcessWithExitCode (command arguments) "")
+    unless (directCode /= ExitSuccess && "input-rejected" `isInfixOf` directOut)
+      (fail (label ++ " direct request did not retain input rejection"))
+    forM_ expected $ \message -> unless (message `isInfixOf` directOut)
+      (fail (label ++ " direct request reported another refusal"))
+    noRequestWork directErr
+    noScratch
   let source = root </> "Classify.hs"
       verdicts = root </> "classified.json"
       good = workerArgv [Input source, Classify, ClassifyOut verdicts]
@@ -891,10 +901,13 @@ workerRequestAdmissionBeforeEffects = withScratch $ \root -> do
           hFlush incoming
           (,,) <$> readWord <*> readFrame <*> readFrame
     acknowledge 1
-    (badCode,badOut,_) <- request (root </> "absent-cwd") bad
-    unless (badCode /= 0 && "input-rejected" `BS.isInfixOf` badOut)
-      (fail "malformed daemon request performed CWD/source work before admission")
-    noScratch
+    forM_ refused $ \(label,arguments,expected) -> do
+      (badCode,badOut,_) <- request (root </> "absent-cwd") arguments
+      unless (badCode /= 0 && "input-rejected" `BS.isInfixOf` badOut)
+        (fail (label ++ " daemon request performed CWD/source work before admission"))
+      forM_ expected $ \message -> unless (BSC.pack message `BS.isInfixOf` badOut)
+        (fail (label ++ " daemon request reported another refusal"))
+      noScratch
     (goodCode,goodOut,_) <- request root good
     unless (goodCode == 0 && "success" `BS.isInfixOf` goodOut)
       (fail "admitted classification failed after malformed request")
