@@ -9716,7 +9716,21 @@ mod tests {
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
         let issued = CompilerSourceSupport::from_selected_issuance(projection, view).unwrap();
-        let expected = issued.artifacts.capture_graph_selection().native_groups;
+        let explicit = |source: &CompilerSourceSupport| {
+            source
+                .artifacts
+                .roots()
+                .iter()
+                .filter_map(|root| {
+                    if let InventoryNodeKey::Group(group) = root {
+                        Some(*group)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = explicit(&issued);
         assert_eq!(expected.len(), 1);
         let mut records = issued.recorded_rows().clone();
         let RecordedCompilerRow::Original { native_choices, .. } = records.get_mut(owner).unwrap()
@@ -9742,19 +9756,13 @@ mod tests {
                 ),
                 Err(crate::certified_products::InputDecisionRefusal::MissingDecision)
             ));
-            assert_eq!(
-                source.artifacts.capture_graph_selection().native_groups,
-                expected
-            );
+            assert_eq!(explicit(source), expected);
         };
         check_unissued(&unissued);
         let owners = BTreeSet::from([owner.clone()]);
         let types = unissued.for_source_owners(&BTreeSet::new()).unwrap();
         assert!(types.compiler_roles().original_acquisition(owner).is_none());
-        assert_eq!(
-            types.artifacts.capture_graph_selection().native_groups,
-            expected
-        );
+        assert_eq!(explicit(&types), expected);
         let promoted = types
             .promote_issued_authored_originals(&issued, &owners)
             .unwrap();
@@ -9763,7 +9771,44 @@ mod tests {
             .merge_output_fragments(&promoted)
             .unwrap();
         check_unissued(&merged);
-        let closed = merged.close_request(None, &Default::default()).unwrap();
+        let other_view = inventory
+            .admit_shared(
+                &inventory.empty_view(),
+                vec![
+                    entry.clone(),
+                    Arc::new(crate::artifact_inventory::tests::entry(
+                        "RivalRootMarker",
+                        &[],
+                    )),
+                ],
+            )
+            .unwrap();
+        let other =
+            CompilerSourceSupport::from_selected_issuance(issued.projection.clone(), other_view)
+                .unwrap();
+        let rival = explicit(&other);
+        assert_ne!(expected, rival);
+        assert_ne!(
+            promoted.selected[owner].original().unwrap().0,
+            other.selected[owner].original().unwrap().0
+        );
+        let winning = promoted.merge(&other).unwrap();
+        check_unissued(&winning);
+        assert!(winning.same_selected_acquisitions(&promoted));
+        assert!(
+            rival.iter().all(|group| winning
+                .artifacts
+                .capture_graph_selection()
+                .native_groups
+                .contains(group)),
+            "losing exact groups remain custody without becoming roots"
+        );
+        assert!(other
+            .artifacts
+            .binding_dependencies()
+            .iter()
+            .all(|edge| winning.artifacts.binding_dependencies().contains(edge)));
+        let closed = winning.close_request(None, &Default::default()).unwrap();
         let InputNativeDecision::IssuedChoices(groups) = closed
             .checked_native_input_decision(entry.descriptor.id, canonical, product.owner())
             .unwrap()
@@ -9771,9 +9816,33 @@ mod tests {
             panic!("the actual request issuer resolves its selected graph");
         };
         assert_eq!(groups.values().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(explicit(&closed), expected);
+        let receiving_types = unissued
+            .select_support_roots(vec![canonical])
+            .unwrap()
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
+        assert!(explicit(&receiving_types).is_empty());
+        let rival_types = other.for_source_owners(&BTreeSet::new()).unwrap();
+        let mixed_types = receiving_types.merge(&rival_types).unwrap();
+        assert_eq!(explicit(&mixed_types), rival);
+        let crossed = mixed_types
+            .promote_issued_authored_originals(&issued, &owners)
+            .unwrap();
         assert_eq!(
-            closed.artifacts.capture_graph_selection().native_groups,
-            expected
+            crossed.selected[owner].original().unwrap().0,
+            issued.selected[owner].original().unwrap().0
+        );
+        assert!(matches!(
+            crossed.checked_native_input_decision(entry.descriptor.id, canonical, product.owner()),
+            Err(crate::certified_products::InputDecisionRefusal::MissingDecision)
+        ));
+        assert!(
+            matches!(CompilerSourceSupport::empty().merge_output_fragments(&crossed),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
+                    if artifact == entry.descriptor.id)),
+            "a same-payload root from another actual carrier cannot issue this Original's policy"
         );
     }
 
@@ -10147,7 +10216,7 @@ mod tests {
     }
 
     #[test]
-    fn source_merge_refuses_different_group_choices_with_the_same_exact_issuer() {
+    fn source_merge_keeps_receiving_choices_for_same_canonical_original_pair() {
         let entries = decision_affinity_entries();
         let inventory = ArtifactInventory::default();
         let base = inventory
@@ -10184,17 +10253,55 @@ mod tests {
         });
         for entry in &entries[..2] {
             let owner = &entry.descriptor.owner;
-            assert!(supports[0].selected[owner].same_recorded_facts(&supports[1].selected[owner]));
+            let left = &supports[0].selected[owner];
+            let right = &supports[1].selected[owner];
+            assert_eq!(left.assembly_role(), right.assembly_role());
+            assert_eq!(left.interface().0, right.interface().0);
+            assert_eq!(left.original().unwrap().0, right.original().unwrap().0);
+            assert!(left
+                .interface()
+                .1
+                .same_issuing_authority(&right.interface().1));
+            assert!(left
+                .original()
+                .unwrap()
+                .1
+                .same_issuing_authority(&right.original().unwrap().1));
             assert_ne!(
                 supports[0].input_decisions.facts[owner].groups,
                 supports[1].input_decisions.facts[owner].groups
             );
         }
         for (left, right) in [(&supports[0], &supports[1]), (&supports[1], &supports[0])] {
+            let joined = left.merge(right).unwrap();
+            assert!(joined.same_selected_acquisitions(left));
+            assert_eq!(
+                joined.recorded_input_decisions(),
+                left.recorded_input_decisions()
+            );
+            let roots = |source: &CompilerSourceSupport| {
+                source
+                    .artifacts
+                    .roots()
+                    .iter()
+                    .filter_map(|root| {
+                        if let InventoryNodeKey::Group(group) = root {
+                            Some(*group)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(roots(&joined), roots(left));
+            assert!(roots(&joined).is_disjoint(&roots(right)));
             assert!(
-                matches!(left.merge(right), Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
-                    if entries[..2].iter().any(|entry| entry.descriptor.id == artifact)))
+                right
+                    .artifacts
+                    .binding_dependencies()
+                    .iter()
+                    .all(|edge| joined.artifacts.binding_dependencies().contains(edge)),
+                "losing issuer edges remain custody rather than contributing choices"
             );
         }
     }
