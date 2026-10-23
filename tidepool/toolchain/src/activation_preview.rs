@@ -77,10 +77,8 @@ impl OriginalDisplayContext {
         >,
         CompileError,
     > {
-        self.execution
-            .completed()
-            .map_err(CompileError::from)?
-            .original_preview_interface_graph()
+        self.declarations
+            .preview_interface_graph_for_target(self.execution.target())
     }
     pub fn matches_prototype(&self, prototype: &ExactHostBindingPrototype) -> bool {
         prototype.producer() == self.declarations.toolchain_identity_sha256()
