@@ -155,39 +155,6 @@ impl CheckedCellRequest {
     pub(crate) fn template_sources(&self) -> Vec<String> {
         self.recipe.template_sources()
     }
-    pub(crate) fn manifest_value(
-        &self,
-        purpose: CheckedCellManifestPurpose,
-    ) -> Result<Value, CompileError> {
-        let modules = self.reserved_declaration_modules();
-        Ok(array([
-            text(match purpose {
-                CheckedCellManifestPurpose::Authored => {
-                    crate::artifacts::CheckedPurpose::Cell.wire_tag()
-                }
-                CheckedCellManifestPurpose::Program => {
-                    crate::artifacts::CheckedPurpose::Program.wire_tag()
-                }
-            }),
-            text(hex(&self.admission_digest())),
-            text(hash(self.recipe.cell_source.as_bytes())),
-            text(hash(self.recipe.template_source.as_bytes())),
-            Value::Array(
-                self.recipe
-                    .turn_templates
-                    .iter()
-                    .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
-                    .collect(),
-            ),
-            Value::Array(self.recipe.injected_modules.iter().map(text).collect()),
-            Value::Array(modules.iter().map(text).collect()),
-        ]))
-    }
-}
-
-pub(crate) enum CheckedCellManifestPurpose {
-    Authored,
-    Program,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4282,55 +4249,6 @@ pub(crate) fn same_include_paths(
             .iter()
             .zip(right)
             .all(|(left, right)| left.as_os_str() == right.as_os_str())
-}
-
-/// Independent captured projections are admitted with the initial checked
-/// offer. A continuation cannot relabel its replaced parent as such an input.
-pub(crate) fn retain_projection_inputs(
-    context: &crate::declaration_context::ExactDeclarationContext,
-    projections: &[Arc<crate::declaration_join::AcceptedJoin>],
-) -> Result<Vec<Arc<crate::declaration_join::AcceptedJoin>>, CompileError> {
-    let interfaces = context.joined_interfaces();
-    let selected = context
-        .lexical_graph()
-        .iter()
-        .map(|node| &node.owner)
-        .collect::<BTreeSet<_>>();
-    let mut seen = BTreeSet::new();
-    let selected_originals = context
-        .compiler_input_projection()
-        .snapshot_roles()
-        .iter()
-        .filter(|(_, role)| role.original().is_some())
-        .map(|(owner, _)| owner.clone())
-        .collect();
-    for projection in projections {
-        let owner = crate::declaration_join::ExactModuleIdentity {
-            unit: projection.reserved().unit.clone(),
-            module: projection.reserved().module.clone(),
-        };
-        if !seen.insert(owner.clone())
-            || !selected.contains(&owner)
-            || !interfaces
-                .iter()
-                .any(|interface| interface == projection.interface())
-        {
-            return Err(failure(
-                "captured projection lacks one exact selected initial interface",
-            ));
-        }
-        if context.toolchain_identity_sha256() != projection.toolchain_identity_sha256() {
-            return Err(failure(
-                "captured projection belongs to another compiler producer",
-            ));
-        }
-        // Check the owning merge policy, including published-source policy and
-        // exact native decisions. Retaining a projection does not compose its
-        // SOURCE scope or change the receiving context's lexical permissions.
-        let incoming = projection.publication_compiler_support(&selected_originals)?;
-        context.compiler_source_support().merge(&incoming)?;
-    }
-    Ok(projections.to_vec())
 }
 
 /// Normalize World cell observations once at the checked-item owner. Checking
@@ -8911,68 +8829,6 @@ mod tests {
     }
 }
 
-/// Serialization inputs have no completed-prefix or same-offer capability.
-pub(crate) struct ItemAuthorization<'a> {
-    pub(crate) admission: [u8; 32],
-    pub(crate) receipt: [u8; 32],
-    pub(crate) index: usize,
-    pub(crate) source: &'a str,
-    pub(crate) kind: CheckedItemKind,
-    pub(crate) binders: &'a [String],
-    pub(crate) templates: &'a [(String, String)],
-    pub(crate) injected: &'a [String],
-    pub(crate) signatures: &'a [ExactCheckedSignature],
-    pub(crate) expression: Option<&'a Value>,
-    pub(crate) generation: u64,
-    pub(crate) runtime_prefix: [u8; 32],
-    pub(crate) imports: &'a [(String, Vec<String>)],
-    pub(crate) observation: Option<&'a str>,
-    pub(crate) planned: Value,
-    pub(crate) settled: Vec<Value>,
-    pub(crate) value_interfaces: Value,
-    pub(crate) template_imports: crate::declaration_context::SelectedTemplateImports,
-}
-pub(crate) fn encode_item_authorization(fields: ItemAuthorization<'_>) -> Value {
-    array([
-        text(crate::artifacts::CheckedPurpose::Item.wire_tag()),
-        text(hex(&fields.admission)),
-        text(hex(&fields.receipt)),
-        Value::Integer((fields.index as u64).into()),
-        text(hash(fields.source.as_bytes())),
-        text(match fields.kind {
-            CheckedItemKind::Bind => "bind",
-            CheckedItemKind::Expression => "expr",
-            CheckedItemKind::Declaration => "decl",
-        }),
-        Value::Array(fields.binders.iter().map(text).collect()),
-        Value::Array(
-            fields
-                .templates
-                .iter()
-                .map(|(kind, source)| array([text(kind), text(hash(source.as_bytes()))]))
-                .collect(),
-        ),
-        Value::Array(fields.injected.iter().map(text).collect()),
-        Value::Array(fields.signatures.iter().map(encode_signature).collect()),
-        fields.expression.cloned().unwrap_or(Value::Null),
-        Value::Integer(fields.generation.into()),
-        text(hex(&fields.runtime_prefix)),
-        Value::Array(
-            fields
-                .imports
-                .iter()
-                .map(|(module, names)| {
-                    array([text(module), Value::Array(names.iter().map(text).collect())])
-                })
-                .collect(),
-        ),
-        fields.observation.map_or(Value::Null, text),
-        fields.planned,
-        Value::Array(fields.settled),
-        fields.value_interfaces,
-        fields.template_imports.authorization_value(),
-    ])
-}
 #[cfg(test)]
 pub(crate) fn fixture_checked_signature(
     bytes: &[u8],
@@ -8986,10 +8842,4 @@ fn decode_expression_lift(expression: &Value) -> Result<CheckedExpressionLift, C
         "effectful" => CheckedExpressionLift::Effectful,
         _ => return Err(failure("sealed expression has an unknown lift")),
     })
-}
-#[cfg(test)]
-pub(crate) fn fixture_expression_plan(bytes: &[u8]) -> Result<Value, CompileError> {
-    let expression = unique_key(&[decode(bytes)?], "__tidepool_cell_expr_0", 4)?;
-    decode_expression_lift(&expression)?;
-    Ok(expression)
 }

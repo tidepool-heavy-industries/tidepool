@@ -6319,47 +6319,6 @@ mod tests {
     }
 
     #[test]
-    fn checked_retained_home_certificate_refuses_substituted_interface() {
-        let fixture = CheckedHomeFixture::new();
-        let scratch = tempfile::tempdir().unwrap();
-        let endpoint = extract_cmd().unwrap().bind().unwrap();
-        let specification = Arc::new(
-            tidepool_toolchain::checked_cell::CheckedCellRequest::issue(
-                Arc::new(
-                    CellRecipe::new(
-                        "let alias = home".to_string(),
-                        "module Next where".to_string(),
-                        vec![],
-                        vec![fixture.home.owner().module_name()],
-                    )
-                    .unwrap(),
-                ),
-                tidepool_toolchain::checked_cell::AdmissionDigest::finalize([3; 32]).unwrap(),
-                vec![],
-            )
-            .unwrap(),
-        );
-        let error = ModuleCandidateOffer::select_checked_cell(
-            endpoint.identity().producer_bytes(),
-            fixture.effects.include_paths(),
-            scratch.path(),
-            None,
-            specification,
-            tidepool_toolchain::artifacts::CheckedCellPurpose::Authored,
-            vec![(fixture.home.owner(), Arc::from(&b"changed interface"[..]))],
-            std::slice::from_ref(&fixture.home),
-            &[],
-        )
-        .err()
-        .expect("another interface cannot borrow the retained certificate");
-        assert!(
-            matches!(&error, CompileError::ExtractFailed(detail)
-            if detail == "checked cell: retained value certificate differs from selected interface bytes"),
-            "{error:?}"
-        );
-    }
-
-    #[test]
     fn dependency_load_errors_keep_source_spans_and_allow_a_valid_retry() {
         use crate::session::world_cell_test_support::{
             begin_state_fixture_execution, fixture_cell_recipe,

@@ -1,2 +1,0 @@
-error[E0616]: field `reserved_declaration_modules` of struct `CheckedCellRequest` is private
- --> tests/compile_fail/checked_cell_request_inventory_is_issued.rs:14:13

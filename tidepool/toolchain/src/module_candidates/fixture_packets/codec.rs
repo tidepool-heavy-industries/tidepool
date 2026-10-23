@@ -164,20 +164,17 @@ enum CodecOperation {
     WorldBlocks,
     #[serde(rename = "world-context-blocks")]
     WorldContextBlocks,
-    CellPurpose,
+    InspectionPurpose,
     ReceiptFacts,
     CertificateFacts,
     SegmentItemFacts,
     InputFacts,
     Purpose,
     RequestTypes,
-    ExpressionPurpose,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum PurposeCase {
-    Cell,
-    Item,
     Inspection,
 }
 #[derive(Deserialize)]
@@ -214,14 +211,13 @@ enum CodecRequest {
     ScopeEmpty,
     WorldBlocks,
     WorldContextBlocks(NativeBytes),
-    CellPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
+    InspectionPurpose(Vec<PathBuf>, Vec<ValueInterfaceInput>),
     ReceiptFacts(PathBuf),
     CertificateFacts(PathBuf),
     SegmentItemFacts(PathBuf),
     InputFacts(PathBuf, PathBuf),
     Purpose(PurposeCase, Vec<PathBuf>, Option<NativeBytes>),
     RequestTypes(NativeBytes, HelperRecipe, Option<NativeBytes>),
-    ExpressionPurpose(Vec<PathBuf>, NativeBytes),
 }
 fn decode_arguments<T: serde::de::DeserializeOwned>(value: &Value, fields: usize) -> T {
     assert_eq!(
@@ -273,9 +269,9 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
             let [producer]: [NativeBytes; 1] = decode_arguments(&arguments, 1);
             CodecRequest::WorldContextBlocks(producer)
         }
-        CodecOperation::CellPurpose => {
+        CodecOperation::InspectionPurpose => {
             let (includes, values) = decode_arguments(&arguments, 2);
-            CodecRequest::CellPurpose(includes, values)
+            CodecRequest::InspectionPurpose(includes, values)
         }
         CodecOperation::ReceiptFacts => {
             let [path] = decode_arguments(&arguments, 1);
@@ -300,10 +296,6 @@ fn packet_request(bytes: &[u8]) -> CodecRequest {
         CodecOperation::RequestTypes => {
             let (signatures, recipe, inner) = decode_arguments(&arguments, 3);
             CodecRequest::RequestTypes(signatures, recipe, inner)
-        }
-        CodecOperation::ExpressionPurpose => {
-            let (includes, plan) = decode_arguments(&arguments, 2);
-            CodecRequest::ExpressionPurpose(includes, plan)
         }
     }
 }
@@ -377,8 +369,8 @@ fn source_boot_codec_packet_producer() {
             tidepool_atomic_write::write_best_effort(&output, &encoded).unwrap();
             output
         }
-        CodecRequest::CellPurpose(includes, values) => {
-            cell_purpose(&root, &includes, values);
+        CodecRequest::InspectionPurpose(includes, values) => {
+            inspection_purpose(&root, &includes, values);
             root.join("purpose.cbor")
         }
         CodecRequest::ReceiptFacts(path) => {
@@ -403,10 +395,6 @@ fn source_boot_codec_packet_producer() {
         }
         CodecRequest::RequestTypes(signatures, recipe, inner) => {
             request_types(&root, signatures, recipe, inner);
-            root.join("purpose.cbor")
-        }
-        CodecRequest::ExpressionPurpose(includes, plan) => {
-            expression_purpose(&root, &includes, plan);
             root.join("purpose.cbor")
         }
     };
@@ -799,83 +787,21 @@ fn input_facts(root: &Path, proof: &Path, evidence_path: &Path) {
     write_facts(root, "input_facts", &facts);
 }
 
-fn fixture_request(
-    cell_source: &str,
-    template_source: &str,
-    injected_modules: Vec<String>,
-) -> crate::checked_cell::CheckedCellRequest {
-    crate::checked_cell::CheckedCellRequest::issue(
-        Arc::new(
-            crate::checked_cell::CellRecipe::new(
-                cell_source,
-                template_source,
-                vec![],
-                injected_modules,
-            )
-            .expect("fixture recipe"),
-        ),
-        crate::checked_cell::AdmissionDigest::finalize([0xaa; 32]).expect("fixture admission"),
-        vec![],
-    )
-    .expect("fixture checked request")
-}
-
-fn purpose(root: &Path, case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
-    use crate::artifacts::checked_search_authorization;
-    use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
-    let signature = signature.map(|bytes| {
-        crate::checked_cell::fixture_checked_signature(&bytes.0).expect("owner signature decoder")
-    });
-    let body = match case {
-        PurposeCase::Cell => {
-            assert!(
-                signature.is_none(),
-                "cell checking cannot carry an input signature"
-            );
-            crate::artifacts::encode_cell_authorization(
-                crate::checked_cell::CheckedCellManifestPurpose::Authored,
-                &fixture_request("codec cell", "codec template", vec![]),
-                Value::Array(vec![]),
-                &crate::declaration_context::SelectedTemplateImports::default(),
-            )
-            .unwrap()
-        }
-        PurposeCase::Item => {
-            assert!(signature.is_none(), "item purpose has no input signature");
-            encode_item_authorization(ItemAuthorization {
-                admission: [0xaa; 32],
-                receipt: [0xaa; 32],
-                index: 0,
-                source: "codec item",
-                kind: CheckedItemKind::Bind,
-                binders: &[],
-                templates: &[],
-                injected: &[],
-                signatures: &[],
-                expression: None,
-                generation: 1,
-                runtime_prefix: [0xaa; 32],
-                imports: &[],
-                observation: None,
-                planned: Value::Null,
-                settled: vec![],
-                value_interfaces: Value::Array(vec![]),
-                template_imports: crate::declaration_context::SelectedTemplateImports::default(),
-            })
-        }
-        PurposeCase::Inspection => {
-            assert!(signature.is_none(), "inspection has no input signature");
-            crate::artifacts::fixture_inspection_authorization()
-        }
-    };
-    let value = checked_search_authorization(body, includes).expect("purpose search encoder");
+fn purpose(root: &Path, _case: PurposeCase, includes: &[PathBuf], signature: Option<NativeBytes>) {
+    assert!(
+        signature.is_none(),
+        "inspection purpose has no input signature"
+    );
+    let body =
+        crate::artifacts::encode_inspection_authorization(&BTreeSet::new(), Value::Array(vec![]));
+    let value = crate::artifacts::checked_search_authorization(body, includes)
+        .expect("purpose search encoder");
     let mut bytes = vec![];
     ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
 }
 
-fn cell_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInput>) {
-    let injected_modules = values.iter().map(|value| value.1.clone()).collect();
+fn inspection_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInput>) {
     let baseline = Value::Array(
         values
             .into_iter()
@@ -892,13 +818,7 @@ fn cell_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInp
             })
             .collect(),
     );
-    let body = crate::artifacts::encode_cell_authorization(
-        crate::checked_cell::CheckedCellManifestPurpose::Authored,
-        &fixture_request("codec cell", "codec template", injected_modules),
-        baseline,
-        &crate::declaration_context::SelectedTemplateImports::default(),
-    )
-    .expect("owning checked cell serializer");
+    let body = crate::artifacts::encode_inspection_authorization(&BTreeSet::new(), baseline);
     let value = crate::artifacts::checked_search_authorization(body, includes)
         .expect("purpose search encoder");
     let mut bytes = vec![];
@@ -937,36 +857,5 @@ fn request_types(
         &mut bytes,
     )
     .unwrap();
-    tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
-}
-
-fn expression_purpose(root: &Path, includes: &[PathBuf], plan: NativeBytes) {
-    use crate::artifacts::checked_search_authorization;
-    use crate::checked_cell::{encode_item_authorization, CheckedItemKind, ItemAuthorization};
-    let expression = crate::checked_cell::fixture_expression_plan(&plan.0)
-        .expect("owner reserved expression plan reader");
-    let body = encode_item_authorization(ItemAuthorization {
-        admission: [0xaa; 32],
-        receipt: [0xaa; 32],
-        index: 0,
-        source: "1",
-        kind: CheckedItemKind::Expression,
-        binders: &[],
-        templates: &[],
-        injected: &[],
-        signatures: &[],
-        expression: Some(&expression),
-        generation: 1,
-        runtime_prefix: [0xaa; 32],
-        imports: &[],
-        observation: Some("observation"),
-        planned: Value::Null,
-        settled: vec![],
-        value_interfaces: Value::Array(vec![]),
-        template_imports: crate::declaration_context::SelectedTemplateImports::default(),
-    });
-    let value = checked_search_authorization(body, includes).unwrap();
-    let mut bytes = vec![];
-    ciborium::ser::into_writer(&value, &mut bytes).unwrap();
     tidepool_atomic_write::write_best_effort(&root.join("purpose.cbor"), &bytes).unwrap();
 }

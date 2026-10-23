@@ -1126,10 +1126,7 @@ struct SegmentItemDemand<'a> {
 pub(crate) enum CheckedPurpose {
     Inspection,
     ReloadInspection,
-    Cell,
-    Item,
     ActivationPreview,
-    Program,
 }
 
 impl CheckedPurpose {
@@ -1138,17 +1135,9 @@ impl CheckedPurpose {
         match self {
             Self::Inspection => "inspection1",
             Self::ReloadInspection => "reload-inspection1",
-            Self::Cell => "cell-check4",
-            Self::Item => "checked-item5",
             Self::ActivationPreview => "host-activation-renderer1",
-            Self::Program => "cell-program3",
         }
     }
-}
-
-/// Authored whole-cell checking is independent of live-input binding and preview.
-pub enum CheckedCellPurpose {
-    Authored,
 }
 
 /// Attach search roots to an already tagged, owner-issued authorization.
@@ -1183,43 +1172,6 @@ pub(crate) fn checked_search_authorization(
     Ok(authorization)
 }
 
-fn checked_cell_authorization(
-    purpose: CheckedCellPurpose,
-    specification: &crate::checked_cell::CheckedCellRequest,
-    values: &crate::checked_cell::CheckedValueInputs,
-    context: &crate::declaration_context::ExactDeclarationContext,
-    include: &[PathBuf],
-) -> Result<Value, CompileError> {
-    checked_search_authorization(
-        encode_cell_authorization(
-            match purpose {
-                CheckedCellPurpose::Authored => {
-                    crate::checked_cell::CheckedCellManifestPurpose::Authored
-                }
-            },
-            specification,
-            values.baseline_authorization(),
-            &context.selected_template_imports(&specification.template_sources())?,
-        )?,
-        include,
-    )
-}
-
-pub(crate) fn encode_cell_authorization(
-    purpose: crate::checked_cell::CheckedCellManifestPurpose,
-    specification: &crate::checked_cell::CheckedCellRequest,
-    baseline: Value,
-    templates: &crate::declaration_context::SelectedTemplateImports,
-) -> Result<Value, CompileError> {
-    let mut authorization = specification.manifest_value(purpose)?;
-    let Value::Array(fields) = &mut authorization else {
-        unreachable!("closed cell authorization")
-    };
-    fields.push(baseline);
-    fields.push(templates.authorization_value());
-    Ok(authorization)
-}
-
 fn encode_inspection_authorization_for(
     purpose: CheckedPurpose,
     owners: &BTreeSet<String>,
@@ -1233,13 +1185,8 @@ fn encode_inspection_authorization_for(
 }
 
 #[cfg(test)]
-fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
+pub(crate) fn encode_inspection_authorization(owners: &BTreeSet<String>, baseline: Value) -> Value {
     encode_inspection_authorization_for(CheckedPurpose::Inspection, owners, baseline)
-}
-
-#[cfg(test)]
-pub(crate) fn fixture_inspection_authorization() -> Value {
-    encode_inspection_authorization(&BTreeSet::new(), Value::Array(vec![]))
 }
 
 fn compile_context_with_declarations(
@@ -1396,18 +1343,6 @@ fn private_native_availability(
             crate::declaration_context::OriginalCompilerInputs::reuse_selected_authored(context)
         }
     }
-}
-
-fn checked_candidate_reservations(
-    specification: &crate::checked_cell::CheckedCellRequest,
-) -> BTreeSet<String> {
-    specification
-        .recipe()
-        .injected_modules()
-        .iter()
-        .chain(specification.reserved_declaration_modules())
-        .cloned()
-        .collect()
 }
 
 impl ModuleCandidateOffer {
@@ -1742,85 +1677,6 @@ impl ModuleCandidateOffer {
             ),
 
             checked_values: Some(inputs),
-            activation_preview: None,
-        })
-    }
-
-    pub fn select_checked_cell(
-        producer: &[u8],
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: Arc<crate::checked_cell::CheckedCellRequest>,
-        purpose: CheckedCellPurpose,
-        checked_values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
-        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
-        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
-    ) -> Result<Self, CompileError> {
-        let expected = specification
-            .recipe()
-            .injected_modules()
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let actual = checked_values
-            .iter()
-            .map(|(module, _)| module.module_name())
-            .collect::<BTreeSet<_>>();
-        if actual.len() != checked_values.len() || actual != expected {
-            return Err(CompileError::ExtractFailed(
-                "checked initial interface inventory differs from injected owners".into(),
-            ));
-        }
-        let compile_context = context;
-        let publication_context = checked_offer_context(
-            compile_context
-                .as_ref()
-                .map(|context| context.declarations().clone()),
-        )?;
-        let checked_values = crate::checked_cell::CheckedValueInputs::capture_checked(
-            checked_values,
-            retained_interfaces,
-        )?;
-        let context = checked_value_context(Some(publication_context), &checked_values)?;
-        let _checked_projections =
-            crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
-        let authorization = checked_cell_authorization(
-            purpose,
-            &specification,
-            &checked_values,
-            &context,
-            include,
-        )?;
-        let selected = immutable_candidates_in_context(
-            &context,
-            producer,
-            include,
-            scratch,
-            checked_candidate_reservations(&specification),
-        )?;
-        let private = private_native_availability(&context, producer, selected.as_deref())?;
-        Ok(Self {
-            selected,
-            producer: producer.to_vec(),
-            include: include.to_vec(),
-            exact: Some(
-                compile_context_with_declarations(compile_context, context.clone())
-                    .prepare_compilation_with_private_input(
-                        &scratch.join("exact-scope"),
-                        producer,
-                        Some(authorization),
-                        private,
-                    )?
-                    .with_source_search_context(include)
-                    .with_checked_value_imports(checked_values.import_authority())
-                    .with_initial_template_interfaces(
-                        context.clone(),
-                        &specification.template_sources(),
-                    )?,
-            ),
-
-            checked_values: Some(checked_values),
             activation_preview: None,
         })
     }
@@ -6136,8 +5992,11 @@ mod typed_site_tests {
     #[test]
     fn protected_search_authorization_refuses_lossy_path_encoding() {
         use std::os::unix::ffi::OsStringExt;
-        let authorization =
-            || Value::Array(vec![Value::Text(CheckedPurpose::Cell.wire_tag().into())]);
+        let authorization = || {
+            Value::Array(vec![Value::Text(
+                CheckedPurpose::Inspection.wire_tag().into(),
+            )])
+        };
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', 0xff]));
         assert!(checked_search_authorization(authorization(), &[invalid]).is_err());
         let paths = [
@@ -6150,7 +6009,7 @@ mod typed_site_tests {
         };
         assert_eq!(
             fields[0],
-            Value::Text(CheckedPurpose::Cell.wire_tag().into())
+            Value::Text(CheckedPurpose::Inspection.wire_tag().into())
         );
         assert_eq!(
             fields[1],
