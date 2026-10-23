@@ -4156,6 +4156,7 @@ impl ArtifactInventory {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_segment(
         &self,
         parent: &ArtifactView,

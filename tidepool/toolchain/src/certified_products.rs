@@ -4882,7 +4882,7 @@ impl<'a> CurrentProductRef<'a> {
         >,
     ) -> Result<CompletedTargetProductRef<'a>, crate::CompileError> {
         crate::declaration_context::validate_current_stage_native_inputs(self, entries)?;
-        let ReceiptNativeAvailability::Completed(receipt) = &self.native.availability else {
+        let Some(receipt) = self.native.state.completed() else {
             return Err(crate::CompileError::CompilerEvidence(Box::new(
                 CertificationError::Mismatch("target current product lacks physical completion"),
             )));
@@ -4967,11 +4967,8 @@ impl<'a> CurrentProductRef<'a> {
             .get(&(unit.clone(), module.clone()))
             .and_then(ReceiptSourceSelection::native);
         if native.is_some_and(|native| {
-            matches!(native.origin, ReceiptNativeOrigin::NewProduct)
-                && matches!(
-                    native.availability,
-                    ReceiptNativeAvailability::NewProduct { .. }
-                )
+            matches!(native.origin(), ReceiptNativeOrigin::NewProduct)
+                && matches!(native.state, ReceiptNativeState::PendingCurrent { .. })
         }) {
             return self
                 .current_source_child(reference, entries)
@@ -4983,7 +4980,7 @@ impl<'a> CurrentProductRef<'a> {
                     ))
                 });
         }
-        let row = match native.and_then(|native| native.availability.issued_row()) {
+        let row = match native.and_then(|native| native.state.issued_row()) {
             Some(row) => row.as_ref(),
             None => self
                 .selection
@@ -5020,10 +5017,10 @@ impl<'a> CurrentProductRef<'a> {
                 "Source availability binder membership",
             )));
         }
-        if let Some(native) =
-            native.filter(|native| matches!(native.origin, ReceiptNativeOrigin::PriorStageProduct))
+        if let Some(native) = native
+            .filter(|native| matches!(native.origin(), ReceiptNativeOrigin::PriorStageProduct))
         {
-            let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+            let Some(receipt) = native.state.completed() else {
                 return Err(evidence(CertificationError::Mismatch(
                     "prior Source lacks physical completion",
                 )));
@@ -5135,14 +5132,14 @@ impl<'a> CurrentProductRef<'a> {
             .modules
             .get(&(unit.clone(), module.clone()))
             .and_then(ReceiptSourceSelection::native)
-            .filter(|native| matches!(native.origin, ReceiptNativeOrigin::NewProduct))
+            .filter(|native| matches!(native.origin(), ReceiptNativeOrigin::NewProduct))
         else {
             return Ok(None);
         };
         if &native.owner != owner {
             return Err(CertificationError::Mismatch("current Source sealed owner"));
         }
-        let ReceiptOriginalIdentity::Bound(artifact) = native.original else {
+        let ReceiptOriginalIdentity::Bound(artifact) = native.original_identity() else {
             return Err(CertificationError::Mismatch(
                 "current Source original identity",
             ));
@@ -5218,17 +5215,18 @@ impl<'a> CurrentProductRef<'a> {
     }
 
     pub(crate) fn own_group_candidates(&self) -> CertResult<NativeGroupCandidates> {
-        match &self.native.availability {
-            ReceiptNativeAvailability::NewProduct { .. } => {
+        match &self.native.state {
+            ReceiptNativeState::PendingCurrent { .. } => {
                 // This path preserves a carried own binding, if one exists.
                 // Physical completion alone does not require an earlier binding.
                 self.selection
                     .native_group_candidates(self.key(), &self.native.owner)
             }
-            ReceiptNativeAvailability::Completed(receipt) => Ok(
+            ReceiptNativeState::CompletedCurrent { receipt, .. }
+            | ReceiptNativeState::CompletedPrior(receipt) => Ok(
                 NativeGroupCandidates::IssuedAvailability(receipt.groups(self.key()).collect()),
             ),
-            ReceiptNativeAvailability::Issued(_) => Err(CertificationError::Mismatch(
+            ReceiptNativeState::Input(_) => Err(CertificationError::Mismatch(
                 "current product lacks its own completion receipt",
             )),
         }
@@ -5263,8 +5261,8 @@ impl<'a> CurrentProductRef<'a> {
         else {
             return Ok(None);
         };
-        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct)
-            || !matches!(native.original, ReceiptOriginalIdentity::Bound(id) if id == key.artifact)
+        if !matches!(native.origin(), ReceiptNativeOrigin::NewProduct)
+            || !matches!(native.original_identity(), ReceiptOriginalIdentity::Bound(id) if id == key.artifact)
         {
             return Ok(None);
         }
@@ -5275,12 +5273,13 @@ impl<'a> CurrentProductRef<'a> {
         &self,
         group: crate::artifact_inventory::NativeGroupBinding,
     ) -> Option<CertifiedNativeGroupSupport<'a>> {
-        match &self.native.availability {
-            ReceiptNativeAvailability::Completed(receipt) => receipt
+        match &self.native.state {
+            ReceiptNativeState::CompletedCurrent { receipt, .. }
+            | ReceiptNativeState::CompletedPrior(receipt) => receipt
                 .support(self.key(), group)
                 .map(CertifiedNativeGroupSupport::Issued),
-            ReceiptNativeAvailability::Issued(_) => None,
-            ReceiptNativeAvailability::NewProduct { dependencies } => dependencies
+            ReceiptNativeState::Input(_) => None,
+            ReceiptNativeState::PendingCurrent { dependencies, .. } => dependencies
                 .iter()
                 .find(|proof| {
                     proof.original == self.key().artifact
@@ -5367,11 +5366,8 @@ enum ReceiptSourceSelection {
 
 #[derive(Clone, Debug)]
 struct ReceiptNativeSelection {
-    original: ReceiptOriginalIdentity,
-    origin: ReceiptNativeOrigin,
     owner: CachedHomeOwner,
-    version: ReceiptSourceVersion,
-    availability: ReceiptNativeAvailability,
+    state: ReceiptNativeState,
 }
 
 /// Current physical products acquire their exact identity from the producing
@@ -5383,17 +5379,36 @@ enum ReceiptOriginalIdentity {
 }
 
 impl ReceiptNativeSelection {
-    fn original_artifact_id(&self) -> CertResult<crate::artifact_inventory::ArtifactId> {
-        if let Some(row) = self.availability.issued_row() {
-            let actual = row.original_artifact_id();
-            if matches!(self.original, ReceiptOriginalIdentity::Bound(id) if id != actual) {
-                return Err(CertificationError::Mismatch(
-                    "issued original artifact identity",
-                ));
-            }
-            return Ok(actual);
+    fn origin(&self) -> ReceiptNativeOrigin {
+        match &self.state {
+            ReceiptNativeState::Input(_) => ReceiptNativeOrigin::Input,
+            ReceiptNativeState::PendingCurrent { .. }
+            | ReceiptNativeState::CompletedCurrent { .. } => ReceiptNativeOrigin::NewProduct,
+            ReceiptNativeState::CompletedPrior(_) => ReceiptNativeOrigin::PriorStageProduct,
         }
-        match self.original {
+    }
+    fn version(&self) -> ReceiptSourceVersion {
+        match &self.state {
+            ReceiptNativeState::PendingCurrent { version, .. }
+            | ReceiptNativeState::CompletedCurrent { version, .. } => *version,
+            ReceiptNativeState::Input(_) | ReceiptNativeState::CompletedPrior(_) => {
+                ReceiptSourceVersion::Original
+            }
+        }
+    }
+    fn original_identity(&self) -> ReceiptOriginalIdentity {
+        match &self.state {
+            ReceiptNativeState::PendingCurrent { original, .. } => *original,
+            _ => ReceiptOriginalIdentity::Bound(
+                self.state
+                    .issued_row()
+                    .expect("completed or input owner")
+                    .original_artifact_id(),
+            ),
+        }
+    }
+    fn original_artifact_id(&self) -> CertResult<crate::artifact_inventory::ArtifactId> {
+        match self.original_identity() {
             ReceiptOriginalIdentity::Bound(id) => Ok(id),
             ReceiptOriginalIdentity::PendingProduct => Err(CertificationError::Mismatch(
                 "new product original identity is not bound",
@@ -5434,7 +5449,7 @@ impl ReceiptNativeSelection {
                 "selected original owner or canonical interface",
             ));
         }
-        if let Some(row) = self.availability.issued_row() {
+        if let Some(row) = self.state.issued_row() {
             let actual = row
                 .target_original(&self.owner)
                 .ok_or(CertificationError::Mismatch("issued original owner"))?;
@@ -5458,49 +5473,59 @@ enum ReceiptNativeOrigin {
     PriorStageProduct,
 }
 
+/// Current completion, carried input and prior output have distinct issuers.
+/// Retained Core remains a current physical product while its compiler role is TYPE.
 #[derive(Clone, Debug)]
-enum ReceiptNativeAvailability {
-    /// Completed product bytes await native graph issuance. Dependencies are
-    /// transaction-held evidence, not a reusable Full availability certificate.
-    NewProduct {
+enum ReceiptNativeState {
+    Input(Arc<crate::declaration_context::NativeTransportAvailability>),
+    PendingCurrent {
+        original: ReceiptOriginalIdentity,
+        version: ReceiptSourceVersion,
         dependencies: Vec<crate::artifact_inventory::NativeOriginalRequirement>,
     },
-    /// A carried request owns these available bodies and dependency closures.
-    Issued(Arc<crate::declaration_context::NativeTransportAvailability>),
-    /// This physical product owns one producer-issued root census.
-    Completed(Arc<crate::declaration_context::CompletedNativeProductAvailability>),
+    CompletedCurrent {
+        version: ReceiptSourceVersion,
+        receipt: Arc<crate::declaration_context::CompletedNativeProductAvailability>,
+    },
+    CompletedPrior(Arc<crate::declaration_context::CompletedNativeProductAvailability>),
 }
 
-impl ReceiptNativeAvailability {
+impl ReceiptNativeState {
     fn issued_row(&self) -> Option<&Arc<crate::declaration_context::NativeTransportAvailability>> {
         match self {
-            Self::Issued(row) => Some(row),
-            Self::Completed(receipt) => Some(receipt.row()),
-            Self::NewProduct { .. } => None,
+            Self::Input(row) => Some(row),
+            Self::CompletedCurrent { receipt, .. } | Self::CompletedPrior(receipt) => {
+                Some(receipt.row())
+            }
+            Self::PendingCurrent { .. } => None,
         }
     }
-
+    fn completed(
+        &self,
+    ) -> Option<&Arc<crate::declaration_context::CompletedNativeProductAvailability>> {
+        match self {
+            Self::CompletedCurrent { receipt, .. } | Self::CompletedPrior(receipt) => Some(receipt),
+            Self::Input(_) | Self::PendingCurrent { .. } => None,
+        }
+    }
     fn requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         let dependencies = match self {
-            Self::NewProduct { dependencies } => dependencies.as_slice(),
-            Self::Issued(_) | Self::Completed(_) => &[],
+            Self::PendingCurrent { dependencies, .. } => dependencies.as_slice(),
+            _ => &[],
         };
-        let issued = self.issued_row();
         dependencies.iter().chain(
-            issued
+            self.issued_row()
                 .into_iter()
                 .flat_map(|availability| availability.offers())
                 .filter_map(|offer| offer.proof()),
         )
     }
-
     fn permits(&self, ordinal: u32) -> bool {
         match self {
-            Self::NewProduct { .. } => true,
-            Self::Issued(availability) => availability.permits(ordinal),
-            Self::Completed(receipt) => receipt.row().permits(ordinal),
+            Self::PendingCurrent { .. } => true,
+            _ => self.issued_row().is_some_and(|row| row.permits(ordinal)),
         }
     }
 }
@@ -5520,7 +5545,7 @@ impl ReceiptSourceSelection {
 
     fn compiler_namespace_row(&self) -> CompilerNamespaceRow<'_> {
         let original = match self {
-            Self::Native { native, .. } => match native.version {
+            Self::Native { native, .. } => match native.version() {
                 ReceiptSourceVersion::Original | ReceiptSourceVersion::Fresh => Some(native),
                 ReceiptSourceVersion::RetainedCore => None,
             },
@@ -5772,10 +5797,10 @@ impl CertifiedSourceSelection {
         else {
             return Ok(None);
         };
-        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+        if !matches!(native.origin(), ReceiptNativeOrigin::NewProduct) {
             return Ok(None);
         }
-        let ReceiptOriginalIdentity::Bound(original) = native.original else {
+        let ReceiptOriginalIdentity::Bound(original) = native.original_identity() else {
             return Err(CertificationError::Mismatch(
                 "current product original identity is not bound",
             ));
@@ -5846,10 +5871,10 @@ impl CertifiedSourceSelection {
         else {
             return Ok(None);
         };
-        if matches!(native.origin, ReceiptNativeOrigin::Input) {
+        if matches!(native.origin(), ReceiptNativeOrigin::Input) {
             return Ok(None);
         }
-        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+        let Some(receipt) = native.state.completed() else {
             return Err(CertificationError::Mismatch(
                 "compiler output lacks physical completion",
             ));
@@ -5912,7 +5937,7 @@ impl CertifiedSourceSelection {
             return Ok(None);
         };
         if matches!(
-            native.origin,
+            native.origin(),
             ReceiptNativeOrigin::NewProduct | ReceiptNativeOrigin::PriorStageProduct
         ) {
             return Ok(None);
@@ -5921,7 +5946,7 @@ impl CertifiedSourceSelection {
             owner: owner.clone(),
             reason,
         };
-        if !matches!(native.version, ReceiptSourceVersion::Original) {
+        if !matches!(native.version(), ReceiptSourceVersion::Original) {
             return Err(refusal(InputDecisionRefusal::UnexpectedVersion));
         }
         let CertifiedInputOrigin::Continuation(source) = &self.input_origin else {
@@ -5958,10 +5983,7 @@ impl CertifiedSourceSelection {
             let ReceiptSourceSelection::Native { interface, native } = selected else {
                 continue;
             };
-            if !matches!(
-                native.availability,
-                ReceiptNativeAvailability::NewProduct { .. }
-            ) {
+            if !matches!(native.state, ReceiptNativeState::PendingCurrent { .. }) {
                 continue;
             }
             let id = native.original_artifact_id()?;
@@ -5985,7 +6007,10 @@ impl CertifiedSourceSelection {
                     "new product issued original identity",
                 ));
             }
-            native.availability = ReceiptNativeAvailability::Completed(Arc::clone(completed));
+            native.state = ReceiptNativeState::CompletedCurrent {
+                version: native.version(),
+                receipt: Arc::clone(completed),
+            };
         }
         self.modules = modules;
         self.private_native = carried;
@@ -6045,29 +6070,18 @@ impl CertifiedSourceSelection {
                         "request actual Original identity",
                     ));
                 }
-                let (origin, availability) = if let Some(receipt) = inputs.produced_source(entry)? {
-                    (
-                        ReceiptNativeOrigin::PriorStageProduct,
-                        ReceiptNativeAvailability::Completed(Arc::clone(receipt)),
-                    )
+                let state = if let Some(receipt) = inputs.produced_source(entry)? {
+                    ReceiptNativeState::CompletedPrior(Arc::clone(receipt))
                 } else {
-                    (
-                        ReceiptNativeOrigin::Input,
-                        ReceiptNativeAvailability::Issued(
-                            inputs.native_availability(original).ok_or(
-                                CertificationError::Mismatch("request original availability"),
-                            )?,
-                        ),
-                    )
+                    ReceiptNativeState::Input(inputs.native_availability(original).ok_or(
+                        CertificationError::Mismatch("request original availability"),
+                    )?)
                 };
                 ReceiptSourceSelection::Native {
                     interface: role.interface(),
                     native: ReceiptNativeSelection {
-                        original: ReceiptOriginalIdentity::Bound(original),
-                        origin,
                         owner: product.owner().clone(),
-                        version: ReceiptSourceVersion::Original,
-                        availability,
+                        state,
                     },
                 }
             } else {
@@ -6085,17 +6099,13 @@ impl CertifiedSourceSelection {
         &self,
     ) -> impl Iterator<Item = &Arc<crate::declaration_context::NativeTransportAvailability>> {
         self.native_selections()
-            .filter_map(|native| native.availability.issued_row())
+            .filter_map(|native| native.state.issued_row())
             .chain(self.private_native.issued())
     }
 
     pub(crate) fn has_unissued_current_native_products(&self) -> bool {
-        self.native_selections().any(|native| {
-            matches!(
-                native.availability,
-                ReceiptNativeAvailability::NewProduct { .. }
-            )
-        })
+        self.native_selections()
+            .any(|native| matches!(native.state, ReceiptNativeState::PendingCurrent { .. }))
     }
 
     pub(crate) fn complete_native_entries(
@@ -6107,10 +6117,7 @@ impl CertifiedSourceSelection {
         self.visible_modules()
             .filter_map(|(_, selected)| match selected {
                 ReceiptSourceSelection::Native { interface, native }
-                    if matches!(
-                        native.availability,
-                        ReceiptNativeAvailability::NewProduct { .. }
-                    ) =>
+                    if matches!(native.state, ReceiptNativeState::PendingCurrent { .. }) =>
                 {
                     Some((*interface, native))
                 }
@@ -6127,7 +6134,7 @@ impl CertifiedSourceSelection {
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         self.native_selections()
-            .flat_map(|native| native.availability.requirements())
+            .flat_map(|native| native.state.requirements())
             .chain(self.private_native.requirements())
     }
 
@@ -6137,11 +6144,11 @@ impl CertifiedSourceSelection {
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
         self.native_selections()
-            .flat_map(|native| match &native.availability {
-                ReceiptNativeAvailability::NewProduct { dependencies } => dependencies.as_slice(),
-                ReceiptNativeAvailability::Issued(_) | ReceiptNativeAvailability::Completed(_) => {
-                    &[]
-                }
+            .flat_map(|native| match &native.state {
+                ReceiptNativeState::PendingCurrent { dependencies, .. } => dependencies.as_slice(),
+                ReceiptNativeState::Input(_)
+                | ReceiptNativeState::CompletedCurrent { .. }
+                | ReceiptNativeState::CompletedPrior(_) => &[],
             })
     }
 
@@ -6167,7 +6174,7 @@ impl CertifiedSourceSelection {
         };
         let selected = self
             .native_selections()
-            .filter_map(|native| native.availability.issued_row().map(Arc::as_ref));
+            .filter_map(|native| native.state.issued_row().map(Arc::as_ref));
         for row in selected.chain(direct_private) {
             let Some(entry) = row.target_original(owner) else {
                 continue;
@@ -6285,10 +6292,10 @@ impl CertifiedSourceSelection {
         else {
             return Ok(None);
         };
-        if !matches!(native.origin, ReceiptNativeOrigin::PriorStageProduct) {
+        if !matches!(native.origin(), ReceiptNativeOrigin::PriorStageProduct) {
             return Ok(None);
         }
-        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+        let Some(receipt) = native.state.completed() else {
             return Err(CertificationError::Mismatch(
                 "prior Source lacks physical completion",
             ));
@@ -6322,10 +6329,10 @@ impl CertifiedSourceSelection {
         else {
             return Ok(None);
         };
-        if !matches!(native.origin, ReceiptNativeOrigin::NewProduct) {
+        if !matches!(native.origin(), ReceiptNativeOrigin::NewProduct) {
             return Ok(None);
         }
-        let ReceiptNativeAvailability::Completed(receipt) = &native.availability else {
+        let Some(receipt) = native.state.completed() else {
             return Err(CertificationError::Mismatch(
                 "produced Source lacks physical completion",
             ));
@@ -6418,7 +6425,7 @@ impl CertifiedSourceSelection {
             .native_selections()
             .find(|native| &native.owner == owner)
         {
-            if let ReceiptNativeAvailability::Completed(receipt) = &native.availability {
+            if let Some(receipt) = native.state.completed() {
                 return receipt
                     .support(key, group)
                     .map(CertifiedNativeGroupSupport::Issued);
@@ -6817,8 +6824,7 @@ impl CertifiedSourceSelection {
                     "native requirement compiler owner",
                 ));
             }
-            let ReceiptNativeAvailability::NewProduct { dependencies } = &mut native.availability
-            else {
+            let ReceiptNativeState::PendingCurrent { dependencies, .. } = &mut native.state else {
                 return Err(CertificationError::Mismatch(
                     "cannot amend an issued native offer",
                 ));
@@ -6841,12 +6847,12 @@ impl CertifiedSourceSelection {
             .native_selections()
             .find(|native| &native.owner == owner);
         if let Some(native) = own {
-            if let ReceiptNativeAvailability::Completed(receipt) = &native.availability {
+            if let Some(receipt) = native.state.completed() {
                 return Ok(NativeGroupCandidates::IssuedAvailability(
                     receipt.groups(key).collect(),
                 ));
             }
-            if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
+            if let ReceiptNativeState::PendingCurrent { dependencies, .. } = &native.state {
                 let groups = dependencies
                     .iter()
                     .filter(|proof| proof.original == key.artifact)
@@ -6869,7 +6875,7 @@ impl CertifiedSourceSelection {
         // A fresh body's immutable child graph grants its exact historical
         // descendants; it does not make those descendants new products.
         for native in self.native_selections() {
-            if let ReceiptNativeAvailability::NewProduct { dependencies } = &native.availability {
+            if let ReceiptNativeState::PendingCurrent { dependencies, .. } = &native.state {
                 candidates.extend(
                     dependencies
                         .iter()
@@ -6885,8 +6891,8 @@ impl CertifiedSourceSelection {
         if let CertifiedInputOrigin::Continuation(source) = &self.input_origin {
             // Finished current products retain their producer origin even after
             // their availability becomes an issued row. They are not old inputs.
-            let current_product =
-                own.is_some_and(|native| matches!(native.origin, ReceiptNativeOrigin::NewProduct));
+            let current_product = own
+                .is_some_and(|native| matches!(native.origin(), ReceiptNativeOrigin::NewProduct));
             // Even unavailable input must consult its old choice so a miss is
             // diagnosed rather than treated as an unconstrained fresh policy.
             if !current_product {
@@ -6939,8 +6945,8 @@ impl CertifiedSourceSelection {
             .native_selections()
             .find(|selected| &selected.owner == owner)
         {
-            return match &selected.availability {
-                ReceiptNativeAvailability::Issued(availability) => availability
+            return match &selected.state {
+                ReceiptNativeState::Input(availability) => availability
                     .dependency_support(
                         crate::artifact_inventory::NativeGroupKey {
                             artifact: original,
@@ -6949,14 +6955,15 @@ impl CertifiedSourceSelection {
                         owner,
                     )
                     .is_some(),
-                ReceiptNativeAvailability::Completed(receipt) => receipt
+                ReceiptNativeState::CompletedCurrent { receipt, .. }
+                | ReceiptNativeState::CompletedPrior(receipt) => receipt
                     .groups(crate::artifact_inventory::NativeGroupKey {
                         artifact: original,
                         original_ordinal: ordinal,
                     })
                     .next()
                     .is_some(),
-                ReceiptNativeAvailability::NewProduct { .. } => true,
+                ReceiptNativeState::PendingCurrent { .. } => true,
             };
         }
         if let Some(permitted) = self.private_native.permits(original, owner, ordinal) {
@@ -6967,15 +6974,16 @@ impl CertifiedSourceSelection {
             original_ordinal: ordinal,
         };
         self.native_selections()
-            .any(|selected| match &selected.availability {
-                ReceiptNativeAvailability::Issued(availability) => availability
+            .any(|selected| match &selected.state {
+                ReceiptNativeState::Input(availability) => availability
                     .dependency_support(key, owner)
                     .is_some_and(|support| support.groups().next().is_some()),
-                ReceiptNativeAvailability::Completed(receipt) => receipt
+                ReceiptNativeState::CompletedCurrent { receipt, .. }
+                | ReceiptNativeState::CompletedPrior(receipt) => receipt
                     .row()
                     .dependency_support(key, owner)
                     .is_some_and(|support| support.groups().next().is_some()),
-                ReceiptNativeAvailability::NewProduct { dependencies } => {
+                ReceiptNativeState::PendingCurrent { dependencies, .. } => {
                     dependencies.iter().any(|proof| {
                         proof
                             .selection
@@ -7022,21 +7030,12 @@ impl CertifiedSourceSelection {
             .get(&(unit.to_owned(), module.to_owned()))
             .and_then(ReceiptSourceSelection::native)
         {
-            match selected.version {
+            match selected.version() {
                 ReceiptSourceVersion::Original if version.is_none() => {
-                    match (&selected.origin, &selected.availability) {
-                        // The same program's produced Source retains its exact
-                        // completed issuer across stages. An initial Original
-                        // input does not acquire that derived identity.
-                        (
-                            ReceiptNativeOrigin::PriorStageProduct,
-                            ReceiptNativeAvailability::Completed(_),
-                        ) => {}
-                        _ => {
-                            return Err(CertificationError::Mismatch(
-                                "missing cached source version",
-                            ))
-                        }
+                    if !matches!(selected.state, ReceiptNativeState::CompletedPrior(_)) {
+                        return Err(CertificationError::Mismatch(
+                            "missing cached source version",
+                        ));
                     }
                 }
                 ReceiptSourceVersion::RetainedCore if version.is_some() => {
@@ -7065,7 +7064,7 @@ impl CertifiedSourceSelection {
             if version.is_some_and(|version| version != &selected.owner.module_version) {
                 return Err(CertificationError::Mismatch("source module version"));
             }
-            if ordinal.is_some_and(|ordinal| !selected.availability.permits(ordinal)) {
+            if ordinal.is_some_and(|ordinal| !selected.state.permits(ordinal)) {
                 return Err(CertificationError::OriginalAvailability(Box::new(
                     OriginalAvailabilityRefusal {
                         owner: selected.owner.clone(),
@@ -7259,11 +7258,10 @@ impl CertifiedSourceSelection {
                             product.module_interface(),
                         ),
                         native: ReceiptNativeSelection {
-                            original: ReceiptOriginalIdentity::Bound(entry.descriptor.id),
-                            origin: ReceiptNativeOrigin::NewProduct,
                             owner: witness.owner.clone(),
-                            version: ReceiptSourceVersion::Original,
-                            availability: ReceiptNativeAvailability::NewProduct {
+                            state: ReceiptNativeState::PendingCurrent {
+                                original: ReceiptOriginalIdentity::Bound(entry.descriptor.id),
+                                version: ReceiptSourceVersion::Original,
                                 dependencies: Vec::new(),
                             },
                         },
@@ -7301,14 +7299,14 @@ impl CertifiedSourceSelection {
             let ReceiptSourceSelection::Native { native, .. } = selected else {
                 continue;
             };
-            if !matches!(native.original, ReceiptOriginalIdentity::PendingProduct) {
+            if !matches!(
+                native.original_identity(),
+                ReceiptOriginalIdentity::PendingProduct
+            ) {
                 continue;
             }
-            if !matches!(native.origin, ReceiptNativeOrigin::NewProduct)
-                || !matches!(
-                    native.availability,
-                    ReceiptNativeAvailability::NewProduct { .. }
-                )
+            if !matches!(native.origin(), ReceiptNativeOrigin::NewProduct)
+                || !matches!(native.state, ReceiptNativeState::PendingCurrent { .. })
             {
                 return Err(CertificationError::Mismatch(
                     "pending original is not a current product",
@@ -7321,7 +7319,10 @@ impl CertifiedSourceSelection {
                     .ok_or(CertificationError::Mismatch(
                         "current product lacks its producing original identity",
                     ))?;
-            native.original = ReceiptOriginalIdentity::Bound(*actual);
+            let ReceiptNativeState::PendingCurrent { original, .. } = &mut native.state else {
+                unreachable!("checked pending current product")
+            };
+            *original = ReceiptOriginalIdentity::Bound(*actual);
         }
         Ok(())
     }
@@ -7414,11 +7415,10 @@ impl CertifiedSourceSelection {
             ReceiptSourceSelection::Native {
                 interface,
                 native: ReceiptNativeSelection {
-                    original: ReceiptOriginalIdentity::PendingProduct,
-                    origin: ReceiptNativeOrigin::NewProduct,
                     owner: owner.clone(),
-                    version,
-                    availability: ReceiptNativeAvailability::NewProduct {
+                    state: ReceiptNativeState::PendingCurrent {
+                        original: ReceiptOriginalIdentity::PendingProduct,
+                        version,
                         dependencies: Vec::new(),
                     },
                 },
@@ -7435,7 +7435,7 @@ impl CertifiedSourceSelection {
             else {
                 continue;
             };
-            if matches!(selected.version, ReceiptSourceVersion::RetainedCore) {
+            if matches!(selected.version(), ReceiptSourceVersion::RetainedCore) {
                 selected.owner.module_version = versions
                     .get(key)
                     .ok_or(CertificationError::Mismatch("retained derived identity"))?
@@ -32061,7 +32061,8 @@ pub(crate) mod tests {
                 })
             ));
             let quoter = issued
-                .data().recovery_products
+                .data()
+                .recovery_products
                 .iter()
                 .find(|product| product.owner().module == "Quoter")
                 .unwrap();
@@ -32247,7 +32248,8 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&{
                 let inventory = crate::artifact_inventory::ArtifactInventory::default();
                 let entries = initial
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .cloned()
                     .map(|product| {
@@ -32522,7 +32524,8 @@ None,
                 vec![&owner]
             );
             let current = issued
-                .data().recovery_products
+                .data()
+                .recovery_products
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
@@ -32532,7 +32535,8 @@ None,
                 .retained_core_products
                 .contains_original(current));
             let selected = issued
-                .data().groups
+                .data()
+                .groups
                 .iter()
                 .filter(|group| group.owner() == &owner)
                 .collect::<Vec<_>>();
@@ -32553,7 +32557,8 @@ None,
             }
             for old in &prior {
                 let retained = issued
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
@@ -32566,7 +32571,8 @@ None,
             expected_owners.insert(owner.clone());
             assert_eq!(
                 issued
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .map(|product| product.owner().clone())
                     .collect::<BTreeSet<_>>(),
@@ -32607,7 +32613,8 @@ None,
                 .iter()
                 .all(|group| group.origin() == ProductOrigin::RetainedCore
                     && issued
-                        .data().recovery_products
+                        .data()
+                        .recovery_products
                         .iter()
                         .any(|product| group.matches_original(product))));
             let mut duplicate = packet.clone();
@@ -33686,7 +33693,8 @@ None,
             .extend_issued_compiler_support(&{
                 let inventory = crate::artifact_inventory::ArtifactInventory::default();
                 let entries = initial
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .cloned()
                     .map(|product| {
@@ -33785,7 +33793,8 @@ None,
                 .extend_issued_compiler_support(&{
                     let inventory = crate::artifact_inventory::ArtifactInventory::default();
                     let entries = marker_certified
-                        .data().recovery_products
+                        .data()
+                        .recovery_products
                         .iter()
                         .cloned()
                         .map(|product| {
@@ -34009,7 +34018,8 @@ None,
             // handoff must preserve that issuance for a later notebook cell.
             let mut selection = certified.source_selection().clone();
             let output_entries = certified
-                .data().recovery_products
+                .data()
+                .recovery_products
                 .iter()
                 .cloned()
                 .map(|product| {
@@ -34067,7 +34077,8 @@ None,
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 certified
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .map(|product| product.owner().clone())
                     .collect::<BTreeSet<_>>(),
@@ -34075,7 +34086,8 @@ None,
                 "private original custody lost: iteration={index}, nonempty={nonempty}"
             );
             let current = certified
-                .data().recovery_products
+                .data()
+                .recovery_products
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
@@ -34198,7 +34210,8 @@ None,
             }
             for old in &prior {
                 let retained = certified
-                    .data().recovery_products
+                    .data()
+                    .recovery_products
                     .iter()
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
@@ -34484,7 +34497,8 @@ None,
         .with_module_interface(original.module_interface().clone())
         .unwrap();
         let groups = certified
-            .data().groups
+            .data()
+            .groups
             .iter()
             .filter(|group| group.owner() == original.owner())
             .cloned()
@@ -34516,7 +34530,8 @@ None,
                 .clone()
                 .extend_issued_compiler_support(&{
                     let entries = certified
-                        .data().recovery_products
+                        .data()
+                        .recovery_products
                         .iter()
                         .cloned()
                         .map(|product| {
@@ -34674,7 +34689,8 @@ None,
         assert_eq!(certified.data().recovery_products.len(), 1);
         assert_eq!(certified.data().module_interfaces.len(), 2);
         assert!(certified
-            .data().module_interfaces
+            .data()
+            .module_interfaces
             .iter()
             .any(|interface| interface.module() == "Types" && interface.core_bytes().is_none()));
         let mut missing = receipt.clone();
