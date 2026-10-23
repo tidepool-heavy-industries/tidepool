@@ -12593,7 +12593,25 @@ mod authored_publication_tests {
             Some(library(SessionId(4504))),
         );
         let source = original.mint_isolated_scope_with_lease().unwrap();
-        let view = original.compile_view_in(source.scope()).unwrap();
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        crate::session::world_cell_test_support::bootstrap_world_for(
+            &mut original,
+            &recipe,
+            &source,
+        );
+        let execution = Arc::new(
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut original,
+                source.original_source().clone(),
+                |session, _| session.begin_private_execution(source.scope()),
+            )
+            .unwrap(),
+        );
+        let view = execution.view().unwrap();
         let imports = view.turn_imports(&SourceImports::new());
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
         let specification = CellRecipe::new(
@@ -12614,41 +12632,13 @@ mod authored_publication_tests {
             view.injected_module_names(),
         )
         .unwrap();
-        let includes = view.include_paths(effects.include_paths());
-        let admitted = original
-            .with_source_compiler_transaction(
-                source.original_source().clone(),
-                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                crate::CompilerTransactionCancellation::new(),
-                None,
-                |_| {},
-                |session, report| {
-                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &includes,
-                        report,
-                    )
-                    .unwrap();
-                    session
-                        .admit_native_setup_cell_in(
-                            source.scope(),
-                            plan,
-                            Arc::new(specification.clone()),
-                            specification.specification_digest(),
-                            [1; 32],
-                            includes,
-                            None,
-                        )
-                        .unwrap()
-                },
-            )
-            .unwrap();
-        assert!(
-            matches!(admitted.close(), crate::CompilerTransactionClose::Clean),
-            "actual parsed setup must settle cleanly: {:?}",
-            admitted.close()
-        );
-        let admission = admitted.into_outcome().action;
+        let admission = crate::session::world_cell_test_support::plan_fixture_specification_for(
+            &mut original,
+            &source,
+            crate::session::world_cell_test_support::world_recipe(&specification),
+            execution,
+        )
+        .unwrap();
         let (_recipient_root, mut recipient) = startup_session();
         let unrelated = recipient.mint_isolated_scope_with_lease().unwrap();
         let child = recipient
@@ -13976,16 +13966,26 @@ mod authored_publication_tests {
         tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
             .unwrap();
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
-        tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_with_imports_in(
-                ScopeId::ROOT,
-                &["seed :: Int\nseed = 1"],
-                &super::super::SourceImports::new(),
-                settlement,
+        let public_source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        crate::session::world_cell_test_support::bootstrap_world_for(
+            &mut session,
+            &recipe,
+            &public_source,
+        );
+        let private = Arc::new(
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut session,
+                public_source.original_source().clone(),
+                |session, _| session.begin_private_execution(public_source.scope()),
             )
-        })
-        .unwrap();
-        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
+            .unwrap(),
+        );
+        let original_source = private.original_source().unwrap();
         let scope = private.private_scope();
         session.run_context.lexical_scope = scope;
         let view = session.state.compile_view_in(scope).unwrap();
@@ -14012,32 +14012,25 @@ mod authored_publication_tests {
             injected.clone(),
         )
         .unwrap();
-        let includes = view.include_paths(effects.include_paths());
-        let admission = session
-            .admit_planned_cell_for_execution(
-                private,
-                tidepool_testing::with_settlement(|settlement| {
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(includes.clone()),
-                        settlement,
-                    )
-                })
-                .unwrap(),
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [0; 32],
-                includes.clone(),
-                None,
-            )
-            .unwrap();
+        let admission = crate::session::world_cell_test_support::plan_fixture_specification_for(
+            &mut session,
+            &public_source,
+            crate::session::world_cell_test_support::world_recipe(&specification),
+            private,
+        )
+        .unwrap();
         let (checked, program) = tidepool_testing::with_settlement(|settlement| {
             compile_cell_program_admitted(admission.clone(), settlement)
         })
         .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session.begin_cell_program(program).unwrap().unwrap();
-        let item_admission = session.admit_checked_item(prefix.clone(), item).unwrap();
+        let item_admission = crate::session::world_cell_test_support::source_action_with_original(
+            &mut session,
+            original_source.clone(),
+            |session, _| session.admit_checked_item(prefix.clone(), item),
+        )
+        .unwrap();
         let generation = item_admission.generation();
         let TurnResult::Bind {
             bound, compiled, ..
@@ -14145,13 +14138,17 @@ mod authored_publication_tests {
         // Refused routes cannot consume the item reservation. Its authenticated
         // bind route still executes and alone advances the sealed prefix.
         assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| session.run_bind_with_sites(
-                "checked bind",
-                code,
-                page,
-                generation,
-                settlement
-            )),
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut session,
+                original_source,
+                |session, settlement| session.run_bind_with_sites(
+                    "checked bind",
+                    code,
+                    page,
+                    generation,
+                    settlement
+                )
+            ),
             Ok(ResidentOutcome::Completed { .. })
         ));
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);

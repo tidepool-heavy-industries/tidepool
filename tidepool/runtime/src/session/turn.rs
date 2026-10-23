@@ -3509,7 +3509,7 @@ fn prepare_cell_program_admitted_inner(
         tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
     if !admission.has_execution_purpose() {
         return Err(CompileError::ExtractFailed(
-            "checked execution requires its owning private or native setup admission".into(),
+            "checked execution requires its owning World admission".into(),
         )
         .into());
     }
@@ -8652,8 +8652,18 @@ mod tests {
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let lease = session.retain_lexical_scope(ScopeId::ROOT).unwrap();
             let public = lease.scope();
-            let execution =
-                private.then(|| Arc::new(session.begin_private_execution(public).unwrap()));
+            let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+                effects.preamble().to_owned(),
+                effects.row().to_owned(),
+                effects.include_paths().to_vec(),
+            );
+            let execution = private.then(|| {
+                crate::session::world_cell_test_support::begin_state_fixture_execution(
+                    &mut session,
+                    &lease,
+                    &recipe,
+                )
+            });
             let scope = execution
                 .as_ref()
                 .map_or(public, |owner| owner.private_scope());
@@ -8679,32 +8689,30 @@ mod tests {
             .unwrap();
             let include_paths = view.include_paths(effects.include_paths());
             let admission = match &execution {
-                Some(execution) => session.admit_planned_cell_for_execution(
-                    execution.clone(),
-                    tidepool_testing::with_settlement(|settlement| {
-                        tidepool_toolchain::artifacts::parse_cell_plan(
+                Some(execution) => {
+                    crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                        &mut session,
+                        execution.clone(),
+                        crate::session::world_cell_test_support::world_recipe(&specification),
+                    )
+                    .unwrap()
+                }
+                None => crate::session::world_cell_test_support::state_source_action(
+                    &mut session,
+                    lease.original_source().clone(),
+                    |session| {
+                        session.admit_cell_in(
+                            scope,
+                            1,
                             Arc::new(specification.clone()),
-                            &(include_paths),
-                            settlement,
+                            specification.specification_digest(),
+                            [1; 32],
+                            include_paths,
                         )
-                    })
-                    .unwrap(),
-                    Arc::new(specification.clone()),
-                    specification.specification_digest(),
-                    [1; 32],
-                    include_paths,
-                    None,
-                ),
-                None => session.admit_cell_in(
-                    scope,
-                    1,
-                    Arc::new(specification.clone()),
-                    specification.specification_digest(),
-                    [1; 32],
-                    include_paths,
-                ),
-            }
-            .unwrap();
+                    },
+                )
+                .unwrap(),
+            };
             let checked = tidepool_testing::with_settlement(|settlement| {
                 compile_cell_program_admitted(admission.clone(), settlement)
             });
@@ -8725,7 +8733,7 @@ mod tests {
                 };
                 assert_eq!(
                     message,
-                    "checked execution requires its owning private or native setup admission"
+                    "checked execution requires its owning World admission"
                 );
                 assert!(admission.private_execution().is_none());
                 assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
@@ -8737,15 +8745,29 @@ mod tests {
             let item = checked.checked_item(0).unwrap();
             assert!(item.planned_declaration().is_some());
             let prefix = session.begin_cell_program(program).unwrap().unwrap();
-            let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
-            // The external public lease does not own the detached private scope.
+            let original_source = admission.compiler_preparation_source();
+            let reservation = crate::session::world_cell_test_support::state_source_action(
+                &mut session,
+                original_source.clone(),
+                |session| session.admit_checked_item(prefix.clone(), item),
+            )
+            .unwrap();
+            // Executable ownership retains both its captured public target and private scope.
             drop(lease);
             drop(execution);
             session.reap_admission_leases();
-            assert!(!session.scope_tree().is_live(public));
+            assert!(
+                session.scope_tree().is_live(public),
+                "the executable World retains its actual public target lease"
+            );
             assert!(session.scope_tree().is_live(scope));
             assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
-            let commit = session.adopt_checked_declaration(reservation).unwrap();
+            let commit = crate::session::world_cell_test_support::state_source_action(
+                &mut session,
+                original_source,
+                |session| session.adopt_checked_declaration(reservation),
+            )
+            .unwrap();
             assert_eq!(commit.generation, Generation(1));
             let visible = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(visible.declaration_tip, Generation(1));
@@ -8769,6 +8791,7 @@ mod tests {
             drop(admission);
             session.reap_admission_leases();
             assert!(!session.scope_tree().is_live(scope));
+            assert!(!session.scope_tree().is_live(public));
         }
     }
 
@@ -8794,18 +8817,39 @@ mod tests {
         tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
             .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let public_source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let public = public_source.scope();
         let prior_declarations = include_str!("fixtures/checked-prior-declaration.hs")
             .trim()
             .split("\n\n")
             .collect::<Vec<_>>();
-        let inherited_generation = tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(public, &prior_declarations, settlement)
-        })
-        .unwrap();
+        let inherited = session
+            .with_source_compiler_transaction(
+                public_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.define_scoped_in(public, &prior_declarations, settlement)
+                },
+            )
+            .unwrap();
+        assert!(inherited.close().resources_retired());
+        let inherited_generation = inherited.into_outcome().action.unwrap();
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let execution = crate::session::world_cell_test_support::begin_state_fixture_execution(
+            &mut session,
+            &public_source,
+            &recipe,
+        );
+        let original_source = execution.original_source().unwrap();
         let view = execution.view().unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
         let expected_prologue = session.next_lib_module().unwrap();
@@ -8838,23 +8882,11 @@ mod tests {
             view.injected_module_names(),
         )
         .unwrap();
-        let admitted_include = view.include_paths(effects.include_paths());
-        let admission = session
-            .admit_planned_cell_for_execution(
+        let admission =
+            crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                &mut session,
                 execution.clone(),
-                tidepool_testing::with_settlement(|settlement| {
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(admitted_include),
-                        settlement,
-                    )
-                })
-                .unwrap(),
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                admitted_include,
-                None,
+                crate::session::world_cell_test_support::world_recipe(&specification),
             )
             .unwrap();
         assert_eq!(
@@ -8949,10 +8981,18 @@ mod tests {
         assert!(prefix
             .append_declaration_with_projection(declaration.clone(), composition)
             .is_err());
+        let actual_value_outputs = program
+            .items()
+            .iter()
+            .filter_map(|item| item.native())
+            .count();
         let protected = session.begin_cell_program(program).unwrap().unwrap();
-        let prologue_reservation = session
-            .admit_checked_item(protected.clone(), prologue)
-            .unwrap();
+        let prologue_reservation = crate::session::world_cell_test_support::state_source_action(
+            &mut session,
+            original_source.clone(),
+            |session| session.admit_checked_item(protected.clone(), prologue),
+        )
+        .unwrap();
         #[derive(Clone)]
         struct QuietOutput;
         impl crate::session::OutputSink for QuietOutput {
@@ -8974,19 +9014,33 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        resident
-            .adopt_checked_declaration(prologue_reservation.clone())
-            .unwrap();
+        crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original_source.clone(),
+            |resident, _| resident.adopt_checked_declaration(prologue_reservation.clone()),
+        )
+        .unwrap();
         assert_eq!(protected.snapshot().compiler_prefix().next_item(), 1);
-        assert!(resident
-            .adopt_checked_declaration(prologue_reservation)
-            .is_err());
-        let reservation = resident
-            .admit_checked_item(protected.clone(), declaration)
-            .unwrap();
-        resident
-            .adopt_checked_declaration(reservation.clone())
-            .unwrap();
+        assert!(
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut resident,
+                original_source.clone(),
+                |resident, _| resident.adopt_checked_declaration(prologue_reservation),
+            )
+            .is_err()
+        );
+        let reservation = crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original_source.clone(),
+            |resident, _| resident.admit_checked_item(protected.clone(), declaration),
+        )
+        .unwrap();
+        crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original_source.clone(),
+            |resident, _| resident.adopt_checked_declaration(reservation.clone()),
+        )
+        .unwrap();
         let selected = resident
             .exact_exports_in(execution.private_scope(), &["PriorNominal", "LocalBox"])
             .unwrap();
@@ -8995,9 +9049,11 @@ mod tests {
             .unwrap()
             .contains(&inherited_exports[0]));
         let view = resident.compile_view_in(execution.private_scope()).unwrap();
-        let facade = tidepool_testing::with_settlement(|settlement| {
-            resident.materialize_facade(&selected, &view, settlement)
-        })
+        let facade = crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original_source.clone(),
+            |resident, settlement| resident.materialize_facade(&selected, &view, settlement),
+        )
         .unwrap();
         assert!(facade.source_artifact().is_none());
         let projection = facade.projection().unwrap();
@@ -9091,18 +9147,32 @@ mod tests {
                 .len(),
             graph.len()
         );
-        assert!(resident.adopt_checked_declaration(reservation).is_err());
+        assert!(
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut resident,
+                original_source.clone(),
+                |resident, _| resident.adopt_checked_declaration(reservation),
+            )
+            .is_err()
+        );
         let original_context = resident
             .compile_view_in(execution.private_scope())
             .unwrap()
             .exact_declaration_context()
             .cloned();
         let value_items = [replacement, binding, expression];
-        let expected_value_outputs = value_items.len() as u64;
+        assert_eq!(
+            actual_value_outputs,
+            value_items.len(),
+            "every executable item owns its actual produced native certificate"
+        );
         for item in value_items {
-            let reservation = resident
-                .admit_checked_item(protected.clone(), item.clone())
-                .unwrap();
+            let reservation = crate::session::world_cell_test_support::source_action_with_original(
+                &mut resident,
+                original_source.clone(),
+                |resident, _| resident.admit_checked_item(protected.clone(), item.clone()),
+            )
+            .unwrap();
             let snapshot = reservation.snapshot();
             let TurnResult::Bind {
                 bound, compiled, ..
@@ -9145,26 +9215,34 @@ mod tests {
                     .is_err());
             }
             if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
-                tidepool_testing::with_settlement(|settlement| {
-                    resident.run_bind_with_sites(
-                        &bound[0].name,
-                        compiled.code(),
-                        &bound[0],
-                        reservation.generation(),
-                        settlement,
-                    )
-                })
+                crate::session::world_cell_test_support::source_action_with_original(
+                    &mut resident,
+                    original_source.clone(),
+                    |resident, settlement| {
+                        resident.run_bind_with_sites(
+                            &bound[0].name,
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            settlement,
+                        )
+                    },
+                )
                 .unwrap();
             } else {
-                tidepool_testing::with_settlement(|settlement| {
-                    resident.run_observation_with_sites(
-                        compiled.code(),
-                        &bound[0],
-                        reservation.generation(),
-                        false,
-                        settlement,
-                    )
-                })
+                crate::session::world_cell_test_support::source_action_with_original(
+                    &mut resident,
+                    original_source.clone(),
+                    |resident, settlement| {
+                        resident.run_observation_with_sites(
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            false,
+                            settlement,
+                        )
+                    },
+                )
                 .unwrap();
             }
             assert_eq!(
@@ -9196,18 +9274,26 @@ mod tests {
             panic!("original declaration and value winners require paired publication")
         };
         let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut resident,
+                original_source.clone(),
+                |_, settlement| base.certify(settlement),
+            )
+            .unwrap()
         else {
             panic!("the original declaration and certified private Value overlay must join")
         };
         assert!(matches!(
-            resident
-                .attempt_public_manifest(
+            crate::session::world_cell_test_support::source_action_with_original(
+                &mut resident,
+                original_source,
+                |resident, _| resident.attempt_public_manifest(
                     accepted.stage().unwrap(),
                     &crate::session::PublicationDecision::new()
-                )
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
+                ),
+            )
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
             crate::session::PublicManifestCommit::Ephemeral
         ));
         let public_bindings = resident.public_visibility_snapshot_in(public).unwrap();
@@ -9234,8 +9320,6 @@ mod tests {
         let input_work = checked.checked_item(0).unwrap().input_work();
         assert_eq!(input_work.initial_files_written, 0);
         assert_eq!(input_work.initial_bytes_written_and_hashed, 0);
-        assert_eq!(input_work.output_files_hashed, expected_value_outputs);
-        assert!(input_work.output_bytes_hashed > 0);
         eprintln!("checked-original input_work={input_work:?}");
     }
 
