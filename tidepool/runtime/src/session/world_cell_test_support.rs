@@ -320,35 +320,30 @@ where
                 panic!("checked value must compile a binding");
             };
             assert_eq!(bound.len(), 1);
-            let outcome = source_action_with_original(
-                resident,
-                original.clone(),
-                |resident, report| match item.kind() {
-                    tidepool_toolchain::checked_cell::CheckedItemKind::Bind => resident
-                        .run_bind_with_sites(
+            let outcome =
+                source_action_with_original(resident, original.clone(), |resident, report| {
+                    if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
+                        resident.run_bind_with_sites(
                             &bound[0].name,
                             compiled.code(),
                             &bound[0],
                             reservation.generation(),
                             report,
-                        ),
-                    tidepool_toolchain::checked_cell::CheckedItemKind::Expression => resident
-                        .run_observation_with_sites(
-                        compiled.code(),
-                        &bound[0],
-                        reservation.generation(),
-                        item.expression_lift().unwrap()
-                            == Some(
-                                tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
-                            ),
-                        report,
-                    ),
-                    tidepool_toolchain::checked_cell::CheckedItemKind::Declaration => {
-                        unreachable!()
+                        )
+                    } else {
+                        assert_eq!(
+                            item.kind(),
+                            tidepool_toolchain::checked_cell::CheckedItemKind::Expression
+                        );
+                        resident.run_observation_with_sites(
+                        compiled.code(), &bound[0], reservation.generation(),
+                        item.expression_lift().unwrap() == Some(
+                            tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
+                        ), report,
+                    )
                     }
-                },
-            )
-            .unwrap();
+                })
+                .unwrap();
             assert!(
                 matches!(outcome, ResidentOutcome::Completed { .. }),
                 "actual publication value must complete: {outcome:?}"
