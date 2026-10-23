@@ -1781,12 +1781,26 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
 }
 
 /// Availability is an issuance fact independent of compiler roles and execution.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum NativeOfferSnapshotBody {
     Empty(crate::artifact_inventory::ExactArtifactSelection),
     Partial(crate::artifact_inventory::ExactArtifactSelection),
     Full(crate::artifact_inventory::ExactArtifactSelection),
 }
+impl PartialEq for NativeOfferSnapshotBody {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Empty(left), Self::Empty(right))
+            | (Self::Partial(left), Self::Partial(right))
+            | (Self::Full(left), Self::Full(right)) => {
+                Arc::ptr_eq(left.snapshot(), right.snapshot())
+                    || left.snapshot() == right.snapshot()
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for NativeOfferSnapshotBody {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeOfferSnapshotFacts {
@@ -1796,6 +1810,8 @@ pub(crate) struct NativeOfferSnapshotFacts {
     pub(crate) body: NativeOfferSnapshotBody,
 }
 impl NativeOfferSnapshotFacts {
+    /// Offer identity describes selected semantics. Record equality separately
+    /// includes every stored proof fact so Merkle updates preserve exact bytes.
     pub(crate) fn identity(&self) -> Result<[u8; 32], crate::CompileError> {
         use sha2::{Digest, Sha256};
         let (mode, selection) = match &self.body {
@@ -3361,51 +3377,102 @@ mod projection_tests {
         assert!(base.get(&nodes[0]).unwrap().is_some());
     }
 
+    fn proof_only_native_offer(extra_unselected_node: bool) -> NativeOfferSnapshotFacts {
+        let scope = ArtifactSelectionId([1; 32]);
+        let binding = ArtifactBinding {
+            artifact: ArtifactId([2; 32]),
+            selection: scope,
+        };
+        let node = ArtifactBindingNode::Artifact(binding);
+        let mut nodes = vec![node];
+        if extra_unselected_node {
+            nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: scope,
+            }));
+        }
+        let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+            selection: scope,
+            nodes,
+            dependencies: vec![],
+        }));
+        let snapshot = Arc::new(ExactSelectionSnapshot {
+            scopes: [(scope, proof)].into_iter().collect(),
+            roots: [(node, ())].into_iter().collect(),
+            namespace: [(binding.artifact, binding)].into_iter().collect(),
+            custody_roots: Default::default(),
+        });
+        NativeOfferSnapshotFacts {
+            original: binding.artifact,
+            interface: ArtifactId([4; 32]),
+            owner: ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "Data".into(),
+            },
+            body: NativeOfferSnapshotBody::Full(
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(snapshot),
+            ),
+        }
+    }
+
+    #[test]
+    fn native_offer_full_proof_change_matches_cold_incremental_encoding() {
+        let before = proof_only_native_offer(false);
+        let after = proof_only_native_offer(true);
+        let (NativeOfferSnapshotBody::Full(left), NativeOfferSnapshotBody::Full(right)) =
+            (&before.body, &after.body)
+        else {
+            unreachable!()
+        };
+        assert_eq!(left, right, "selected semantics stay equal");
+        assert_ne!(before, after, "full durable records change");
+        let key = before.identity().unwrap();
+        assert_eq!(key, after.identity().unwrap());
+        let maps = |fact| PublicationNativeMaps {
+            roles: Default::default(),
+            offers: [(key, fact)].into_iter().collect(),
+            native_availability: Default::default(),
+        };
+        let base = PublicationNativeFacts::maintain(None, maps(before.clone())).unwrap();
+        let incremental =
+            PublicationNativeFacts::maintain(Some(&base), maps(after.clone())).unwrap();
+        let cold = PublicationNativeFacts::maintain(None, maps(after.clone())).unwrap();
+        assert_ne!(incremental.commitment(), base.commitment());
+        assert_eq!(incremental.commitment(), cold.commitment());
+        assert_eq!(incremental.offers[&key], after);
+
+        let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+        let install = |packet: StagedBlocks| {
+            for (cid, bytes) in packet.into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+        };
+        let mut snapshot = ExactContextSnapshot::empty();
+        snapshot.offers.insert(key, before);
+        let mut writer = Materializer::new(&store);
+        let base = writer.materialize_context(None, &snapshot).unwrap();
+        install(writer.finish().unwrap());
+        snapshot.offers.insert(key, after);
+        let mut writer = Materializer::new(&store);
+        let incremental = writer.materialize_context(Some(&base), &snapshot).unwrap();
+        install(writer.finish().unwrap());
+        let mut writer = Materializer::new(&store);
+        let cold = writer.materialize_context(None, &snapshot).unwrap();
+        assert_ne!(incremental.root(), base.root());
+        assert_eq!(incremental.root(), cold.root());
+        let decoded = hydrate_context(&store, incremental.root()).unwrap();
+        assert_eq!(decoded.snapshot().offers, snapshot.offers);
+    }
+
     #[test]
     fn key_projection_keeps_full_proof_bytes_when_observations_are_equal() {
-        fn data(extra_unselected_node: bool) -> NativeOfferSnapshotFacts {
-            let scope = ArtifactSelectionId([1; 32]);
-            let binding = ArtifactBinding {
-                artifact: ArtifactId([2; 32]),
-                selection: scope,
-            };
-            let node = ArtifactBindingNode::Artifact(binding);
-            let mut nodes = vec![node];
-            if extra_unselected_node {
-                nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
-                    artifact: ArtifactId([3; 32]),
-                    selection: scope,
-                }));
-            }
-            let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
-                selection: scope,
-                nodes,
-                dependencies: vec![],
-            }));
-            let snapshot = Arc::new(ExactSelectionSnapshot {
-                scopes: [(scope, proof)].into_iter().collect(),
-                roots: [(node, ())].into_iter().collect(),
-                namespace: [(binding.artifact, binding)].into_iter().collect(),
-                custody_roots: Default::default(),
-            });
-            NativeOfferSnapshotFacts {
-                original: binding.artifact,
-                interface: ArtifactId([4; 32]),
-                owner: ExactModuleIdentity {
-                    unit: "unit".into(),
-                    module: "Data".into(),
-                },
-                body: NativeOfferSnapshotBody::Full(
-                    crate::artifact_inventory::ExactArtifactSelection::from_snapshot(snapshot),
-                ),
-            }
-        }
         // Passive decoded DATA may claim the same scope identity with different
         // atomic proof bytes. This is not a pair of authenticated live issuers.
-        let a = data(false);
+        let a = proof_only_native_offer(false);
         let b: NativeOfferSnapshotFacts =
-            serde_json::from_slice(&serde_json::to_vec(&data(true)).unwrap()).unwrap();
-        assert_eq!(a, b, "selected observations omit the unselected proof node");
+            serde_json::from_slice(&serde_json::to_vec(&proof_only_native_offer(true)).unwrap())
+                .unwrap();
+        assert_ne!(a, b, "durable records preserve the unselected proof node");
         let key = a.identity().unwrap();
         assert_eq!(key, b.identity().unwrap());
         let maps = |fact| PublicationNativeMaps {
@@ -3435,7 +3502,7 @@ mod projection_tests {
                 &serde_json::to_vec(&mismatched).unwrap()
             )
             .is_err(),
-            "semantic Eq cannot associate foreign full facts with another owner's encoded root"
+            "foreign full facts cannot borrow another owner's encoded root"
         );
         let keys = PublicationNativeMapKeys {
             offers: std::collections::BTreeSet::from([key]),
