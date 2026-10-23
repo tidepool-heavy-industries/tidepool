@@ -96,12 +96,12 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The last settled validation candidate is `831d96eea1`: the 32-consumer compile
-stopped on a Haskell decoder reference and no tests executed. `65e2eb4ae0`
-repairs that failure and the independently found scaffold caller, removing its
-obsolete parameter and branch. Generated metadata is current; joined compilation,
-focused execution and two World-based regression replacements remain pending.
-See `STATE.md` for exact evidence and qualification limits.
+The last settled validation candidate is `65e2eb4ae0`: the 32-consumer compile
+passed the earlier decoder/scaffold repairs, then stopped on two stale local
+variable references; no tests executed. `33ae06028c` repairs both references
+and integrates the independently reviewed World-based regression replacements.
+Generated metadata is current; joined compilation and focused execution remain
+pending. See `STATE.md` for exact evidence and qualification limits.
 Adversarial closeout found a demand/catalog identity conflation and surviving
 test-only transport and SOURCE-authority issuers. The demand repair is integrated;
 test migrations and independent review remain open. The actual future-value
