@@ -1887,11 +1887,12 @@ impl crate::checked_cell::CellProgram {
         self: &Arc<Self>,
         predecessor: &Arc<CompilerWorld>,
         item: &crate::checked_cell::ExactCheckedItem,
-        joined: &Arc<crate::declaration_join::AcceptedJoin>,
-        projection_context: &Arc<ExactDeclarationContext>,
+        publication: &crate::declaration_join::PublicationComposition,
         import_lines: Vec<String>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<CompilerWorldBinding<'a>>)>,
     ) -> Result<CheckedWorldSuccessor, CompileError> {
+        let joined = publication.join();
+        let projection_context = publication.context();
         let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
             return Err(source_failure("finite declaration has no World successor"));
         };
@@ -1968,7 +1969,7 @@ impl crate::checked_cell::CellProgram {
         let declaration = predecessor
             .restoration
             .primary_compiler_inputs
-            .with_declaration_projection(joined, projection_context)?;
+            .with_declaration_projection(publication)?;
         let advance = declaration.with_native_completion_from(issued.compiler_context())?;
         tracing::debug!(target: "exomonad_harness::timing",
             promotion_qualifier_invocations = advance.promotion_qualifier_invocations,
@@ -2163,14 +2164,14 @@ impl CompilerWorld {
     /// the coherent context and inputs together in the returned product.
     pub fn prepare_declaration_publication(
         self: &Arc<Self>,
-        joined: &Arc<crate::declaration_join::AcceptedJoin>,
-        context: &Arc<ExactDeclarationContext>,
+        publication: &crate::declaration_join::PublicationComposition,
         import_lines: Vec<String>,
     ) -> Result<CompilerWorldDeclarationPublication, CompileError> {
+        let joined = publication.join();
         let advance = self
             .restoration
             .primary_compiler_inputs
-            .with_declaration_projection(joined, context)?;
+            .with_declaration_projection(publication)?;
         let lexical = CompilerWorldLexicalSurface::from_import_lines(
             import_lines,
             Some(WorldDeclarationSelection::Joined(joined.clone())),

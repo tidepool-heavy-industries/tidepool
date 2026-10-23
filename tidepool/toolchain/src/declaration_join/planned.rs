@@ -35,7 +35,7 @@ fn authored_support_context(
     }
     let context = match baseline {
         Some(context) => context.as_ref().clone(),
-        None => ExactDeclarationContext::new(&[], &[], vec![])?,
+        None => ExactDeclarationContext::empty(),
     };
     let support = support.source_support(&owners)?;
     Ok(Arc::new(context.extend_issued_compiler_support(&support)?))

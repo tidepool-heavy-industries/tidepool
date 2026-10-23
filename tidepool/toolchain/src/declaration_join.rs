@@ -28,8 +28,7 @@ pub use crate::declaration_context::{
 
 mod recovery;
 pub use recovery::{
-    certify_recovered_declaration_tip, certify_recovered_declaration_tip_in_context,
-    certify_recovered_declaration_tip_with_value_interfaces, RecoveredDeclarationTip,
+    certify_recovered_declaration_tip_in_context, RecoveredDeclarationTip,
     RecoveryDeclarationOrigin, RecoveryDeclarationSelection,
 };
 
@@ -303,13 +302,105 @@ impl NativeAuthoredDeclarationAdmission {
     }
 }
 
+/// Shared source permission issued by authored or strictly restored evidence.
+/// Interface inspection anchors and Original compiler roles are independent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdmittedDeclarationSurface {
+    roots: Vec<ExactModuleIdentity>,
+    lexical: Vec<ExactLexicalNode>,
+    source_originals: BTreeSet<ExactModuleIdentity>,
+    source_bindings: std::collections::BTreeMap<
+        ExactModuleIdentity,
+        (
+            crate::artifact_inventory::ArtifactBinding,
+            Option<crate::artifact_inventory::ArtifactBinding>,
+        ),
+    >,
+}
+
+impl AdmittedDeclarationSurface {
+    pub fn roots(&self) -> &[ExactModuleIdentity] {
+        &self.roots
+    }
+
+    pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
+        &self.lexical
+    }
+
+    pub(crate) fn retain_source_bindings(
+        &mut self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        rows: &[ExactLexicalNode],
+    ) -> Result<(), CompileError> {
+        for node in rows {
+            let row = support
+                .world_primary_type_row(&node.owner)
+                .ok_or_else(|| contract("publication source lacks its issued binding"))?;
+            let incoming = (row.interface_binding.clone(), row.original_binding.cloned());
+            if let Some(prior) = self.source_bindings.get(&node.owner) {
+                if prior != &incoming {
+                    return Err(contract(
+                        "publication surface substitutes its exact source binding",
+                    ));
+                }
+            } else {
+                self.source_bindings.insert(node.owner.clone(), incoming);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_source_bindings(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+    ) -> Result<(), CompileError> {
+        for (owner, (interface, original)) in &self.source_bindings {
+            let row = support
+                .world_primary_type_row(owner)
+                .ok_or_else(|| contract("publication source lacks its exact input binding"))?;
+            if row.interface_binding != interface || row.original_binding != original.as_ref() {
+                return Err(contract(
+                    "publication source binding differs from its exact input",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn source_originals(&self) -> &BTreeSet<ExactModuleIdentity> {
+        &self.source_originals
+    }
+}
+
+/// One accepted facade and the exact context issued for its publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationComposition {
+    join: Arc<AcceptedJoin>,
+    context: Arc<ExactDeclarationContext>,
+}
+
+impl PublicationComposition {
+    pub fn join(&self) -> &Arc<AcceptedJoin> {
+        &self.join
+    }
+
+    pub fn receipt(&self) -> &Arc<AcceptedJoin> {
+        &self.join
+    }
+
+    pub fn context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context
+    }
+}
+
 /// Shared source selection derived from one immutable original certificate.
 /// Session implementations remain dependencies, without selecting their names.
-pub struct OriginalSourceLexicalSurface {
+pub(crate) struct OriginalSourceLexicalSurface {
     pub roots: Vec<ExactModuleIdentity>,
     pub lexical: Vec<ExactLexicalNode>,
 }
 
+#[cfg(test)]
 fn original_source_lexical_surface(
     original: &ExactModuleIdentity,
     imports: &std::collections::BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
@@ -556,19 +647,46 @@ impl CertifiedAuthoredDeclaration {
         self.compiler_support.for_source_owners(&sources)
     }
 
-    /// Preserve strict shared-source traversal while excluding only certified
-    /// session implementation anchors from lexical selection.
-    pub fn shared_source_lexical_surface(
+    /// Extend an issued source surface without acquiring compiler roles from
+    /// either graph keys or broader artifact custody.
+    pub fn extend_source_surface(
         &self,
-        inherited: &[ExactLexicalNode],
-    ) -> Result<OriginalSourceLexicalSurface, CompileError> {
+        prior: &AdmittedDeclarationSurface,
+    ) -> Result<AdmittedDeclarationSurface, CompileError> {
         let lexical = crate::declaration_context::compose_lexical_nodes(
-            inherited.iter().chain(self.source_scope.rows()),
+            prior.lexical.iter().chain(self.source_scope.rows()),
         )?;
-        Ok(OriginalSourceLexicalSurface {
-            roots: self.source_roots.clone(),
+        let roots = prior
+            .roots
+            .iter()
+            .chain(&self.source_roots)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut source_originals = prior.source_originals.clone();
+        source_originals.extend(
+            self.compiler_support
+                .projection()
+                .snapshot_roles()
+                .iter()
+                .filter(|(owner, role)| {
+                    role.original().is_some() && self.source_scope.admits(owner)
+                })
+                .map(|(owner, _)| owner.clone()),
+        );
+        let mut surface = AdmittedDeclarationSurface {
+            roots,
             lexical,
-        })
+            source_originals,
+            source_bindings: prior.source_bindings.clone(),
+        };
+        surface.retain_source_bindings(&self.compiler_support, self.source_scope.rows())?;
+        Ok(surface)
+    }
+
+    pub(crate) fn source_roots(&self) -> &[ExactModuleIdentity] {
+        &self.source_roots
     }
 
     pub(crate) fn source_scope(&self) -> &crate::declaration_context::SourceLexicalScope {
@@ -759,7 +877,7 @@ fn certify_authored_declaration_inner(
     let scope_context = match context.as_deref() {
         Some(context) => context,
         None => {
-            empty_context = ExactDeclarationContext::new(&[], &[], Vec::new())?;
+            empty_context = ExactDeclarationContext::empty();
             &empty_context
         }
     };
@@ -1273,7 +1391,37 @@ fn require_owned_artifact_paths(
 /// Certify the owner's exact interface observation and retain its native context.
 /// The worker attests interface semantics, not unconsumed native bodies or scopes.
 /// Rejection is also bound to the request; runtime owns its staleness decision.
-pub fn certify_declaration_join(
+pub enum CertifiedPublicationJoin {
+    Accepted(PublicationComposition),
+    Rejected(RejectedJoin),
+}
+
+pub fn certify_publication_join(
+    spec: DeclarationJoinSpec,
+    inputs: crate::declaration_context::PublicationJoinInputs,
+    includes: &[PathBuf],
+    session_root: &Path,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<CertifiedPublicationJoin, CompileError> {
+    match certify_declaration_join(spec, inputs.interfaces, includes, session_root, settlement)? {
+        CertifiedDeclarationJoin::Accepted(join) => {
+            let join = Arc::new(join);
+            let context = join
+                .context
+                .clone()
+                .compose_joined_publication(&join, &inputs.surface)?;
+            Ok(CertifiedPublicationJoin::Accepted(PublicationComposition {
+                join,
+                context: Arc::new(context),
+            }))
+        }
+        CertifiedDeclarationJoin::Rejected(rejected) => {
+            Ok(CertifiedPublicationJoin::Rejected(rejected))
+        }
+    }
+}
+
+pub(crate) fn certify_declaration_join(
     spec: DeclarationJoinSpec,
     inputs: crate::declaration_context::DeclarationJoinInputs,
     includes: &[PathBuf],
@@ -2542,7 +2690,9 @@ mod authored_tests {
             unit: "main".into(),
             module: "PrefixUnrelatedSupport".into(),
         };
-        let source_surface = baseline.shared_source_lexical_surface(&[]).unwrap();
+        let source_surface = baseline
+            .extend_source_surface(&AdmittedDeclarationSurface::default())
+            .unwrap();
         assert!(source_surface.lexical.iter().any(|node| {
             node.owner == selected_support && node.imports == [transitive_support.clone()]
         }));
@@ -2571,26 +2721,23 @@ mod authored_tests {
         }
         let (endpoint, _) = crate::toolchain::bind_extract_endpoint().unwrap();
         let context = Arc::new(
-            ExactDeclarationContext::new(
-                std::slice::from_ref(&baseline),
-                &[],
-                vec![ExactLexicalNode {
-                    owner: ExactModuleIdentity {
-                        unit: baseline.product().owner().unit.clone(),
-                        module: baseline_module.module_name(),
-                    },
-                    imports: Vec::new(),
-                }],
-            )
-            .unwrap(),
+            ExactDeclarationContext::empty()
+                .admit_authored_publication(std::slice::from_ref(&baseline), &source_surface)
+                .unwrap(),
         );
+        let baseline_adjacency = context
+            .lexical_graph()
+            .iter()
+            .find(|node| node.owner.module == baseline_module.module_name())
+            .unwrap()
+            .clone();
         assert_ne!(context.toolchain_identity_sha256(), [0; 32]);
         assert_eq!(
             context.toolchain_identity_sha256(),
             baseline.toolchain_identity_sha256()
         );
         let module = SessionModule::lib(Generation(2));
-        let source = "module Tidepool.Session.Lib.G2 where\nimport Tidepool.Session.Lib.G1 (baseline)\nanswer = baseline + 1\n{-# NOINLINE answer #-}\n";
+        let source = "module Tidepool.Session.Lib.G2 where\nimport Tidepool.Session.Lib.G1 (baseline)\nimport PrefixUnrelatedSupport ()\nanswer = baseline + 1\n{-# NOINLINE answer #-}\n";
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
@@ -2600,7 +2747,7 @@ mod authored_tests {
             source,
             &[root.path().to_path_buf()],
             root.path(),
-            context,
+            context.clone(),
         )
         .expect("the authored probe must reach its native origin issuer in an exact context");
         assert_eq!(result.product.owner().module, module.module_name());
@@ -2628,6 +2775,16 @@ mod authored_tests {
             root.path(),
             endpoint.identity().producer_bytes(),
         );
+        let cumulative = result.extend_source_surface(&source_surface).unwrap();
+        assert!(cumulative.roots().contains(&transitive_support));
+        assert!(!source_surface.roots().contains(&transitive_support));
+        let prepared = context
+            .as_ref()
+            .clone()
+            .admit_authored_publication(&[Arc::new(result.clone())], &cumulative)
+            .unwrap();
+        assert_eq!(prepared.lexical_graph().iter().find(|node| node.owner == baseline_adjacency.owner), Some(&baseline_adjacency),
+            "later cumulative SOURCE roots cannot rewrite an earlier authored owner's issued adjacency");
         let result_owner = result.product().owner().clone();
         let result_interface = crate::artifact_inventory::ArtifactEntry::canonical(
             result.product().module_interface().unwrap().clone(),

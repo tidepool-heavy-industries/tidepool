@@ -16486,7 +16486,7 @@ mod tests {
                 context.extend_program_value_interface(value)
             } else {
                 let lexical = context.lexical_graph().to_vec();
-                context.extend_with_value_interfaces(&[value], lexical)
+                context.extend_with_value_interfaces(&[value])
             }
         };
         let expected = issuer.capture_graph_selection().native_groups;
@@ -16531,7 +16531,7 @@ mod tests {
                 let graph = following.artifact_view().capture_graph_selection();
                 let repeated = following
                     .clone()
-                    .extend_with_value_interfaces(&[first], following.lexical_graph().to_vec())
+                    .extend_with_value_interfaces(&[first])
                     .unwrap();
                 assert_eq!(repeated.artifact_view().capture_graph_selection(), graph);
                 assert_eq!(graph.native_groups, expected);

@@ -2031,7 +2031,7 @@ impl HostBindingInterfaceOffer {
         )?;
         let context = (*self.prototype.context)
             .clone()
-            .extend_with_value_interfaces(std::slice::from_ref(&certificate), Vec::new())?;
+            .project_host_type_interfaces(std::slice::from_ref(&certificate))?;
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
@@ -2658,10 +2658,11 @@ impl CheckedValueInputs {
                 }
                 context.clone()
             }
-            None => Arc::new((**context).clone().extend_with_value_interfaces(
-                std::slice::from_ref(&certificate),
-                context.lexical_graph().to_vec(),
-            )?),
+            None => Arc::new(
+                (**context)
+                    .clone()
+                    .extend_with_value_interfaces(std::slice::from_ref(&certificate))?,
+            ),
         };
         // Promote into the completed issuer before its existing physical
         // projection chooses the value's independently retained support.
@@ -3861,8 +3862,9 @@ impl ExactCompiledPrefix {
     pub fn append_declaration_with_projection(
         &self,
         item: ExactCheckedItem,
-        projection: Arc<crate::declaration_join::AcceptedJoin>,
+        publication: &crate::declaration_join::PublicationComposition,
     ) -> Result<Self, CompileError> {
+        let projection = publication.join();
         if item.index != self.next_item() || !Arc::ptr_eq(&item.cell, &self.cell) {
             return Err(failure(
                 "declaration is not the next original certified item of this cell",
@@ -3887,19 +3889,6 @@ impl ExactCompiledPrefix {
                 "declaration projection has another original implementation",
             ));
         }
-        let owner = crate::declaration_join::ExactModuleIdentity {
-            unit: original.owner().unit.clone(),
-            module: original.owner().module.clone(),
-        };
-        let mut lexical = projection.context().lexical_graph().to_vec();
-        let tip = lexical
-            .iter_mut()
-            .find(|node| node.owner == owner)
-            .ok_or_else(|| failure("declaration projection lacks its original lexical tip"))?;
-        tip.owner = crate::declaration_join::ExactModuleIdentity {
-            unit: projection.reserved().unit.clone(),
-            module: projection.reserved().module.clone(),
-        };
         let retained_projections = &self.cell.retained_projections;
         let initial = &self.cell.declaration_context;
         let initial_lexical = initial
@@ -3934,18 +3923,9 @@ impl ExactCompiledPrefix {
                 }
             }
         }
-        lexical.extend(
-            selected
-                .into_iter()
-                .map(|owner| initial_lexical[&owner].clone()),
-        );
-        let mut joins = vec![projection];
-        joins.extend_from_slice(retained_projections);
-        // The new projection and retained actor membranes can share source
-        // dependencies. Compose their selections through the context owner:
-        // equal rows are one authority, while conflicting edges remain invalid.
-        crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new())?
-            .extend_lexical_joins(&joins, &lexical)?;
+        // Each facade arrives paired with the exact selected context issued
+        // for it. Retained membranes keep their authenticated initial owner.
+        initial.as_ref().clone().admit_publication(publication)?;
         let mut next = self.clone();
         next.completed.push(CompletedCheckedItem::Declaration(item));
         Ok(next)

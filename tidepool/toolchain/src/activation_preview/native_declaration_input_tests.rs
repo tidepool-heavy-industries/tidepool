@@ -399,7 +399,7 @@ pub(crate) fn with_irrelevant_values_named(
     }
     let expanded = (**context)
         .clone()
-        .extend_with_value_interfaces(&values, lexical.clone())
+        .extend_with_value_interfaces(&values)
         .unwrap();
     Arc::new(
         ExactDeclarationContext::from_authenticated_execution(

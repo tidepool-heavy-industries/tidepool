@@ -4787,9 +4787,10 @@ impl RequestCompilerInputs {
     /// does not contain that newly issued facade.
     pub(crate) fn with_declaration_projection(
         self: &Arc<Self>,
-        joined: &Arc<crate::declaration_join::AcceptedJoin>,
-        projection_context: &Arc<ExactDeclarationContext>,
+        publication: &crate::declaration_join::PublicationComposition,
     ) -> Result<WorldPrimaryProgramSupport, CompileError> {
+        let joined = publication.join();
+        let projection_context = publication.context();
         let owner = identity(joined.interface().unit(), joined.interface().module());
         let incoming = joined.compiler_source_support();
         if joined.toolchain_identity_sha256() != projection_context.owner.facts.producer
@@ -6596,6 +6597,17 @@ pub(crate) struct RecoveryInspectionInputs(CertifiedInterfaceInputs);
 
 /// Owner-issued interface observation; native bindings remain in its context.
 pub struct DeclarationJoinInputs(CertifiedInterfaceInputs);
+pub struct PublicationJoinInputs {
+    pub(crate) interfaces: DeclarationJoinInputs,
+    pub(crate) surface: crate::declaration_join::AdmittedDeclarationSurface,
+}
+
+impl PublicationJoinInputs {
+    pub fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
+        self.interfaces.interface(owner)
+    }
+}
+
 impl DeclarationJoinInputs {
     pub fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
         self.0.interface(owner)
@@ -13430,7 +13442,105 @@ impl ExactDeclarationContext {
         Self::from_facts(facts)
     }
 
-    pub fn new(
+    pub fn empty() -> Self {
+        Self::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
+            compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
+            producer: [0; 32],
+            lexical: crate::exact_context::ExactLexicalSnapshot::default(),
+            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+            template_imports: None,
+        })
+    }
+
+    /// Prepare exact authored inputs; inspection interfaces are retained by
+    /// their issuers without becoming lexical rows or Original selections.
+    pub fn admit_authored_publication(
+        self,
+        authored: &[Arc<CertifiedAuthoredDeclaration>],
+        surface: &crate::declaration_join::AdmittedDeclarationSurface,
+    ) -> Result<Self, CompileError> {
+        let mut selected = self
+            .compiler_source_support()
+            .projection()
+            .snapshot_roles()
+            .iter()
+            .filter(|(_, role)| role.original().is_some())
+            .map(|(owner, _)| owner.clone())
+            .collect::<BTreeSet<_>>();
+        selected.extend(surface.source_originals().iter().cloned());
+        let mut lexical = surface.lexical_graph().to_vec();
+        for certificate in authored {
+            let owner = identity(
+                &certificate.product().owner().unit,
+                &certificate.product().owner().module,
+            );
+            selected.insert(owner.clone());
+            lexical.push(ExactLexicalNode {
+                owner,
+                imports: certificate.source_roots().to_vec(),
+            });
+        }
+        let lexical = compose_lexical_nodes(self.lexical_graph().iter().chain(&lexical))?;
+        self.extend_selected(authored, &[], lexical, &selected)
+    }
+
+    /// Issue a facade and its selected context as one indivisible publication.
+    pub(crate) fn compose_joined_publication(
+        mut self,
+        join: &Arc<AcceptedJoin>,
+        surface: &crate::declaration_join::AdmittedDeclarationSurface,
+    ) -> Result<Self, CompileError> {
+        let updated = self
+            .compiler_source_support()
+            .for_source_owners(surface.source_originals())?;
+        self = self.rebuild(|facts| facts.compiler_support = updated);
+        let facade = ExactLexicalNode {
+            owner: identity(&join.reserved().unit, &join.reserved().module),
+            imports: surface.roots().to_vec(),
+        };
+        let lexical = compose_lexical_nodes(
+            surface
+                .lexical_graph()
+                .iter()
+                .chain(std::iter::once(&facade)),
+        )?;
+        self.extend_selected(
+            &[],
+            std::slice::from_ref(join),
+            lexical,
+            surface.source_originals(),
+        )
+    }
+
+    /// Compose only a publication's already issued source and compiler roles.
+    pub fn admit_publication(
+        mut self,
+        publication: &crate::declaration_join::PublicationComposition,
+    ) -> Result<Self, CompileError> {
+        let incoming = publication.context();
+        self = self.admit_producer(incoming.toolchain_identity_sha256())?;
+        let support = self
+            .compiler_source_support()
+            .merge(incoming.compiler_source_support())?;
+        let lexical =
+            compose_lexical_nodes(self.lexical_graph().iter().chain(incoming.lexical_graph()))?;
+        let scope = self
+            .source_scope()
+            .append_admitted(incoming.source_scope().rows().iter().cloned())?;
+        scope.validate_support(&support)?;
+        let lexical = self.owner.facts.lexical.replace(lexical)?;
+        self = self.rebuild(|facts| {
+            facts.compiler_support = support;
+            facts.lexical = lexical;
+            facts.source_scope = scope;
+            facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+        });
+        self.finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(
         authored: &[Arc<CertifiedAuthoredDeclaration>],
         joins: &[Arc<AcceptedJoin>],
         lexical: Vec<ExactLexicalNode>,
@@ -13492,11 +13602,23 @@ impl ExactDeclarationContext {
 
     /// Merge immutable custody and issued source roles, replacing the selected
     /// lexical graph. One compiler namespace offers at most one original.
-    pub fn extend(
+    #[cfg(test)]
+    pub(crate) fn extend(
+        self,
+        authored: &[Arc<CertifiedAuthoredDeclaration>],
+        joins: &[Arc<AcceptedJoin>],
+        lexical: Vec<ExactLexicalNode>,
+    ) -> Result<Self, CompileError> {
+        let selected = lexical.iter().map(|node| node.owner.clone()).collect();
+        self.extend_selected(authored, joins, lexical, &selected)
+    }
+
+    fn extend_selected(
         mut self,
         authored: &[Arc<CertifiedAuthoredDeclaration>],
         joins: &[Arc<AcceptedJoin>],
         lexical: Vec<ExactLexicalNode>,
+        selected_sources: &BTreeSet<ExactModuleIdentity>,
     ) -> Result<Self, CompileError> {
         let prior_scope = self.source_scope().clone();
         let prior_support = self.compiler_source_support().clone();
@@ -13512,19 +13634,15 @@ impl ExactDeclarationContext {
                 ),
             )?
         };
-        let selected_sources = lexical
-            .iter()
-            .map(|node| node.owner.clone())
-            .collect::<BTreeSet<_>>();
         for certificate in authored {
             self = self.admit_producer(certificate.toolchain_identity_sha256())?;
-            let incoming = certificate.publication_compiler_support(&selected_sources)?;
+            let incoming = certificate.publication_compiler_support(selected_sources)?;
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }
         for join in joins {
             self = self.admit_producer(join.toolchain_identity_sha256())?;
-            let incoming = join.publication_compiler_support(&selected_sources)?;
+            let incoming = join.publication_compiler_support(selected_sources)?;
             let updated = self.owner.facts.compiler_support.merge(&incoming)?;
             self = self.rebuild(|facts| facts.compiler_support = updated);
         }
@@ -13561,7 +13679,8 @@ impl ExactDeclarationContext {
     /// Add issued joins and their selected lexical nodes without duplicating
     /// an already retained owner. Equal import sets are idempotent; different
     /// selections for the same owner remain a conflict.
-    pub fn extend_lexical_joins(
+    #[cfg(test)]
+    pub(crate) fn extend_lexical_joins(
         self,
         joins: &[Arc<AcceptedJoin>],
         lexical: &[ExactLexicalNode],
@@ -13705,7 +13824,7 @@ impl ExactDeclarationContext {
         artifacts: &ArtifactView,
         projection: CompilerInputProjection,
     ) -> Result<Self, CompileError> {
-        let mut context = Self::new(&[], &[], Vec::new())?;
+        let mut context = Self::empty();
         context = context.admit_producer(producer)?;
         let projection = projection.interface_only();
         projection.validate(artifacts)?;
@@ -13893,7 +14012,7 @@ impl ExactDeclarationContext {
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
-        let mut context = Self::new(&[], &[], Vec::new())?;
+        let mut context = Self::empty();
         context = context.admit_producer(producer)?;
         for descriptor in support.artifacts().descriptors() {
             context = context.admit_producer(descriptor.producer_sha256)?;
@@ -14675,7 +14794,6 @@ impl ExactDeclarationContext {
     pub fn extend_with_value_interfaces(
         mut self,
         values: &[Arc<CertifiedValueInterface>],
-        lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.value_context_extension",
@@ -14693,10 +14811,6 @@ impl ExactDeclarationContext {
         timing.advance("update_context_facts");
         self = self.rebuild(|facts| facts.compiler_support = updated);
         {
-            let updated = self.owner.facts.lexical.replace(lexical)?;
-            self = self.rebuild(|facts| facts.lexical = updated);
-        }
-        {
             let updated = OriginalInstanceEnvironment::Unknown;
             self = self.rebuild(|facts| facts.original_instance_environment = updated);
         }
@@ -14704,6 +14818,19 @@ impl ExactDeclarationContext {
         let result = self.finish();
         timing.finish(result.is_ok());
         result
+    }
+
+    /// Host operands expose TYPE interfaces without inherited source policy.
+    pub(crate) fn project_host_type_interfaces(
+        self,
+        values: &[Arc<CertifiedValueInterface>],
+    ) -> Result<Self, CompileError> {
+        self.extend_with_value_interfaces(values)?
+            .rebuild(|facts| {
+                facts.lexical = Default::default();
+                facts.source_scope = Default::default();
+            })
+            .finish()
     }
 
     #[tracing::instrument(
@@ -14814,8 +14941,7 @@ impl ExactDeclarationContext {
     ) -> Result<Self, CompileError> {
         // Keep the same boundary as World publication: nominal requirements
         // travel in the certified interface, not the accumulated lexical graph.
-        let lexical = self.owner.facts.lexical.to_vec();
-        self.extend_with_value_interfaces(&[value], lexical)
+        self.extend_with_value_interfaces(&[value])
     }
 
     /// Logical identity is independent of materialization paths and of the
@@ -15497,6 +15623,47 @@ impl ExactDeclarationContext {
         Arc::new(self.clone())
             .materialize_interface_inputs(directory, self.compiler_metadata_snapshot()?)
             .map(DeclarationJoinInputs)
+    }
+
+    /// Bind a publication's exact source projection before the compiler
+    /// accepts its facade. Later consumers cannot replace these inputs.
+    pub fn publication_join_inputs(
+        &self,
+        directory: Arc<tempfile::TempDir>,
+        surface: &crate::declaration_join::AdmittedDeclarationSurface,
+    ) -> Result<PublicationJoinInputs, CompileError> {
+        for row in surface.lexical_graph() {
+            if self.source_scope().imports(&row.owner) != Some(row.imports.as_slice()) {
+                return Err(failure(
+                    "publication source adjacency differs from its exact input",
+                ));
+            }
+        }
+        if surface
+            .roots()
+            .iter()
+            .any(|owner| !self.source_scope().admits(owner))
+        {
+            return Err(failure(
+                "publication source root is outside its exact input",
+            ));
+        }
+        let roles = self.compiler_source_support().projection().snapshot_roles();
+        if surface.source_originals().iter().any(|owner| {
+            roles
+                .get(owner)
+                .is_none_or(|role| role.original().is_none())
+                || !self.source_scope().admits(owner)
+        }) {
+            return Err(failure(
+                "publication Original source selection differs from its exact input",
+            ));
+        }
+        surface.validate_source_bindings(self.compiler_source_support())?;
+        Ok(PublicationJoinInputs {
+            interfaces: self.declaration_join_inputs(directory)?,
+            surface: surface.clone(),
+        })
     }
 
     pub(crate) fn recovery_inspection_inputs(
@@ -29240,7 +29407,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             old_context
                 .as_ref()
                 .clone()
-                .extend_with_value_interfaces(&values, vec![])
+                .extend_with_value_interfaces(&values)
                 .unwrap()
                 .extend_lexical_joins(&[], &shared)
                 .unwrap(),
@@ -29965,7 +30132,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         for context in [
             (*context)
                 .clone()
-                .extend_with_value_interfaces(&[receiver_value_interface()], vec![])
+                .extend_with_value_interfaces(&[receiver_value_interface()])
                 .unwrap(),
             (*context)
                 .clone()
@@ -30904,13 +31071,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 }
             })
             .unwrap()
-            .extend_with_value_interfaces(
-                &[value.clone()],
-                vec![ExactLexicalNode {
-                    owner: source.clone(),
-                    imports: vec![],
-                }],
-            )
+            .extend_with_value_interfaces(&[value.clone()])
             .unwrap();
         let support = context
             .compiler_source_support()

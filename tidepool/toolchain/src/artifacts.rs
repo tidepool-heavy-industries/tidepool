@@ -1419,7 +1419,7 @@ fn checked_offer_context(
     match context {
         Some(context) => Ok(context),
         None => Ok(Arc::new(
-            crate::declaration_join::ExactDeclarationContext::new(&[], &[], Vec::new())?,
+            crate::declaration_join::ExactDeclarationContext::empty(),
         )),
     }
 }
