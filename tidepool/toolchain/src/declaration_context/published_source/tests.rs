@@ -1523,13 +1523,14 @@ impl ExactDeclarationContext {
                 crate::artifact_inventory::InputNativeDecision::UnissuedPolicy,
             ), "publication and continuation cannot issue a native choice from retained availability");
         };
-        let assert_empty_request_choice = |support: &crate::artifact_inventory::CompilerSourceSupport| {
-            assert_acquisition(support);
-            assert!(matches!(
+        let assert_empty_request_choice =
+            |support: &crate::artifact_inventory::CompilerSourceSupport| {
+                assert_acquisition(support);
+                assert!(matches!(
                 support.compiler_roles().native_decision(owner),
                 crate::artifact_inventory::InputNativeDecision::IssuedChoices(groups) if groups.is_empty(),
             ), "request construction issues an explicit empty choice without demanding retained availability");
-        };
+            };
         let context = self
             .published_context_for_root(owner, expected.descriptor.id)
             .unwrap()
@@ -1591,6 +1592,64 @@ impl ExactDeclarationContext {
             .unwrap();
         assert_unissued(world.context().compiler_source_support());
         assert_empty_request_choice(world.inputs().compiler_source_support());
+        let catalog_entry = &world.inputs().metadata().retained.artifacts[&expected.descriptor.id];
+        let incoming_entry = incoming
+            .compiler_roles()
+            .original_acquisition(owner)
+            .unwrap();
+        if !Arc::ptr_eq(incoming_entry, expected) {
+            assert!(
+                !Arc::ptr_eq(catalog_entry, expected),
+                "crossed observations must remain distinct at the demand boundary"
+            );
+        }
+        let demanded = world
+            .inputs()
+            .demanded_compiler_projection(
+                &BTreeSet::from([owner.clone()]),
+                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+            )
+            .expect(
+                "actual request demand preserves its selected acquisition through crossed custody",
+            );
+        assert!(Arc::ptr_eq(
+            demanded
+                .compiler_roles()
+                .original_acquisition(owner)
+                .unwrap(),
+            expected,
+        ));
+        assert!(Arc::ptr_eq(&demanded.metadata().entries[owner], expected));
+        let custody_only = incoming
+            .compiler_roles()
+            .keys()
+            .find(|candidate| {
+                world
+                    .inputs()
+                    .compiler_source_support()
+                    .compiler_roles()
+                    .get(candidate)
+                    .is_none()
+            })
+            .expect("actual completed cohort includes an unselected role")
+            .clone();
+        assert!(world
+            .inputs()
+            .metadata()
+            .retained
+            .artifacts
+            .values()
+            .any(|entry| entry.descriptor.owner == custody_only));
+        assert!(
+            world
+                .inputs()
+                .demanded_compiler_projection(
+                    &BTreeSet::from([custody_only]),
+                    &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                )
+                .is_err(),
+            "retained custody does not issue a missing compiler role"
+        );
         let additions = incoming
             .compiler_roles()
             .keys()

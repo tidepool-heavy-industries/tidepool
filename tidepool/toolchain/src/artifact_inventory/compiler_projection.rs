@@ -1759,51 +1759,6 @@ impl RecordedInputNativeDecisions {
         }
     }
 
-    pub(crate) fn from_certified_continuation(
-        selection: &crate::certified_products::CertifiedSourceSelection,
-        projection: &CompilerInputProjection,
-    ) -> Result<Self, CompileError> {
-        use crate::certified_products::{CertificationError, InputDecisionRefusal};
-        let mut result = Self::default();
-        for (owner, role) in projection.snapshot_roles() {
-            let Some(original) = role.original() else {
-                continue;
-            };
-            let Some((source, native_owner)) = selection
-                .continuation_input(owner)
-                .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-            else {
-                continue;
-            };
-            let refusal = |reason| {
-                CompileError::CompilerEvidence(Box::new(CertificationError::InputDecision {
-                    owner: owner.clone(),
-                    reason,
-                }))
-            };
-            let choices = match source
-                .checked_native_input_decision(original, role.interface(), native_owner)
-                .map_err(refusal)?
-            {
-                InputNativeDecision::IssuedChoices(choices) => choices,
-                InputNativeDecision::UnissuedPolicy => {
-                    return Err(refusal(InputDecisionRefusal::MissingDecision));
-                }
-            };
-            if !matches!(role, CompilerInputRole::ReusableOriginal { .. }) {
-                return Err(refusal(InputDecisionRefusal::RoleMismatch));
-            }
-            result.facts.insert(
-                owner.clone(),
-                RecordedInputNativeDecision {
-                    role: role.recorded_fact(),
-                    groups: choices.clone(),
-                },
-            );
-        }
-        Ok(result)
-    }
-
     pub(crate) fn recorded_facts(
         &self,
     ) -> &imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision> {
@@ -2821,12 +2776,17 @@ impl crate::declaration_context::RequestCompilerInputs {
             {
                 crate::host_work::checkpoint()?;
                 work.payload_lookups += 1;
-                let acquired = retained.artifacts.get(&binding.artifact).ok_or_else(|| {
+                let retained_entry = retained.artifacts.get(&binding.artifact).ok_or_else(|| {
                     failure("demanded compiler payload is outside request custody")
                 })?;
-                if binding.artifact != entry.descriptor.id || !Arc::ptr_eq(acquired, entry) {
+                // The catalog retains certified byte facts; the selected row
+                // owns this request's acquisition. Equal facts can have separate
+                // source observations, so catalog object identity cannot choose it.
+                if binding.artifact != entry.descriptor.id
+                    || retained_entry.descriptor != entry.descriptor
+                {
                     return Err(failure(
-                        "demanded compiler row differs from its acquired request payload",
+                        "demanded compiler row differs from retained certified facts",
                     ));
                 }
                 if original {
