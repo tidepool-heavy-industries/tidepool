@@ -1584,7 +1584,7 @@ impl WorldPrimaryProgramSupport {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct NativeTransportAvailability {
     original: Arc<ArtifactEntry>,
     canonical: ArtifactId,
@@ -1687,7 +1687,41 @@ pub(crate) fn validate_current_stage_native_inputs<'a>(
     Ok(())
 }
 
+fn same_native_contribution_acquisitions(
+    left: &[Arc<crate::artifact_inventory::NativeOfferContribution>],
+    right: &[Arc<crate::artifact_inventory::NativeOfferContribution>],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|contribution| {
+            right
+                .iter()
+                .any(|other| contribution.same_acquisition(other))
+        })
+}
+
+fn same_native_contribution_facts(
+    left: &[Arc<crate::artifact_inventory::NativeOfferContribution>],
+    right: &[Arc<crate::artifact_inventory::NativeOfferContribution>],
+) -> bool {
+    left.iter().all(|contribution| {
+        right
+            .iter()
+            .any(|other| contribution.same_recorded_facts(other))
+    }) && right.iter().all(|contribution| {
+        left.iter()
+            .any(|other| contribution.same_recorded_facts(other))
+    })
+}
+
 impl NativeTransportAvailability {
+    fn same_acquisition(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.original, &other.original)
+            && self.canonical == other.canonical
+            && self.mode == other.mode
+            && self.classification == other.classification
+            && same_native_contribution_acquisitions(&self.contributions, &other.contributions)
+    }
+
     /// Lend the contribution for an exact choice already held by its selector.
     /// This observes availability; the caller must retain the selecting owner.
     pub(crate) fn exact_group_support(
@@ -2007,7 +2041,7 @@ impl NativeAvailabilitySnapshotFacts {
 /// Only native selection issuance constructs a nonempty component; clones retain its
 /// exact payload owners and opaque availability handles. The second persistent root
 /// records those same rows for capture without a deferred row/contribution census.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RequestNativeAvailability(
     Arc<imbl::OrdMap<ArtifactId, Arc<NativeTransportAvailability>>>,
     imbl::OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
@@ -2262,6 +2296,10 @@ impl RequestNativeAvailability {
         self.0.get(&key.artifact)?.dependency_support(key, owner)
     }
 
+    pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+
     pub(crate) fn same_acquisition(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -2285,38 +2323,56 @@ impl RequestNativeAvailability {
             rows.insert(id, row);
             return Ok(NativeAvailabilityRowMerge::Changed);
         };
-        if previous == &row {
+        if previous.same_acquisition(&row) {
             return Ok(NativeAvailabilityRowMerge::Unchanged);
         }
-        if previous.original != row.original || previous.canonical != row.canonical {
+        if previous.original.fact_owner() != row.original.fact_owner()
+            || previous.original.descriptor != row.original.descriptor
+            || previous.original.requirements != row.original.requirements
+            || previous.canonical != row.canonical
+        {
             return Err(failure("normalized native owner differs"));
         }
-        let mut contributions = BTreeMap::new();
+        let mut contributions = BTreeMap::<
+            [u8; 32],
+            Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
+        >::new();
         for contribution in previous
             .contributions
             .iter()
             .chain(row.contributions.iter())
         {
-            contributions
-                .entry(contribution.identity()?)
-                .or_insert_with(|| Arc::clone(contribution));
+            let alternatives = contributions.entry(contribution.identity()?).or_default();
+            if !alternatives
+                .iter()
+                .any(|prior| prior.same_acquisition(contribution))
+            {
+                alternatives.push(Arc::clone(contribution));
+            }
         }
-        rows.insert(
-            id,
-            Arc::new(NativeTransportAvailability {
-                original: Arc::clone(&previous.original),
-                canonical: previous.canonical,
-                mode: if previous.mode == NativeTransportMode::Full
-                    || row.mode == NativeTransportMode::Full
-                {
-                    NativeTransportMode::Full
-                } else {
-                    NativeTransportMode::IssuedGroups
-                },
-                classification: previous.classification,
-                contributions: contributions.into_values().collect::<Vec<_>>().into(),
-            }),
-        );
+        let updated = NativeTransportAvailability {
+            // This representative belongs to the receiving row. Each actual
+            // alternative keeps its own issued offer and payload acquisition.
+            original: Arc::clone(&previous.original),
+            canonical: previous.canonical,
+            mode: if previous.mode == NativeTransportMode::Full
+                || row.mode == NativeTransportMode::Full
+            {
+                NativeTransportMode::Full
+            } else {
+                NativeTransportMode::IssuedGroups
+            },
+            classification: previous.classification,
+            contributions: contributions
+                .into_values()
+                .flatten()
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        if previous.same_acquisition(&updated) {
+            return Ok(NativeAvailabilityRowMerge::Unchanged);
+        }
+        rows.insert(id, Arc::new(updated));
         Ok(NativeAvailabilityRowMerge::Changed)
     }
 
@@ -2344,7 +2400,10 @@ impl RequestNativeAvailability {
                     }
                     Some(previous)
                         if previous.mode == updated.mode
-                            && previous.contributions == updated.contributions => {}
+                            && same_native_contribution_facts(
+                                &previous.contributions,
+                                &updated.contributions,
+                            ) => {}
                     Some(_) => {
                         let changed = Self::changed_row_facts(updated)?;
                         if facts.get(&id) != Some(&changed) {
@@ -2538,8 +2597,8 @@ impl RequestNativeAvailability {
             } else {
                 NativeInputClassification::PrivateInput
             };
-            let changed_fact =
-                selected.mode != row.mode || selected.contributions != row.contributions;
+            let changed_fact = selected.mode != row.mode
+                || !same_native_contribution_facts(&selected.contributions, &row.contributions);
             if !changed_fact {
                 work.reused_facts += 1;
             }
@@ -2578,7 +2637,7 @@ impl RequestNativeAvailability {
                 }
             }
             budget.reserve::<(ArtifactId, Arc<NativeTransportAvailability>, [usize; 4])>(1)?;
-            if selected == **row {
+            if selected.same_acquisition(row) {
                 work.reused_rows += 1;
                 rows.insert(id, Arc::clone(row));
             } else {
@@ -4620,7 +4679,7 @@ impl NativeInputSelection {
                 let contributions = availability.entry(consumed.original()).or_default();
                 if !contributions
                     .iter()
-                    .any(|prior| prior.offer() == contribution.offer())
+                    .any(|prior| prior.same_acquisition(&contribution))
                 {
                     contributions.push(Arc::clone(&contribution));
                 }
@@ -4638,7 +4697,7 @@ impl NativeInputSelection {
                 let contributions = availability.entry(*original).or_default();
                 if !contributions
                     .iter()
-                    .any(|prior| prior.offer() == contribution.offer())
+                    .any(|prior| prior.same_acquisition(&contribution))
                 {
                     contributions.push(Arc::clone(&contribution));
                 }
@@ -22554,19 +22613,22 @@ mod tests {
                 "cold publication preserves its native fact owner"
             );
             assert!(
-                actual_support.acquired_native_closures()
-                    == expected_support.acquired_native_closures(),
+                actual_support.native_closure_records()
+                    == expected_support.native_closure_records(),
                 "cold publication preserves completed native code facts"
             );
             assert!(
-                actual_support.native_availability() == expected_support.native_availability(),
-                "cold publication preserves live native availability"
+                actual_support
+                    .native_availability()
+                    .same_recorded_facts(expected_support.native_availability()),
+                "cold publication preserves recorded native availability"
             );
             assert!(
-                actual_support == expected_support,
+                actual_support.same_recorded_facts(expected_support),
                 "cold publication preserves admitted compiler rows and offers"
             );
-            assert_eq!(actuals, std::slice::from_ref(&current_publication));
+            assert_eq!(actuals.len(), 1);
+            assert!(actuals[0].same_recorded_facts(&current_publication));
         };
         let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
             let actual = ProtectedScaffoldRequirements::default()
