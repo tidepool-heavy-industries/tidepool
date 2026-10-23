@@ -3,7 +3,7 @@
 module Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, typedSegmentInputOccurrences
   , ParsedSegmentDemand, prepareSegmentDemand, segmentDemandMatchesSource
-  , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource
+  , ParsedModuleDemand, prepareModuleDemand, moduleDemandMatchesSource, moduleDemandCapturedImports
   , moduleInputOccurrences, moduleImportRequests, segmentModuleDemand, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName
   ) where
@@ -16,9 +16,7 @@ import Data.Generics (everything, mkQ)
 import Data.List (intersect, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
-import GHC (ParsedModule (..))
+import GHC (ParsedSource)
 import GHC.Parser.Annotation (getLocA)
 import GHC.Data.Strict qualified as Strict
 import GHC.Driver.Session (DynFlags, GeneralFlag(Opt_HelpfulErrors,Opt_DeferOutOfScopeVariables), gopt_set, gopt_unset, xopt)
@@ -30,13 +28,7 @@ import GHC.Rename.Names (rnImports)
 import GHC.Tc.Types (TcGblEnv(..))
 import GHC.Tc.Utils.Monad (initTcInteractive, getGblEnv, setGblEnv, failM)
 import GHC.Types.Name (Name)
-import GHC.Driver.Config.Parser (initParserOpts)
-import GHC.Parser qualified as Parser
 import GHC.Parser.Header (mkPrelImports)
-import GHC.Parser.Lexer (ParseResult(..), initParserState, unP, getPsErrorMessages)
-import GHC.Types.Error (isEmptyMessages)
-import GHC.Data.FastString (mkFastString)
-import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Ppr (showPpr)
 import GHC.Hs
 import GHC.Types.Basic (Boxity (Boxed), DoPmc (SkipPmc), GenReason (OtherExpansion), Origin (Generated))
@@ -45,32 +37,36 @@ import GHC.Types.Name.Reader
   ( RdrName, isUnqual, mkRdrQual, mkRdrUnqual, rdrNameOcc
   , GlobalRdrEnv, mkGlobalRdrEnv, mkLocalVanillaGRE, Parent(NoParent)
   , plusGlobalRdrEnv, shadowNames, extendGlobalRdrEnv )
-import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, mkRealSrcLoc, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
+import GHC.Types.SrcLoc (GenLocated (L), Located, getLoc, unLoc, noSrcSpan, getBufSpan, bufSpanStart, bufSpanEnd, bufPos)
 import GHC.Unit.Types (interactiveUnit, mkModule)
 import GHC.Unit.Module (ModuleName, mkModuleName)
 import GHC.Types.PkgQual (RawPkgQual)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface)
-import GHC.Unit.Module.ModSummary (ms_hspp_opts)
 import GHC.Utils.Outputable (ppr, text, (<+>))
 import Tidepool.TypedSegment.Types
 import Tidepool.ExactHydration
-  ( CapturedGeneratedScaffoldSource, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
-  , capturedSourceImportOrigins )
+  ( CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax )
+import Tidepool.ImportSyntax (capturedParsedSource)
 import Tidepool.CheckedCell (ResolvedNativeSlots, applyNativeAnnotations)
 import Tidepool.CheckedPrefixImports (parsedDeclarationOccurrences)
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 
--- The source issuer has already checked these bytes against its protected
--- recipe. This parser result is also the no-quasiquote proof required before
--- the demand renamer can load any imported interface.
+-- Demand analysis borrows the root's already parsed, origin-bound capture.
+-- Its private constructor adds the no-quasiquote proof required before the
+-- demand renamer can load any imported interface. The source may subsequently
+-- receive native type annotations, while the captured imports remain exact.
 data ParsedModuleDemand = ParsedModuleDemand
-  CapturedGeneratedScaffoldSource DynFlags (Located (HsModule GhcPs))
+  CapturedGeneratedImports ParsedSource
+
+moduleDemandCapturedImports :: ParsedModuleDemand -> CapturedGeneratedImports
+moduleDemandCapturedImports (ParsedModuleDemand captured _) = captured
 
 -- Import selection consumes the same parsed source as the demand renamer.
 -- Package qualifiers and SOURCE identity are preserved until the active
 -- World environment resolves them; rendering cannot create an import here.
 moduleImportRequests :: ParsedModuleDemand -> [(ModuleName, RawPkgQual, IsBootInterface)]
-moduleImportRequests (ParsedModuleDemand _ _ parsed) =
+moduleImportRequests (ParsedModuleDemand _ parsed) =
   [(unLoc (ideclName declaration), ideclPkgQual declaration, ideclSource declaration)
   | L _ declaration <- hsmodImports (unLoc parsed)]
 
@@ -82,8 +78,9 @@ segmentModuleDemand :: ParsedSegmentDemand -> ParsedModuleDemand
 segmentModuleDemand (ParsedSegmentDemand parsed) = parsed
 
 moduleDemandMatchesSource :: ParsedModuleDemand -> FilePath -> BS.ByteString -> Bool
-moduleDemandMatchesSource (ParsedModuleDemand captured _ _) path bytes =
-  capturedGeneratedScaffoldPath captured == path && capturedGeneratedScaffoldBytes captured == bytes
+moduleDemandMatchesSource (ParsedModuleDemand captured _) path bytes =
+  capturedGeneratedScaffoldPath source == path && capturedGeneratedScaffoldBytes source == bytes
+  where source = capturedGeneratedImportSource captured
 
 -- Physical rendered-source boundaries are independent of user LINE pragmas.
 -- These closed modes constrain an operand to its generated expression/type
@@ -95,7 +92,7 @@ data ObservationOperand
 
 validateObservationContribution :: Int -> ObservationOperand -> [String] -> ParsedModuleDemand
   -> Either String ()
-validateObservationContribution prefix mode probes (ParsedModuleDemand _ _ parsed) = do
+validateObservationContribution prefix mode probes (ParsedModuleDemand _ parsed) = do
   suffix <- fmap concat $ mapM classify (hsmodDecls (unLoc parsed))
   let expected = map (False,) probes ++ case mode of
         ObservationNoOperand -> []
@@ -151,35 +148,31 @@ validateObservationContribution prefix mode probes (ParsedModuleDemand _ _ parse
 -- Native type substitution preserves the source issuer and no-quasiquote proof.
 -- The same resolved annotation product must also feed final module checking.
 annotateModuleDemand :: ResolvedNativeSlots -> ParsedModuleDemand -> IO ParsedModuleDemand
-annotateModuleDemand annotations (ParsedModuleDemand captured flags parsed) = do
+annotateModuleDemand annotations (ParsedModuleDemand captured parsed) = do
   (annotated, _) <- applyNativeAnnotations annotations parsed
-  pure (ParsedModuleDemand captured flags annotated)
+  -- Only declaration types participate in demand. Retain the captured header
+  -- and imports by construction, independently of the annotation traversal.
+  let L location original = parsed
+      declarations = hsmodDecls (unLoc annotated)
+  pure (ParsedModuleDemand captured (L location original {hsmodDecls = declarations}))
 
 segmentDemandMatchesSource :: ParsedSegmentDemand -> FilePath -> BS.ByteString -> Bool
 segmentDemandMatchesSource = moduleDemandMatchesSource . segmentModuleDemand
 
-prepareModuleDemand :: DynFlags -> CapturedGeneratedScaffoldSource
-  -> Either TypedSegmentFailure ParsedModuleDemand
-prepareModuleDemand flags captured = case unP Parser.parseModule parser of
-  PFailed state -> parseRejected state
-  POk state parsed
-    | not (isEmptyMessages (getPsErrorMessages state)) -> parseRejected state
-    | null quotes -> case capturedSourceImportOrigins captured parsed of
-        Left reason -> Left (ModuleDemandParseRejected path reason)
-        Right _ -> Right (ParsedModuleDemand captured flags parsed)
-    | otherwise -> Left (ModuleDemandQuasiQuoteRejected path (map (showPpr flags) quotes))
-    where quotes = quasiQuoteOccurrences flags parsed
+prepareModuleDemand :: CapturedGeneratedImports -> Either TypedSegmentFailure ParsedModuleDemand
+prepareModuleDemand captured
+  | null quotes = Right (ParsedModuleDemand captured parsed)
+  | otherwise = Left (ModuleDemandQuasiQuoteRejected path (map (showPpr flags) quotes))
   where
-    path = capturedGeneratedScaffoldPath captured
-    parseRejected state = Left (ModuleDemandParseRejected path (showPpr flags (getPsErrorMessages state)))
-    source = Text.unpack (TextEncoding.decodeUtf8 (capturedGeneratedScaffoldBytes captured))
-    parser = initParserState (initParserOpts flags) (stringToStringBuffer source)
-      (mkRealSrcLoc (mkFastString path) 1 1)
+    flags = capturedGeneratedImportFlags captured
+    parsed = capturedParsedSource (capturedGeneratedImportSyntax captured)
+    path = capturedGeneratedScaffoldPath (capturedGeneratedImportSource captured)
+    quotes = quasiQuoteOccurrences flags parsed
 
-prepareSegmentDemand :: TypedSegmentPlan -> DynFlags -> CapturedGeneratedScaffoldSource
+prepareSegmentDemand :: TypedSegmentPlan -> CapturedGeneratedImports
   -> Either TypedSegmentFailure ParsedSegmentDemand
-prepareSegmentDemand plan flags captured = do
-  parsedModule@(ParsedModuleDemand _ _ parsed) <- prepareModuleDemand flags captured
+prepareSegmentDemand plan captured = do
+  parsedModule@(ParsedModuleDemand _ parsed) <- prepareModuleDemand captured
   if roots parsed == [()]
     then Right (ParsedSegmentDemand parsedModule)
     else Left UnprovedRootAbstraction
@@ -253,8 +246,9 @@ typedSegmentInputOccurrences environment scope =
 moduleInputOccurrences :: HscEnv -> SegmentDemandScope binding -> ParsedModuleDemand
   -> IO (Either TypedSegmentFailure [(String,binding)])
 moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
-    (ParsedModuleDemand _ flags parsed) = do
-  let probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
+    (ParsedModuleDemand captured parsed) = do
+  let flags = capturedGeneratedImportFlags captured
+      probeFlags = gopt_set (gopt_unset flags Opt_HelpfulErrors) Opt_DeferOutOfScopeVariables
       probe = hscUpdateFlags (const probeFlags) environment
       syntax = unLoc parsed
       imports = hsmodImports syntax
@@ -287,19 +281,18 @@ moduleInputOccurrences environment (SegmentDemandScope aliases bindings)
     occurrence (HsVar _ (L _ name)) = [name]
     occurrence _ = []
 
-rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> ParsedModule -> IO ParsedModule
-rewriteParsedSegmentRoot operations plan parsed = case rewriteModule of
+rewriteParsedSegmentRoot :: GeneratedSegmentOperations -> TypedSegmentPlan -> DynFlags -> ParsedSource -> IO ParsedSource
+rewriteParsedSegmentRoot operations plan flags source = case rewriteModule of
   Left failure -> throwIO failure
-  Right rewrittenSource -> pure (parsed { pm_parsed_source = rewrittenSource })
+  Right rewrittenSource -> pure rewrittenSource
   where
-    source = pm_parsed_source parsed
     authoredNames = parsedNames source
     generatedNames = concatMap plannedNames (typedSegmentPlanItems plan)
     collisions = generatedNames `intersect` authoredNames
     rewriteModule
       | length generatedNames /= length (nub generatedNames) = Left InvalidReservedNames
       | not (null collisions) = Left InvalidReservedNames
-      | otherwise = case rewriteRoot operations (ms_hspp_opts (pm_mod_summary parsed)) plan source of
+      | otherwise = case rewriteRoot operations flags plan source of
           Left failure -> Left failure
           Right (source', 1) -> Right source'
           Right _ -> Left UnprovedRootAbstraction
