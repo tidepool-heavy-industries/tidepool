@@ -1338,6 +1338,23 @@ def actor_notebook_contract_test_cases(binary):
     return "\n".join(rules)
 
 
+# These actual World/capture cases need a resident compiler both in their
+# maintained cohorts and when selected directly through `just test-lib`.
+RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests::" + name for name in (
+    "checked_interface_publication_conflict_preserves_private_prefix",
+    "checked_interface_publication_write_failure_preserves_private_prefix",
+    "checked_capture_completes_issued_binding_through_resident",
+    "checked_capture_stage_requires_its_actual_issued_ticket_and_session",
+    "checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair",
+)]
+RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+    "checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects",
+    "historical_source_captures_bind_the_original_value_after_shadowing",
+    "same_cell_source_capture_requeries_only_the_referenced_prior_output",
+    "compiler_issued_binding_survives_capture_and_releases_interface_and_root",
+)]
+
+
 def runtime_world_publication_test_cases(binary):
     tests = ["session::resident::paired_publication_tests::" + name for name in (
         "paired_independent_authored_rebase_preserves_originals_and_current_winners",
@@ -1370,6 +1387,7 @@ def runtime_world_publication_test_cases(binary):
         "library_replacement_under_same_runtime_owner_refuses_held_publication_and_intent",
         "bounded_interference_then_fair_drain_preserves_public_owners",
     ))
+    tests.extend(RUNTIME_CHECKED_CAPTURE_CASES)
     env, resources, worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_world_publication_histories"
     )
@@ -1460,6 +1478,7 @@ def runtime_test_cases(binary):
         "zero_capture_action_runs_once_before_the_next_item",
         "strict_let_group_forces_before_retaining_its_closure_capture",
     )]
+    semantic_tests.extend(RUNTIME_PARKED_CAPTURE_CASES)
     semantic_env, semantic_resources, semantic_worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_typed_segment_semantic_tests"
     )
@@ -2045,7 +2064,15 @@ tidepool_buildscript_run(
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
-                *(['    case_compiler_modes = {"session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation": "owned-resident"},'] if package_name == "tidepool-runtime" else []),
+                *(['    case_compiler_modes = {' + ", ".join(
+                    json.dumps(name) + ': "owned-resident"'
+                    for name in [
+                        "session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation",
+                        "session::turn::scaling_tests::typed_segment_tests::bare_observation_retains_lazy_thunk_before_later_demand",
+                        "session::turn::scaling_tests::typed_segment_tests::effectful_observation_runs_once_and_retains_its_lazy_result",
+                        *RUNTIME_CHECKED_CAPTURE_CASES,
+                        *RUNTIME_PARKED_CAPTURE_CASES,
+                    ]) + "},"] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(
                     json.dumps(name) + ": \"owned-resident\""
                     for name in [
