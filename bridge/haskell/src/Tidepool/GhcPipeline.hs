@@ -6485,20 +6485,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           liftIO $ throwIO $ if null diagnostics
             then DependencyWorkerFailure
             else DependencySourceFailure diagnostics
-    -- Exclude hs-boot summaries in one shared site for both variants:
-    -- a boot node shares its ModuleName with the real module, so its
-    -- near-empty desugared guts would CLOBBER the real module's entry in
-    -- the name-keyed 'gutsByMod' below — hiding every Core edge out of that
-    -- module from 'reachableModuleClosure' and silently tiering its
-    -- dependencies out of the optimized stage (observed live: the
-    -- Even.hs-boot/Odd cycle baked a TypeMetadata sentinel for Odd.odd'),
-    -- and merging boot guts as if they were the real module's on either
-    -- path. Boot files exist for 'load''s loop-breaking only; any error in
-    -- one already surfaced there, and their guts carry no bindings
-    -- extraction could use.
+    -- Completed source products use the same ordinary-source selection as
+    -- memo admission. Boot summaries share a Module with their implementation
+    -- and must not replace its summary in this owner-keyed view.
     capturedModules <- liftIO (readIORef loadedModulesRef)
     let sourceSummariesByOwner = Map.fromList
-          [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
+          [(ms_mod summary,summary) | summary <- sourceOrder]
         cachedModules = Map.mapMaybeWithKey (\owner entry ->
           (\summary -> payloadLoaded summary (gmePayload entry))
             <$> Map.lookup owner sourceSummariesByOwner) validatedMemo
