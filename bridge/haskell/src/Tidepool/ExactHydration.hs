@@ -91,6 +91,7 @@ import GHC.Unit.Home.ModInfo
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Driver.Ppr (showPpr)
 import qualified GHC.Parser as Parser (parseHeader, parseModule)
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP, getPsErrorMessages)
 import GHC.Types.Error (isEmptyMessages)
@@ -595,15 +596,16 @@ parseCapturedGeneratedImports :: DynFlags -> CapturedGeneratedScaffoldSource
   -> Either String CapturedGeneratedImports
 parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path bytes _) =
   case unP Parser.parseModule parser of
-    PFailed _ -> Left "GHC could not parse the captured generated root"
+    PFailed state -> Left (parseDiagnostics state)
     POk state parsed -> do
       unless (isEmptyMessages (getPsErrorMessages state))
-        (Left "GHC reported errors in the captured generated root")
+        (Left (parseDiagnostics state))
       origins <- capturedSourceImportOrigins captured parsed
       syntax <- either (Left . show) Right (captureImportSyntax parsed)
       occurrences <- associate (capturedImportOccurrences syntax) origins
       pure (CapturedGeneratedImports captured flags syntax occurrences)
   where
+    parseDiagnostics state = showPpr flags (getPsErrorMessages state)
     parser = initParserState (initParserOpts flags)
       (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
       (mkRealSrcLoc (mkFastString path) 1 1)
