@@ -96,21 +96,23 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The last settled validation candidate is `65e2eb4ae0`: the 32-consumer compile
-passed the earlier decoder/scaffold repairs, then stopped on two stale local
-variable references; no tests executed. `33ae06028c` repairs both references
-and integrates the independently reviewed World-based regression replacements.
-Generated metadata is current; joined compilation and focused execution remain
-pending. See `STATE.md` for exact evidence and qualification limits.
+The last settled validation candidate is `33ae06028c`: the 32-consumer compile
+stopped on five Haskell diagnostics; no tests executed. `aeff15a6e0` repairs the
+surviving helper consumers, imports, declared dependencies and typed-error callers,
+and includes fresh Cabal metadata. Generic and cohort World test selection now
+share their resident-mode declaration. Joined compilation is running; regional
+execution and independent closeout follow `REGIONAL-GATE.md`. See `STATE.md` for
+exact evidence and qualification limits.
 Adversarial closeout found a demand/catalog identity conflation and surviving
 test-only transport and SOURCE-authority issuers. The demand repair is integrated;
 test migrations and independent review remain open. The actual future-value
 permission defect is fixed and its three-item regression passed at `791f`.
 Delete alternate issuers,
 preserve refusal controls and execute the repaired join before completion. The actual
-World history now passes initial capture/declaration/publication, then fails at
-retained-value reuse through an authored native declaration. This is a distinct
-boundary under direct root investigation; G2/G3 remain unqualified.
+World history previously passed initial capture/declaration/publication, then
+failed at retained-value reuse through an authored native declaration. That
+investigation is parked until the rebuilt region is qualified; the next G2 run
+must establish the frontier on the current revision. G2/G3 remain unqualified.
 Finite notebook retirement now deletes the Rust/Haskell transport, ownership
 variants, recipes and exclusive tests. The actual World promotion test passed;
 the obsolete SOURCE fixture issuer is deleted. Cross-language compilation,

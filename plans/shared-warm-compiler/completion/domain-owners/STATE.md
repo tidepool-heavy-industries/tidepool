@@ -3,10 +3,11 @@
 Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `65e2eb4ae0`: 32 requested consumers stopped on two
-GHC compile errors; zero tests ran. Repair candidate `33ae06028c` is queued for
-the same joined compile and focused execution, including the two restored World
-regression tests. The previous `2de0e83ee2` pin
+Last settled validation pin: `33ae06028c`: 32 requested consumers stopped on five
+Haskell compile diagnostics in three targets; zero tests ran. Repair candidate
+`aeff15a6e0` has freshly generated Cabal metadata and is running the same joined
+compile. `REGIONAL-GATE.md` owns the invariant-based regional execution and
+adversarial closeout before the next G2 run. The previous `2de0e83ee2` pin
 compiled 17 consumers and executed nine tests: five passed and four failed.
 These are bounded review checkpoints, not a release.
 
@@ -63,8 +64,8 @@ fixture families are not covered by that bounded deletion claim.
 Remaining closeout work:
 
 - Compile both language consumers at the repaired joined revision. Fresh pinned
-  Cabal metadata and Rust generated targets are integrated; 74 registration and
-  source-participation checks pass. Two actual checked-value authority cases
+  Cabal metadata and Rust generated targets are integrated; 75 registration and
+  source-participation checks pass at the test-mode repair. Two actual checked-value authority cases
   retain their resident compiler resources.
 - Execute the four repaired ownership controls. The joined materialization
   bypass now checks actual issuance, with shared-owner and competing-owner cases;
@@ -73,8 +74,10 @@ Remaining closeout work:
   real-compiler World regression contracts: qualified equality under the custom
   Prelude, and authored versus imported missing-record warnings. Both are
   integrated through `33ae06028c`; the finite entry point remains deleted.
-- Execute the changed controls and current production paths before claiming
-  migration completion. Source integration alone is insufficient.
+- Execute the initial 15 controls, then the additional regional invariant matrix
+  and repeat independent source/coverage review. The initial shortlist alone does
+  not qualify the rebuilt region. Only after that closeout run G2 and record its
+  actual progression or failure boundary; see `REGIONAL-GATE.md`.
 
 Preserve parser-only `--cell-plan` and ordinary native compilation for bootstrap,
 unprepared installers and packaged Original entries. Those are distinct live
@@ -112,6 +115,21 @@ Each repaired join receives another independent bounded adversarial review.
 
 ## Evidence and pending checks
 
+- At **`33ae06028c`**, the **32-consumer compile failed**, with **zero tests
+  executed**. Two production activation-preview calls still referred to a helper
+  deleted with the finite recipe module; the planned-declaration test imported
+  `eqType` from the wrong pinned GHC module and omitted its direct schema
+  dependency; a migrated test treated a typed interface failure as a string.
+  `09abf29e7f` uses the existing template owner, correct imports and direct package
+  dependencies, and preserves the typed failure in both affected test consumers.
+  Independent review accepted that source repair. Fresh Cabal generation and its
+  check passed at `aeff15a6e0`; native compilation and execution remain pending.
+- The regional registration audit found **18 of 24** World semantic cases lacked
+  the resident-mode declaration when selected through the generic runner.
+  `7a44233756` shares the existing case declaration between cohort and generic
+  selection. Its relational test fails before the repair and passes afterward;
+  the lightweight registration/participation suite passes **75/75**. This is test
+  routing evidence, not native execution evidence.
 - At **`65e2eb4ae0`**, the **32-consumer compile failed** on two undefined
   `scaffold` variables; **zero tests executed**. The earlier decoder and layout
   blockers are repaired. Both new failures came from a broad text substitution
