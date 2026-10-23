@@ -332,19 +332,23 @@ impl AdmittedDeclarationSurface {
         support: &crate::artifact_inventory::CompilerSourceSupport,
         rows: &[ExactLexicalNode],
     ) -> Result<(), CompileError> {
-        for node in rows {
+        for owner in rows
+            .iter()
+            .map(|node| &node.owner)
+            .chain(&self.source_originals)
+        {
             let row = support
-                .world_primary_type_row(&node.owner)
+                .world_primary_type_row(owner)
                 .ok_or_else(|| contract("publication source lacks its issued binding"))?;
             let incoming = (row.interface_binding.clone(), row.original_binding.cloned());
-            if let Some(prior) = self.source_bindings.get(&node.owner) {
+            if let Some(prior) = self.source_bindings.get(owner) {
                 if prior != &incoming {
                     return Err(contract(
                         "publication surface substitutes its exact source binding",
                     ));
                 }
             } else {
-                self.source_bindings.insert(node.owner.clone(), incoming);
+                self.source_bindings.insert(owner.clone(), incoming);
             }
         }
         Ok(())
@@ -354,6 +358,20 @@ impl AdmittedDeclarationSurface {
         &self,
         support: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<(), CompileError> {
+        if self
+            .lexical
+            .iter()
+            .any(|node| !self.source_bindings.contains_key(&node.owner))
+            || self.source_originals.iter().any(|owner| {
+                self.source_bindings
+                    .get(owner)
+                    .is_none_or(|(_, original)| original.is_none())
+            })
+        {
+            return Err(contract(
+                "publication source selection lacks its exact issuing binding",
+            ));
+        }
         for (owner, (interface, original)) in &self.source_bindings {
             let row = support
                 .world_primary_type_row(owner)
@@ -1801,6 +1819,21 @@ impl JoinEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_original_selection_requires_an_exact_binding_outside_lexical_scope() {
+        let mut malformed = AdmittedDeclarationSurface::default();
+        malformed.source_originals.insert(ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "UnreachableOriginal".into(),
+        });
+        let error = malformed
+            .validate_source_bindings(&crate::artifact_inventory::CompilerSourceSupport::empty())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("publication source selection lacks its exact issuing binding"));
+    }
 
     #[test]
     fn shared_source_surface_requires_exact_implementation_anchors_and_source_rows() {
