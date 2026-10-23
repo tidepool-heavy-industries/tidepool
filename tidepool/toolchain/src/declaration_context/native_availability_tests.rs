@@ -4888,7 +4888,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             let types = complete
                 .selected_interfaces()
                 .unwrap()
-                .support_for_owners([owner.clone()])
+                .support_for_owners(vec![owner.clone()])
                 .unwrap();
             let type_context = Arc::new(context.clone().rebuild(|facts| {
                 facts.compiler_support = types;
@@ -9491,7 +9491,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                 .compiler_source_support()
                 .selected_interfaces()
                 .unwrap()
-                .support_for_owners(BTreeSet::from([owner.clone()]))
+                .support_for_owners(vec![owner.clone()])
                 .unwrap()
                 .retain_template_availability(original.compiler_source_support())
                 .unwrap();

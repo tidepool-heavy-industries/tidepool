@@ -97,10 +97,7 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     let helper = &fixture.helper;
     let genuine = source.artifact_view().capture_graph_selection();
     let producer = root.descriptor.producer_sha256;
-    let mut entries = source
-        .artifact_view()
-        .entries_for_artifacts(&source.artifact_view().artifact_ids())
-        .unwrap();
+    let mut entries = source.artifact_view().entries();
     entries.push(Arc::new(ArtifactEntry::canonical(
         crate::certified_products::fixture_module_interface(
             producer,

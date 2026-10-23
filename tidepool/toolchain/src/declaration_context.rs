@@ -21280,11 +21280,6 @@ mod tests {
         }
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
-        let source = fixture
-            .entry
-            .products()
-            .original_execution_context()
-            .unwrap();
         let selection = fixture
             .entry
             .products()
@@ -22772,7 +22767,13 @@ mod tests {
             .entries()
             .iter()
             .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
-        assert_eq!(context.published_lexical_closure(&root).unwrap().len(), 2);
+        let lexical = context.lexical_graph();
+        assert!(lexical
+            .iter()
+            .any(|node| node.owner == root && node.imports == [lexical_only.clone()]));
+        assert!(lexical
+            .iter()
+            .any(|node| node.owner == lexical_only && node.imports.is_empty()));
         assert!(context
             .published_source_original_selections()
             .unwrap()
@@ -22803,7 +22804,7 @@ mod tests {
         *original = fixture.root.descriptor.id;
         let mut projection = CompilerInputProjection::default();
         for (owner, role) in roles {
-            projection.admit_role(owner, role).unwrap();
+            projection.admit_role(owner.clone(), role.clone()).unwrap();
         }
         assert!(publication
             .context()

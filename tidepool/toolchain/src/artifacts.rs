@@ -12996,7 +12996,10 @@ pub(crate) mod test_support {
         let target = sources.join("PublicationTarget.hs");
         let includes = vec![sources];
         let frozen = FrozenEntrySources::capture(&includes, &target)?;
-        let endpoint = ExtractCmd::new()?.bind()?;
+        let endpoint = ExtractCmd::new()
+            .map_err(|error| CompileError::Io(error.into()))?
+            .bind()
+            .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
         let producer_bytes = endpoint.identity().producer_bytes().to_vec();
         let entry = prepare_frozen_production_entry(
             &frozen,
