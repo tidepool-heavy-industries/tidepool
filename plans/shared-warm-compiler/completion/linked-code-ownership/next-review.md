@@ -120,7 +120,7 @@ TYPE and body custody do not grant SOURCE. Inherited scope must actually exist;
 protected dependency adjacency must not publish unrelated lexical roots.
 Legitimate historical issued dependencies remain valid alongside newer bodies.
 
-### Remaining completion correction
+### Checked-value completion boundary
 
 The checked-value history exposes a domain mismatch: selected GHC HOME imports
 include source-less checked values, while consumed SOURCE edges intentionally do
@@ -133,10 +133,21 @@ owners, add all available TYPE inputs, or insert value imports into canonical
 source adjacency. Ordinary-session and World injection must use their actual
 owners rather than a namesake or source inventory fallback.
 
-The current compiler and affected test executables compile. Restricted-alias,
-physical-span (including 24 generated cases), and planned-declaration lifecycle
-controls pass. Checked-value completion remains failed; broader joined histories
-are pending. Exact revisions and counts live in V's retained checkpoint records.
+The repair is integrated. At `0197741519`, the actual checked-value history passes
+all four explicit/inferred SOURCE and ordinary/delayed-injection combinations,
+including existing owner refusals. Production and affected test consumers compile.
+Restricted-alias, physical-span (including 24 generated cases), and planned-
+declaration lifecycle controls retain their earlier focused passes.
+
+At `1d5c7d86f8`, Context9 missing-field/storage controls, carried World TYPE/global
+Names, and mixed World sealing each pass 1/1. The staged runtime history now reaches
+a later Rust boundary and refuses `main:Tidepool.TextFormat` for missing exact
+original source-import evidence. Root, P and H are tracing the actual completed
+receipt through source-claim admission and lexical closure before choosing a
+repair. Determine whether an issued SOURCE fact is dropped or a protected TYPE
+dependency is being over-requested; neither invent empty adjacency nor promote
+retained TYPE custody. Prior-World/runtime recovery and ordinary G2 remain pending.
+Exact commands, source pins, cleanup outcomes and limits remain in V's records.
 
 ## Parallel corrections
 
