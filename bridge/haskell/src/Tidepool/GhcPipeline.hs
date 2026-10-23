@@ -315,7 +315,8 @@ import Tidepool.ExactHydration
   ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
-  , noCheckedValueImports, checkedValueImportAuthorityFromVerified
+  , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
+  , checkedValueImportAuthorityFromCaptures, unionCheckedValueImports, admitsCheckedValueImport
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
   , CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
   , capturedGeneratedImportSource, capturedGeneratedImportSyntax, capturedGeneratedImportOccurrences
@@ -3169,6 +3170,12 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               , cpInjectedSessionInterfaces = do
                   resolved <- requireResolved
                   (worldResolvedCaptures resolved ++) <$> cpInjectedSessionInterfaces planned
+              , cpCheckedValueImports = do
+                  resolved <- requireResolved
+                  let captures = worldResolvedCaptures resolved
+                        ++ [capture | WorldCellOperandProjection _ _ capture _ <- maybe [] pure operandProjection]
+                  world <- either fail pure (checkedValueImportAuthorityFromCaptures captures)
+                  unionCheckedValueImports world <$> cpCheckedValueImports planned
               }
         }
   let runStage :: PipelineSelection checked -> Ghc checked
@@ -4058,8 +4065,8 @@ parseModuleWithImportRoot owned summary = case owned of
 -- or qualified child must still resolve to that parent's exact selected Module;
 -- ambient Finder state cannot replace an earlier choice with a namesake.
 prepareImportAdmission :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary
-  -> MatchedImportDriver -> IO PreparedImportAdmission
-prepareImportAdmission variant target environment actual matched@(MatchedImportDriver
+  -> CheckedValueImportAuthority -> MatchedImportDriver -> IO PreparedImportAdmission
+prepareImportAdmission variant target environment actual checkedValues matched@(MatchedImportDriver
     (ScopedImportAdmission _ _ (ImportAttempt _ _ root path fingerprint)) driver demands _) = do
   actualPath <- traverse canonicalizePath (ml_hs_file (ms_location actual))
   let admitted = pm_mod_summary (driverParsedModule driver)
@@ -4071,6 +4078,11 @@ prepareImportAdmission variant target environment actual matched@(MatchedImportD
     owner <- case found of
       Found _ owner -> pure owner
       _ -> fail "import frontend lacks its admitted selected module"
+    when (admitsCheckedValueImport checkedValues owner) $ do
+      when boot (fail "checked value import cannot select a boot interface")
+      case lookupHpt (hsc_HPT environment) (moduleName owner) of
+        Just home | mi_module (hm_iface home) == owner -> pure ()
+        _ -> fail "checked value import lacks its installed selected interface"
     pure (ResolvedImportOccurrence identity origin requested raw qualifier boot owner)
   let activeDriver = case driver of
         DriverImportSyntax capture parsed occurrences ->
@@ -4105,16 +4117,16 @@ prepareImportAdmission variant target environment actual matched@(MatchedImportD
           , identity == parent (importOccurrenceId occurrence)] of
         [expected] | expected == owner -> pure ()
         _ -> fail "prepared import changed its selected owner"
-  pure (PreparedImportAdmission resolved actual native)
+  pure (PreparedImportAdmission resolved actual native checkedValues)
 
 preparedImportModule :: PreparedImportAdmission -> NativeParsedModule
-preparedImportModule (PreparedImportAdmission _ _ native) = native
+preparedImportModule (PreparedImportAdmission _ _ native _) = native
 
 recordImportFrontend :: IORef (Maybe PreparedImportAdmission) -> Maybe PreparedImportAdmission
   -> TcGblEnv -> IO ()
 recordImportFrontend _ Nothing _ = pure ()
 recordImportFrontend ref (Just prepared@(PreparedImportAdmission
-    (ResolvedImportAdmission (MatchedImportDriver (ScopedImportAdmission _ _ (ImportAttempt _ _ root _ _)) _ _ _) _) _ _)) checked = do
+    (ResolvedImportAdmission (MatchedImportDriver (ScopedImportAdmission _ _ (ImportAttempt _ _ root _ _)) _ _ _) _) _ _ _)) checked = do
   unless (tcg_mod checked == root) (fail "successful import frontend has another root")
   writeIORef ref (Just prepared)
 
@@ -4125,7 +4137,7 @@ completeImportAdmission :: PreparedImportAdmission -> [(String,String,Bool,Strin
   -> IO CompletedImportAdmission
 completeImportAdmission (PreparedImportAdmission (ResolvedImportAdmission
     (MatchedImportDriver (ScopedImportAdmission captured context attempt@(ImportAttempt _ _ root path fingerprint))
-      _ _ sourceSelection) selected) _ _) consumedHome = do
+      _ _ sourceSelection) selected) _ _ checkedValues) consumedHome = do
   bytes <- case captured of
     GeneratedImportCapture whole -> pure (capturedGeneratedScaffoldBytes (capturedGeneratedImportSource whole))
     OrdinaryImportCapture _ body _ -> pure (artifactBytes body)
@@ -4137,13 +4149,35 @@ completeImportAdmission (PreparedImportAdmission (ResolvedImportAdmission
       role ProtectedCompiler = 4
       syntax = [((renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString requested,boot),role origin)
         | ResolvedImportOccurrence _ origin requested _ qualifier boot _ <- selected]
-      home = [((renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString requested,boot,unitString (moduleUnit owner)),role origin)
+      home = [((renderDependencyQualifier (dependencyQualifier qualifier),moduleNameString requested,boot,unitString (moduleUnit owner)),role origin,owner)
         | ResolvedImportOccurrence _ origin requested _ qualifier boot owner <- selected
         , moduleUnit owner == moduleUnit root]
-      actualHome = Map.fromListWith (.|.) home
+      actualHome = Map.fromListWith (.|.)
+        [(key,mask) | (key,mask,owner) <- home, not (admitsCheckedValueImport checkedValues owner)]
+      checkedHome = Set.fromList
+        [key | (key,_,owner) <- home, admitsCheckedValueImport checkedValues owner]
       consumed = Set.fromList consumedHome
-  unless (Map.keysSet actualHome == consumed) $
-    fail "completed HOME imports differ from their selected driver owners"
+      selectedSource = Map.keysSet actualHome
+      overlap = Set.intersection checkedHome consumed
+      refuse detail = do
+        _ <- trySynchronous $ do
+          logger <- readLogger "tidepool.compiler.imports"
+          when (loggerEnabled logger LogWarn) $ logEvent logger LogWarn "completion_census_rejected"
+            [ ("root", LogText (unitString (moduleUnit root) ++ ":" ++ moduleNameString (moduleName root)))
+            , ("attempt", LogText (show attempt))
+            , ("detail", LogText detail)
+            , ("selected_source_count", LogInteger (fromIntegral (Set.size selectedSource)))
+            , ("consumed_source_count", LogInteger (fromIntegral (Set.size consumed)))
+            , ("selected_checked_count", LogInteger (fromIntegral (Set.size checkedHome)))
+            , ("missing", LogText (show (take 8 (Set.toAscList (consumed Set.\\ selectedSource)))))
+            , ("unexpected", LogText (show (take 8 (Set.toAscList (selectedSource Set.\\ consumed)))))
+            , ("checked_source_overlap", LogText (show (take 8 (Set.toAscList overlap))))
+            ]
+        fail detail
+  unless (Set.null overlap) $
+    refuse "completed SOURCE imports overlap admitted checked value imports"
+  unless (selectedSource == consumed) $
+    refuse "completed HOME imports differ from their selected driver owners"
   let issued = IssuedSourceImports path bytes (SHA256.hash bytes)
         (unitString (moduleUnit root),moduleNameString (moduleName root)) syntax
         [(qualifier,name,boot,unit,mask) | ((qualifier,name,boot,unit),mask) <- Map.toAscList actualHome]
@@ -4271,6 +4305,9 @@ data CompilePlan = CompilePlan
     -- merged. Native results validate the current scope here; metadata's
     -- terminal proof belongs to its checked receipt publication owner.
   , cpInjectedSessionInterfaces :: IO [CapturedSessionInterface]
+  -- Observed after this plan's selective injection. This proof classifies
+  -- actual selected value imports without granting SOURCE or native access.
+  , cpCheckedValueImports :: IO CheckedValueImportAuthority
   , cpFinalEnv :: HscEnv -> HscEnv
     -- ^ Applied to the post-loop session before it becomes 'ownedPrHscEnv'.
   }
@@ -6210,7 +6247,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 let quotes = classifyQuasiQuoteUse parsed
                 (transformed,importPrepared) <- liftIO $ if ms_mod summaryC == targetOwner
                   then do
-                    owned <- prepareImportAdmission variant targetName current summaryC matchedImports
+                    checkedValues <- cpCheckedValueImports plan
+                    owned <- prepareImportAdmission variant targetName current summaryC checkedValues matchedImports
                     pure (preparedImportModule owned,Just owned)
                   else do
                     native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summaryC
@@ -6529,7 +6567,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     let quotes = classifyQuasiQuoteUse parsed
                     (transformed,importPrepared) <- liftIO $ if ms_mod modSum == targetOwner
                       then do
-                        owned <- prepareImportAdmission variant targetName typecheckEnv modSum matchedImports
+                        checkedValues <- cpCheckedValueImports plan
+                        owned <- prepareImportAdmission variant targetName typecheckEnv modSum checkedValues matchedImports
                         pure (preparedImportModule owned,Just owned)
                       else do
                         native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName typecheckEnv modSum
@@ -7278,7 +7317,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       let quotes = classifyQuasiQuoteUse parsed
                       (transformed,importPrepared) <- liftIO $ if ms_mod summary == targetOwner
                         then do
-                          owned <- prepareImportAdmission variant targetName current summary matchedImports
+                          checkedValues <- cpCheckedValueImports plan
+                          owned <- prepareImportAdmission variant targetName current summary checkedValues matchedImports
                           pure (preparedImportModule owned,Just owned)
                         else do
                           native <- nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summary
@@ -9476,6 +9516,7 @@ normalVariant purpose = do
       , cpBeforeModule = \_ -> pure ()
       , cpBeforeMerge = \_ -> pure ()
       , cpInjectedSessionInterfaces = pure []
+      , cpCheckedValueImports = pure noCheckedValueImports
       , cpFinalEnv = id
       }
   }
@@ -10287,6 +10328,7 @@ sessionVariant purpose scope = do
       injectedInterfacesRef <- liftIO (newIORef [])
       originalHooks <- hsc_hooks <$> getSession
       verifiedClosureRef <- liftIO (newIORef Nothing)
+      checkedValueAuthorityRef <- liftIO (newIORef noCheckedValueImports)
       retainedOriginalHomesRef <- liftIO (newIORef [])
       scaffoldRef <- liftIO (newIORef noGeneratedScaffoldImports)
       injectMsRef <- liftIO (newIORef (0 :: Integer))
@@ -10301,6 +10343,7 @@ sessionVariant purpose scope = do
           interfaces <- either (liftIO . ioError . userError) pure (selectVerifiedExactInterfaces closure' originals)
           checkedValues <- either (liftIO . ioError . userError) pure
             (checkedValueImportAuthorityFromVerified closure' values)
+          liftIO (writeIORef checkedValueAuthorityRef checkedValues)
           checkedInterfaces <- either (liftIO . ioError . userError) pure
             (selectVerifiedValueInterfaces closure' values)
           hydrated <- liftIO (hydrateExactScope env interfaces)
@@ -10517,6 +10560,11 @@ sessionVariant purpose scope = do
                    verified <- liftIO (validateExactScopeEnvironment env admitted)
                    either (liftIO . fail) pure verified
         , cpInjectedSessionInterfaces = readIORef injectedInterfacesRef
+        , cpCheckedValueImports = do
+            verified <- readIORef checkedValueAuthorityRef
+            captures <- readIORef injectedInterfacesRef
+            injected <- either fail pure (checkedValueImportAuthorityFromCaptures captures)
+            pure (unionCheckedValueImports verified injected)
         , cpFinalEnv = \env -> hscUpdateFlags canonicalizeDFlags env {hsc_hooks=originalHooks}
         }
    }

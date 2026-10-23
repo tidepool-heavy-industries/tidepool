@@ -20,6 +20,7 @@ module Tidepool.ExactHydration
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , checkedValueOwner, noCheckedValueImports
+  , checkedValueImportAuthorityFromCaptures, unionCheckedValueImports, admitsCheckedValueImport
   , readCheckedValueImportAuthority
   , VerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosure
@@ -306,12 +307,39 @@ checkedValueImportAuthorityFromVerified closure artifacts
       <$> selectVerifiedValueInterfaces closure artifacts
 
 checkedValueOwner :: ExactIfaceArtifact -> Bool
-checkedValueOwner artifact = exactUnit artifact == "main" && case parseSessionModule (exactModule artifact) of
-  Just owner -> smKind owner == ValMod && sessionModuleString owner == exactModule artifact
+checkedValueOwner artifact = checkedValueModuleOwner (exactUnit artifact) (exactModule artifact)
+
+checkedValueModuleOwner :: String -> String -> Bool
+checkedValueModuleOwner unit name = unit == "main" && case parseSessionModule name of
+  Just owner -> smKind owner == ValMod && sessionModuleString owner == name
   Nothing -> False
 
 noCheckedValueImports :: CheckedValueImportAuthority
 noCheckedValueImports = CheckedValueImportAuthority Set.empty
+
+-- Captures come from the actual session injection owner. Merely observing a
+-- value-shaped name in an interface inventory or HPT cannot issue this proof.
+checkedValueImportAuthorityFromCaptures
+  :: [CapturedSessionInterface] -> Either String CheckedValueImportAuthority
+checkedValueImportAuthorityFromCaptures captures = do
+  owners <- mapM checked captures
+  pure (CheckedValueImportAuthority (Set.fromList owners))
+  where
+    checked capture =
+      let (owner,_) = capturedSessionInterface capture
+          name = moduleNameString (moduleName owner)
+          unit = unitString (moduleUnit owner)
+      in if checkedValueModuleOwner unit name then Right (unit,name)
+        else Left "injected checked value capture has another owner"
+
+unionCheckedValueImports :: CheckedValueImportAuthority -> CheckedValueImportAuthority
+  -> CheckedValueImportAuthority
+unionCheckedValueImports (CheckedValueImportAuthority left) (CheckedValueImportAuthority right) =
+  CheckedValueImportAuthority (Set.union left right)
+
+admitsCheckedValueImport :: CheckedValueImportAuthority -> Module -> Bool
+admitsCheckedValueImport (CheckedValueImportAuthority owners) owner =
+  (unitString (moduleUnit owner),moduleNameString (moduleName owner)) `Set.member` owners
 
 -- A protected turn producer records the compiler's import before authored
 -- bytes are inserted. The resulting capability belongs to one rendered

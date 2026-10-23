@@ -20,7 +20,7 @@ import GHC.Unit.Types (unitString)
 import GHC.Types.PkgQual (PkgQual, RawPkgQual)
 import Tidepool.ArtifactBytes (ArtifactBytes)
 import Tidepool.CheckedCell (NativeParsedModule)
-import Tidepool.ExactHydration (CapturedGeneratedImports, ExactIfaceArtifact)
+import Tidepool.ExactHydration (CapturedGeneratedImports, ExactIfaceArtifact, CheckedValueImportAuthority)
 import Tidepool.ExactScope (ExactScope, SourceSelectedOriginals)
 import Tidepool.DependencyEvidence (DependencyQualifier)
 import Tidepool.ImportSyntax (DriverImportSyntax, ImportOccurrenceId)
@@ -75,7 +75,7 @@ data ResolvedImportAdmission = ResolvedImportAdmission
 -- The only constructor sites are the closed actual frontend recipes. The
 -- NativeParsedModule includes the same driver's import lineage and type uses.
 data PreparedImportAdmission = PreparedImportAdmission
-  ResolvedImportAdmission ModSummary NativeParsedModule
+  ResolvedImportAdmission ModSummary NativeParsedModule CheckedValueImportAuthority
 
 -- Successful compilation drops the parsed module and refinement buffer. The
 -- completed owner retains only the exact decisions required by its receipt.
