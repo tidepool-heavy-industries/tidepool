@@ -2725,6 +2725,21 @@ mod authored_tests {
                 .admit_authored_publication(std::slice::from_ref(&baseline), &source_surface)
                 .unwrap(),
         );
+        let mut substituted = source_surface.clone();
+        substituted
+            .source_bindings
+            .get_mut(&selected_support)
+            .unwrap()
+            .0
+            .selection
+            .0[0] ^= 1;
+        let refusal = context
+            .publication_join_inputs(Arc::new(tempfile::tempdir().unwrap()), &substituted)
+            .err()
+            .expect("equal SOURCE owner names cannot substitute an exact issuing binding");
+        assert!(refusal
+            .to_string()
+            .contains("publication source binding differs from its exact input"));
         let baseline_adjacency = context
             .lexical_graph()
             .iter()
