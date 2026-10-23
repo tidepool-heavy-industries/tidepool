@@ -285,10 +285,35 @@ fn assert_same_native_decision(
     ) {
         (InputNativeDecision::UnissuedPolicy, InputNativeDecision::UnissuedPolicy) => {}
         (
-            InputNativeDecision::IssuedChoices(expected),
-            InputNativeDecision::IssuedChoices(actual),
+            InputNativeDecision::IssuedChoices(expected_groups),
+            InputNativeDecision::IssuedChoices(actual_groups),
         ) => {
-            assert_eq!(actual, expected);
+            assert_eq!(actual_groups, expected_groups);
+            for group in expected_groups.values() {
+                let expected_support = expected
+                    .compiler_roles()
+                    .selected_native_support(owner, *group)
+                    .expect("the issuing selected row records its native support");
+                let actual_support = actual
+                    .compiler_roles()
+                    .selected_native_support(owner, *group)
+                    .expect("the chosen row retains native support with its native decision");
+                assert_eq!(
+                    matches!(expected_support, SelectedNativeSupport::Missing(_)),
+                    matches!(actual_support, SelectedNativeSupport::Missing(_)),
+                    "missing native permission cannot be filled by the losing row"
+                );
+                let expected_offers = expected_support.acquisitions();
+                let actual_offers = actual_support.acquisitions();
+                assert_eq!(actual_offers.len(), expected_offers.len());
+                assert!(
+                    actual_offers
+                        .iter()
+                        .zip(expected_offers)
+                        .all(|(actual, expected)| actual.same_issuance(expected)),
+                    "equal native facts cannot replace the selected actual contribution"
+                );
+            }
         }
         _ => panic!("a whole-row operation changed whether a native choice was issued"),
     }
