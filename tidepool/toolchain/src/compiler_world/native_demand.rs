@@ -7,13 +7,32 @@ use crate::declaration_context::{
     DemandCertifiedGroups, RequestCompilerInputs, ResolvedNativeDemand,
 };
 
+#[derive(Debug)]
+pub(super) struct DependencyRequestIdentity;
+
+pub(super) struct WorldDependencyObservations {
+    pub(super) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
+    pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
+    pub(super) primary: crate::declaration_context::WorldPrimaryInputs,
+    identity: Arc<DependencyRequestIdentity>,
+    acquisitions: Vec<Arc<ResolvedNativeDemand>>,
+    acquired_uses: BTreeMap<crate::certified_products::ReceiptImportOwner, usize>,
+    stages: BTreeMap<u64, PendingStageDependencies>,
+}
+
 pub(crate) struct WorldNativeDemandCompletion {
     pub(super) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
     pub(super) primary: crate::declaration_context::WorldPrimaryInputs,
     acquisitions: Vec<Arc<ResolvedNativeDemand>>,
     acquired_uses: BTreeMap<crate::certified_products::ReceiptImportOwner, usize>,
-    stages: BTreeMap<u64, PendingStageDependencies>,
+    identity: Arc<DependencyRequestIdentity>,
+    stages: BTreeMap<u64, CompletedStageDependencies>,
+}
+
+struct CompletedStageDependencies {
+    native: Option<WorldNativeDemandStage>,
+    dependencies: Arc<SealedStageDependencies>,
 }
 
 #[derive(Default)]
@@ -59,93 +78,6 @@ impl CheckedWorldStageNativeInputs {
 
     pub(crate) fn stage(&self) -> &Arc<CheckedWorldCellStage> {
         &self.stage
-    }
-
-    pub(crate) fn select_dependency_terminal(
-        &self,
-        reference: &DependencyTerminalReference,
-    ) -> Result<SelectedDependencyTerminal, CompileError> {
-        let matches = |occurrence: crate::declaration_context::NativeRetainedOccurrence<'_>| {
-            occurrence.demander == reference.demander
-                && occurrence.global_index == reference.global_index
-                && *occurrence.binding == reference.binding
-                && *occurrence.identity == reference.identity
-                && occurrence.generation == reference.generation
-        };
-        let selected = match reference.origin {
-            DependencyTerminalOrigin::SourceDefinition => self
-                .request
-                .stages
-                .get(&self.offset)
-                .into_iter()
-                .flat_map(|stage| &stage.source)
-                .any(|basis| {
-                    basis.rows().iter().any(|row| {
-                        row.reference() == &reference.original_use
-                            && row.retained_occurrences().any(matches)
-                    })
-                }),
-            DependencyTerminalOrigin::NativeOriginal => match self.selection() {
-                Some(stage) => stage
-                    .selected_groups
-                    .retained_occurrences_for_use(&reference.original_use)?
-                    .into_iter()
-                    .any(matches),
-                None => false,
-            },
-        };
-        if !selected {
-            return Err(source_failure(
-                "dependency terminal exceeds its issued stage decision",
-            ));
-        }
-        Ok(SelectedDependencyTerminal {
-            reference: reference.clone(),
-            issuer: self.clone(),
-        })
-    }
-
-    pub(crate) fn matches_dependency_terminal_checked_value(
-        &self,
-        reference: &DependencyTerminalReference,
-        row: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<bool, CompileError> {
-        let occurrence = crate::declaration_context::NativeRetainedOccurrence {
-            demander: reference.demander,
-            global_index: reference.global_index,
-            binding: &reference.binding,
-            identity: &reference.identity,
-            generation: reference.generation,
-        };
-        match reference.origin {
-            DependencyTerminalOrigin::SourceDefinition => {
-                for basis in self
-                    .request
-                    .stages
-                    .get(&self.offset)
-                    .into_iter()
-                    .flat_map(|stage| &stage.source)
-                {
-                    if basis.rows().iter().any(|issued| {
-                        issued.reference() == &reference.original_use
-                            && issued
-                                .retained_occurrences()
-                                .any(|actual| actual == occurrence)
-                    }) {
-                        return basis.matches_checked_value(occurrence, row);
-                    }
-                }
-                Ok(false)
-            }
-            DependencyTerminalOrigin::NativeOriginal => match self.selection() {
-                Some(stage) => stage.selected_groups.matches_retained_checked_value(
-                    &reference.original_use,
-                    occurrence,
-                    row,
-                ),
-                None => Ok(false),
-            },
-        }
     }
 
     pub(crate) fn selection(&self) -> Option<&WorldNativeDemandStage> {
@@ -212,7 +144,9 @@ impl WorldNativeDemandCompletion {
             .ordinals()
             .first()
             .ok_or_else(|| source_failure("World stage native inputs have no ordinal"))?;
-        if first >= self.reservation.slots().len()
+        if !Arc::ptr_eq(&stage.dependencies.request, &self.identity)
+            || stage.dependencies.first_ordinal != first
+            || first >= self.reservation.slots().len()
             || program
                 .stages()
                 .binary_search_by_key(&first, |emitted| emitted.ordinals()[0])
@@ -224,31 +158,200 @@ impl WorldNativeDemandCompletion {
         }
         let offset = u64::try_from(first)
             .map_err(|_| source_failure("World native stage ordinal is out of range"))?;
+        if self
+            .stages
+            .get(&offset)
+            .is_none_or(|completed| !Arc::ptr_eq(&completed.dependencies, stage.dependencies()))
+        {
+            return Err(source_failure(
+                "World stage dependencies have another completion owner",
+            ));
+        }
         Ok(CheckedWorldStageNativeInputs {
             request: Arc::clone(self),
             stage: Arc::clone(stage),
             offset,
         })
     }
+}
 
-    pub(super) fn require_emitted_stages(
+impl WorldDependencyObservations {
+    /// Bind only reached terminal rows, once per exact use, before the stage
+    /// is admitted. Availability elsewhere in the ledger is not selected.
+    pub(super) fn seal_stage_dependencies(
         &self,
+        first_ordinal: usize,
+        references: Vec<DependencyTerminalReference>,
+    ) -> Result<Arc<SealedStageDependencies>, CompileError> {
+        use crate::declaration_context::{NativeRetainedOccurrence, RetainedValueEvidence};
+        type UseKey<'a> = (
+            DependencyTerminalOrigin,
+            &'a crate::certified_products::ReceiptImportOwner,
+        );
+        self.operation
+            .reserve::<(UseKey, Vec<usize>)>(references.len())
+            .and_then(|_| {
+                self.operation
+                    .reserve::<SealedDependencyRow>(references.len())
+            })
+            .and_then(|_| {
+                self.operation
+                    .reserve::<Option<RetainedValueEvidence>>(references.len())
+            })
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut uses = BTreeMap::<UseKey, Vec<usize>>::new();
+        for (index, reference) in references.iter().enumerate() {
+            uses.entry((reference.origin, &reference.original_use))
+                .or_default()
+                .push(index);
+        }
+        let pending = self.stages.get(&(first_ordinal as u64));
+        let mut selected = vec![None; references.len()];
+        for ((origin, original_use), indices) in uses {
+            crate::host_work::checkpoint()?;
+            self.operation
+                .reserve::<NativeRetainedOccurrence<'_>>(indices.len())
+                .and_then(|_| {
+                    self.operation
+                        .reserve::<RetainedValueEvidence>(indices.len())
+                })
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let requested = indices
+                .iter()
+                .map(|index| references[*index].occurrence())
+                .collect::<Vec<_>>();
+            let pending = pending.ok_or_else(|| {
+                source_failure("dependency terminal has no issued stage decision")
+            })?;
+            let evidence = match origin {
+                DependencyTerminalOrigin::NativeOriginal => pending
+                    .native
+                    .as_ref()
+                    .ok_or_else(|| source_failure("native terminal has no native stage selection"))?
+                    .selected_groups
+                    .select_retained_values_for_use(&original_use, &requested)?,
+                DependencyTerminalOrigin::SourceDefinition => {
+                    // Repeated observations retain their actual issuer. Merge only
+                    // exact occurrence membership, never permission or generations.
+                    let mut issued = BTreeMap::new();
+                    for (basis_index, basis) in pending.source.iter().enumerate() {
+                        for row in basis
+                            .rows()
+                            .iter()
+                            .filter(|row| row.reference() == &original_use)
+                        {
+                            self.operation
+                                .reserve::<(NativeRetainedOccurrence<'_>, usize)>(
+                                    row.retained_occurrences().len(),
+                                )
+                                .map_err(|error| {
+                                    CompileError::CompilerEvidence(Box::new(error.into()))
+                                })?;
+                            for occurrence in row.retained_occurrences() {
+                                issued.entry(occurrence).or_insert(basis_index);
+                            }
+                        }
+                    }
+                    let mut by_basis = BTreeMap::<usize, Vec<usize>>::new();
+                    for (index, occurrence) in requested.iter().enumerate() {
+                        let basis = issued.get(occurrence).ok_or_else(|| {
+                            source_failure("SOURCE terminal exceeds its issued exact use")
+                        })?;
+                        by_basis.entry(*basis).or_default().push(index);
+                    }
+                    let mut evidence = vec![None; requested.len()];
+                    for (basis, positions) in by_basis {
+                        let subset = positions
+                            .iter()
+                            .map(|index| requested[*index])
+                            .collect::<Vec<_>>();
+                        let admitted = pending.source[basis]
+                            .select_retained_values_for_use(&original_use, &subset)?;
+                        for (index, value) in positions.into_iter().zip(admitted) {
+                            evidence[index] = Some(value);
+                        }
+                    }
+                    evidence
+                        .into_iter()
+                        .map(|value| {
+                            value.ok_or_else(|| {
+                                source_failure("SOURCE terminal lost its selected payload")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+            };
+            for (index, evidence) in indices.into_iter().zip(evidence) {
+                selected[index] = Some(evidence);
+            }
+        }
+        let rows = references
+            .into_iter()
+            .zip(selected)
+            .map(|(reference, evidence)| {
+                Ok(SealedDependencyRow {
+                    reference,
+                    evidence: evidence.ok_or_else(|| {
+                        source_failure("dependency terminal lost its selected payload")
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        Ok(Arc::new(SealedStageDependencies {
+            request: Arc::clone(&self.identity),
+            first_ordinal,
+            rows,
+        }))
+    }
+
+    pub(super) fn bind_emitted_stages(
+        mut self,
         stages: &[Arc<CheckedWorldCellStage>],
-    ) -> Result<(), CompileError> {
+    ) -> Result<Arc<WorldNativeDemandCompletion>, CompileError> {
         for offset in self.stages.keys() {
             crate::host_work::checkpoint()?;
             let offset = usize::try_from(*offset)
-                .map_err(|_| source_failure("native demand stage offset is out of range"))?;
+                .map_err(|_| source_failure("dependency stage offset is out of range"))?;
             if stages
                 .binary_search_by(|stage| stage.ordinals().first().copied().cmp(&Some(offset)))
                 .is_err()
             {
                 return Err(source_failure(
-                    "native demand has no actual completed World stage",
+                    "dependency query has no actual completed World stage",
                 ));
             }
         }
-        Ok(())
+        self.operation
+            .reserve::<(u64, CompletedStageDependencies)>(stages.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut completed = BTreeMap::new();
+        for stage in stages {
+            let first = stage.ordinals()[0];
+            if !Arc::ptr_eq(&stage.dependencies.request, &self.identity)
+                || stage.dependencies.first_ordinal != first
+            {
+                return Err(source_failure(
+                    "dependency seal belongs to another request or stage",
+                ));
+            }
+            let pending = self.stages.remove(&(first as u64)).unwrap_or_default();
+            completed.insert(
+                first as u64,
+                CompletedStageDependencies {
+                    native: pending.native,
+                    dependencies: Arc::clone(stage.dependencies()),
+                },
+            );
+        }
+        Ok(Arc::new(WorldNativeDemandCompletion {
+            reservation: self.reservation,
+            operation: self.operation,
+            primary: self.primary,
+            identity: self.identity,
+            acquisitions: self.acquisitions,
+            acquired_uses: self.acquired_uses,
+            stages: completed,
+        }))
     }
 }
 
@@ -428,7 +531,7 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
 pub(super) struct WorldNativeDemandResolver<'a> {
     owner: tidepool_extract_cmd::NativeDemandOwner,
     slots: usize,
-    completion: WorldNativeDemandCompletion,
+    completion: WorldDependencyObservations,
     validation: &'a mut crate::recovery_artifacts::PackageInterfaceValidation,
     refusals: [Vec<u8>; 6],
     refusal: Option<CompileError>,
@@ -497,10 +600,11 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 inputs: world.restoration.compiler_input_identity,
             },
             slots: reservation.slots().len(),
-            completion: WorldNativeDemandCompletion {
+            completion: WorldDependencyObservations {
                 reservation: Arc::clone(reservation),
                 operation: Arc::clone(&validation.inventory),
                 primary,
+                identity: Arc::new(DependencyRequestIdentity),
                 acquisitions: Vec::new(),
                 acquired_uses: BTreeMap::new(),
                 stages: BTreeMap::new(),
@@ -515,10 +619,10 @@ impl<'a> WorldNativeDemandResolver<'a> {
         self.owner.clone()
     }
 
-    pub(super) fn finish(self) -> Result<Arc<WorldNativeDemandCompletion>, CompileError> {
+    pub(super) fn finish(self) -> Result<WorldDependencyObservations, CompileError> {
         match self.refusal {
             Some(refusal) => Err(refusal),
-            None => Ok(Arc::new(self.completion)),
+            None => Ok(self.completion),
         }
     }
 
@@ -543,7 +647,7 @@ impl<'a> WorldNativeDemandResolver<'a> {
             native_demand::DependencyQuery::Source(packet) => {
                 let basis = Arc::new(crate::declaration_context::SourceDependencyBasis::observe(
                     &self.completion.primary,
-                    packet.into_originals(),
+                    packet,
                     &self.validation.inventory,
                 )?);
                 self.validation

@@ -3260,6 +3260,22 @@ pub(crate) struct NativePackageObligation {
     pub(crate) interface_digest: [u8; 32],
 }
 
+/// Immutable compatibility facts retained by exact dependency selection.
+/// This is not a runtime binding or a grant to execute the value.
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedValueEvidence {
+    entry: Arc<crate::artifact_inventory::ArtifactEntry>,
+}
+impl RetainedValueEvidence {
+    pub(crate) fn matches_checked_value(
+        &self,
+        row: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<bool, CompileError> {
+        let (actual, _) = row.world_type_parts()?;
+        Ok(self.entry.as_ref() == actual.as_ref())
+    }
+}
+
 /// A borrowed retained import at its exact selected body occurrence. Keeping
 /// the slot and full binding prevents equal symbols in different historical
 /// selections from collapsing into one runtime requirement.
@@ -3456,20 +3472,23 @@ impl DemandCertifiedGroups {
         Ok(occurrences)
     }
 
-    pub(crate) fn matches_retained_checked_value(
+    pub(crate) fn select_retained_values_for_use(
         &self,
         reference: &crate::certified_products::ReceiptImportOwner,
-        occurrence: NativeRetainedOccurrence<'_>,
-        row: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<bool, CompileError> {
-        if !self.retained_occurrences_for_use(reference)?.contains(&occurrence) {
-            return Ok(false);
-        }
-        let selected = self.basis.source_support.artifacts()
-            .observed_payload(&occurrence.binding.artifact)
-            .ok_or_else(|| failure("selected native retained occurrence lost its immutable value payload"))?;
-        let (actual, _) = row.world_type_parts()?;
-        Ok(selected.as_ref() == actual.as_ref())
+        requested: &[NativeRetainedOccurrence<'_>],
+    ) -> Result<Vec<RetainedValueEvidence>, CompileError> {
+        // The exact graph is traversed once for the whole reached use.
+        let issued = self.retained_occurrences_for_use(reference)?;
+        NativeDemandBudget(Some(&self.operation)).reserve::<RetainedValueEvidence>(requested.len())?;
+        requested.iter().map(|occurrence| {
+            if issued.binary_search(occurrence).is_err() {
+                return Err(failure("native terminal exceeds its issued exact use"));
+            }
+            let entry = self.basis.source_support.artifacts()
+                .observed_payload(&occurrence.binding.artifact)
+                .ok_or_else(|| failure("selected native retained occurrence lost its immutable value payload"))?;
+            Ok(RetainedValueEvidence { entry: Arc::clone(entry) })
+        }).collect()
     }
 
     /// Follow roots recorded by the original choice issuer and their exact

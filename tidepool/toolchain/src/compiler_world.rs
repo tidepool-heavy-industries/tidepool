@@ -4754,7 +4754,7 @@ pub(crate) struct CheckedWorldCellStage {
     ordinals: Vec<usize>,
     outputs: WorldStageOutputs,
     selected_inputs: Vec<WorldCellRuntimeInput>,
-    dependency_terminals: Vec<DependencyTerminalReference>,
+    dependencies: Arc<SealedStageDependencies>,
     demanded_rows: Vec<Arc<CheckedValueArtifact>>,
     demanded_session_bindings: Vec<tidepool_repr::SessionVarId>,
 }
@@ -4780,8 +4780,8 @@ impl CheckedWorldCellStage {
     pub(crate) fn demanded_session_bindings(&self) -> &[tidepool_repr::SessionVarId] {
         &self.demanded_session_bindings
     }
-    pub(crate) fn dependency_terminals(&self) -> &[DependencyTerminalReference] {
-        &self.dependency_terminals
+    pub(crate) fn dependencies(&self) -> &Arc<SealedStageDependencies> {
+        &self.dependencies
     }
     fn selected(&self, reference: &WorldInputRef) -> bool {
         self.selected_inputs
@@ -5188,28 +5188,6 @@ impl CheckedWorldCellProgram {
         self.items.get(ordinal)
     }
 
-    pub(crate) fn selected_dependency_terminals(
-        &self,
-        ordinal: usize,
-    ) -> Result<Vec<SelectedDependencyTerminal>, CompileError> {
-        let item = self
-            .item(ordinal)
-            .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
-        let stage = item.proof.stage();
-        let issuer =
-            self.native_demand_completion()
-                .checked_stage(self, stage, self.validation())?;
-        issuer
-            .operation()
-            .reserve::<SelectedDependencyTerminal>(stage.dependency_terminals().len())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        stage
-            .dependency_terminals()
-            .iter()
-            .map(|reference| issuer.select_dependency_terminal(reference))
-            .collect()
-    }
-
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
         self.output.primary_context()
     }
@@ -5460,8 +5438,9 @@ fn world_cell_output_certificate(
                 .map(|selected| &selected.reference),
             &mut frame,
         );
-        frame(&(stage.dependency_terminals.len() as u64).to_le_bytes());
-        for terminal in &stage.dependency_terminals {
+        frame(&(stage.dependencies.rows.len() as u64).to_le_bytes());
+        for row in &stage.dependencies.rows {
+            let terminal = &row.reference;
             frame_dependency_terminal(terminal, &mut frame);
         }
     }
@@ -5932,6 +5911,16 @@ pub(crate) struct DependencyTerminalReference {
 }
 
 impl DependencyTerminalReference {
+    fn occurrence(&self) -> crate::declaration_context::NativeRetainedOccurrence<'_> {
+        crate::declaration_context::NativeRetainedOccurrence {
+            demander: self.demander,
+            global_index: self.global_index,
+            binding: &self.binding,
+            identity: &self.identity,
+            generation: self.generation,
+        }
+    }
+
     fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         use crate::artifact_inventory::{
             ArtifactBinding, ArtifactId, ArtifactSelectionId, NativeGroupBinding, NativeGroupIssuer,
@@ -5993,50 +5982,81 @@ impl DependencyTerminalReference {
     }
 }
 
+/// Once-authenticated dependency rows for an actually emitted stage.
+/// Rows retain immutable facts, never a backreference to their stage or handles.
+#[derive(Debug)]
+pub struct SealedStageDependencies {
+    request: Arc<native_demand::DependencyRequestIdentity>,
+    first_ordinal: usize,
+    rows: Vec<SealedDependencyRow>,
+}
+
+#[derive(Debug)]
+struct SealedDependencyRow {
+    reference: DependencyTerminalReference,
+    evidence: crate::declaration_context::RetainedValueEvidence,
+}
+
+impl SealedStageDependencies {
+    pub fn terminals(
+        self: &Arc<Self>,
+    ) -> impl ExactSizeIterator<Item = SelectedDependencyTerminal> + '_ {
+        (0..self.rows.len()).map(|index| SelectedDependencyTerminal {
+            owner: Arc::clone(self),
+            index,
+        })
+    }
+}
+
 /// An exact terminal selected by the issuing source or native dependency
 /// owner of this request and stage. Runtime value authority remains separate.
 #[derive(Clone, Debug)]
 pub struct SelectedDependencyTerminal {
-    reference: DependencyTerminalReference,
-    issuer: native_demand::CheckedWorldStageNativeInputs,
+    owner: Arc<SealedStageDependencies>,
+    index: usize,
 }
 
 impl SelectedDependencyTerminal {
+    fn reference(&self) -> &DependencyTerminalReference {
+        &self.owner.rows[self.index].reference
+    }
     /// Compare immutable compiler evidence only. The receiving runtime must
     /// independently resolve and retain its actual scoped prepared value.
     pub fn matches_checked_value(&self, row: &CheckedValueArtifact) -> Result<bool, CompileError> {
-        self.issuer
-            .matches_dependency_terminal_checked_value(&self.reference, row)
+        self.owner.rows[self.index]
+            .evidence
+            .matches_checked_value(row)
     }
 
     pub fn origin(&self) -> DependencyTerminalOrigin {
-        self.reference.origin
+        self.reference().origin
     }
     pub fn original_use(&self) -> &crate::certified_products::ReceiptImportOwner {
-        &self.reference.original_use
+        &self.reference().original_use
     }
     pub fn demander(&self) -> crate::artifact_inventory::NativeGroupBinding {
-        self.reference.demander
+        self.reference().demander
     }
     pub fn global_index(&self) -> u32 {
-        self.reference.global_index
+        self.reference().global_index
     }
     pub fn binding(&self) -> crate::artifact_inventory::ArtifactBinding {
-        self.reference.binding
+        self.reference().binding
     }
     pub fn identity(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
-        &self.reference.identity
+        &self.reference().identity
     }
     pub fn generation(&self) -> u64 {
-        self.reference.generation
+        self.reference().generation
     }
     pub fn stage_first_ordinal(&self) -> usize {
-        self.issuer.stage().ordinals()[0]
+        self.owner.first_ordinal
     }
 }
 
 fn admit_world_stage_inputs(
     decoded: DecodedWorldCellStage,
+    dependencies: Arc<SealedStageDependencies>,
     plan: &crate::cell_plan::CompilerWorldCellPlan,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<Arc<CheckedWorldCellStage>, CompileError> {
@@ -6157,7 +6177,7 @@ fn admit_world_stage_inputs(
         ordinals: decoded.ordinals,
         outputs: decoded.outputs,
         selected_inputs,
-        dependency_terminals: decoded.dependency_terminals,
+        dependencies,
         demanded_rows: rows.into_values().collect(),
         demanded_session_bindings: bindings
             .into_iter()
@@ -6238,7 +6258,7 @@ fn admit_world_preparation_response(
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
-    native_demands: Arc<native_demand::WorldNativeDemandCompletion>,
+    native_demands: native_demand::WorldDependencyObservations,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
     if !Arc::ptr_eq(&reservation, &native_demands.reservation)
         || !Arc::ptr_eq(&validation.inventory, &native_demands.operation)
@@ -6322,9 +6342,15 @@ fn admit_world_preparation_response(
         &validation.inventory,
     )?
     .into_iter()
-    .map(|stage| admit_world_stage_inputs(stage, plan, &validation.inventory))
+    .map(|mut stage| {
+        let dependencies = native_demands.seal_stage_dependencies(
+            stage.ordinals[0],
+            std::mem::take(&mut stage.dependency_terminals),
+        )?;
+        admit_world_stage_inputs(stage, dependencies, plan, &validation.inventory)
+    })
     .collect::<Result<Vec<_>, _>>()?;
-    native_demands.require_emitted_stages(&stages)?;
+    let native_demands = native_demands.bind_emitted_stages(&stages)?;
     validation
         .inventory
         .reserve::<Arc<WorldItemProof>>(completed.len())
@@ -7451,7 +7477,11 @@ mod answer_tests {
                     certified_products: file("certified"),
                 },
                 selected_inputs: vec![],
-                dependency_terminals: vec![],
+                dependencies: Arc::new(SealedStageDependencies {
+                    request: Arc::new(native_demand::DependencyRequestIdentity),
+                    first_ordinal: ordinal,
+                    rows: vec![],
+                }),
                 demanded_rows: vec![],
                 demanded_session_bindings: vec![],
             })
