@@ -500,10 +500,11 @@ admittedSourceFiles request = case admittedRequestOperation request of
   _ -> []
   where sources source = payloadSourceInput source : payloadSourceAdditionalInputs source
 
--- Path replacement preserves the admitted operation's shape and query pairing.
-traverseAdmittedSources :: Applicative f => (RequestSourceRole -> FilePath -> f FilePath)
+-- Path replacement preserves the admitted operation's shape, nonempty paths
+-- and query pairing.
+traverseAdmittedSources :: MonadFail f => (RequestSourceRole -> FilePath -> f FilePath)
   -> AdmittedWorkerRequest -> f AdmittedWorkerRequest
-traverseAdmittedSources replace (AdmittedWorkerRequest options operation) = AdmittedWorkerRequest options <$> case operation of
+traverseAdmittedSources replacePath (AdmittedWorkerRequest options operation) = AdmittedWorkerRequest options <$> case operation of
   AdmittedSourcePayload request -> (\source -> AdmittedSourcePayload (request {payloadSourceProductSource=source})) <$> sourcePaths (payloadSourceProductSource request)
   AdmittedSourceCheckPayload source -> AdmittedSourceCheckPayload <$> sourcePaths source
   AdmittedTurnPayload turn -> AdmittedTurnPayload <$> turnPaths turn
@@ -518,6 +519,9 @@ traverseAdmittedSources replace (AdmittedWorkerRequest options operation) = Admi
     <*> traverse (replace InspectionBatchSource) (payloadInspectionBatch inspection)
   other -> pure other
   where
+    replace role original = do
+      copied <- replacePath role original
+      if null copied then fail "source rewriting erased an admitted input path" else pure copied
     sourcePaths source = SourceRequest <$> replace PrimarySource (payloadSourceInput source)
       <*> traverse (replace AdditionalSource) (payloadSourceAdditionalInputs source)
     turnPaths turn = (\source -> turn {payloadTurnSourceRequest=source}) <$> sourcePaths (payloadTurnSourceRequest turn)
