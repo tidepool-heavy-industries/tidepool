@@ -17,16 +17,23 @@ import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile)
 import GHC
   ( runGhc, setSession, setTargets, guessTarget, depanal, mgModSummaries
-  , ms_mod_name, parseModule, getSession, tm_internals_, ParsedModule, pm_parsed_source )
+  , ms_mod_name, ms_location, parseModule, getSession, tm_internals_, ParsedModule, pm_parsed_source )
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (hsc_HPT, hsc_FC, hsc_home_unit)
+import GHC.Unit.Finder (addHomeModuleToFinder)
+import GHC.Unit.Types (GenWithIsBoot(..))
+import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
+import GHC.Hs (HsModule(..), ImportDecl(..), ImportDeclQualifiedStyle(..))
+import GHC.Types.SrcLoc (unLoc)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import GHC.Builtin.Types (intTy, boolTy)
-import GHC.Types.Name (nameModule_maybe)
+import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (mkVarOcc, mkTcOcc, mkDataOcc, mkRecFieldOcc)
 import GHC.Data.FastString (mkFastString)
 import GHC.Types.Name.Reader (RdrName(..), mkRdrUnqual, globalRdrEnvElts, greName, greRdrNames)
 import GHC.Unit.Module (moduleName, mkModuleName)
-import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts, mi_exports)
 import GHC.Utils.Fingerprint (Fingerprint(..))
 import GHC.Types.SourceError (SourceError)
 import GHC.Unit.Module (moduleNameString)
@@ -36,7 +43,7 @@ import Tidepool.Binders
   , analyzeCell, renderCellCheckSource, defaultParserDynFlags, templateParserFlags )
 import Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..), NativeParsedModule
-  , unannotatedModule, typecheckNativeModule )
+  , unannotatedModule, nativeParsedModule, typecheckNativeModule )
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), ExportIdentity(..))
 import Tidepool.GhcPipeline
@@ -46,7 +53,7 @@ import Tidepool.GhcPipeline
 import Tidepool.CheckedPrefixImports
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
-  , generatedCheckingTemplateRecipeWithImportRendering )
+  , generatedCheckingTemplateRecipeWithImportRendering, hydratedExactEnvironment, exactInterfaceSummary )
 import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
@@ -54,7 +61,7 @@ import Tidepool.TurnSource (preambleDefaultDeclaration, replaceTemplateMarker)
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), sessionModuleString
   , parseSessionModule, isReservedSessionModuleName
-  , mkThinSessionIface, writeSessionIface, injectSessionIface, sessionHiPath, sessionBinderName, registerSessionInterfaceLocation )
+  , mkThinSessionIface, writeSessionIface, injectSessionIface, sessionHiPath, sessionBinderName )
 
 main :: IO ()
 main = runTests tests
@@ -290,8 +297,9 @@ checkCompletedValueRefinement work baseEnv original = do
         (sessionModuleString dependencyOwner) (sessionHiPath work dependencyOwner)
         (digestOf dependencyBytes) []
       target = work </> "PrefixCheck.hs"
-  (hydrated, completed) <- hydrateCompletedValueImportsWithDependencies [dependency]
+  (hydratedOwner, completed) <- hydrateCompletedValueImportsWithDependencies [dependency]
     [requested] previousEnv >>= either fail pure
+  let hydrated = hydratedExactEnvironment hydratedOwner
   source <- readFile "test-planned-declaration/fixtures/prefix-check.hs"
   writeFile target source
   checkCompletedImports target hydrated original completed
@@ -314,7 +322,8 @@ checkCompletedValueRefinement work baseEnv original = do
         fail "changed or duplicate dependency bytes admitted completed value hydration"
   -- Identical owner, bytes and fingerprint0 still do not authorize the HPT
   -- allocation from an earlier injection or a separately reconstructed read.
-  (recreated, recreatedCompleted) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
+  (recreatedOwner, recreatedCompleted) <- hydrateCompletedValueImports [requested] hydrated >>= either fail pure
+  let recreated = hydratedExactEnvironment recreatedOwner
   checkCompletedImports target recreated original recreatedCompleted
   poisonedThin <- mkThinSessionIface baseEnv owner [(occurrence, boolTy), (mkVarOcc "other", intTy)]
   unless (mi_iface_hash (mi_final_exts poisonedThin) == Fingerprint 0 0) $
@@ -324,8 +333,9 @@ checkCompletedValueRefinement work baseEnv original = do
   BS.writeFile (sessionHiPath work owner) bytes
   -- A previous same-owner, same-zero-hash allocation has different native
   -- details. The captured Int bytes must replace it before issuing this cap.
-  (repaired, repairedCompleted) <- hydrateCompletedValueImportsWithDependencies [dependency]
+  (repairedOwner, repairedCompleted) <- hydrateCompletedValueImportsWithDependencies [dependency]
     [requested] poisonedEnv >>= either fail pure
+  let repaired = hydratedExactEnvironment repairedOwner
   checkCompletedImports target repaired original repairedCompleted
   forM_ [previousEnv, recreated, poisonedEnv] $ \stale -> do
     refused <- try (checkCompletedImports target stale original completed) :: IO (Either IOException ())
@@ -351,25 +361,38 @@ checkCompletedImports file env original completed = do
       _ -> fail "completed-prefix checking module absent"
     parsed <- parseModule summary
     current <- getSession
-    -- Downsweep can replace finder state; register the retained source-less
-    -- location in the consuming request, as the session pipeline does.
-    liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
-      (SessionModule ValMod (Generation 9))) (SessionModule ValMod (Generation 9)) current)
-    liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
-      (SessionModule ValMod (Generation 8))) (SessionModule ValMod (Generation 8)) current)
     native <- liftIO (parsedNativeModule parsed)
     transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current native)
-    typed <- typecheckNativeModule transformed
-    let (tcg, _) = tm_internals_ typed
-        owners spelling = nub [moduleNameString (moduleName owner)
-          | entry <- globalRdrEnvElts (tcg_rdr_env tcg)
-          , spelling `elem` greRdrNames entry
-          , Just owner <- [nameModule_maybe (greName entry)]]
-    unless (owners (mkRdrUnqual (mkVarOcc "id")) == ["Tidepool.Session.Val.G9"]
-        && owners (Qual (mkModuleName "Tidepool.Session.Lib.G7") (mkVarOcc "id")) == ["Tidepool.Session.Lib.G7"]
-        && owners (Qual (mkModuleName "Tidepool.Session.Val.G8") (mkVarOcc "older")) == ["Tidepool.Session.Val.G8"]
-        && owners (Qual (mkModuleName "Foreign") (mkVarOcc "hidden")) == ["Foreign"]) $
-      fail "completed value refinement lost native replacement or preserved qualification"
+    let imports = map unLoc (hsmodImports (unLoc (pm_parsed_source (nativeParsedModule transformed))))
+        names owner qualified = do
+          home <- maybe (fail "refinement fixture lost its captured HOME") pure
+            (lookupHpt (hsc_HPT current) (mkModuleName owner))
+          concat <$> mapM (either fail pure . selectedImportNames (mi_exports (hm_iface home)) . ideclImportList)
+            [declaration | declaration <- imports
+              , unLoc (ideclName declaration) == mkModuleName owner
+              , (ideclQualified declaration /= NotQualified) == qualified]
+        has owner qualified occurrence = any ((== mkVarOcc occurrence) . nameOccName) <$> names owner qualified
+    selected <- liftIO (has "Tidepool.Session.Val.G9" False "id")
+    shadowed <- liftIO (has "Tidepool.Session.Lib.G7" False "id")
+    originalQualified <- liftIO (has "Tidepool.Session.Lib.G7" True "id")
+    olderQualified <- liftIO (has "Tidepool.Session.Val.G8" True "older")
+    foreignQualified <- liftIO (has "Foreign" True "hidden")
+    unless (selected && not shadowed && originalQualified && olderQualified && foreignQualified) $
+      fail "completed value refinement lost its selected Names or preserved qualification"
+    -- This is the independent GHC oracle over the fixture's real written
+    -- interfaces. Tidepool's production installer is exercised by World
+    -- source-hidden tests; no public Finder issuer is needed for this oracle.
+    liftIO $ forM_ [SessionModule ValMod (Generation 8),SessionModule ValMod (Generation 9)] $ \owner -> do
+      bytes <- BS.readFile (sessionHiPath (takeDirectory file) owner)
+      let digest = concatMap (\byte -> let digits = showHex byte ""
+            in replicate (2 - length digits) '0' ++ digits) (BS.unpack (SHA256.hash bytes))
+          artifact = ExactIfaceArtifact (fst (plannedOriginalOwner original)) (sessionModuleString owner)
+            (sessionHiPath (takeDirectory file) owner) digest []
+      addHomeModuleToFinder (hsc_FC current) (hsc_home_unit current)
+        (GWIB (mkModuleName (sessionModuleString owner)) NotBoot)
+        (ms_location (exactInterfaceSummary current artifact))
+    _ <- typecheckNativeModule transformed
+    pure ()
 
 replaceForeignImport :: String -> String -> String
 replaceForeignImport replacement = unlines . map replace . lines

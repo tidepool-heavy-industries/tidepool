@@ -14,7 +14,7 @@ module Tidepool.CheckedPrefixImports
   , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases
   ) where
 
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, throwIO)
 import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
 import qualified Data.IntMap.Strict as IntMap
@@ -51,8 +51,10 @@ import GHC.Utils.Outputable (ppr)
 import System.Mem.StableName (StableName, makeStableName)
 import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), exportIdentity)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), VerifiedExactIfaceClosure, readExactIfaceArtifacts
-  , selectVerifiedValueInterfaces, hydrateExactScope, checkedValueOwner )
+  ( ExactIfaceArtifact(..), CapturedInterfaceInputs, HydratedExactInterfaces
+  , readVerifiedExactIfaceClosure, selectCapturedInterfaceInputs
+  , hydrateInterfaceInputs, hydratedExactEnvironment, hydratedInterfaceProduct
+  , selectVerifiedValueInterfaces, checkedValueOwner )
 import Tidepool.Identity (stableVarId, nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
@@ -60,7 +62,7 @@ import Tidepool.ImportSyntax (RefinedImportSyntax, refinedParsedModule)
 import Tidepool.ImportSyntax.Internal
   ( ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource )
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
-  sessionModuleString, scaffoldTargetName, registerSessionInterfaceLocation)
+  sessionModuleString, scaffoldTargetName)
 
 -- These fields come from the closed completed-prefix authorization. They are
 -- advisory until the exact captured bytes and exported native Names validate.
@@ -82,24 +84,34 @@ completedValueAliasIds :: CompletedValueAliases -> Map.Map String Id
 completedValueAliasIds (CompletedValueAliases _ aliases) = aliases
 
 hydrateCompletedValueAliases
-  :: [(String,SymbolIdentity,ExactIfaceArtifact)] -> [(ExactIfaceArtifact,ModIface)] -> HscEnv
-  -> IO (Either String (HscEnv,CompletedValueAliases))
-hydrateCompletedValueAliases requested captured env
+  :: [(String,SymbolIdentity,ExactIfaceArtifact)] -> HydratedExactInterfaces
+  -> IO (Either String CompletedValueAliases)
+hydrateCompletedValueAliases requested hydratedOwner
   | length requested /= Map.size (Map.fromList [(alias,()) | (alias,_,_) <- requested]) =
       pure (Left "completed value aliases have duplicate lexical winners")
-  | any (not . checkedValueOwner . fst) captured = pure (Left "completed value alias has another owner")
-  | length captured /= Map.size (Map.fromList
-      [((exactUnit artifact,exactModule artifact),()) | (artifact,_) <- captured]) =
-      pure (Left "completed value aliases contain duplicate interface owners")
+  | any (not . checkedValueOwner . (\(_,_,artifact) -> artifact)) requested =
+      pure (Left "completed value alias has another owner")
   | otherwise = do
-      let interfaces = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface,names iface)) | (artifact,iface) <- captured]
+      let env = hydratedExactEnvironment hydratedOwner
+          capturedProducts = forM requested $ \(_,_,artifact) -> do
+            (_,home) <- hydratedInterfaceProduct hydratedOwner artifact
+            pure (artifact,hm_iface home)
+      case capturedProducts of
+        Left reason -> pure (Left reason)
+        Right captured -> hydrateAliases env captured
+  where
+    hydrateAliases env captured = do
+      let
+          interfaces = Map.fromList [((exactUnit artifact,exactModule artifact),(artifact,iface,names iface)) | (artifact,iface) <- captured]
           names iface = Map.fromListWith (++)
             [(symbol,[name]) | name <- Set.toList (Set.fromList (concatMap availNames (mi_exports iface)))
               , Just symbol <- [nameSymbolIdentity "value" name]]
           select (alias,symbol,artifact) = do
             (actual,iface,exports) <- maybe (Left "completed value alias lacks its captured interface") Right
               (Map.lookup (exactUnit artifact,exactModule artifact) interfaces)
-            unless (actual == artifact) (Left "completed value alias has another captured interface")
+            -- Each receiving alias was checked against the selected owner
+            -- above; different authenticated paths can share that owner.
+            unless (sameAliasOwner actual artifact) (Left "completed value alias has another captured interface")
             name <- case Map.findWithDefault [] symbol exports of
               [name] -> Right name
               _ -> Left "completed value alias lacks its exact exported SymbolIdentity"
@@ -107,13 +119,7 @@ hydrateCompletedValueAliases requested captured env
       case mapM select requested of
         Left reason -> pure (Left reason)
         Right selected -> do
-          installed <- forM captured $ \(_,iface) -> case lookupHpt (hsc_HPT env) (moduleName (mi_module iface)) of
-            Just home | mi_module (hm_iface home) == mi_module iface -> do
-              expected <- evaluate iface >>= makeStableName
-              actual <- evaluate (hm_iface home) >>= makeStableName
-              pure (actual == expected)
-            _ -> pure False
-          hydrated <- if and installed then pure env else hydrateExactScope env captured
+          let hydrated = env
           aliases <- forM selected $ \(alias,iface,name) -> do
             _ <- currentOwner hydrated (mi_module iface) (mi_iface_hash (mi_final_exts iface))
             known <- lookupType hydrated name
@@ -132,7 +138,10 @@ hydrateCompletedValueAliases requested captured env
             stable <- makeStableName forced
             pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
               [] (CompletedValues []) (Just (forced,stable)))
-          pure ((\values -> (hydrated,CompletedValueAliases owners (Map.fromList values))) <$> sequence aliases)
+          pure ((\values -> CompletedValueAliases owners (Map.fromList values)) <$> sequence aliases)
+    sameAliasOwner first second =
+      (exactUnit first,exactModule first,exactSha256 first,exactRequirements first)
+        == (exactUnit second,exactModule second,exactSha256 second,exactRequirements second)
 
 -- The generated root's segment chain stays untouched. Explicit native-typed
 -- top-level aliases let ordinary GHC renaming preserve authored local shadows
@@ -179,7 +188,7 @@ data RefinementOwner = RefinementOwner
 -- A zero GHC fingerprint never substitutes for that read-and-install proof.
 hydrateCompletedValueImports
   :: [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HscEnv, CompletedValueImports))
+  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
 hydrateCompletedValueImports = hydrateCompletedValueImportsWithDependencies []
 
 -- Read dependencies and completed owners once, installing one HPT knot. The
@@ -187,21 +196,20 @@ hydrateCompletedValueImports = hydrateCompletedValueImportsWithDependencies []
 -- batch, including when a selected value's type depends on another input.
 hydrateCompletedValueImportsWithDependencies
   :: [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HscEnv, CompletedValueImports))
-hydrateCompletedValueImportsWithDependencies = hydrateCompletedValueInputs readExactIfaceArtifacts
+  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
+hydrateCompletedValueImportsWithDependencies = hydrateCompletedValueInputs readVerifiedExactIfaceClosure
 
 hydrateCompletedValueImportsWithVerifiedDependencies
-  :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HscEnv, CompletedValueImports))
+  :: CapturedInterfaceInputs -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
+  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
 hydrateCompletedValueImportsWithVerifiedDependencies closure =
-  hydrateCompletedValueInputs (\_ artifacts -> pure (selectVerifiedValueInterfaces closure artifacts))
+  hydrateCompletedValueInputs (\_ _ -> pure (Right closure))
 
 hydrateCompletedValueInputs
-  :: (HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)]))
+  :: (HscEnv -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs))
   -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HscEnv, CompletedValueImports))
+  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
 hydrateCompletedValueInputs readInputs dependencies requested env
-  | null artifacts = pure (Right (env, CompletedValueImports []))
   | any invalidOwner requested = pure (Left "completed values require canonical Val owners and nonempty selections")
   | any invalidDependency dependencies = pure (Left "completed value dependencies require canonical Val owners")
   | length winners /= length (nub winners) = pure (Left "completed value selections contain duplicate lexical winners")
@@ -210,21 +218,22 @@ hydrateCompletedValueInputs readInputs dependencies requested env
       decoded <- readInputs env artifacts
       case decoded of
         Left diagnostic -> pure (Left diagnostic)
-        Right interfaces -> do
-          let completedInterfaces = drop (length dependencies) interfaces
-          case sequence (zipWith selectedNames requested completedInterfaces) of
-            Left diagnostic -> pure (Left diagnostic)
-            Right selections -> do
-              hydrated <- hydrateExactScope env interfaces
-              forM_ artifacts $ \artifact -> case parseSessionModule (exactModule artifact) of
-                Just owner -> registerSessionInterfaceLocation (exactPath artifact) owner hydrated
-                Nothing -> fail "completed value owner ceased to be canonical"
-              refinements <- forM (zip completedInterfaces selections) $ \((_, iface), names) -> do
-                forced <- evaluate iface
-                stable <- makeStableName forced
-                pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
-                  (map exportIdentity names) (CompletedValues names) (Just (forced, stable)))
-              pure (Right (hydrated, CompletedValueImports refinements))
+        Right inputs -> case selectVerifiedValueInterfaces inputs artifacts of
+          Left diagnostic -> pure (Left diagnostic)
+          Right interfaces -> do
+            let completedInterfaces = drop (length dependencies) interfaces
+            case sequence (zipWith selectedNames requested completedInterfaces) of
+              Left diagnostic -> pure (Left diagnostic)
+              Right selections -> do
+                selected <- either throwIO pure (selectCapturedInterfaceInputs inputs artifacts)
+                owner <- hydrateInterfaceInputs env selected
+                let hydrated = hydratedExactEnvironment owner
+                refinements <- forM (zip completedInterfaces selections) $ \((_, iface), names) -> do
+                  forced <- evaluate iface
+                  stable <- makeStableName forced
+                  pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
+                    (map exportIdentity names) (CompletedValues names) (Just (forced, stable)))
+                pure (Right (owner, CompletedValueImports refinements))
   where
     invalidOwner value = null (completedValueBinders value)
       || any ((== scaffoldTargetName) . fst) (completedValueBinders value)

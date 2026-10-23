@@ -24,6 +24,16 @@ paired; consumers cannot construct or update the issued records. Refusal tests
 change raw inputs at their admission owner, and projection tests change the
 projection inputs without reissuing compiler results.
 
+Captured interfaces retain authenticated byte tokens and their actual NameCache
+owner. Completed products also retain the actual successful HMI; decoded TYPE
+metadata cannot replace that allocation. `ExactHydration` selects and hydrates
+this owner without Finder paths. `GhcPipeline` alone combines it with observed
+SOURCE/lexical evidence and the current cycle's physical views. Qualification
+must remove its temporary Finder entries before publishing its retained HPT.
+HOME body reads consume HPT/captured owners; defining-file reads are explicit
+package operations. Retained boot graph nodes describe topology and never enter
+a later Make graph as ordinary interface files.
+
 `CompilerRequest` binds normalized worker arguments, admitted exact scope and
 one compiler executor before mode dispatch. `CompilerScope` exposes ordinary
 operations, never public record-update labels. A `PreparedCompilation` retains

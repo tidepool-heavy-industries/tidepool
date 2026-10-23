@@ -16,6 +16,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
+import GHC.Builtin.Types (intTy)
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
@@ -60,7 +61,14 @@ import Tidepool.FatIface.Internal
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceArtifact(..), hydrateExactScope,
   newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
-  selectVerifiedExactInterfaceProducts, verifiedExactInterface, hydrateExactScopeWithProducts)
+  selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
+  hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
+  readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs,
+  InterfaceInputFailure(..))
+import Tidepool.Session
+  ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
+  , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings
+  , capturedSessionInterfaceBody, capturedSessionCompilerProduct )
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import qualified Data.ByteString as BS
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -127,6 +135,46 @@ verifyPrivateComponents = forM_ [0 .. 4] $ \size -> do
                     ++ [left | (left, right) <- edges, right == vertex]
               in reach (Set.insert vertex seen) (adjacent ++ pending)
 
+verifyCompletedInterfaceMerges :: FilePath -> FilePath -> HscEnv -> IO ()
+verifyCompletedInterfaceMerges libdir work environment = do
+  let selected = SessionModule ValMod (Generation 991337)
+  interface <- mkThinSessionIface environment selected [(mkVarOcc "value",intTy)]
+  writeSessionIface environment work selected interface
+  (injected,_,capture) <- injectSessionIfaceWithBindings work selected environment
+  let (_,body) = capturedSessionInterfaceBody capture
+      artifact = ExactIfaceArtifact "main" (sessionModuleString selected) (sessionHiPath work selected)
+        (artifactSha256 body) []
+      (_,actualHome) = capturedSessionCompilerProduct capture
+  empty <- either throwIO pure (capturedInterfaceInputs [])
+  completed <- captureCompletedInterfaceInputs injected empty [(artifact,capture)] []
+  decoded <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
+  actualIdentity <- evaluate actualHome >>= makeStableName
+  forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
+    merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
+    fresh <- freshExactContext environment
+    owner <- hydrateInterfaceInputs fresh merged
+    retained <- maybe (fail "completed interface merge lost its HMI") pure
+      (lookupHpt (hsc_HPT (hydratedExactEnvironment owner)) (mkModuleName (sessionModuleString selected)))
+    retainedIdentity <- evaluate retained >>= makeStableName
+    assert (retainedIdentity == actualIdentity)
+      "captured merge replaced the actual completed HMI with a decoded reconstruction"
+  fresh <- freshExactContext environment
+  decodedOwner <- hydrateInterfaceInputs fresh decoded
+  decodedHome <- maybe (fail "raw decoded interface failed hydration") pure
+    (lookupHpt (hsc_HPT (hydratedExactEnvironment decodedOwner)) (mkModuleName (sessionModuleString selected)))
+  decodedIdentity <- evaluate decodedHome >>= makeStableName
+  assert (decodedIdentity /= actualIdentity) "raw decoded input silently claimed a completed HMI owner"
+  foreignEnvironment <- runGhc (Just libdir) getSession
+  foreignInput <- readVerifiedExactIfaceClosure foreignEnvironment [artifact] >>= either fail pure
+  assert (case mergeCapturedInterfaceInputs [completed,foreignInput] of
+      Left InterfaceNameCacheMismatch -> True; _ -> False)
+    "captured merge accepted an interface from another NameCache"
+  (_,_,otherCapture) <- injectSessionIfaceWithBindings work selected environment
+  otherCompleted <- captureCompletedInterfaceInputs injected empty [(artifact,otherCapture)] []
+  assert (case mergeCapturedInterfaceInputs [completed,otherCompleted] of
+      Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
+    "equal interface bytes silently selected another completed owner"
+
 scenario :: IO ()
 scenario = do
   tmp <- getTemporaryDirectory
@@ -181,6 +229,7 @@ scenario = do
       -- Retain the decoded owner after its original file is removed; private
       -- original lookup must consume HPT rather than reopening that alias.
       liftIO $ do
+        verifyCompletedInterfaceMerges libdir work hsc
         home <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
           (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
         let original = home
@@ -228,7 +277,9 @@ scenario = do
           forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
             products <- capture hsc alias
             fresh <- forkExactContext hsc
-            (captured,_) <- hydrateExactScopeWithProducts fresh products []
+            inputs <- either throwIO pure (capturedInterfaceInputs products)
+            hydrated <- hydrateInterfaceInputs fresh inputs
+            let captured = hydratedExactEnvironment hydrated
             isolated <- newFatIfaceCache
             thin <- lookupFatIfaceExact captured isolated thinIdentityName
             assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
@@ -241,9 +292,14 @@ scenario = do
           repeatedObjects <- mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName) repeated
           assert (firstObjects == repeatedObjects)
             "interleaving another NameCache discarded an admitted decoded owner"
-          crossed <- try (hydrateExactScopeWithProducts other first [] >> pure ()) :: IO (Either SomeException ())
+          inputs <- either throwIO pure (capturedInterfaceInputs first)
+          crossed <- try (hydrateInterfaceInputs other inputs >> pure ()) :: IO (Either SomeException ())
           assert (case crossed of Left _ -> True; Right () -> False)
-            "TYPE hydration accepted an interface from another NameCache")
+            "TYPE hydration accepted an interface from another NameCache"
+          installed <- hydrateInterfaceInputs hsc inputs
+          foreignPhase <- try (restoreHydratedInterfaceEnvironment installed other >> pure ()) :: IO (Either SomeException ())
+          assert (case foreignPhase of Left _ -> True; Right () -> False)
+            "interface phase restoration accepted another NameCache")
           `finally` BS.writeFile thinPath thinRaw
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency

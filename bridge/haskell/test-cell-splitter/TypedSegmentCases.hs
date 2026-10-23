@@ -63,7 +63,7 @@ import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
 import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, capturedInterfaceInputs, captureCompletedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
 import Tidepool.Identity (nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.Test.Runner (requiredInput)
@@ -86,7 +86,7 @@ typedValueAliasControl libdir root prepared = do
     (Session.capturedSessionInterfaceEvidence captured)
   session <- maybe (fail "typed alias control requires an actual canonical Val owner") pure
     (Session.parseSessionModule (moduleNameString (moduleName owner)))
-  (hydrated,identifiers,_) <- Session.injectCapturedSessionIfaceWithBindings session body
+  (hydrated,identifiers,injectedCapture) <- Session.injectCapturedSessionIfaceWithBindings session body
     (captureArtifactBytes packages) required environment
   home <- maybe (fail "typed alias control lost its installed owner") pure
     (lookupHpt (hsc_HPT hydrated) (moduleName owner))
@@ -98,11 +98,14 @@ typedValueAliasControl libdir root prepared = do
     (nameSymbolIdentity (Text.pack "value") (varName identifier))
   let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
         (Session.sessionHiPath (root </> "stage0") session) (shaHex (snd (Session.capturedSessionInterface captured))) required
-      interfaces = [(artifact,hm_iface home)]
       requested = [("renamed",symbol,artifact),("synonym",symbol,artifact)]
-  (ready,aliases) <- hydrateCompletedValueAliases requested interfaces hydrated >>= either fail pure
+  empty <- either (fail . show) pure (capturedInterfaceInputs [])
+  inputs <- captureCompletedInterfaceInputs hydrated empty [(artifact,injectedCapture)] []
+  ownerInputs <- hydrateInterfaceInputs hydrated inputs
+  aliases <- hydrateCompletedValueAliases requested ownerInputs >>= either fail pure
+  let ready = hydratedExactEnvironment ownerInputs
   forM_ [symbol {symbolUnit=Text.pack "different-unit"},symbol {symbolNamespace=Text.pack "var"}] $ \changed -> do
-    rejected <- hydrateCompletedValueAliases [("renamed",changed,artifact)] interfaces hydrated
+    rejected <- hydrateCompletedValueAliases [("renamed",changed,artifact)] ownerInputs
     case rejected of
       Left _ -> pure ()
       Right _ -> fail "completed value alias accepted a different defining unit or identity namespace"

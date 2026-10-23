@@ -108,6 +108,7 @@ library tidepool-extract-internal
     Tidepool.ExecutionSource
     Tidepool.HostBindingAuthority
     Tidepool.HomeProducts
+    Tidepool.HomeProducts.Internal
     Tidepool.FamilyConsistency
     Tidepool.Identity
     Tidepool.ConstructorIdentity

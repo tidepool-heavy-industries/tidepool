@@ -4,16 +4,20 @@ module Tidepool.FinalizedModule.Internal
   ( FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
   , FinalizedCoreFailure(..), UnsupportedCoreMetadata(..), isUnsupportedFinalizedCore
   , captureFinalizedCore, captureFinalizedInterface, decodeFinalizedCore, attachFinalizedCore
-  , finalizedCoreSiteInstances, serializeOriginalInterface
+  , finalizedCoreSiteInstances, serializeOriginalInterface, finalizedInterfaceNameCache, sameFinalizedInterfaceOwner
+  , CompletedModuleInterface, retainCompletedModuleInterface, completedModuleInterfaceFinalized
+  , completedModuleInterfaceHome, sameCompletedModuleInterfaceOwner
   ) where
 
-import Control.Exception (Exception, displayException, bracket, evaluate)
+import Control.Exception (Exception, displayException, bracket, evaluate, throwIO)
+import Control.Monad (unless)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef)
 import Data.Maybe (isJust)
 import Data.Set qualified as Set
 import Data.Word (Word8)
+import Data.Unique (Unique, newUnique)
 import GHC.Core (bindersOfBinds)
 import GHC.Core.InstEnv (ClsInst, instEnvElts)
 import GHC.Core.TyCon (TyCon, tyConName)
@@ -32,6 +36,7 @@ import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Types.ForeignStubs (ForeignStubs(..), CHeader(..), CStub(..))
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Types.Name (Name, isExternalName, nameOccName)
+import GHC.Types.Name.Cache (NameCache(..), OrigNameCache)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.TyThing (TyThing(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
@@ -41,7 +46,7 @@ import GHC.Unit.Module.Env (mkModuleEnv)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Unit.Module.ModDetails (md_types, md_insts)
 import GHC.Unit.Module.ModGuts (CgGuts(..))
-import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, set_mi_extra_decls)
+import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_iface_hash, mi_final_exts, mi_hsc_src, set_mi_extra_decls)
 import GHC.Unit.Module.WholeCoreBindings (WholeCoreBindings(..), emptyIfaceForeign)
 import GHC.Unit.Types (Module, UnitId)
 import GHC.Utils.Binary
@@ -52,11 +57,14 @@ import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.Timing (readTimingEnabled, emitCount)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (openBinaryTempFile, hClose, hIsClosed)
+import System.Mem.StableName (StableName, makeStableName)
 
 -- The pair and its encoding profile are issued together. Neither captures a
 -- mutable compiler environment; completed representations share this owner.
 data FinalizedModule = FinalizedModule
   { ownedHomeModInfo :: HomeModInfo
+  , ownedInterfaceIdentity :: !Unique
+  , ownedInterfaceNameCache :: !(Char,MVar OrigNameCache)
   , ownedTidyGuts :: CgGuts
   , ownedEncodingProfile :: !Profile
   , ownedForeignStubsEmpty :: !Bool
@@ -69,6 +77,40 @@ data CoreCapture = EncodedCore !ArtifactBytes | UnsupportedCore !UnsupportedCore
 finalizedHomeModInfo :: FinalizedModule -> HomeModInfo
 finalizedHomeModInfo = ownedHomeModInfo
 
+finalizedInterfaceNameCache :: FinalizedModule -> (Char,MVar OrigNameCache)
+finalizedInterfaceNameCache = ownedInterfaceNameCache
+
+sameFinalizedInterfaceOwner :: FinalizedModule -> FinalizedModule -> Bool
+sameFinalizedInterfaceOwner left right = ownedInterfaceIdentity left == ownedInterfaceIdentity right
+
+-- The compile loop retains the actual loaded HMI after GHC has tied SOURCE
+-- knots. Its immutable interface bytes still belong to the original producer.
+-- Only the private loop/codec boundary issues this association; the facade
+-- exposes read access, never a raw-HPT constructor.
+data CompletedModuleInterface = CompletedModuleInterface FinalizedModule HomeModInfo (StableName HomeModInfo)
+
+retainCompletedModuleInterface :: HscEnv -> FinalizedModule -> HomeModInfo -> IO CompletedModuleInterface
+retainCompletedModuleInterface environment original current = do
+  unless (ownedInterfaceNameCache original == (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)))
+    (throwIO FinalizedCoreCompilerMismatch)
+  let produced = hm_iface (ownedHomeModInfo original)
+      actual = hm_iface current
+  unless (mi_module produced == mi_module actual && mi_hsc_src produced == mi_hsc_src actual
+      && mi_iface_hash (mi_final_exts produced) == mi_iface_hash (mi_final_exts actual))
+    (throwIO FinalizedCoreInterfaceMismatch)
+  home <- evaluate current
+  CompletedModuleInterface original home <$> makeStableName home
+
+completedModuleInterfaceFinalized :: CompletedModuleInterface -> FinalizedModule
+completedModuleInterfaceFinalized (CompletedModuleInterface original _ _) = original
+
+completedModuleInterfaceHome :: CompletedModuleInterface -> HomeModInfo
+completedModuleInterfaceHome (CompletedModuleInterface _ home _) = home
+
+sameCompletedModuleInterfaceOwner :: CompletedModuleInterface -> CompletedModuleInterface -> Bool
+sameCompletedModuleInterfaceOwner (CompletedModuleInterface left _ first) (CompletedModuleInterface right _ second) =
+  sameFinalizedInterfaceOwner left right && first == second
+
 finalizedTidyGuts :: FinalizedModule -> CgGuts
 finalizedTidyGuts = ownedTidyGuts
 
@@ -77,7 +119,9 @@ newFinalizedModule :: HscEnv -> HomeModInfo -> CgGuts -> IO FinalizedModule
 newFinalizedModule env home guts = do
   profile <- evaluate (targetProfile (hsc_dflags env))
   foreignEmpty <- evaluate (emptyForeignStubs env (cg_foreign guts))
-  FinalizedModule home guts profile foreignEmpty <$> newMVar Nothing <*> newMVar Nothing
+  identity <- newUnique
+  FinalizedModule home identity (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)) guts profile foreignEmpty
+    <$> newMVar Nothing <*> newMVar Nothing
 
 emptyForeignStubs :: HscEnv -> ForeignStubs -> Bool
 emptyForeignStubs _ NoStubs = True

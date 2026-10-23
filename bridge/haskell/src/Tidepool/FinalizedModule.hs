@@ -1,7 +1,8 @@
 -- | Immutable output shared by interface certification and executable preparation.
 module Tidepool.FinalizedModule
   ( FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
-  , captureFinalizedInterface, homeInterfaceUsageOwners ) where
+  , captureFinalizedInterface, finalizedInterfaceNameCache, sameFinalizedInterfaceOwner, homeInterfaceUsageOwners
+  , CompletedModuleInterface, completedModuleInterfaceFinalized, completedModuleInterfaceHome, sameCompletedModuleInterfaceOwner ) where
 
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_usages)
 import GHC.Unit.Module (moduleUnit, moduleName, moduleNameString)
@@ -12,7 +13,8 @@ import Data.Set qualified as Set
 
 import Tidepool.FinalizedModule.Internal
   ( FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
-  , captureFinalizedInterface )
+  , captureFinalizedInterface, finalizedInterfaceNameCache, sameFinalizedInterfaceOwner
+  , CompletedModuleInterface, completedModuleInterfaceFinalized, completedModuleInterfaceHome, sameCompletedModuleInterfaceOwner )
 
 -- GHC records indirect home type uses independently of authored imports.
 -- These edges retain interfaces and grant no native execution authority.

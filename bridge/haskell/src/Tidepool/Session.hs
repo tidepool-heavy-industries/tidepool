@@ -26,10 +26,9 @@
 --     'readIface' by RAW path (NOT 'findAndReadIface' — the finder is
 --     source-anchored and rejects a source-less module), 'typecheckIface' in
 --     'initIfaceCheck' to reconstruct the 'TyThing's, then inject as a NORMAL
---     HPT home module ('addHomeModInfoToHpt' + 'addHomeModuleToFinder' with
---     @ml_hs_file = Nothing@). This sidesteps the @interactive:GhciN@ package
---     namespace and source-file lookup, neither of which describes these
---     synthetic type-only modules.
+--     HPT home module through 'addHomeModInfoToHpt'. The compiler's lexical
+--     installation owner separately gives actual imports cycle-owned files.
+--     The captured type owner itself grants no Finder location.
 --
 -- GATING: nothing here runs on the normal one-shot eval path. 'SessionScope'
 -- without values or an explicit exact declaration scope is inert; 'GhcPipeline.runPipelineSelected' calls the
@@ -66,8 +65,8 @@ module Tidepool.Session
   , writeSessionIface
   , injectSessionIface
   , injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
-  , injectSessionScope, registerSessionInterfaceLocation
-  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies
+  , injectSessionScope
+  , CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner
   , injectSessionScopeWithCaptures
     -- * Persistent binder identity
   , sessionBinderName
@@ -85,7 +84,7 @@ import Tidepool.ArtifactBytes
 import Tidepool.Timing (readTimingEnabled, emitCount)
 import Tidepool.BoundedRead (readFileAtMost)
 import GHC.Driver.Env
-  ( HscEnv, hsc_dflags, hsc_NC, hsc_home_unit, hsc_FC, hscUpdateHPT )
+  ( HscEnv, hsc_dflags, hsc_NC, hsc_home_unit, hsc_HPT, hscUpdateHPT )
 import GHC.Driver.Session (targetProfile)
 
 import GHC.Types.Avail (AvailInfo(..))
@@ -114,14 +113,9 @@ import GHC.Unit.Module.ModIface
 import GHC.Unit.Module.ModDetails (ModDetails(..))
 
 import GHC.Unit.Home (homeUnitAsUnit)
-import GHC.Unit.Finder (addHomeModuleToFinder)
-import GHC.Unit.Module.Location
-  ( ModLocation, pattern ModLocation
-  , ml_hs_file, ml_hi_file, ml_dyn_hi_file
-  , ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Home.ModInfo
-  ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable )
-import GHC.Unit.Types (mkModule, GenWithIsBoot(..), ModuleNameWithIsBoot, unitString)
+  ( HomeModInfo(..), addHomeModInfoToHpt, emptyHomeModInfoLinkable, lookupHpt )
+import GHC.Unit.Types (mkModule, unitString)
 import GHC.Unit.Module (Module, ModuleName, mkModuleName, moduleName, moduleNameString, moduleUnit)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
@@ -133,6 +127,9 @@ import qualified GHC.Data.Maybe as MErr
 import Control.Exception (bracket)
 import qualified Data.ByteString as BS
 import Control.Monad (foldM, unless)
+import Control.Concurrent.MVar (MVar)
+import Data.Unique (Unique, newUnique)
+import GHC.Types.Name.Cache (NameCache(..), OrigNameCache)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Data.Char (isDigit)
 import Data.List (isPrefixOf, stripPrefix, nub, sort)
@@ -333,9 +330,8 @@ writeSessionIface hsc root sm iface = do
 
 -- | Inject a session module's @.hi@ into the current session as a normal HPT
 -- home module. Read by RAW path ('readIface'), reconstruct via 'typecheckIface',
--- push 'HomeModInfo' into the HPT, and register a source-less 'ModLocation'
--- (@ml_hs_file = Nothing@) in the finder cache so an @import@ of the module
--- resolves purely from the serialized interface. Returns the updated 'HscEnv'.
+-- push its actual 'HomeModInfo' into the HPT and retain that allocation with
+-- the captured bytes. Returns the updated 'HscEnv' without Finder publication.
 --
 -- The reconstructed @md_insts@ (if the iface carried any) become available to
 -- importing modules through the HPT — see the module header on instance replay.
@@ -345,13 +341,13 @@ injectSessionIface root sm hsc0 = fst <$> liftIO (injectSessionIfaceWithCapture 
 -- | The exact thin-interface bytes consumed by this injection. This snapshot
 -- proves a type dependency; it carries neither source nor executable Core.
 data CapturedSessionInterface = CapturedSessionInterface Module ArtifactBytes
-  (Maybe (ArtifactBytes, ArtifactBytes, [(String,String)]))
+  (Maybe (ArtifactBytes, ArtifactBytes, [(String,String)])) (Char,MVar OrigNameCache) HomeModInfo !Unique
 
 capturedSessionInterface :: CapturedSessionInterface -> (Module, BS.ByteString)
-capturedSessionInterface (CapturedSessionInterface owner bytes _) = (owner, artifactBytes bytes)
+capturedSessionInterface (CapturedSessionInterface owner bytes _ _ _ _) = (owner, artifactBytes bytes)
 
 capturedSessionInterfaceBody :: CapturedSessionInterface -> (Module, ArtifactBytes)
-capturedSessionInterfaceBody (CapturedSessionInterface owner body _) = (owner,body)
+capturedSessionInterfaceBody (CapturedSessionInterface owner body _ _ _ _) = (owner,body)
 
 -- The tuple preserves the existing issuer's package and nominal-requirement
 -- sidecars alongside the decoded binding types. Absence grants no complete
@@ -362,27 +358,26 @@ capturedSessionInterfaceEvidence = fmap (\(packages,requirements,owners) ->
   (artifactBytes packages,artifactBytes requirements,owners)) . capturedSessionInterfaceEvidenceBodies
 
 capturedSessionInterfaceEvidenceBodies :: CapturedSessionInterface -> Maybe (ArtifactBytes, ArtifactBytes, [(String,String)])
-capturedSessionInterfaceEvidenceBodies (CapturedSessionInterface _ _ evidence) = evidence
+capturedSessionInterfaceEvidenceBodies (CapturedSessionInterface _ _ evidence _ _ _) = evidence
 
 injectSessionIfaceWithCapture :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, CapturedSessionInterface)
 injectSessionIfaceWithCapture root sm hsc0 = do
   (env, _, captured) <- injectSessionIfaceWithBindings root sm hsc0
-  registerSessionInterfaceLocation (sessionHiPath root sm) sm env
   pure (env, captured)
 
 -- Return the global identifiers reconstructed from these same captured bytes.
 -- A caller substituting retained captures must use these identifiers, rather
 -- than constructing a Core global from the module and occurrence spelling.
--- Typed batches consume the HPT directly and do not register their private
--- staging paths in the mutable finder. Live scope injection registers its
--- own published path only after this hydration succeeds.
+-- Injection supplies TYPE availability. Actual lexical imports go through
+-- the compiler's source-admitted installation transition.
 injectSessionIfaceWithBindings :: FilePath -> SessionModule -> HscEnv
   -> IO (HscEnv, [Id], CapturedSessionInterface)
 injectSessionIfaceWithBindings root sm hsc0 = do
   let path = sessionHiPath root sm
   bytes <- readSelected (32 * 1024 * 1024) path
-  (hydrated,identifiers,owner) <- injectSessionBody sm hsc0 (captureArtifactBytes bytes)
+  let body = captureArtifactBytes bytes
+  (hydrated,identifiers,owner) <- injectSessionBody sm hsc0 body
   packageExists <- doesFileExist (path ++ ".packages")
   requirementsExist <- doesFileExist (path ++ ".requirements")
   evidence <- if not packageExists && not requirementsExist then pure Nothing else do
@@ -391,7 +386,8 @@ injectSessionIfaceWithBindings root sm hsc0 = do
     packages <- readSelected (4 * 1024 * 1024) (path ++ ".packages")
     requirements <- readSelected (4 * 1024 * 1024) (path ++ ".requirements")
     pure (Just (captureArtifactBytes packages,captureArtifactBytes requirements,sessionNominalOwners hydrated identifiers))
-  pure (hydrated,identifiers,CapturedSessionInterface owner (captureArtifactBytes bytes) evidence)
+  captured <- captureInjectedSessionInterface hydrated owner body evidence
+  pure (hydrated,identifiers,captured)
   where
     readSelected limit path = do
       bytes <- readFileAtMost path (limit + 1)
@@ -415,7 +411,25 @@ injectCapturedSessionIfaceWithBindings sm body packages required hsc0 = do
   let requirements = captureArtifactBytes (toStrictByteString
         (encodeListLen (fromIntegral (length actual))
           <> foldMap (\(unit,name) -> encodeListLen 2 <> encodeString (Text.pack unit) <> encodeString (Text.pack name)) actual))
-  pure (hydrated,identifiers,CapturedSessionInterface owner body (Just (packages,requirements,actual)))
+  captured <- captureInjectedSessionInterface hydrated owner body (Just (packages,requirements,actual))
+  pure (hydrated,identifiers,captured)
+
+capturedSessionCompilerProduct :: CapturedSessionInterface -> ((Char,MVar OrigNameCache),HomeModInfo)
+capturedSessionCompilerProduct (CapturedSessionInterface _ _ _ issuer home _) = (issuer,home)
+
+sameCapturedSessionInterfaceOwner :: CapturedSessionInterface -> CapturedSessionInterface -> Bool
+sameCapturedSessionInterfaceOwner (CapturedSessionInterface _ _ _ _ _ left)
+    (CapturedSessionInterface _ _ _ _ _ right) = left == right
+
+captureInjectedSessionInterface :: HscEnv -> Module -> ArtifactBytes
+  -> Maybe (ArtifactBytes,ArtifactBytes,[(String,String)]) -> IO CapturedSessionInterface
+captureInjectedSessionInterface environment owner body evidence = do
+  home <- maybe (fail "captured session interface lost its actual HOME") pure
+    (lookupHpt (hsc_HPT environment) (moduleName owner))
+  unless (mi_module (hm_iface home) == owner) (fail "captured session interface has another HOME")
+  identity <- newUnique
+  pure (CapturedSessionInterface owner body evidence
+    (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)) home identity)
 
 sessionNominalOwners :: HscEnv -> [Id] -> [(String,String)]
 sessionNominalOwners env identifiers = sort . nub $
@@ -453,28 +467,6 @@ injectSessionBody sm hsc0 body = do
       details <- initIfaceCheck (text "tidepool session inject") hsc0 (typecheckIface iface)
       let hmi = HomeModInfo iface details emptyHomeModInfoLinkable
       pure (hscUpdateHPT (addHomeModInfoToHpt hmi) hsc0,typeEnvIds (md_types details),theMod)
-
--- Register a source-less owner after its exact interface has been installed.
--- This changes only the finder location; it never reads or grants interface
--- contents. Live scope injection uses it; private batch hydration does not.
-registerSessionInterfaceLocation :: FilePath -> SessionModule -> HscEnv -> IO ()
-registerSessionInterfaceLocation path owner env = do
-  _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-    (GWIB (renderSessionModule owner) NotBoot :: ModuleNameWithIsBoot)
-    (sourcelessModLocation path)
-  pure ()
-
--- | A source-less 'ModLocation' anchored at the session @.hi@ — the load-bearing
--- @ml_hs_file = Nothing@ is what lets the finder accept a module with no source.
-sourcelessModLocation :: FilePath -> ModLocation
-sourcelessModLocation hi = ModLocation
-  { ml_hs_file      = Nothing
-  , ml_hi_file      = hi
-  , ml_dyn_hi_file  = hi
-  , ml_obj_file     = hi   -- never linked (NoLink); a placeholder path
-  , ml_dyn_obj_file = hi
-  , ml_hie_file     = hi
-  }
 
 -- | Inject every live @Val.G<g>@ iface named by a 'SessionScope'. No-op (returns
 -- the env unchanged) for an inert scope, so the normal eval path is unaffected.
