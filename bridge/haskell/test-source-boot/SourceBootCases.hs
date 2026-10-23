@@ -21,7 +21,7 @@ import SourceBootFixtureSupport
 
 import CandidateGraphDescriptorTest (candidateGraphDescriptorChecks)
 import CodecFixtureSupport
-import Tidepool.Test.CandidateCodec (writeCellPurposeCodecFixture)
+import Tidepool.Test.CandidateCodec (writeInspectionPurposeCodecFixture)
 import Tidepool.Test.GenuineCandidate
   ( writeGenuineCandidateManifestFor, writeGenuineMetadataScope, writeGenuineEmptyMetadataScope
   , writeGenuineCandidateNativeScope, writeGenuineCandidateLexicalScope, writeGenuineAuthoredDeclarationScope
@@ -130,7 +130,7 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, writeCertifiedProductsKeeping, retainedOriginalInterfaces, certifiedSourceOriginals, certifiedFinalizedArtifacts
-  , requireOriginalExecutableGlobals, certifiedExecutionSource, newPreparedOriginalInterfaceArtifacts, retainProgramProducts
+  , requireOriginalExecutableGlobals, certifiedExecutionSource, newPreparedOriginalInterfaceArtifacts
   , prepareCompilerProjectionContext, prepareOriginalProducts, admitCurrentOriginalProducts
   , prepareOriginalProductsWithCache, newOriginalProjectionCollector
   , observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
@@ -138,7 +138,7 @@ import Tidepool.CompilerProducts
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
   , writeCertifiedSegmentProducts, publishStagedOriginalProducts, stagedOriginalExternalDemand, validateStagedPriorHomeGroups
-  , retainStagedProgramProducts, exactProgramProductVersionFromDigest )
+  , exactProgramProductVersionFromDigest )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal, captureSelectedPackageWitnesses)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
@@ -193,6 +193,7 @@ import Tidepool.ExactHydration
   , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
+  , selectCapturedInterfaceInputs, hydrateInterfaceInputs
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
   , generatedScaffoldRecipeWithImportRendering
@@ -212,7 +213,6 @@ import Tidepool.GhcPipeline
   , preparedCandidateOriginal, preparedCandidateProof, prBinds, prHscEnv, prCanonicalInterfaceAdmissions, prResultType, prWarnings
   , prTargetTcGblEnv, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
-  , retainProgramSourceImports, withProgramSourceImports
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
@@ -245,8 +245,7 @@ import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..)
-  , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
+  , scopeValueInterfaces, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , ExactScopeRequestFailure(..)
   , scopeModuleInterfaceProofs, scopeCanonicalInterfaces, admittedInterfaceSourceSha256, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
@@ -255,9 +254,9 @@ import Tidepool.ExactScope
   , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners
   )
-import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
+import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, completedValueAliasIds)
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule, nativeParsedModule, nativeTypeUses, unannotatedModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule, nativeParsedModule, nativeTypeUses, unannotatedModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker
   , literalImportRendering, appendImportRendering, replaceImportRendering, importRenderingSource)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..)
@@ -647,9 +646,9 @@ readScopeVariant original change = do
   hClose handle
   readExactScope path
 
-admitCheckedScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
-admitCheckedScope original paths values = do
-  authorizationPath <- writeCellPurposeCodecFixture
+admitInspectionScope :: ExactScope -> [FilePath] -> [ExactIfaceArtifact] -> IO ExactScope
+admitInspectionScope original paths values = do
+  authorizationPath <- writeInspectionPurposeCodecFixture
     (takeDirectory (scopeManifestPath original)) paths values
   authorization <- readCodecTerm authorizationPath
   readScopeVariant original (\fields -> take 8 fields ++ [authorization] ++ drop 9 fields) >>= either fail pure
@@ -761,6 +760,20 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   aliasClosure <- readVerifiedExactIfaceClosureWithCheckedValues environment
     [iface | (iface,_,_) <- originals] [alias] >>= either fail pure
   selected <- either fail pure (selectVerifiedValueInterfaces aliasClosure [alias])
+  aliasInputs <- either fail pure (selectCapturedInterfaceInputs aliasClosure
+    ([iface | (iface,_,_) <- originals] ++ [alias]))
+  aliasOwner <- hydrateInterfaceInputs environment aliasInputs
+  let symbol = SymbolIdentity "main" "Tidepool.Session.Val.G7" "value" "cmd" Nothing
+      requestedAlias = ("renamedCmd",symbol,alias)
+  liveAliases <- hydrateCompletedValueAliases [requestedAlias] aliasOwner >>= either fail pure
+  unless (fmap (renderType . idType) (Map.lookup "renamedCmd" (completedValueAliasIds liveAliases)) == Just "Command") $
+    fail "current World alias lost its captured home-dependent value type"
+  forM_ [[requestedAlias,requestedAlias]
+    ,[("renamedCmd",symbol {symbolOccurrence="absent"},alias)]
+    ,[("renamedCmd",symbol,alias {exactSha256=replicate 64 '0'})]] $ \wrong -> do
+      refusedAlias <- hydrateCompletedValueAliases wrong aliasOwner
+      unless (case refusedAlias of Left _ -> True; Right _ -> False) $
+        fail "current World alias admitted duplicate winners, wrong native identity or changed captured bytes"
   unless (map (exactRequirements . fst) selected == [requirements]) $
     fail "captured value alias lost its complete original type requirements"
   forM_ [alias {exactSha256=replicate 64 '0'},alias {exactPath=aliasPath ++ ".missing"}] $ \wrong -> do
@@ -768,60 +781,42 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
       [iface | (iface,_,_) <- originals] [wrong]
     unless (case rejected of Left _ -> True; Right _ -> False) $
       fail "captured command alias authorized changed or missing bytes"
-  identifier <- case binders of
-    [binder] -> pure (bbVarId binder)
-    _ -> fail "checked command has another binder inventory"
+  unless (length binders == 1) (fail "checked command has another binder inventory")
   consumerSource <- T.unpack . TE.decodeUtf8 <$> BS.readFile consumerPath
-  let submittedImports = "import Tidepool.Command.Types (Command)\nimport Tidepool.Session.Val.G7 (cmd)\n"
-      inferredImports = "import Tidepool.Session.Val.G7 (cmd)\n"
   inferredSource <- either fail pure
     (replaceTemplateMarker "import Tidepool.Command.Types (Command)\n" "" consumerSource
       >>= replaceTemplateMarker "__result :: Command\n" "")
-  flags <- defaultParserDynFlags
   let receiptDirectory = work </> ".exact-compilations"
       receipts = doesDirectoryExist receiptDirectory >>= \exists ->
         if exists then listDirectory receiptDirectory else pure []
   withResidentPipelineSelected includes $ \compile ->
-    forM_ [(True,consumerSource,submittedImports),(False,inferredSource,inferredImports)] $
-      \(explicitType,source,imports) -> do
-        template <- either fail pure (replaceTemplateMarker imports preambleImportMarker source)
-        authored <- analyzeCellWithFlags flags template (imports ++ "cmd") >>= either (fail . show) pure
-        rendering <- either fail pure $ replaceImportRendering preambleImportMarker
-          (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
-            (literalImportRendering preambleImportMarker)) (literalImportRendering template)
-        writeFile consumerPath (importRenderingSource rendering)
-        protected <- either fail pure
-          (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
-        recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
-          protected template rendering consumerPath "CheckedCommandConsumer" >>= either fail pure
-        forM_ [(value,GeneralCompile),(alias,GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing
-            [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]]))]
-          $ \(input,purpose) -> do
-            capture <- admitCheckedScope base includes [input]
-            before <- receipts
-            checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
-              (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
-            unless (fmap renderType (crResultType checked) == Just "Command") $
-              fail "dependency-ordered command value injection changed its captured type"
-            after <- receipts
-            receiptPath <- case Set.toList (Set.fromList after `Set.difference` Set.fromList before) of
-              [directory] -> pure (receiptDirectory </> directory </> "receipt.cbor")
-              _ -> fail "checked command did not publish exactly one completion receipt"
-            receiptBytes <- BS.readFile receiptPath
-            (exactRows,roles) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict receiptBytes) of
-              Right (remaining,TList [TString "TPEXACTCOMPILE",TString "4",_,_,_,_,_,_,TList rows,_,TList homeRoles])
-                | BSL.null remaining -> pure (rows,homeRoles)
-              _ -> fail "checked command completion receipt has another layout"
-            let expectedEdge = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main"]
-                expectedRole = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main",TInt 1]
-            rootEdges <- case [edges
-                | TList [TString "main",TString "CheckedCommandConsumer",TBool False,TList edges] <- exactRows] of
-              [edges] -> pure edges
-              _ -> fail "checked command completion did not retain exactly one root SOURCE row"
-            unless (rootEdges == [expectedEdge | explicitType]
-                && roles == [expectedRole | explicitType]) $
-              fail ("checked value completion confused SOURCE imports with retained TYPE custody: "
-                ++ show (explicitType,rootEdges,roles))
+    forM_ [(True,consumerSource),(False,inferredSource)] $ \(explicitType,source) -> do
+        writeFile consumerPath source
+        capture <- admitInspectionScope base includes [value]
+        before <- receipts
+        checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile capture)
+          (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
+        unless (fmap renderType (crResultType checked) == Just "Command") $
+          fail "dependency-ordered command value injection changed its captured type"
+        after <- receipts
+        receiptPath <- case Set.toList (Set.fromList after `Set.difference` Set.fromList before) of
+          [directory] -> pure (receiptDirectory </> directory </> "receipt.cbor")
+          _ -> fail "checked command did not publish exactly one completion receipt"
+        receiptBytes <- BS.readFile receiptPath
+        (exactRows,roles) <- case deserialiseFromBytes decodeTerm (BSL.fromStrict receiptBytes) of
+          Right (remaining,TList [TString "TPEXACTCOMPILE",TString "4",_,_,_,_,_,_,TList rows,_,TList homeRoles])
+            | BSL.null remaining -> pure (rows,homeRoles)
+          _ -> fail "checked command completion receipt has another layout"
+        let expectedEdge = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main"]
+            expectedRole = TList [TString "none",TString "Tidepool.Command.Types",TBool False,TString "main",TInt 1]
+        rootEdges <- case [edges
+            | TList [TString "main",TString "CheckedCommandConsumer",TBool False,TList edges] <- exactRows] of
+          [edges] -> pure edges
+          _ -> fail "checked command completion did not retain exactly one root SOURCE row"
+        unless (rootEdges == [expectedEdge | explicitType]
+            && roles == [expectedRole | explicitType]) $
+          fail ("checked value completion confused SOURCE imports with retained TYPE custody: "
+            ++ show (explicitType,rootEdges,roles))
   putStrLn "checked command value: SOURCE/type distinction, complete type closure, delayed injection and missing/changed-owner refusal passed"
 
 -- Direct source imports have set semantics. Their fresh/retained provenance and
@@ -857,7 +852,7 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
       base <- readExactScope scopePath >>= either fail pure
       lexicalBase <- extendExactScopeGeneration base [] []
         [(("main",name),[]) | name <- retained] >>= either fail pure
-      admitted <- admitCheckedScope lexicalBase includes []
+      admitted <- admitInspectionScope lexicalBase includes []
       let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       prepared <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile purpose admitted)
         (Just session) target includes Nothing
@@ -946,7 +941,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     fail "canonical input extension admitted an incomplete required owner closure"
   unless (null (scopeProducts base) && null (scopeExecutionOwners base) && null (scopeExecutionGraphs base)) $
     fail "canonical current-source fixture unexpectedly retained native execution authority"
-  admitted <- admitCheckedScope base includes []
+  admitted <- admitInspectionScope base includes []
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile purpose = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
@@ -971,13 +966,11 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       fail "canonical source receipt lost its typed transitive source-selected closure"
     let emptyRoot = work </> "empty-search-root"
     createDirectory emptyRoot
-    admission <- maybe (fail "current-source fixture lacks its checked purpose") pure
-      (scopeCheckedCell admitted)
     -- Generate the nearby search-order/product-role combinations. Current
     -- Finder selection is the oracle: the empty root supplies no provider,
     -- and both operations must retain the same original type-only closure.
     forM_ [[emptyRoot,work],[work,emptyRoot],[work,work]] $ \search -> do
-      currentScope <- admitCheckedScope base search (checkedValueInterfaces admission)
+      currentScope <- admitInspectionScope base search (scopeValueInterfaces admitted)
       let checkCurrent = do
             previousReceipts <- listDirectory (work </> ".exact-compilations")
             _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose currentScope)
@@ -1005,181 +998,6 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
             == Set.fromList [("main","CanonicalSource"),("main","CanonicalDependency")]) $
           fail "search/product-role transition changed the canonical source closure"
     _ <- check compile purpose
-    -- The next authored import must consume this cell's completed original
-    -- capture through the same proof used after Rust persistence.
-    forM_ ["CanonicalLocalSupport.hs","CanonicalLocalConsumer.hs"] $ \name ->
-      copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-    let localTarget = work </> "CanonicalLocalConsumer.hs"
-        localOwner = ("main","CanonicalLocalSupport")
-        localSource = work </> "CanonicalLocalSupport.hs"
-        captureDirectory = work </> "local-original-capture"
-    captured <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile GeneralCompile admitted)
-      (Just session) localTarget includes Nothing
-    createDirectory captureDirectory
-    originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult captured))
-      (pprFinalizedModules captured) (retainedOriginalInterfaces captured) captureDirectory
-    emitted <- writeCertifiedProductsKeeping includes originals captureDirectory captured Nothing []
-    localProof <- maybe (fail "fresh support did not emit a complete source-original proof") pure
-      (Map.lookup localOwner (certifiedSourceOriginals emitted))
-    localCompilation <- maybe (fail "fresh support did not retain exact compilation custody") pure
-      (preparedExactCompilation captured)
-    stagedDirectory <- pure (work </> "checked-local-staged-products")
-    createDirectory stagedDirectory
-    let capturedEnv = prHscEnv (pprPipelineResult captured)
-        targetModule = tcg_mod (prTargetTcGblEnv (pprPipelineResult captured))
-    projection <- prepareCompilerProjectionContext captured Map.empty targetModule "result" [] Nothing
-    (_,rawProducts) <- prepareOriginalProducts capturedEnv
-      (compilationScope <$> preparedExactCompilation captured)
-      (pprProductInterfaces captured) projection Set.empty (pprModules captured)
-    issuedProducts <- admitCurrentOriginalProducts originals captureDirectory captured rawProducts
-    staged <- writeCertifiedSegmentProducts includes originals stagedDirectory captured issuedProducts
-    stagedNames <- listDirectory stagedDirectory
-    let canonicalPaths =
-          [stagedDirectory </> name | name <- stagedNames, ".finalized.certificate.cbor" `isSuffixOf` name]
-    let graphPath = stagedDirectory </> "execution-source.cbor"
-    graphExists <- doesFileExist graphPath
-    unless (not (null canonicalPaths) && graphExists) $
-      fail ("checked-cell stage did not emit canonical and execution-source roles: " ++ show stagedNames)
-    receiptDirectory <- pure (work </> ".exact-compilations")
-    let assertStageRefuses path label = do
-          original <- BS.readFile path
-          forM_ [Nothing,Just (BS.singleton 0)] $ \replacement -> do
-            case replacement of
-              Nothing -> removeFile path
-              Just bytes -> BS.writeFile path bytes
-            receiptsBefore <- doesDirectoryExist receiptDirectory >>= \exists ->
-              if exists then listDirectory receiptDirectory else pure []
-            refused <- try (publishStagedOriginalProducts captured staged)
-              :: IO (Either IOException CertifiedOriginalProducts)
-            receiptsAfter <- doesDirectoryExist receiptDirectory >>= \exists ->
-              if exists then listDirectory receiptDirectory else pure []
-            certificateExists <- doesFileExist (stagedDirectory </> "certified-products.cbor")
-            unless (case refused of Left _ -> receiptsAfter == receiptsBefore && not certificateExists; _ -> False) $
-              fail ("mutated staged " ++ label ++ " published a certificate or receipt")
-            BS.writeFile path original
-    canonicalPath <- case canonicalPaths of
-      [path] -> pure path
-      _ -> fail ("checked-cell stage emitted an unexpected canonical certificate count: " ++ show canonicalPaths)
-    assertStageRefuses canonicalPath "canonical certificate"
-    assertStageRefuses graphPath "execution-source graph"
-    stagedPublished <- withOriginalProductReceipt work captured id $
-      publishStagedOriginalProducts captured staged
-    when (null (certifiedOriginalProducts stagedPublished))
-      (fail "staged readiness control lacks actual native originals")
-    graph <- case certifiedExecutionSource stagedPublished of
-      ExactExecutionSourceAvailable value -> pure value
-      _ -> fail "native package identity control did not issue its actual source graph"
-    let freshOwners = filter executionOwnerFresh (executionGraphOwners graph)
-    when (null freshOwners) (fail "source identity control issued no fresh owner")
-    forM_ freshOwners $ \owner -> do
-      let actual = executionOwnerIdentity owner
-          key@(unit,name) = executionIdentityKey actual
-      product' <- case [value | value <- certifiedOriginalProducts stagedPublished
-          , let (unit',name',_,_) = moduleProductInput value
-          , (T.unpack unit',T.unpack name') == key] of
-        [value] -> pure value
-        _ -> fail "source identity control lacks one genuine native original"
-      admission <- maybe (fail "source identity control lacks finalized custody") pure
-        (Map.lookup key (finalizedLocalAdmissions (certifiedFinalizedArtifacts stagedPublished)))
-      packages <- maybe (fail "source identity control lacks compiler package facts") pure
-        (Map.lookup (mkModuleName name) (pprPackageImports captured))
-      let (_,_,iface,_) = moduleProductInput product'
-          (artifact,_,_) = localFinalizedInterface admission
-          expected = exactProgramProductVersionFromDigest (compilationScope localCompilation)
-            unit name (localFinalizedSourceSha256 admission) iface (moduleProductBytes product')
-            (encodePackageImports artifact packages)
-      unless (executionVersion actual == expected) $
-        fail "source graph identity differs from the original package codec bytes"
-    stagedRetentionDirectory <- pure (work </> "checked-local-staged-retention")
-    createDirectory stagedRetentionDirectory
-    _ <- withOriginalProductReceipt work captured (const stagedPublished) $
-      retainStagedProgramProducts stagedRetentionDirectory captured staged
-        "CanonicalLocalConsumer" admitted
-    plainRetentionDirectory <- pure (work </> "checked-local-plain-retention")
-    createDirectory plainRetentionDirectory
-    _ <- withOriginalProductReceipt work captured (const stagedPublished) $
-      retainProgramProducts plainRetentionDirectory captured stagedPublished
-        "CanonicalLocalConsumer" admitted
-    inherited <- either fail pure (extendSourceSelectedOriginals
-      (compilationSourceSelection localCompilation) admitted)
-    -- Fresh rows are in the completed capture rather than its input scope.
-    let capturedRows = finalizedLocalAdmissions (certifiedFinalizedArtifacts emitted)
-    localAdmission <- maybe (fail "fresh support lacks captured interface custody") pure
-      (Map.lookup localOwner capturedRows)
-    unless (maybe False (elem (DependencyUnqualified,"CanonicalDependency",False,Just "main"))
-        (canonicalSourceImports localProof)) $
-      fail "captured original lost its exact retained-home import receipt"
-    let row = localFinalizedInterface localAdmission
-        localLexical = scopeLexical inherited ++ [(localOwner,[("main","CanonicalDependency")])]
-    selectedScope <- extendExactScopeGeneration inherited
-      [(row,ModuleInterfaceEvidence localProof)] [] localLexical >>= either fail pure
-    completedImports <- retainProgramSourceImports Nothing captured
-      (certifiedFinalizedArtifacts emitted) selectedScope
-    unless (isNothing completedImports)
-      (fail "fresh root absorbed a prior source-selected original's current receipt")
-    let checkLocal scope = compile (PreparedProducts Nothing) Set.empty
-          (ExactScopeCompile GeneralCompile scope) (Just session) localTarget includes Nothing
-        recheckLocal = checkLocal selectedScope
-    selectedLocal <- recheckLocal
-    let selectedRows = maybe [] (maybe [] selectedOriginalRows . compilationSourceSelection)
-          (preparedExactCompilation selectedLocal)
-    unless (any (\(key,seal,_,_) -> key == localOwner
-        && seal == canonicalCertificateSha256 localProof) selectedRows) $
-      fail "later authored import did not select the captured canonical identity"
-    let copiedCertificate = work </> "relocated-local-original.certificate.cbor"
-    copyFile (canonicalCertificatePath localProof) copiedCertificate
-    relocated <- validateCanonicalInterfaceProof selectedScope localOwner copiedCertificate
-      (canonicalCertificateSha256 localProof) ((\core -> (canonicalCorePath core,canonicalCoreSha256 core))
-        <$> canonicalCoreArtifact localProof) >>= either fail pure
-    unless (canonicalCertificateSha256 relocated == canonicalCertificateSha256 localProof
-        && canonicalSourceImports relocated == canonicalSourceImports localProof
-        && normalizeInterfaceEvidence (ModuleInterfaceEvidence relocated)
-          == normalizeInterfaceEvidence (ModuleInterfaceEvidence localProof)) $
-      fail "canonical source identity depends on its capture/persistence locator"
-    relocatedScope <- extendExactScopeGeneration inherited
-      [(row,ModuleInterfaceEvidence relocated)] [] localLexical >>= either fail pure
-    _ <- checkLocal relocatedScope
-    let wrongOwner = ("main","CanonicalWrongOwner")
-        (localIface,packages,seal) = row
-    wrongOwnerProof <- extendExactScopeInputs inherited
-      [((localIface {exactModule=snd wrongOwner},packages,seal),ModuleInterfaceEvidence relocated)]
-    unless (either (const True) (const False) wrongOwnerProof) $
-      fail "captured source original authorized another exact module owner"
-    -- The completed scope carries captured original bytes; later edits to
-    -- their former materialization paths do not invalidate that authority.
-    forM_ [canonicalCertificatePath localProof,exactPath localIface,packages] $ \path ->
-      bracket (BS.readFile path) (BS.writeFile path) $ \bytes -> do
-        removeFile path
-        revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
-        BS.writeFile path "changed former materialization bytes"
-        revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
-        BS.writeFile path bytes
-    revalidateExactScope (prHscEnv (pprPipelineResult captured)) selectedScope >>= either fail pure
-    case localFinalizedCore localAdmission of
-      Nothing -> fail "completed local fixture lacks its Core length/seal control"
-      Just (corePath,_) -> do
-        let validateLocal = withFileObservations $ \observations ->
-              revalidateLocalFinalizedAdmissionWith observations localAdmission
-        validateLocal >>= either fail pure
-        bracket (BS.readFile corePath) (BS.writeFile corePath) $ \bytes ->
-          forM_ [Nothing,Just (BS.take (max 0 (BS.length bytes - 1)) bytes),Just (bytes <> BS.singleton 0)] $ \changed -> do
-            case changed of
-              Nothing -> removeFile corePath
-              Just contents -> BS.writeFile corePath contents
-            validateLocal >>= either fail pure
-            BS.writeFile corePath bytes
-        validateLocal >>= either fail pure
-    copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
-    requireOriginalSourceBytesChanged "captured source retained import closure"
-      ("main","CanonicalDependency") (work </> "CanonicalDependency.hs") (digest dependencyBytes) recheckLocal
-    BS.writeFile (work </> "CanonicalDependency.hs") dependencyBytes
-    _ <- recheckLocal
-    localBytes <- BS.readFile localSource
-    BS.appendFile localSource "\n-- changed original source\n"
-    requireOriginalSourceBytesChanged "captured source later drift"
-      localOwner localSource (digest localBytes) recheckLocal
-    BS.writeFile localSource localBytes
-    _ <- recheckLocal
     copyFile "test-source-boot/fixtures/CanonicalDependencyChanged.hs" (work </> "CanonicalDependency.hs")
     requireOriginalSourceBytesChanged "canonical current-source admitted dependency"
       ("main","CanonicalDependency") (work </> "CanonicalDependency.hs") (digest dependencyBytes)
@@ -1197,327 +1015,6 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     pure ()
   putStrLn "canonical current source: captured and persisted interface-only proofs, exact imports, duplicate imports, dependency/source drift and missing refusal"
 
-completedProgramSourceImports :: IO ()
-completedProgramSourceImports = forM_ [False,True] completedProgramSourceImportsWithCandidates
-
-completedProgramSourceImportsWithCandidates :: Bool -> IO ()
-completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
-    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  let marker = work </> "completed-original-quoter"
-      target = work </> "CompletedOriginalConsumer.hs"
-      includes = [work]
-      root = ("main","MetadataQuotedTarget")
-      hidden = ("main","MetadataHiddenQuoted")
-      targetSource imports = unlines
-        [ "{-# LANGUAGE PackageImports #-}"
-        , "module CompletedOriginalConsumer where"
-        , imports
-        , "__result :: Int"
-        , "__result = 7"
-        ]
-  when reuseCandidate $ do
-    producer <- runPipelineSelected (PreparedProducts Nothing) (work </> "MetadataQuoter.hs") includes
-    fixture <- capturePreparedFixture work producer
-    writeGenuineCandidateManifestFor ["MetadataQuoteSupport"] work fixture
-  quoter <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuoter.hs")
-  writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
-    "quoteExp = \\_ -> pure"
-    (T.pack ("quoteExp = \\_ -> runIO (appendFile " ++ show marker ++ " \"executed\\n\") >> pure"))
-    (T.replace "import MetadataQuoteSupport"
-      "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
-  quoted <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuotedTarget.hs")
-  -- Preserve the defining quoter's real Name through an authored facade.
-  -- A later item imports this same completed original after source removal.
-  writeFile (work </> "MetadataQuotedTarget.hs") (T.unpack (T.replace
-    "module MetadataQuotedTarget where"
-    "module MetadataQuotedTarget (__result, answer) where" quoted))
-  writeFile (work </> "MetadataHiddenQuoted.hs")
-    (T.unpack (T.replace "module MetadataQuotedTarget" "module MetadataHiddenQuoted" quoted))
-  scopePath <- writeGenuineEmptyMetadataScope work
-  base <- readExactScope scopePath >>= either fail pure
-  admitted <- admitCheckedScope base includes []
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
-      protectedTemplate = targetSource ("import MetadataHiddenQuoted ()\n" ++ preambleImportMarker)
-  -- The hidden original is a compiler dependency. Only the genuinely parsed
-  -- submitted import contributes a reusable authored source root.
-  flags <- defaultParserDynFlags
-  authored <- analyzeCellWithFlags flags protectedTemplate "import MetadataQuotedTarget\n(7 :: Int)"
-    >>= either (fail . show) pure
-  rendered <- either fail pure $ replaceImportRendering preambleImportMarker
-    (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
-      (literalImportRendering preambleImportMarker)) (literalImportRendering protectedTemplate)
-  writeFile target (importRenderingSource rendered)
-  protected <- either fail pure
-    (captureProtectedTemplateImports flags protectedTemplate >>= renderProtectedTemplateImports 0)
-  initialRecipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
-    protected protectedTemplate rendered target "CompletedOriginalConsumer" >>= either fail pure
-  withResidentPipelineSelected includes $ \compile -> do
-    completed <- compile (PreparedProducts (if reuseCandidate then Just (manifest work) else Nothing))
-      Set.empty (ExactScopeCompile (GeneratedScaffoldCompile initialRecipe GeneralCompile) admitted)
-      (Just session) target includes Nothing
-    initialAdmission <- maybe (fail "completed import fixture omitted its actual source admission") pure
-      (preparedExactCompilation completed)
-    let rootRoles = sourceImportsHomeRoles (compilationSourceImports initialAdmission)
-    unless ([mask | ("none","MetadataQuotedTarget",False,"main",mask) <- rootRoles] == [1]
-        && [mask | ("none","MetadataHiddenQuoted",False,"main",mask) <- rootRoles] == [4])
-      (fail "completed imports lost their actual authored and protected source owners")
-    unless (map candidateModule (pprAcceptedCandidates completed)
-        == (if reuseCandidate then ["MetadataQuoteSupport"] else []))
-      (fail "completed import fixture did not exercise its selected cached provider")
-    unless (not (dependencyCacheSafe (preparedFreshDependencies completed)))
-      (fail "instrumented arbitrary runIO quoter was treated as cache-safe")
-    let directory = work </> "completed-originals"
-    createDirectory directory
-    let candidatePaths = concat
-          [[candidateInterface candidate,candidatePackageImports candidate,candidateProductPath candidate,
-            canonicalCertificatePath (preparedCandidateProof admission)]
-          | admission <- pprCandidateAdmissions completed
-          , let candidate = preparedCandidateOriginal admission]
-    candidateBytes <- mapM BS.readFile candidatePaths
-    let candidateIfaceBytes = case candidateBytes of bytes:_ -> bytes; [] -> BS.empty
-    let restoreCandidates = sequence_ (zipWith BS.writeFile candidatePaths candidateBytes)
-        disturbCandidates missing = forM_ candidatePaths $ \path ->
-          if missing then removeFile path else BS.writeFile path (BS.singleton 0)
-    originals <- bracket (disturbCandidates True) (const restoreCandidates) $ \_ ->
-      newPreparedOriginalInterfaceArtifacts completed directory
-    when reuseCandidate $ do
-      candidate <- case pprCandidateAdmissions completed of
-        [admission] -> pure (preparedCandidateOriginal admission)
-        _ -> fail "candidate source drift fixture lacks one selected owner"
-      let sourcePath = candidateSource candidate
-      sourceBytes <- BS.readFile sourcePath
-      forM_ [Nothing,Just (BS.singleton 0)] $ \replacement -> do
-        let restoreSource = BS.writeFile sourcePath sourceBytes
-            disturbSource = case replacement of
-              Nothing -> removeFile sourcePath
-              Just bytes -> BS.writeFile sourcePath bytes
-        refused <- bracket disturbSource (const restoreSource) $ \_ ->
-          try (writeCertifiedProductsKeeping includes originals (directory </> "source-drift") completed Nothing [])
-            :: IO (Either IOException CertifiedOriginalProducts)
-        unless (case refused of Left _ -> True; Right _ -> False) $
-          fail "certification accepted a changed current candidate source"
-    certified <- if reuseCandidate
-      then bracket (disturbCandidates True) (const restoreCandidates) $ \_ ->
-        writeCertifiedProductsKeeping includes originals directory completed Nothing []
-      else writeCertifiedProductsKeeping includes originals directory completed Nothing []
-    case certifiedExecutionSource certified of
-      ExactExecutionSourceUnavailable _ -> pure ()
-      _ -> fail "arbitrary runIO compilation unexpectedly issued an execution source recipe"
-    when reuseCandidate $ forM_ [True,False] $ \missing -> do
-      let retainedDirectory = directory </> if missing then "retain-after-delete" else "retain-after-replace"
-      createDirectory retainedDirectory
-      retainedResult <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
-        try (retainProgramProducts retainedDirectory completed certified "CompletedOriginalConsumer" admitted)
-          :: IO (Either IOException ExactScope)
-      retained <- either (\exception -> fail ("retention rejected captured candidate bytes: " ++ show exception)) pure retainedResult
-      copied <- BS.readFile (retainedDirectory </> "retained-cached-original-0.hi")
-      unless (copied == candidateIfaceBytes)
-        (fail "retention did not publish the captured candidate interface bytes")
-    (retained,retentionDiagnostics) <- captureDiagnostics $
-      withOriginalProductReceipt work completed (const certified) $
-        retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
-    let finalProofs = length [() | line <- lines retentionDiagnostics
-          , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
-    unless (finalProofs == 1) (fail ("retention final proof count: " ++ show finalProofs))
-    hPutStrLn stderr ("completed retention final proofs=" ++ show finalProofs ++ " candidates=" ++ show reuseCandidate)
-    let inheritedCandidateParcels = mapMaybe candidateExecutionSources (pprAcceptedCandidates completed)
-    when reuseCandidate $ bracket (disturbCandidates True) (const restoreCandidates) $ \_ -> do
-      let rows = [artifact | (artifact,_,_) <- scopeInterfaces retained
-            , exactModule artifact == "MetadataQuoteSupport"]
-      case rows of
-        [artifact] -> do
-          captured <- scopeInterfaceBytes retained artifact
-          unless (captured == candidateIfaceBytes && exactPath artifact `notElem` candidatePaths)
-            (fail "retained candidate did not transfer the captured owner to its durable support path")
-        _ -> fail "retained candidate has no unique durable support row"
-      reused <- revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained
-      unless (either (const False) (const True) reused)
-        (fail "retained candidate scope reopened historical captured paths")
-    revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained >>= either fail pure
-    when reuseCandidate $ do
-      let unrelatedTarget = work </> "UnselectedOriginalConsumer.hs"
-      writeFile unrelatedTarget (unlines
-        ["module UnselectedOriginalConsumer where", "__result :: Int", "__result = 7"])
-      unrelated <- compile (PreparedProducts Nothing) Set.empty
-        (ExactScopeCompile GeneralCompile admitted) (Just session) unrelatedTarget includes Nothing
-      unless (null (pprAcceptedCandidates unrelated))
-        (fail "unselected original control unexpectedly accepted a candidate")
-      unaccepted <- retainProgramSourceImports Nothing unrelated
-        (certifiedFinalizedArtifacts certified) retained
-      unless (isNothing unaccepted)
-        (fail "unselected retained inventory issued a completed import decision")
-    imports <- retainProgramSourceImports Nothing completed (certifiedFinalizedArtifacts certified) retained
-    unless (isJust imports) (fail "fresh authored root did not retain its completed decision")
-    initialRuns <- lines <$> readFile marker
-    unless (length initialRuns >= 2) (fail "fresh and hidden support did not execute the real quoter")
-    writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
-    _ <- compile CheckedEnvironment Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-      (Just session) target includes Nothing
-    later <- compile (PreparedProducts Nothing) Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-      (Just session) target includes Nothing
-    unless (null (preparedNames later) || preparedNames later == ["CompletedOriginalConsumer"])
-      (fail "later pass rebuilt retained authored support")
-    imports' <- retainProgramSourceImports imports later (emptyFinalizedModuleArtifacts (prHscEnv (pprPipelineResult later))) retained
-    unless (imports' == imports) (fail "later pass changed the completed import decision")
-    laterRuns <- lines <$> readFile marker
-    unless (laterRuns == initialRuns) (fail "later pass reran the retained arbitrary runIO quoter")
-    -- A new quotation executes the authenticated original quoter. It must
-    -- neither need its old source nor inherit ordinary source cache authority.
-    let removed = [work </> name | name <-
-          ["MetadataQuotedTarget.hs", "MetadataQuoter.hs", "MetadataQuoteSupport.hs"]]
-        quotedTarget = T.unpack (T.replace "__result = 7" "__result = [Captured.answer|later|]"
-          (T.replace "LANGUAGE PackageImports" "LANGUAGE PackageImports, QuasiQuotes"
-            (T.pack (targetSource "import qualified MetadataQuotedTarget as Captured"))))
-    originalsToRestore <- mapM BS.readFile removed
-    bracket (mapM_ removeFile removed)
-      (const (sequence_ (zipWith BS.writeFile removed originalsToRestore))) $ \_ -> do
-        writeFile target quotedTarget
-        (quotedAgain, diagnostics) <- captureDiagnostics $
-          compile (PreparedProducts Nothing) Set.empty
-            (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-            (Just session) target includes Nothing
-        unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quotedAgain))
-            && counterValues "exact_execution_original_load_owners" diagnostics == [2]
-            && Map.keys (pprFinalizedModules quotedAgain) == [mkModuleName "CompletedOriginalConsumer"]
-            && all (\owner -> ("tidepool-canonical-frontend module=" ++ owner)
-                `notElem` lines diagnostics) ["MetadataQuoter", "MetadataQuoteSupport"]
-            && scopeExecutionGraphs retained == concatMap fst inheritedCandidateParcels
-            && scopeExecutionOwners retained == map snd inheritedCandidateParcels) $
-          fail ("later same-cell quotation lost source-less canonical Core execution: " ++ show
-            (reuseCandidate,hasIntResultLiteral 42 (prBinds (pprPipelineResult quotedAgain)),
-              counterValues "exact_execution_original_load_owners" diagnostics,
-              Map.keys (pprFinalizedModules quotedAgain),length (scopeExecutionGraphs retained),
-              length (scopeExecutionOwners retained)) ++ "\n" ++ diagnostics)
-        runs <- lines <$> readFile marker
-        unless (runs == initialRuns ++ ["executed"]) $
-          fail "later same-cell quotation did not execute its original quoter exactly once"
-    writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
-    requireOriginalSourceRejection "new cell cannot reuse completed original imports"
-      (ExecutionSourceUnsupported root)
-      (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile retained)
-        (Just session) target includes Nothing)
-    writeFile target (targetSource "import \"this\" MetadataQuotedTarget")
-    requireOriginalSourceRejection "changed package qualifier requires current source"
-      (ExecutionSourceUnsupported root)
-      (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-        (Just session) target includes Nothing)
-    writeFile target (targetSource "import MetadataHiddenQuoted")
-    requireOriginalSourceRejection "generated hidden original has no completed authored demand"
-      (ExecutionSourceUnsupported hidden)
-      (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-        (Just session) target includes Nothing)
-    writeFile target (targetSource "import MetadataQuoter")
-    demanded <- compile (PreparedProducts Nothing) Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-      (Just session) target includes Nothing
-    unless (maybe False (any ((== ("main","MetadataQuoter")) . firstOwner) . selectedOriginalRows)
-        (preparedExactCompilation demanded >>= compilationSourceSelection))
-      (fail "new direct import of a transitive provider lost its current-source receipt")
-    selected <- either fail pure (extendSourceSelectedOriginals
-      (preparedExactCompilation demanded >>= compilationSourceSelection) retained)
-    retainedImports <- retainProgramSourceImports imports demanded
-      (emptyFinalizedModuleArtifacts (prHscEnv (pprPipelineResult demanded))) selected
-    writeFile target (targetSource "import MetadataQuotedTarget")
-    requireOriginalSourceRejection "new selected dependency still requires its current-source receipt"
-      (ExecutionSourceUnsupported root)
-      (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports retainedImports GeneralCompile) selected)
-        (Just session) target includes Nothing)
-    originalBytes <- BS.readFile (work </> "MetadataQuotedTarget.hs")
-    BS.appendFile (work </> "MetadataQuotedTarget.hs") "\n-- current source changed\n"
-    requireOriginalSourceBytesChanged "new cell rechecks changed current source" root
-      (work </> "MetadataQuotedTarget.hs") (digest originalBytes)
-      (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile retained)
-        (Just session) target includes Nothing)
-    writeFile (work </> "MetadataQuotedTarget.hs") (T.unpack (TE.decodeUtf8 originalBytes))
-    let helper = work </> "MetadataQuoteSupport.hs"
-    helperBytes <- BS.readFile helper
-    BS.appendFile helper "\n-- current dependency changed\n"
-    writeFile target (targetSource "import MetadataQuoteSupport")
-    requireOriginalSourceBytesChanged "new demand rechecks changed completed dependency"
-      ("main","MetadataQuoteSupport") helper (digest helperBytes)
-      (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
-        (Just session) target includes Nothing)
-  putStrLn "completed program imports: fresh/cached providers, arbitrary runIO original retained once, source-less later quoter, alias reuse, unaccepted provider, new cell/qualifier/hidden/new-demand and source/dependency drift controls"
-  where
-    firstOwner (owner,_,_,_) = owner
-
-completedProgramSourceImportPairing :: IO ()
-completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
-  forM_ ["MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
-    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  let expansion = work </> "original-expansion"
-      target = work </> "PairedOriginalConsumer.hs"
-      includes = [work]
-      root = ("main","MetadataQuotedTarget")
-  quoter <- TE.decodeUtf8 <$> BS.readFile (work </> "MetadataQuoter.hs")
-  writeFile (work </> "MetadataQuoter.hs") (T.unpack (T.replace
-    "quoteExp = \\_ -> pure (LitE (IntegerL answerValue))"
-    (T.pack ("quoteExp = \\_ -> do\n      value <- runIO (readFile " ++ show expansion
-      ++ ")\n      pure (LitE (IntegerL (read value + answerValue - 42)))"))
-    (T.replace "import MetadataQuoteSupport"
-      "import Language.Haskell.TH.Syntax (runIO)\nimport MetadataQuoteSupport" quoter)))
-  appendFile (work </> "MetadataQuotedTarget.hs") "\n{-# NOINLINE __result #-}\n"
-  writeFile target $ unlines
-    [ "module PairedOriginalConsumer where"
-    , "import MetadataQuotedTarget ()"
-    , "__result :: Int"
-    , "__result = 7"
-    ]
-  scopePath <- writeGenuineEmptyMetadataScope work
-  base <- readExactScope scopePath >>= either fail pure
-  admitted <- admitCheckedScope base includes []
-  let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
-  let purpose = ExactScopeCompile GeneralCompile admitted
-      prepare value = do
-        writeFile expansion (show value)
-        prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty purpose
-          (Just session) target includes Nothing
-        original <- maybe (fail "pairing fixture lacks its genuine finalized quote original") pure
-          (Map.lookup (mkModuleName (snd root)) (pprFinalizedModules prepared))
-        unless (hasIntResultLiteral value (cg_binds (finalizedTidyGuts original)))
-          (fail "unchanged authored source did not produce the selected runIO expansion")
-        let directory = work </> "pairing-capture-" ++ show value
-        createDirectory directory
-        originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult prepared))
-          (pprFinalizedModules prepared) (retainedOriginalInterfaces prepared) directory
-        certified <- writeCertifiedProductsKeeping includes originals directory prepared Nothing []
-        let proofs = certifiedSourceOriginals certified
-            admissions = finalizedLocalAdmissions (certifiedFinalizedArtifacts certified)
-        rows <- forM (Map.keys proofs) $ \key -> do
-          capture <- maybe (fail "pairing fixture lost its completed finalization capture") pure
-            (Map.lookup key admissions)
-          lexical <- either fail pure (preparedHomeRequirements prepared (fst key) (snd key))
-          pure (key,localFinalizedInterface capture,lexical)
-        retained <- extendExactScopeGeneration admitted
-          [(row,ModuleInterfaceEvidence (proofs Map.! key)) | (key,row,_) <- rows]
-          [] [(key,lexical) | (key,_,lexical) <- rows] >>= either fail pure
-        pure (prepared,certifiedFinalizedArtifacts certified,retained)
-  (first,captureA,scopeA) <- prepare 41
-  (second,captureB,scopeB) <- prepare 42
-  let sourceHashes prepared = [(dependencySourcePath source,dependencySourceSha256 source)
-        | source <- dependencySources (preparedFreshDependencies prepared)]
-  unless (sourceHashes first == sourceHashes second)
-    (fail "cross-capture negative control changed authored compiler source")
-  ownA <- retainProgramSourceImports Nothing first captureA scopeA
-  ownB <- retainProgramSourceImports Nothing second captureB scopeB
-  unless (isJust ownA && isJust ownB)
-    (fail "actual finalization object did not match its own completed capture")
-  swappedA <- retainProgramSourceImports Nothing first captureB scopeB
-  swappedB <- retainProgramSourceImports Nothing second captureA scopeA
-  unless (isNothing swappedA && isNothing swappedB)
-    (fail "same-source runIO expansions exchanged completed finalization authority")
-  putStrLn "completed program import pairing: identical source, distinct NOINLINE expansions, own capture admission and cross-capture refusal"
-
--- GHC owns whether an authored import contributes an interface obligation.
--- Inspect that evidence before projecting custody; import text is never used
--- to manufacture an absent type or native dependency.
 canonicalSourceObligations :: IO ()
 canonicalSourceObligations = withTiming $ withScratch $ \work -> do
   forM_ ["CanonicalUnusedSource.hs","CanonicalUnusedDependency.hs","CanonicalUnusedConsumer.hs"] $ \name ->
@@ -1550,7 +1047,7 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
       && Map.member dependencyKey (scopeModuleInterfaceProofs base) == required
       && null (scopeProducts base) && null (scopeExecutionGraphs base)) $
     fail "unused import scope invented an interface or native obligation"
-  admitted <- admitCheckedScope base includes []
+  admitted <- admitInspectionScope base includes []
   let purpose = GeneralCompile
       session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
@@ -1728,7 +1225,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     >>= either fail pure
   freshRecipe <- generatedScaffoldRecipe parserFlags (CheckedTemplateImports [] [])
     protectedSource protectedSource target "Expr" >>= either fail pure
-  let purpose = GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing [])
+  let purpose = GeneratedScaffoldCompile recipe (GeneralCompile)
       hiddenSession = emptySessionScope {ssRoot=work,ssExactScope=Just hiddenPath}
       protectedImport = "import GeneratedScaffoldHomeSupport hiding (irrelevant)"
       authoredRendering template imported = do
@@ -1787,13 +1284,13 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     protectedRoleRecipe <- renderingRecipe roleTemplate (literalImportRendering roleTemplate)
     writeFile target roleTemplate
     protectedRole <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile protectedRoleRecipe (CheckedItemCompile [] Nothing []))
+      (GeneratedScaffoldCompile protectedRoleRecipe (GeneralCompile))
       (Just hiddenSession) target [] Nothing
     overlapRendering <- authoredRendering roleTemplate "import qualified GeneratedRoleFresh as AuthoredRole\n"
     overlapRecipe <- renderingRecipe roleTemplate overlapRendering
     writeFile target (importRenderingSource overlapRendering)
     overlapRole <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile overlapRecipe (CheckedItemCompile [] Nothing []))
+      (GeneratedScaffoldCompile overlapRecipe (GeneralCompile))
       (Just hiddenSession) target [] Nothing
     let requireRole expected prepared = do
           receipt <- maybe (fail "finite role capture lacks its actual source receipt") pure
@@ -1849,7 +1346,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     duplicateRecipe <- renderingRecipe protectedSource duplicateRendering
     requireHiddenSource "additional authored home import has no protected occurrence slot" $
       compile (PreparedProducts Nothing) Set.empty
-        (GeneratedScaffoldCompile duplicateRecipe (CheckedItemCompile [] Nothing []))
+        (GeneratedScaffoldCompile duplicateRecipe (GeneralCompile))
         (Just hiddenSession) target [] Nothing
     writeFile target (protectedSource ++ "\ntampered = 0 :: Int\n")
     requireUserError "changed rendered target"
@@ -1875,7 +1372,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
         capturedRecipe <- generatedScaffoldRecipe parserFlags templateImports
           rendered rendered target "Expr" >>= either fail pure
         completed <- compile (PreparedProducts Nothing) Set.empty
-          (GeneratedScaffoldCompile capturedRecipe (CheckedItemCompile [] Nothing []))
+          (GeneratedScaffoldCompile capturedRecipe (GeneralCompile))
           (Just hiddenSession) target [] Nothing
         requireRetainedAnswer (label ++ " actual driver preserves protected original") completed
         receipt <- maybe (fail (label ++ " actual driver omitted its source owner")) pure
@@ -1894,7 +1391,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     duplicateRecipeWithProtected <- generatedScaffoldRecipeWithProtectedImports parserFlags templateImports
       renderedOccurrences duplicateProtected renderedDuplicate target "Expr" >>= either fail pure
     duplicateResult <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile duplicateRecipeWithProtected (CheckedItemCompile [] Nothing []))
+      (GeneratedScaffoldCompile duplicateRecipeWithProtected (GeneralCompile))
       (Just hiddenSession) target [] Nothing
     requireRetainedAnswer "duplicate protected imports preserve original compiler provenance" duplicateResult
     missingProtected <- either fail pure
@@ -1918,7 +1415,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     qualifiedRecipe <- generatedScaffoldRecipe parserFlags templateImports qualifiedSource qualifiedSource target "Expr"
       >>= either fail pure
     qualifiedResult <- compile (PreparedProducts Nothing) Set.empty
-      (GeneratedScaffoldCompile qualifiedRecipe (CheckedItemCompile [] Nothing []))
+      (GeneratedScaffoldCompile qualifiedRecipe (GeneralCompile))
       (Just hiddenSession) target [] Nothing
     requireRetainedAnswer "qualified protected import preserves original compiler provenance" qualifiedResult
     let changedAlias = T.unpack (T.replace "as CapturedTemplate" "as AuthoredAlias" (T.pack qualifiedSource))
@@ -1941,7 +1438,7 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
       generated <- generatedScaffoldRecipe parserFlags templateImports protectedSource rendered generatedPath name
         >>= either fail pure
       checked <- compile (PreparedProducts Nothing) Set.empty
-        (ExactScopeCompile (GeneratedScaffoldCompile generated (CheckedItemCompile [] Nothing [])) hidden)
+        (ExactScopeCompile (GeneratedScaffoldCompile generated (GeneralCompile)) hidden)
         (Just hiddenSession) generatedPath [] Nothing
       requireRetainedAnswer ("generated " ++ name ++ " preserves original compiler provenance") checked
     let metadataPath = work </> "CellCheck.hs"
@@ -2785,7 +2282,7 @@ exactExecutionValues = withTiming $ withScratch $ \work -> do
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G8" valuePath (digest bytes) []
   scopePath <- writeGenuineEmptyMetadataScope work
   base <- readExactScope scopePath >>= either fail pure
-  admitted <- admitCheckedScope base [work] [value]
+  admitted <- admitInspectionScope base [work] [value]
   let scope = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted),ssValIfaces=[valueOwner]}
   withResidentPipelineSelected [work] $ \compile -> do
     positive <- compile CheckedEnvironment Set.empty GeneralCompile Nothing ordinaryTarget [work] Nothing
@@ -4677,8 +4174,7 @@ candidateGhcLoad = withTiming $ withScratch $ \work -> do
         ++ " helper_frontends=" ++ show helperFrontends)
   putStrLn "candidate GHC load: original native reuse, actual quoter execution and source A/B/A passed"
 
--- Pure issuer and scope-budget controls; the runtime suite separately drives
--- cold parser -> whole checked program -> per-item original certification.
+-- Native signature resolution and the current generated type-slot consumer.
 nativeCheckedSignaturesTest :: IO ()
 nativeCheckedSignaturesTest = withScratch $ \work -> do
   let target = work </> "CheckedNativeSignatures.hs"
@@ -4708,20 +4204,17 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
             captured <- either (fail . show) pure (captureImportSyntax (pm_parsed_source actual))
             driver <- either (fail . show) pure (matchDriverImports captured actual)
             pure (unannotatedModule (beginImportRefinement driver))
-      parsed <- parseModule summary >>= liftIO . matchedNative
-      rewritten <- liftIO (rewriteCheckedAnnotations (crHscEnv checked) signatures parsed)
-      rechecked <- typecheckNativeModule rewritten
-      let (environment, _) = tm_internals_ rechecked
-          actual = Map.fromList [(getOccString identifier, idType identifier)
-            | identifier <- typeEnvIds (tcg_type_env environment)]
-      liftIO $ forM_ (Map.toList original) $ \(key, expected) ->
-        unless (maybe False (eqType expected) (Map.lookup key actual))
-          (fail ("native signature changed exact type: " ++ key))
-      let damaged = [(key, signature { signatureNames = [] }) | (key, signature) <- signatures]
-      refused <- liftIO (try (rewriteCheckedAnnotations (crHscEnv checked) damaged parsed)
-        :: IO (Either SomeException NativeParsedModule))
-      liftIO $ unless (case refused of Left _ -> True; Right _ -> False)
-        (fail "native signature admitted a substituted Name inventory")
+      liftIO $ forM_ signatures $ \(key,signature) -> do
+        (resolved,_) <- resolveCheckedSignature (crHscEnv checked) signature
+        expected <- maybe (fail "native signature lost its original type") pure (Map.lookup key original)
+        unless (eqType expected resolved) (fail ("native signature changed exact type: " ++ key))
+      let damaged = [signature {signatureNames=[]} | (_,signature) <- signatures
+            , not (null (signatureNames signature))]
+      liftIO $ forM_ damaged $ \signature -> do
+        refused <- try (void (resolveCheckedSignature (crHscEnv checked) signature))
+          :: IO (Either SomeException ())
+        unless (case refused of Left _ -> True; Right _ -> False)
+          (fail "native signature admitted a substituted Name inventory")
       let inputSignature = lookup "__tidepool_cell_pin_0_nominal" signatures
           inputType = Map.lookup "__tidepool_cell_pin_0_nominal" original
       signature <- maybe (fail "native nominal signature missing") pure inputSignature
@@ -5077,10 +4570,10 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
   original <- runPipelineSessionSelected CheckedEnvironment Set.empty GeneralCompile Nothing sourcePath [work] Nothing
   inputType <- maybe (fail "host input fixture has no inferred type") pure (crResultType original)
   issuedFields <- writeGenuineEmptyScopeFields work
-  authoredPurpose <- readPurposeCodecFixture work [work] CodecItemPurpose
+  authoredPurpose <- readPurposeCodecFixture work [work] CodecInspectionPurpose
   authoredFields <- case authoredPurpose of
     TList values -> pure values
-    _ -> fail "production checked-item encoder returned another record"
+    _ -> fail "production inspection encoder returned another record"
   let authorization = TString "host-activation-input2" : tail authoredFields
   let sha = TString (T.replicate 64 "a")
       empty = TList []
@@ -5097,7 +4590,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
     unless (case refused of Left _ -> True; Right _ -> False) $
       fail "retired authored activation purpose was admitted"
   authored <- decodeManifest (TList (replace 8 authoredPurpose issuedFields)) >>= either fail pure
-  unless (fmap itemPurpose (scopeCheckedItem authored) == Just AuthoredCheckedItem) $
+  unless (case scopePurpose authored of ExactInspectionPurpose _ _ -> True; _ -> False) $
     fail "ordinary purpose acquired host authority"
   replySignature <- captureCheckedSignature (crHscEnv original) "request-reply" inputType
   let requestBytes = toStrictByteString (encodeRequestTypeSignatures (RequestTypeSignatures replySignature Nothing))
@@ -5113,7 +4606,7 @@ hostActivationPurposeTest destination = withScratch $ \work -> do
       (fail "native request wrapper lost recipe or granted an inner purpose")
     graphFree <- decodeManifest (TList (replace 7 TNull (replace 8 wrapper issuedFields))) >>= either fail pure
     unless (scopeRequestTypes graphFree == scopeRequestTypes requestScope
-        && isNothing (scopeCheckedItem graphFree)
+        && scopePurpose graphFree == NoCheckedPurpose
         && null (scopeExecutionGraphs graphFree) && null (scopeExecutionOwners graphFree))
       (fail "graph-free request wrapper changed native recipe authority")
     legacy <- decodeManifest (TList [text "TPEXACTSCOPE",text "4",sha,sha,empty,empty,empty,wrapper])
@@ -5932,7 +5425,7 @@ exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
   base <- readExactScope scopePath >>= either fail pure
   let value = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2"
         (sessionHiPath work valueOwner) (digest intBytes) []
-  admitted <- admitCheckedScope base [work] [value]
+  admitted <- admitInspectionScope base [work] [value]
   withResidentPipelineSelected [work] $ \compile -> do
     let native session = compile (PreparedProducts Nothing) Set.empty GeneralCompile
           (Just session) target [work] Nothing

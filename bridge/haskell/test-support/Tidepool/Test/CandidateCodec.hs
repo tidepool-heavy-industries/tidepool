@@ -4,7 +4,7 @@
 -- carry no compiler capture, protected grant, or executable authority.
 module Tidepool.Test.CandidateCodec
   ( CandidateCodecCase(..), writeCandidateCodecFixture
-  , writeEmptyScopeCodecFixture, writeCellPurposeCodecFixture ) where
+  , writeEmptyScopeCodecFixture, writeInspectionPurposeCodecFixture ) where
 
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -36,12 +36,12 @@ writeEmptyScopeCodecFixture work = do
     (TList [TString "TPCODECFIXTURE1", TString "scope_empty", TList []])))
 
 -- The fixture protocol carries typed inputs, rather than a purpose wire array.
--- Rust's checked-cell and search serializers own the emitted authorization.
-writeCellPurposeCodecFixture :: FilePath -> [FilePath] -> [ExactIfaceArtifact] -> IO FilePath
-writeCellPurposeCodecFixture work includes values = do
+-- Rust's inspection and search serializers own the emitted authorization.
+writeInspectionPurposeCodecFixture :: FilePath -> [FilePath] -> [ExactIfaceArtifact] -> IO FilePath
+writeInspectionPurposeCodecFixture work includes values = do
   let text = TString . T.pack
       value artifact = TList [text (exactUnit artifact),text (exactModule artifact)
         ,text (exactPath artifact),text (exactSha256 artifact)]
   issueCodecFixturePacket work "purpose.cbor" (toStrictByteString (encodeTerm
-    (TList [TString "TPCODECFIXTURE1", TString "cell_purpose"
+    (TList [TString "TPCODECFIXTURE1", TString "inspection_purpose"
       ,TList [TList (map text includes),TList (map value values)]])))

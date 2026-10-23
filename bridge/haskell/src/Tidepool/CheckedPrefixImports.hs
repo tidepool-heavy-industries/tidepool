@@ -1,26 +1,20 @@
 {-# LANGUAGE DataKinds #-}
 
--- | Refine lexical imports from parsed local declarations, original declaration
--- inventories, or completed-prefix interfaces installed in this request.
+-- | Refine declaration imports and install typed aliases from the current
+-- World's captured value interfaces.
 module Tidepool.CheckedPrefixImports
-  ( CompletedValueImport(..), CompletedValueImports
-  , hydrateCompletedValueImports, hydrateCompletedValueImportsWithDependencies
-  , hydrateCompletedValueImportsWithVerifiedDependencies
-  , transformCompletedValueImports
-  , refineOriginalDeclarationImports, refineOriginalDeclarationImportsWithCompleted
-  , refineProgramDeclarationImports
+  ( refineOriginalDeclarationImports, refineProgramDeclarationImports
   , refineParsedDeclarationImports
   , selectedImportNames, parsedDeclarationOccurrences
   , CompletedValueAliases, completedValueAliasIds, hydrateCompletedValueAliases, transformCompletedValueAliases
   ) where
 
-import Control.Exception (evaluate, throwIO)
+import Control.Exception (evaluate)
 import Control.Monad (forM, forM_, unless)
 import Data.List (nub, sort)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Word (Word64)
 import GHC (ParsedModule(..), ModSummary(ms_hspp_opts))
 import GHC.Data.Maybe (MaybeErr(..))
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_unit_env, hsc_home_unit, lookupType)
@@ -51,30 +45,15 @@ import GHC.Utils.Outputable (ppr)
 import System.Mem.StableName (StableName, makeStableName)
 import Tidepool.DeclarationJoin (ExportIdentity(..), ExportNamespace(..), exportIdentity)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), CapturedInterfaceInputs, HydratedExactInterfaces
-  , readVerifiedExactIfaceClosure, selectCapturedInterfaceInputs
-  , hydrateInterfaceInputs, hydratedExactEnvironment, hydratedInterfaceProduct
-  , selectVerifiedValueInterfaces, checkedValueOwner )
-import Tidepool.Identity (stableVarId, nameSymbolIdentity)
+  ( ExactIfaceArtifact(..), HydratedExactInterfaces
+  , hydratedExactEnvironment, hydratedInterfaceProduct
+  , checkedValueOwner )
+import Tidepool.Identity (nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
 import Tidepool.ImportSyntax (RefinedImportSyntax, refinedParsedModule)
 import Tidepool.ImportSyntax.Internal
   ( ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource )
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
-  sessionModuleString, scaffoldTargetName)
-
--- These fields come from the closed completed-prefix authorization. They are
--- advisory until the exact captured bytes and exported native Names validate.
-data CompletedValueImport = CompletedValueImport
-  { completedValueUnit :: String
-  , completedValueModule :: String
-  , completedValueIfacePath :: FilePath
-  , completedValueIfaceSha256 :: String
-  , completedValueBinders :: [(String, Word64)]
-  } deriving (Eq, Show)
-
-newtype CompletedValueImports = CompletedValueImports [RefinementOwner]
 
 -- This capability comes from exact installed interface allocations and their
 -- actual exported Names. Runtime variable IDs never supply GHC binder identity.
@@ -137,7 +116,7 @@ hydrateCompletedValueAliases requested hydratedOwner
             forced <- evaluate iface
             stable <- makeStableName forced
             pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
-              [] (CompletedValues []) (Just (forced,stable)))
+              [] (Just (forced,stable)))
           pure ((\values -> CompletedValueAliases owners (Map.fromList values)) <$> sequence aliases)
     sameAliasOwner first second =
       (exactUnit first,exactModule first,exactSha256 first,exactRequirements first)
@@ -174,96 +153,12 @@ transformCompletedValueAliases (CompletedValueAliases owners aliases) env (Nativ
           signature = TypeSig noAnn [noLocA name] (hsTypeToHsSigWcType (noLocA (XHsType (idType identifier))))
       in [noLocA (SigD noExtField signature),noLocA (ValD noExtField (unLoc binding))]
 
-data DirectSelection = OriginalDeclarations | CompletedValues [Name]
 data RefinementOwner = RefinementOwner
   { refinementOwner :: Module
   , refinementFingerprint :: Fingerprint
   , refinementNames :: [ExportIdentity]
-  , refinementSelection :: DirectSelection
   , refinementReadback :: Maybe (ModIface, StableName ModIface)
   }
-
--- Thin value interfaces have fingerprint0. Decode captured SHA-verified bytes,
--- install those exact interfaces together, then retain their actual allocations.
--- A zero GHC fingerprint never substitutes for that read-and-install proof.
-hydrateCompletedValueImports
-  :: [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
-hydrateCompletedValueImports = hydrateCompletedValueImportsWithDependencies []
-
--- Read dependencies and completed owners once, installing one HPT knot. The
--- completed cap retains exactly the interface allocations installed by this
--- batch, including when a selected value's type depends on another input.
-hydrateCompletedValueImportsWithDependencies
-  :: [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
-hydrateCompletedValueImportsWithDependencies = hydrateCompletedValueInputs readVerifiedExactIfaceClosure
-
-hydrateCompletedValueImportsWithVerifiedDependencies
-  :: CapturedInterfaceInputs -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
-hydrateCompletedValueImportsWithVerifiedDependencies closure =
-  hydrateCompletedValueInputs (\_ _ -> pure (Right closure))
-
-hydrateCompletedValueInputs
-  :: (HscEnv -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs))
-  -> [ExactIfaceArtifact] -> [CompletedValueImport] -> HscEnv
-  -> IO (Either String (HydratedExactInterfaces, CompletedValueImports))
-hydrateCompletedValueInputs readInputs dependencies requested env
-  | any invalidOwner requested = pure (Left "completed values require canonical Val owners and nonempty selections")
-  | any invalidDependency dependencies = pure (Left "completed value dependencies require canonical Val owners")
-  | length winners /= length (nub winners) = pure (Left "completed value selections contain duplicate lexical winners")
-  | length owners /= length (nub owners) = pure (Left "completed value hydration contains duplicate interface owners")
-  | otherwise = do
-      decoded <- readInputs env artifacts
-      case decoded of
-        Left diagnostic -> pure (Left diagnostic)
-        Right inputs -> case selectVerifiedValueInterfaces inputs artifacts of
-          Left diagnostic -> pure (Left diagnostic)
-          Right interfaces -> do
-            let completedInterfaces = drop (length dependencies) interfaces
-            case sequence (zipWith selectedNames requested completedInterfaces) of
-              Left diagnostic -> pure (Left diagnostic)
-              Right selections -> do
-                selected <- either throwIO pure (selectCapturedInterfaceInputs inputs artifacts)
-                owner <- hydrateInterfaceInputs env selected
-                let hydrated = hydratedExactEnvironment owner
-                refinements <- forM (zip completedInterfaces selections) $ \((_, iface), names) -> do
-                  forced <- evaluate iface
-                  stable <- makeStableName forced
-                  pure (RefinementOwner (mi_module forced) (mi_iface_hash (mi_final_exts forced))
-                    (map exportIdentity names) (CompletedValues names) (Just (forced, stable)))
-                pure (Right (owner, CompletedValueImports refinements))
-  where
-    invalidOwner value = null (completedValueBinders value)
-      || any ((== scaffoldTargetName) . fst) (completedValueBinders value)
-      || case parseSessionModule (completedValueModule value) of
-        Just owner -> smKind owner /= ValMod || sessionModuleString owner /= completedValueModule value
-        Nothing -> True
-    winners = concatMap (map fst . completedValueBinders) requested
-    invalidDependency artifact = case parseSessionModule (exactModule artifact) of
-      Just owner -> smKind owner /= ValMod || sessionModuleString owner /= exactModule artifact
-      Nothing -> True
-    owners = map exactModule artifacts
-    artifacts = dependencies ++ [ExactIfaceArtifact (completedValueUnit value) (completedValueModule value)
-      (completedValueIfacePath value) (completedValueIfaceSha256 value) [] | value <- requested]
-    selectedNames value (_, iface) = mapM select (completedValueBinders value)
-      where
-        select (occurrence, identity) = case
-          [name | name <- nub (concatMap availNames (mi_exports iface))
-            , let exported = exportIdentity name
-            , exportUnit exported == completedValueUnit value
-            , exportModule exported == completedValueModule value
-            , exportNamespace exported == ValueNamespace
-            , exportOccurrence exported == occurrence
-            , stableVarId name == identity] of
-          [name] -> Right name
-          _ -> Left "completed value selection lacks its exact exported native identity"
-
-transformCompletedValueImports
-  :: CompletedValueImports -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-transformCompletedValueImports (CompletedValueImports owners) env =
-  mapPrefixImports (refineImports owners [] env)
 
 -- Only this issuer applies lineage-changing import operations to the held
 -- bundle. Native type uses survive every import refinement unchanged.
@@ -281,30 +176,16 @@ refineOriginalDeclarationImports
   :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 refineOriginalDeclarationImports owner fingerprint names env = mapPrefixImports $ \parsed -> do
   original <- originalRefinement env owner fingerprint names
-  refineImports [original] [] env parsed
-
--- A completed value may replace a Lib value. Protect only the completed cap's
--- verified exact direct selections during the Lib pass, then give the value
--- winners precedence over that Lib and every historical unqualified import.
-refineOriginalDeclarationImportsWithCompleted
-  :: Module -> Fingerprint -> [ExportIdentity] -> CompletedValueImports
-  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-refineOriginalDeclarationImportsWithCompleted owner fingerprint names
-    (CompletedValueImports completed) env = mapPrefixImports $ \parsed -> do
-  original <- originalRefinement env owner fingerprint names
-  intermediate <- refineImports [original] completed env parsed
-  refineImports completed [] env intermediate
+  refineImports [original] env parsed
 
 -- Select the source-ordered declaration winners while keeping every original
 -- owner available through its qualified import. Completed Val selections have
 -- already been pruned by declaration shadowing before they enter this pass.
 refineProgramDeclarationImports
-  :: [(Module,Fingerprint,[[ExportIdentity]])] -> Maybe CompletedValueImports
-  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-refineProgramDeclarationImports originals captured env = mapPrefixImports $ \parsed -> do
+  :: [(Module,Fingerprint,[[ExportIdentity]])] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+refineProgramDeclarationImports originals env = mapPrefixImports $ \parsed -> do
   owners <- mapM (\(owner,fingerprint,groups) -> originalRefinement env owner fingerprint (concat groups)) originals
-  let completed = case captured of Just (CompletedValueImports values) -> values; Nothing -> []
-      namespace TypeNamespace = TypeNamespace
+  let namespace TypeNamespace = TypeNamespace
       namespace ConstructorNamespace = ConstructorNamespace
       namespace FieldNamespace = FieldNamespace
       namespace _ = ValueNamespace
@@ -314,9 +195,8 @@ refineProgramDeclarationImports originals captured env = mapPrefixImports $ \par
       originalWinners = [(key name,owner)
         | (owner,_,groups) <- originals, group@(headName:_) <- groups
         , Map.lookup (key headName) headWinners == Just owner, name <- group]
-      winners = Map.fromList (originalWinners ++ [(key name,refinementOwner owner)
-        | owner <- completed, name <- refinementNames owner])
-  verified <- refineImports owners completed env parsed
+      winners = Map.fromList originalWinners
+  verified <- refineImports owners env parsed
   let select located = case [owner | owner <- owners
           , directRefinementImport owner located] of
         [] -> pure KeepImport
@@ -329,7 +209,7 @@ refineProgramDeclarationImports originals captured env = mapPrefixImports $ \par
           pure (NarrowUnqualified (map importName retained))
         _ -> fail "program declaration owner is duplicated"
   selected <- mapRefinedImportsM select verified
-  if null completed then pure selected else refineImports completed [] env selected
+  pure selected
 
 originalRefinement
   :: HscEnv -> Module -> Fingerprint -> [ExportIdentity] -> IO RefinementOwner
@@ -338,7 +218,7 @@ originalRefinement env owner fingerprint names = do
   unless (sort (nub names) == sort (nub (map exportIdentity
       (concatMap availNames (mi_exports (hm_iface original)))))) $
     fail "planned import refinement lacks its complete original export inventory"
-  pure (RefinementOwner owner fingerprint names OriginalDeclarations Nothing)
+  pure (RefinementOwner owner fingerprint names Nothing)
 
 currentOwner :: HscEnv -> Module -> Fingerprint -> IO HomeModInfo
 currentOwner env owner fingerprint = case lookupHpt (hsc_HPT env) (moduleName owner) of
@@ -399,12 +279,12 @@ directRefinementImport owner imported = let declaration = unLoc imported in
     && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
     && ideclSource declaration == NotBoot
 
-refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
-refineImports [] [] _ parsed = pure parsed
-refineImports owners protected env parsed = do
+refineImports :: [RefinementOwner] -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
+refineImports [] _ parsed = pure parsed
+refineImports owners env parsed = do
   let syntax = unLoc (pm_parsed_source (refinedParsedModule parsed))
       originalImports = hsmodImports syntax
-  forM_ (owners ++ protected) $ \owner -> do
+  forM_ owners $ \owner -> do
     original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
     case refinementReadback owner of
       Nothing -> pure ()
@@ -414,23 +294,15 @@ refineImports owners protected env parsed = do
         unless (actual == expected) $
           fail "completed value import lost its exact installed interface allocation"
     case filter (directRefinementImport owner) originalImports of
-      [imported] -> case refinementSelection owner of
-        OriginalDeclarations -> unless (ideclImportList (unLoc imported) == Nothing) $
-          fail "planned declaration requires one direct original wildcard import"
-        CompletedValues expected -> do
-          let selection = ideclImportList (unLoc imported)
-          unless (case selection of Just (Exactly, _) -> True; _ -> False) $
-            fail "completed value import requires its exact explicit selection"
-          selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original)) selection)
-          unless (sort (map exportIdentity selected) == sort (map exportIdentity expected)) $
-            fail "completed value import differs from its certified prefix winners"
+      [imported] -> unless (ideclImportList (unLoc imported) == Nothing) $
+        fail "planned declaration requires one direct original wildcard import"
       _ -> fail "checked import refinement requires one direct original import"
   let namespace TypeNamespace = TypeNamespace
       namespace ConstructorNamespace = ConstructorNamespace
       namespace _ = ValueNamespace
       key identity = (namespace (exportNamespace identity), exportOccurrence identity)
       shadowKeys = map key (concatMap refinementNames owners)
-  refineUnqualifiedImports (\located -> any (`directRefinementImport` located) (owners ++ protected))
+  refineUnqualifiedImports (\located -> any (`directRefinementImport` located) owners)
     ((`notElem` shadowKeys) . key . exportIdentity) env parsed
 
 -- Narrow only the unqualified view. The qualified clone keeps the submitted

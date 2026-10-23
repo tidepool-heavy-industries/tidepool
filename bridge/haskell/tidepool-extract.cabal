@@ -77,11 +77,9 @@ library tidepool-extract-internal
     Tidepool.Binders
     Tidepool.BoundedRead
     Tidepool.CborEncode
-    Tidepool.CellProgramState
     Tidepool.CheckedCell
     Tidepool.CanonicalTypeShape
     Tidepool.CheckedAdmission
-    Tidepool.CheckedRecipe
     Tidepool.CheckedPrefixImports
     Tidepool.CompileInputPolicy
     Tidepool.DependencyEvidence
@@ -216,7 +214,6 @@ test-suite cell-splitter-test
                     TypedSegmentCases
                     TypedSessionCases
                     UnreachableCompileTimeTest
-                    CellProgramStateTest
                     Tidepool.Test.CandidateCodec
                     Tidepool.Test.FixturePacket
                     CheckedAdmissionTest

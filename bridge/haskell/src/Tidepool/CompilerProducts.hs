@@ -41,7 +41,7 @@ import Data.Bits (shiftR)
 import Data.ByteString qualified as BS
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe, isJust, fromMaybe, isNothing)
+import Data.Maybe (mapMaybe, isJust)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -84,19 +84,14 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
 import Tidepool.ImportAdmission
-  ( ExactCompilation, compilationScope, compilationSourceSelection, compilationExactImports, compilationSource
+  ( compilationScope, compilationExactImports, compilationSource
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
-  , writeRetainedExactCompilationWithOutputsAndPublication )
+  )
 import Tidepool.ExactScope
   ( WorldOriginalReference, WorldInputFacts, worldInputsProducer, worldInputsProfile, ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
-  , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
-  , scopeInterfaceToken, scopeOriginalBytes
-  , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
-  , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, canonicalOrigin, isSourceOriginal
-  , originalGroupFromProjected, originalGroupFromCandidate
-  , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
-  , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
+  , FreshOutputSeals, freshOutputSealsFromWrites, freshOutputSealFacts
+  , scopeInterfaceToken, canonicalProofInterfaceBody, canonicalProofOriginalBytes, CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, originalGroupFromProjected, ExactInterfaceEvidence(..), canonicalCertificateBytes, canonicalCertificatePath)
 import Tidepool.ExecutionEncode
   ( ModuleProductEncoding, moduleProductInput, moduleProductBytes
   , prepareModuleProductEncodingFromGroups, encodeModuleProductInventory, encodePackageGroup
@@ -123,15 +118,14 @@ import Tidepool.ExecutionSchema
 import qualified Tidepool.ExecutionSchema as Execution
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..), SourceRecipeUnavailable(..), ExecutionSourceRecipe(..)
-  , ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
+  , ExecutionSourceGraph(..), executionGraphBytes, ExecutionSourceIdentity(..), ExecutionSourceOwner(..)
   , ExecutionSourceFailure(..), executionIdentityKey, issueExecutionSourceRecipe
-  , executionSourceInheritedOwners, ExecutionSourceRef(..), executionSourceProspectiveReferences )
+  , executionSourceInheritedOwners, ExecutionSourceRef(..))
 import Tidepool.ExtractUtil (shaHex)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, captureFinalizedModuleTypeInterfaces, finalizedTypeInterfaces
   , materializeFinalizedModuleArtifactsWithOutputs, LocalFinalizedAdmission
-  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
-  , localFinalizedPackageBody, localFinalizedPackageEvidence
+  , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedPackageBody, localFinalizedPackageEvidence
   )
 import Tidepool.GhcPipeline
   ( NativeProductProvenance, nativeProductProducer, nativeProductProfile
@@ -142,7 +136,7 @@ import Tidepool.GhcPipeline
   , PreparedModuleCompletionInputs(..), PreparedSourceRoute(..), preparedSourceRoute
   , acquireWorldSourceOriginal, worldSourceOriginalFinalization, worldSourceOriginalPackages, captureWorldSourceOriginals
   , preparedFreshDependencies, preparedExactCompilation
-  , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
+  , preparedCandidateOriginal, preparedCandidateProof
   , revalidatePreparedCandidateInputs )
 import Tidepool.GhcPipeline (WorldCellInputs, worldCellTypeInterfaces, worldCellDependencyBasis
   , WorldCellInputReference, worldCellInputReferenceBinding, selectWorldCellExecutionInputReferences)

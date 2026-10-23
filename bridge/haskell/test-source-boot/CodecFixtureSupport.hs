@@ -2,7 +2,7 @@
 -- This adapter has no compiler capture or execution-admission operation.
 module CodecFixtureSupport
   ( CandidateCodecCase(..), writeCandidateCodecFixture
-  , PurposeCodecCase(..), readPurposeCodecFixture, readRequestTypesCodecFixture, readExpressionItemCodecFixture
+  , PurposeCodecCase(..), readPurposeCodecFixture, readRequestTypesCodecFixture
   , ReceiptCodecFacts(..), readReceiptCodecFacts
   , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts, readSegmentItemCodecFacts
   , CompilerInputCodecFacts(..), readCompilerInputCodecFacts
@@ -109,22 +109,13 @@ scopeCodecTerm fixture = TList $
   , codecScopePublished fixture, codecScopeAcquisition fixture ]
 
 data PurposeCodecCase
-  = CodecCellPurpose
-  | CodecItemPurpose
-  | CodecInspectionPurpose
+  = CodecInspectionPurpose
 
 readPurposeCodecFixture :: FilePath -> [FilePath] -> PurposeCodecCase -> IO Term
 readPurposeCodecFixture work includes purpose = do
   let (name, signature) = case purpose of
-        CodecCellPurpose -> ("cell", TNull)
-        CodecItemPurpose -> ("item", TNull)
         CodecInspectionPurpose -> ("inspection", TNull)
   path <- codecRequest work "purpose.cbor" "purpose" [text name,TList (map text includes),signature]
-  readCodecTerm path
-
-readExpressionItemCodecFixture :: FilePath -> [FilePath] -> BS.ByteString -> IO Term
-readExpressionItemCodecFixture work includes expression = do
-  path <- codecRequest work "purpose.cbor" "expression_purpose" [TList (map text includes),TBytes expression]
   readCodecTerm path
 
 readRequestTypesCodecFixture

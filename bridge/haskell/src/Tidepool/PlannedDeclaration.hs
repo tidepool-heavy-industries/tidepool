@@ -8,9 +8,8 @@ module Tidepool.PlannedDeclaration
   , PlannedDeclarationInventory, plannedExports, plannedInstances
   , plannedOriginalOwner, plannedInterfaceFingerprint, plannedSourceMatches, plannedFamilyClosure
   , renderPlannedDeclarationInventory
-  , certifyPlannedDeclaration, hydratePlannedDeclarationInventory, admitLocalNativeDeclaration
-  , transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted
-  , transformProgramDeclarationImports
+  , certifyPlannedDeclaration, admitLocalNativeDeclaration
+  , transformPlannedDeclarationImports, transformProgramDeclarationImports
   ) where
 
 import Control.Monad (unless)
@@ -20,7 +19,6 @@ import Data.Char (isSpace)
 import Data.List (intercalate, isPrefixOf, nub, sort, tails)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import GHC (ParsedModule)
 import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Core.FamInstEnv (FamInst(..))
 import GHC.Driver.Env (HscEnv, hsc_HPT, hsc_HUG, hscEPS, hsc_home_unit)
@@ -36,8 +34,7 @@ import GHC.Utils.Fingerprint (Fingerprint, fingerprintByteString)
 import GHC.Types.Name.Occurrence
   ( isSymOcc, mkTcOcc, mkVarOcc, mkDataOcc )
 import Tidepool.CheckedPrefixImports
-  ( CompletedValueImports, refineOriginalDeclarationImports
-  , refineOriginalDeclarationImportsWithCompleted, refineProgramDeclarationImports )
+  ( refineOriginalDeclarationImports, refineProgramDeclarationImports )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
   , StmtBinders(..), TurnKind(..), ExportItem(..)
@@ -246,30 +243,6 @@ certifyPlannedDeclaration planned env = case
             (Left "planned original declaration exports differ from parser-owned heads")
           Right inventory
 
--- A later target recipe receives the original owner and final interface
--- fingerprint from its closed declaration authorization. Read the same
--- already hydrated original; neither source replay nor rendered names can
--- stand in for its exact interface identity.
-hydratePlannedDeclarationInventory
-  :: (String, String) -> String -> HscEnv
-  -> IO (Either String PlannedDeclarationInventory)
-hydratePlannedDeclarationInventory expectedOwner expectedFingerprint env =
-  case parseSessionModule (snd expectedOwner) of
-    Just owner | smKind owner == LibMod && sessionModuleString owner == snd expectedOwner ->
-      case lookupHpt (hsc_HPT env) (mkModuleName (snd expectedOwner)) of
-        Nothing -> pure (Left "planned original declaration interface is absent")
-        Just original -> do
-          let iface = hm_iface original
-              ownerModule = mi_module iface
-              actualOwner = (unitString (moduleUnit ownerModule)
-                ,moduleNameString (moduleName ownerModule))
-          if actualOwner /= expectedOwner
-              || moduleUnit ownerModule /= homeUnitAsUnit (hsc_home_unit env)
-              || show (mi_iface_hash (mi_final_exts iface)) /= expectedFingerprint
-            then pure (Left "planned original declaration owner or interface differs")
-            else readPlannedDeclarationInventory env original
-    _ -> pure (Left "planned declaration requires a canonical original Lib owner")
-
 readPlannedDeclarationInventory
   :: HscEnv -> HomeModInfo -> IO (Either String PlannedDeclarationInventory)
 readPlannedDeclarationInventory env original = do
@@ -309,15 +282,8 @@ transformPlannedDeclarationImports inventory = refineOriginalDeclarationImports
   (inventoryOwner inventory) (inventoryInterface inventory)
   (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
 
-transformPlannedDeclarationImportsWithCompleted
-  :: PlannedDeclarationInventory -> CompletedValueImports -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
-transformPlannedDeclarationImportsWithCompleted inventory = refineOriginalDeclarationImportsWithCompleted
-  (inventoryOwner inventory) (inventoryInterface inventory)
-  (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
-
 transformProgramDeclarationImports
-  :: [PlannedDeclarationInventory] -> Maybe CompletedValueImports
-  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+  :: [PlannedDeclarationInventory] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 transformProgramDeclarationImports inventories = refineProgramDeclarationImports
   [(inventoryOwner inventory,inventoryInterface inventory,
       map (\item -> exportHead item : exportChildren item) (plannedExports inventory))

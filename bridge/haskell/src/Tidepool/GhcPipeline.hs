@@ -72,9 +72,8 @@ import qualified GHC.Data.Maybe as MaybeErr
 import GHC.Driver.Backend (backendGeneratesCode, backendWritesFiles, backendCanReuseLoadedCode)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT, hsc_HPT, hsc_home_unit, runHsc')
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph, hsc_unit_env, hsc_logger, hsc_dflags, hsc_FC, hsc_targets, hsc_hooks, hsc_interp, hsc_type_env_vars))
-import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Driver.Monad (reflectGhc, reifyGhc, Session(..))
-import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomePackageTable, HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt, eltsHpt, filterHpt)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomePackageTable, HomeModLinkable(..), emptyHomeModInfoLinkable, emptyHomePackageTable, justBytecode, addToHpt, lookupHpt, eltsHpt)
 import GHC.Unit.Module.ModDetails (ModDetails, md_types)
 import GHC.Unit.Module.Status (HscBackendAction(..))
 import GHC.Types.ForeignStubs (ForeignStubs(NoStubs))
@@ -212,7 +211,7 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, modifyIORef', readIORef,
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath (takeFileName, takeDirectory, takeExtension, dropExtension, isAbsolute, normalise, pathSeparator, (</>))
-import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, makeAbsolute, doesFileExist, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, hClose)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, artifactLength, captureArtifactBytes)
@@ -225,7 +224,7 @@ import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, locatedImportNamespaces, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteHostInputType, rewriteRequestTypes
   , NativeParsedModule, unannotatedModule, nativeParsedModule, nativeImportSyntax, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
@@ -233,7 +232,7 @@ import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedH
 import Tidepool.FinalizedModule.Internal (retainCompletedModuleInterface)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, LocalFinalizedAdmission, finalizedLocalAdmissions, localFinalizedInterface
-  , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedHomeUnits, localFinalizedCore
+  , localFinalizedRequirements, localFinalizedCore
   , matchesCapturedFinalization, localFinalizedPackageEvidence, finalizedInterfaceSeals )
 import Tidepool.HomeProducts.Internal
   ( CycleInterfaceViews, withCompilerInterfaceViews, compilerInterfaceDirectory
@@ -249,7 +248,7 @@ import Tidepool.HomeProducts
   , validateCandidateInterfaceRequirements, validateCapturedAdmittedCore )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.PlannedDeclaration
-  ( PlannedDeclaration, plannedModule, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan, certifyPlannedDeclaration, plannedOriginalOwner, preparePlannedDeclaration, originalDeclarationWrapper, replaceTemplateModuleHeader, PlannedDeclarationInventory, transformPlannedDeclarationImports, transformPlannedDeclarationImportsWithCompleted, transformProgramDeclarationImports, hydratePlannedDeclarationInventory )
+  ( PlannedDeclaration, plannedModule, plannedSource, plannedSourceImports, plannedSourceLineOffset, plannedCheckPlan, certifyPlannedDeclaration, plannedOriginalOwner, preparePlannedDeclaration, originalDeclarationWrapper, replaceTemplateModuleHeader, PlannedDeclarationInventory, transformProgramDeclarationImports )
 import Tidepool.DeclarationJoin (DeclarationExport(..))
 import Tidepool.CheckedPrefixImports
   ( refineParsedDeclarationImports, refineOriginalDeclarationImports, selectedImportNames
@@ -296,7 +295,7 @@ import Tidepool.ExecutionProjection
   , preparedRootIdentity )
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
-  , CompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasks, runCompilerTasksWithAttempt, dependencyClosedReuse )
+  , CompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen, withCompilerExecutor, runCompilerTasksWithAttempt, dependencyClosedReuse )
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -313,9 +312,9 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, VerifiedExactInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
-  , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
+  , readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , checkedValueImportAuthorityFromCaptures, unionCheckedValueImports, admitsCheckedValueImport
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
@@ -327,7 +326,7 @@ import Tidepool.ExactHydration
   , generatedTypedSegmentRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, projectExactLexicalGraph )
 import Tidepool.TurnSource (importRenderingSource, ImportOrigin(..))
-import Tidepool.ImportAdmission (ExactCompilation, compilationScope, compilationSourceSelection, compilationExactImports, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation, compilationOriginalSourceImports)
+import Tidepool.ImportAdmission (ExactCompilation, compilationExactImports, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation)
 import Tidepool.ImportAdmission.Internal
   ( ExactCompilation(..), CapturedImportAdmission(..), ImportAdmissionContext(..)
   , ImportAttempt(..), ScopedImportAdmission(..), ResolvedImportAdmission(..), MatchedImportDriver(..), ImportDriverOccurrence(..)
@@ -338,7 +337,7 @@ import Tidepool.ImportSyntax
   , driverImportOccurrences, importOccurrenceId, capturedParsedSource, refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
 import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportOccurrenceId(..), DriverImportSyntax(..))
 import Tidepool.ExactScope
-  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeProducerSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , exactInputRetentionLimits, optionalInputByteLimit, originalImageCountLimit, commitWorldInputRetention
@@ -361,17 +360,15 @@ import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureSourceOriginals, canonicalInterfaceInput, scopeCanonicalInterfaces
   , scopeSourceOriginalInterfaces, admittedInterfaceRequirements
   , validateCandidateCanonicalInterfaceProof, captureCanonicalProofs, CanonicalInterfaceUse(..), canonicalProofInterfaceBytes, revalidateCanonicalProofInputs
-  , canonicalCertificateSha256, canonicalCoreArtifact
-  , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
-  , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
+  , canonicalCertificateSha256, scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..)
+  ( ExecutionSourceGraph(..), executionGraphSha256, ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
   , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
   , executionSourceGraphsFit
   , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
-  ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
+  ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, decodeCapturedPackageImports
   , validatePackageImportRoot
   , withPackageRootObservations, packageImportRootWithin, validatePackageImportRootWithin )
 import Tidepool.PackageWitness
@@ -3125,7 +3122,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                     [entry] -> pure (worldTypeEntryInterface entry)
                     _ -> throwIO WorldCellCorrupt
                   refineOriginalDeclarationImports (mi_module iface) (mi_iface_hash (mi_final_exts iface)) exports environment annotated
-              declared <- transformProgramDeclarationImports inventories Nothing environment baseDeclared
+              declared <- transformProgramDeclarationImports inventories environment baseDeclared
               transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
         , pvPlan = \directory enabled target observation@(SourceGraphObservation graph _) exact resolved -> do
             environment <- getSession

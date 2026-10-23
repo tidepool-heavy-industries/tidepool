@@ -18,12 +18,12 @@ module Tidepool.CompilerRequest
   , prepareArtifactsWithProjection, PreviewOriginalDependenciesUnavailable, requirePreviewProjection
   ) where
 
-import Control.Exception (Exception, evaluate, throw, throwIO, fromException)
+import Control.Exception (Exception, evaluate, throwIO, fromException)
 import Control.Monad ( foldM, forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (isJust, isNothing, mapMaybe)
+import Data.Maybe ( isNothing, mapMaybe)
 import Data.Word (Word64)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -33,7 +33,7 @@ import GHC.Unit.Types (unitString)
 import System.IO (hPutStrLn, stderr)
 import GHC (Ghc)
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
-import GHC.Driver.Session (DynFlags, importPaths)
+import GHC.Driver.Session (DynFlags)
 import Tidepool.CheckedAdmission (matchesInspectionAdmission)
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
@@ -45,7 +45,7 @@ import Tidepool.CompilerProducts
   , WorldStageInputs, exchangeWorldNativeDemand, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, withWorldStageBasis, worldStagePriorOriginals, withWorldStageBindings, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , StagedOriginalProducts, stagedOriginalBinders, stagedOriginalExternalDemand, stagedOriginalReference, withWorldStageInputs
+  , stagedOriginalBinders, stagedOriginalExternalDemand, stagedOriginalReference, withWorldStageInputs
   , stagedDeclarationInputReferences
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, PreparedProductContext
   , prepareOriginalProductsWithCacheAndReuse, prepareOriginalProductsWithWorklist
@@ -66,14 +66,13 @@ import Tidepool.ExecutionProjection
   , finalizePreparedCandidate
   , preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedModuleProductOutcomes
   , preparedRootIdentity, PreparedPackageTarget, projectPreparedPackageTarget
-  , packageTargetName, packageTargetProgram, packageTargetConstructors, packageTargetGroups, packageTargetImports
-  , projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
+  , packageTargetProgram, packageTargetConstructors, packageTargetGroups, projectedPackageModule, projectedPackageInterfaceSha256, projectedPackageEncoding
   , projectedPackageConstructors, projectedPackageYieldSites )
 import Tidepool.HostBindingAuthority (HostBindingRepresentation, hostBindingRepresentationJsonAuthority)
 import Tidepool.ConstructorIdentity (IssuedConstructor)
 import qualified Tidepool.EffectSchema
 import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
-import Tidepool.CertifiedProducts (resolvePackageGlobal, encodeReceiptIdentity)
+import Tidepool.CertifiedProducts (resolvePackageGlobal)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.WorkerServer (NativeDemandExchange)
 import Tidepool.DependencyPlan
@@ -107,7 +106,6 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
   , PhaseSink, CompletionPhase(..), emitPhase, releaseWithPhase)
 
 import qualified Crypto.Hash.SHA256 as SHA256
-import qualified Data.Text.Encoding as TE
 import Data.Char (digitToInt)
 import Data.List (intercalate)
 import System.Directory (createDirectoryIfMissing, canonicalizePath)

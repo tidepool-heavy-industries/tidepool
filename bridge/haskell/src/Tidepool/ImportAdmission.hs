@@ -9,7 +9,7 @@ module Tidepool.ImportAdmission
   , IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
   , compilationOriginalSourceImports
   , ExactCompilationPublication(..)
-  , writeExactCompilation, writeCheckedExactCompilation
+  , writeCheckedExactCompilation
   , writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilation, writeRetainedExactCompilationWithOutputsAndPublication
   ) where
@@ -20,7 +20,6 @@ import Control.Exception (IOException, try, throwIO)
 import Control.Monad (forM_, unless)
 import qualified Crypto.Hash.SHA256 as SHA
 import qualified Data.ByteString as BS
-import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Numeric (showHex)
@@ -73,14 +72,6 @@ compilationOriginalSourceImports = originalSourceImports . compilationExactImpor
 digest :: BS.ByteString -> String
 digest = concatMap hex . BS.unpack . SHA.hash
   where hex value = case showHex value "" of [one] -> ['0',one]; two -> two
-
--- Every successful compile owns a distinct immutable source snapshot. Check,
--- fold and inspection requests can consume several generated modules, so a
--- later successful transaction must not replace an earlier witness.
-writeExactCompilation
-  :: ExactCompilation -> DependencyEvidence -> IO ()
-writeExactCompilation compilation evidence =
-  captureExactCompilationReceipt compilation evidence >>= publishExactCompilationReceipt
 
 -- Publication is data, so no compiler work or caller callback can intervene
 -- between the terminal observations and the receipt. Certified bytes are

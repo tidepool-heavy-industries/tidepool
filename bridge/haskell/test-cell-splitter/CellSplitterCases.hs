@@ -54,7 +54,7 @@ import GHC.Driver.Session (xopt_set, xopt_unset, parseDynamicFilePragma, gopt_se
 import GHC.Driver.Backend (interpreterBackend)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
-import GHC.Unit.Module.ModIface (mi_iface_hash, mi_mod_hash, mi_usages)
+import GHC.Unit.Module.ModIface (mi_module, mi_iface_hash, mi_mod_hash, mi_usages)
 import GHC.Unit.Module.Deps (Usage(..))
 import GHC.Utils.Fingerprint (fingerprintByteString)
 import GHC.Parser.Header (getOptions)
@@ -89,7 +89,8 @@ import Tidepool.ImportSyntax (capturedParsedSource)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
-import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
+import Tidepool.CheckedPrefixImports (refineProgramDeclarationImports)
+import Tidepool.DeclarationJoin (interfaceExports, DeclarationExport(..))
 import Tidepool.ImportSyntax
   ( captureImportSyntax, matchDriverImports, beginImportRefinement
   , refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
@@ -656,8 +657,10 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
       let environment = crHscEnv checked
       inventories <- mapM (\owner -> do
         original <- maybe (fail "original Lib interface is absent") pure (lookupHpt (hsc_HPT environment) (mkModuleName owner))
-        hydratePlannedDeclarationInventory ("main",owner)
-          (show (mi_iface_hash (mi_final_exts (hm_iface original)))) environment >>= either fail pure)
+        let iface = hm_iface original
+        exports <- interfaceExports environment iface
+        pure (mi_module iface,mi_iface_hash (mi_final_exts iface),
+          [exportHead item : exportChildren item | item <- exports]))
         ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
       writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b + c + Restricted.b)")
       libdir <- getLibdir
@@ -672,7 +675,7 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         -- matching syntax DATA does not manufacture a declaration inventory.
         captured <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
         driver <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
-        liftIO (transformProgramDeclarationImports inventories Nothing environment
+        liftIO (refineProgramDeclarationImports inventories environment
           (unannotatedModule (beginImportRefinement driver)))
       let transformedSource = pm_parsed_source (nativeParsedModule transformed)
           imports = map unLoc (hsmodImports (unLoc transformedSource))

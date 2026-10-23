@@ -10,7 +10,7 @@ module Tidepool.ExactScope
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule, resolveShippedHomeModuleWithEvidence, ShippedHomeModuleRefusal(..), ShippedHomeModuleOrigin(..), CanonicalAdmissionKind(..)
   , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), CapturedCanonicalMetadata, captureCanonicalMetadata, capturedCanonicalMetadataProof, canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
-  , captureCheckedSourceOriginals, captureSourceOriginals, originalSourceImports
+  , captureSourceOriginals, originalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact, canonicalInterfaceInput
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
@@ -91,7 +91,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
 import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, RequestInputTokenReader, withCapturedRequestInputTokens, capturedRequestInputToken, requestInputRetained, requestInputCount, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes, requestInputBodies, transferRequestInputBodies, editDirectRequestInputBodies)
@@ -99,7 +99,6 @@ import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..
 import Tidepool.DeclarationJoin (DeclarationExport(..), decodeDeclarationExports, interfaceExports, normalizeDeclarationExports)
 import Tidepool.CheckedCell
   ( CheckedSignature(..), RequestTypeSignatures, RequestHelperRecipe(..), decodeCheckedSignature, decodeRequestTypeSignatures, encodeCheckedSignature, encodeRequestTypeSignatures
-  , CellExpressionPlan(..), ExpressionLiftPlan(..), decodeCellExpressionPlan
   , validateCheckedTypeWitnessBytes )
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), ProjectedGroup(..), ProjectedGroupBody(..), GlobalDecl(..) )
@@ -123,7 +122,7 @@ import Tidepool.NativeOriginalCensus
   , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
   , nativeCensusRequirements, nativeCensusCanonicalCertificate )
 import Tidepool.FinalizedModuleArtifacts
-  ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
+  ( FinalizedModuleArtifacts, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody
   , revalidateLocalFinalizedAdmission )
 import Tidepool.Timing (readTimingEnabled, readSummaryTimingEnabled, timeDetailPhase, emitCount, withValidationTiming)
@@ -1609,27 +1608,8 @@ validateInterfaceEvidenceUsing readInput verifiedInput readCertificate producer 
     (fail "exact interface evidence is incomplete")
   pure evidence
 
--- A completed same-program capture already has the request's admitted producer.
--- Cold captures receive their producer from Rust at admission. Both paths use
--- TPFINALMODULE identity; capture paths are custody, never semantic identity.
--- The current target is retained by its own checked/native declaration owner.
--- Only checked cells retain supporting source originals between their segments.
--- Other requests keep finalization evidence for its independent origin issuer.
-captureCheckedSourceOriginals
-  :: ExactScope -> [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
-  -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureCheckedSourceOriginals scope exactImports accepted target finalized evidence =
-  captureSourceOriginals (scopeProducerSha256 scope) (scopeInterfaces scope)
-    [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
-        (candidateInterface candidate) (candidateInterfaceSha256 candidate)
-        (candidateInterfaceRequirements candidate),candidatePackageImports candidate,
-        candidatePackageImportsSha256 candidate) | candidate <- accepted]
-    (Map.fromList [((T.unpack unit,T.unpack name),T.unpack sha)
-      | ((unit,name),sha) <- finalizedValueInterfaceSeals finalized])
-    exactImports target finalized evidence
-
--- Both admitted routes issue the same canonical certificate from actual local
--- captures. The route owns the producer, inherited interfaces and import facts.
+-- Canonical certificates come from actual local compiler captures. The World
+-- owner supplies the producer, inherited interfaces and completed import facts.
 captureSourceOriginals
   :: String -> [(ExactIfaceArtifact,FilePath,String)]
   -> [(ExactIfaceArtifact,FilePath,String)] -> Map.Map (String,String) String

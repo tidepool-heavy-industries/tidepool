@@ -81,8 +81,6 @@ tests = testGroup "source-boot"
   , testCase "candidate request site siblings" $ candidateRequestSitedSiblings
   , testCase "canonical current source" $ canonicalCurrentSource
   , testCase "canonical mixed source adjacency" canonicalMixedSourceAdjacency
-  , testCase "completed program source imports" $ completedProgramSourceImports
-  , testCase "completed program import pairing" $ completedProgramSourceImportPairing
   , testCase "canonical source obligations" $ canonicalSourceObligations
   , testCase "generated scaffold imports" $ generatedScaffoldImports
   , testCase "activation preview original orphan scope" $ activationPreviewOriginalOrphanScope

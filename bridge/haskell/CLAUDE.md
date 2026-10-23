@@ -480,19 +480,13 @@ prologue. Binder rows have three fields; expression rows have four.
 Neither carries imports reconstructed from type presentation. Native checked
 signatures supply the exact type authority.
 
-`TPEXACTCHECK` uses version 3; planned-cell `TPEXACTPROGRAM` uses version 4 and
-planned-item `TPEXACTITEM` uses version 2. Parser receipts use `TPCELLPLAN3`,
-including the parser-owned action/let/recursive binding form. The matched
-Rust/Haskell release rejects older observations and receipts. Worker fields
-34 (`--turn-pin`) and 45 (`--cell-fold-turn`) are retired
-and rejected explicitly. Original live inputs use a compiler-issued thin value
-interface; execution uses admitted item recipes. Exact scope purposes are
-`cell-check4`, `cell-program3` and `checked-item5`. Direct template roots are
-separate from their closed support graph; support rows do not authorize new
-template imports. Expressions reserve one
-capture generation and observation name, with no auxiliary display recipe or
-presentation admission. Authored display operations and activation previews
-retain their separate compiler and runtime paths.
+Parser receipts use `TPCELLPLAN3`, including the parser-owned
+action/let/recursive binding form. The parser-only `--cell-plan` operation
+supplies syntax decisions; held-World requests own checking and executable
+preparation. Retired worker fields 31 (`--cell`), 34 (`--turn-pin`) and 45
+(`--cell-fold-turn`) are rejected explicitly. Ordinary module compilation,
+native installers, catalogs, inspection and activation previews retain their
+distinct request paths.
 
 Each executable inference segment has one successful authored frontend and
 one canonical finalized module with all its kept entry roots. Descriptors retain

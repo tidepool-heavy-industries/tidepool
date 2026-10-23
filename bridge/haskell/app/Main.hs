@@ -4,49 +4,30 @@ module Main where
 
 import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, (</>))
-import System.Directory (createDirectoryIfMissing, setCurrentDirectory, canonicalizePath)
+import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
-import qualified Crypto.Hash.SHA256 as SHA256
-import qualified Data.ByteString.Lazy as BL
-import qualified Codec.CBOR.Decoding as CD
-import Codec.CBOR.Read (deserialiseFromBytes)
-import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeWord32, encodeNull, encodeBool)
+import Codec.CBOR.Encoding ( encodeBytes, encodeListLen, encodeString, encodeWord64)
 import Codec.CBOR.Write (toStrictByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Control.Exception
-  ( evaluate, try, throwIO, mask, SomeException, fromException
-  , IOException )
-import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
-import Data.List (intercalate, nub, isPrefixOf)
+  ( evaluate, try, throwIO, mask, SomeException, IOException )
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
-import Data.Word (Word32, Word64)
-import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
+import Control.Monad ( forM, forM_, when, unless, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8, IOMode(ReadMode), withBinaryFile)
 
-import GHC (moduleName, moduleNameString, moduleUnit, mkModuleName, mkModule)
-import GHC.Driver.Session (DynFlags, importPaths)
-import GHC.Driver.Env (hsc_dflags)
-import GHC.Driver.Ppr (showSDoc)
-import GHC.Utils.Outputable (ppr)
-import GHC.Tc.Types (tcg_mod)
-import GHC.Unit.Module.ModIface (mi_module)
-import GHC.Unit.Types (unitString, stringToUnit)
+import GHC.Driver.Session (DynFlags)
 import GHC.Core (Bind(..))
-import GHC.Types.Name (nameOccName)
-import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 import Tidepool.Binders
   ( classifyWithFlags, exportItemName, templateParserFlags
-  , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
-  , renderCellCheckSource, renderCellCheckSourceWithImports, locatedImportsRendering, locatedImportNamespaces
-  , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
-  , CellSourcePlan(..), CellAnalysisItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
+  , analyzeOrderedCellWithFlags, PreparedTypedSegmentSource(..), CellSourcePlan(..), CellAnalysisItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
     SourcePrologue(..), LocatedPragma(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
@@ -55,21 +36,17 @@ import Tidepool.Binders
   )
 import Tidepool.CompilerRequest
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
-  , pprPackageImports, CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprPackageImports, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation
   , CompilePurpose(..), prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
-  , withResidentCompilerScopes, checkCellInstances
-  , captureSupportedPackageProfile
+  , withResidentCompilerScopes, captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..)
-  , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, PreparedProductContext
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
-import qualified Tidepool.EffectSchema
 import Tidepool.CompileInput (writeCompileInputProof)
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, generatedActivationPreviewRecipe )
@@ -93,8 +70,7 @@ import Tidepool.ExtractRequest
   , SourceProductRequest, sourceProductSource, sourceProductOutput, SourceOutputKind(..), sourceOutputKind, sourceOutputDirectory, sourceOutputTargets
   , sourceInput, TurnRequest, turnSourceRequest, turnOutput, turnVerdict, turnTemplates, turnOutputDirectory
   , ClassificationRequest, classificationSources, classificationOutput
-  , InspectionPayload, inspectionOutput, CellRequest, cellSourceRequest, cellTemplate, cellOutput, cellTemplates, cellOutputDirectory
-  , admittedRequestOperation, admitWorkerRequest
+  , InspectionPayload, inspectionOutput, CellRequest, cellSourceRequest, cellTemplate, cellOutput, cellTemplates, admittedRequestOperation, admitWorkerRequest
   , workerRequestFromArgv, workerRequestFlag
   , WorldQueryRequest(..), WorldCellPlanRequest(..)
   )
@@ -106,33 +82,24 @@ import Tidepool.InspectionRunner
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256
   , ActivationPreviewAdmission(..), scopeActivationPreview, revalidateExactScope )
-import Tidepool.CheckedCell (encodeCheckedSignature, captureCheckedSignature
-  , CheckedSignature
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
+import Tidepool.CheckedCell (encodeCheckedSignature, captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness)
 import Tidepool.Session
-  ( SessionScope(..), preparedScaffoldTargetName, preparedResumeTargetName
-  , SessionModule(..), SessionModuleKind(..), Generation(..)
-  , preparedApplyEntryTargetName, preparedApplyValueTargetName
-  , sessionHiPath, sessionModuleString, capturedSessionInterface, capturedSessionInterfaceEvidence )
+  ( SessionScope(..), preparedScaffoldTargetName, SessionModule(..), SessionModuleKind(..), Generation(..)
+  , sessionHiPath, sessionModuleString)
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface
-  , prepareTypedSegmentSessionBindings
-  , typedSegmentSessionEnvironment, typedSegmentSessionGlobals, typedSegmentSessionInterfaces
-  , typedSegmentSessionBinders, typedSegmentSessionRetainedGlobals
-  , typedSegmentSessionBindingRepresentations, withTypedSegmentSessionPublication )
-import Tidepool.CborEncode (encodeTurnOut, encodeCellOut, encodeBoundBinder, encodeTypedSegmentPlan)
-import Tidepool.Timing (readTimingEnabled, timePhase, emitCount)
+  )
+import Tidepool.CborEncode (encodeTurnOut, encodeCellOut, encodeBoundBinder)
+import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.TurnSource
-  ( extractModuleName, spliceTemplate
-  , generatedScaffoldModuleName, renameScaffoldModuleHeader
-  , captureCompilerDefaultRecipe, preambleImportMarker
-  , ImportRendering, literalImportRendering
-  , appendImportRendering, replaceImportRendering, importRenderingSource
+  ( extractModuleName, generatedScaffoldModuleName, renameScaffoldModuleHeader
+  , captureCompilerDefaultRecipe, literalImportRendering
+  , importRenderingSource
   , qualifyCompilerDefaultRendering, spliceImportRendering )
 import Tidepool.DependencyEvidence
-  ( validateDependencyEvidence, writeDependencyEvidence, renderDependencyQualifier )
+  ( validateDependencyEvidence, writeDependencyEvidence)
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 
 -- | Serve one typed request, or answer the role probe before compiler setup.

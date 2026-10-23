@@ -3,7 +3,7 @@
 module Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..)
   , CellExpressionPlan(..), ExpressionLiftPlan(..)
-  , encodeCellExpressionPlan, decodeCellExpressionPlan
+  , encodeCellExpressionPlan
   , captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, resolveCheckedSignature
   , RequestTypeSignatures(..), RequestHelperRecipe(..), captureRequestTypeSignatures
   , encodeRequestTypeSignatures, decodeRequestTypeSignatures, renderRequestTypeSignatures
@@ -13,11 +13,10 @@ module Tidepool.CheckedCell
   , NativeParsedModule, nativeParsedModule, nativeImportSyntax, nativeTypeUses, unannotatedModule, mapNativeModule, typecheckNativeModule
   , typecheckNativeModuleWithDiagnostics
   , ResolvedNativeSlots, resolveNativeAnnotations, applyNativeAnnotations, annotateNativeModule
-  , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
+  , rewriteHostInputType, rewriteRequestTypes
   ) where
 
 import Codec.CBOR.Encoding (Encoding, encodeListLen, encodeString, encodeBytes, encodeNull, encodeInt)
-import qualified Codec.CBOR.Decoding as D
 import Codec.CBOR.Decoding
   ( Decoder, TokenType(TypeNull), decodeListLen, decodeString, decodeBytes
   , decodeNull, peekTokenType, peekByteOffset, decodeInt )
@@ -99,32 +98,6 @@ encodeCellExpressionPlan CellExpressionPlan
   <> encodeListLen (fromIntegral (length heads))
   <> foldMap (\(NominalHead unit modul name) ->
       encodeListLen 3 <> encodeString unit <> encodeString modul <> encodeString name) heads
-
--- Decode the same compiler-owned plan carried unchanged through checked-item
--- admission. Rendered types and heads remain observations, not native evidence.
-decodeCellExpressionPlan :: D.Decoder s CellExpressionPlan
-decodeCellExpressionPlan = do
-  fields <- D.decodeListLen
-  unless (fields == 4) (fail "invalid cell expression plan row")
-  key <- nonempty
-  liftPlan <- D.decodeString >>= \value -> case value of
-    "effectful" -> pure ExpressionEffectful
-    "pure" -> pure ExpressionPure
-    _ -> fail "invalid cell expression lift"
-  ty <- T.unpack <$> D.decodeString
-  count <- D.decodeListLen
-  unless (count <= 65536) (fail "cell expression heads exceed bound")
-  heads <- replicateM count $ do
-    headFields <- D.decodeListLen
-    unless (headFields == 3) (fail "invalid cell expression head")
-    NominalHead <$> nonemptyText <*> nonemptyText <*> nonemptyText
-  pure (CellExpressionPlan key liftPlan ty heads)
-  where
-    nonemptyText = do
-      value <- D.decodeString
-      unless (not (T.null value)) (fail "empty cell expression identity")
-      pure value
-    nonempty = T.unpack <$> nonemptyText
 
 -- The human-readable type is presentation only. The compiler consumes its own
 -- binary IfaceType and resolves its Names against the admitted environment.
@@ -459,37 +432,6 @@ rewriteRequestTypes
 rewriteRequestTypes env recipe signatures parsed = do
   resolved <- resolveNativeSlots env (requestNativeSlots recipe signatures)
   annotateNativeModule resolved parsed
-
--- Only compiler-generated signature binders acquire exact Types. Authored
--- source continues through ordinary GHC renaming and lexical lookup.
-rewriteCheckedAnnotations
-  :: HscEnv -> [(String, CheckedSignature)] -> NativeParsedModule -> IO NativeParsedModule
-rewriteCheckedAnnotations env annotations (NativeParsedModule parsed uses) = do
-  resolved <- forM annotations $ \(binder, signature) ->
-    (,) binder <$> resolveCheckedSignature env signature
-  counts <- newIORef []
-  let types = [(binder, ty) | (binder, (ty, _)) <- resolved]
-      names = unionNameSets [used | (_, (_, used)) <- resolved]
-  rewritten <- rewriteSyntax (mkM (rewriteSignature counts types)) (pm_parsed_source (refinedParsedModule parsed))
-  seen <- readIORef counts
-  unless (sortOn id seen == sortOn id (map fst annotations))
-    (fail "generated checked annotation is missing or duplicated")
-  next <- mapImportPreservingSource (const (pure rewritten)) parsed
-  pure (NativeParsedModule next (unionNameSets [uses, names]))
-  where
-    rewriteSignature :: IORef [String] -> [(String, Type)] -> Sig GhcPs -> IO (Sig GhcPs)
-    rewriteSignature counts resolved signature@(TypeSig extension binders ty) =
-      case [(binder, exact) | (binder, exact) <- resolved,
-          map (occNameString . rdrNameOcc . unLoc) binders == [binder]] of
-        [] -> pure signature
-        [(binder, exact)] -> do
-          modifyIORef' counts (binder :)
-          pure (TypeSig extension binders (replaceBody exact ty))
-        _ -> fail "duplicate checked annotation binder"
-    rewriteSignature _ _ signature = pure signature
-    replaceBody :: Type -> LHsSigWcType GhcPs -> LHsSigWcType GhcPs
-    replaceBody exact (HsWC extension (L location (HsSig signatureExtension _ body))) =
-      HsWC extension (L location (HsSig signatureExtension (HsOuterImplicit noExtField) (fmap (const (XHsType exact)) body)))
 
 -- The rendering is presentation only; canonical equality is the complete
 -- ordered GHC type structure and the interfaces of its exact original Names.

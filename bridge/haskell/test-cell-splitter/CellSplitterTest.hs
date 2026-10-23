@@ -2,7 +2,6 @@ module Main (main, tests) where
 
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import CellSplitterCases
-import CellProgramStateTest (cellProgramStateChecks)
 import CheckedAdmissionTest (checkedAdmissionChecks)
 import HarnessSourceTest (harnessSourceChecks)
 import InspectionRunnerTest (inspectionRunnerChecks)
@@ -41,7 +40,6 @@ tests = testGroup "cell-splitter"
   , testCase "moduleHeaderCompilation" moduleHeaderCompilation
   , testCase "generatedScaffoldIdentityChecks" generatedScaffoldIdentityChecks
   , testCase "checkedAdmissionChecks" checkedAdmissionChecks
-  , testCase "cellProgramStateChecks" cellProgramStateChecks
   , testCase "certificationRequestValidation" certificationRequestValidation
   , testCase "checkingSourceRequestRoundTrip" checkingSourceRequestRoundTrip
   , testCase "portableOutputRequestValidation" portableOutputRequestValidation

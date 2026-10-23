@@ -4,84 +4,26 @@ module CheckedAdmissionTest (checkedAdmissionChecks) where
 
 import qualified Codec.CBOR.Encoding as Cbor
 import qualified Codec.CBOR.Write as Cbor
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (bracket)
 import Control.Monad (unless, forM_)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import Numeric (readHex)
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive, createDirectory, removeFile)
 import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
-import System.IO.Error (isDoesNotExistError)
-import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedAdmission
-import Tidepool.CheckedCell (CheckedSignature(..))
-import Tidepool.TurnSource (emptyCompilerDefaultRecipe)
-import Tidepool.CheckedRecipe (writeCheckedItemReceipt, checkedRecipeSource)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
-import Tidepool.ExactHydration (CheckedTemplateImports(..))
 import Tidepool.ExactScope
-import Tidepool.Test.CandidateCodec (writeEmptyScopeCodecFixture)
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), RequestOptions(..), AdmittedRequestOperation(..), admittedRequestOperation, admittedRequestOptions, admitWorkerRequest, InspectionRequest(..), workerArgv, workerRequestFromArgv)
-import Tidepool.ExtractUtil (shaHex)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), RequestOptions(..), AdmittedRequestOperation(..), admittedRequestOperation, admittedRequestOptions, admitWorkerRequest, workerArgv, workerRequestFromArgv)
 
 checkedAdmissionChecks :: IO ()
 checkedAdmissionChecks = withScratch $ \root -> do
-  let first = root </> "first"
-      second = root </> "second"
-      source = "let café = 1"
-      wrapper = "wrapper λ"
-      inventory = [("bind", shaHex "first"), ("expr", shaHex "second"), ("bind", shaHex "first")]
-      fields = [BindGen 7, InjectVal "Val7", TurnTemplate "bind" first,
-        TurnTemplate "expr" second, TurnTemplate "bind" first]
-      cell = CheckedCellAdmission "cell-admission" (digest source) (digest wrapper)
-        inventory ["Val7"] [] [] (CheckedTemplateImports [] []) Nothing AuthoredCellCheck
-      item = CheckedItemAdmission AuthoredCheckedItem "item-admission" "cell-receipt" 2
-        (digest source) "bind" ["café"] inventory ["Val7"]
-        [CheckedSignature "__tidepool_cell_pin_2_café" "Int" (BS.singleton 0) []]
-        Nothing 7 "prefix" [] Nothing Nothing [] [] (CheckedTemplateImports [] [])
-      verdict = StmtBinders KBind ["café"] []
-      retainedInput = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "input" Nothing
-  BS.writeFile first "first"
-  BS.writeFile second "second"
-  args <- request fields
-  let recipes = [("bind",first),("expr",second),("bind",first)]
-      checkCell = validateCheckedCellAdmission args recipes cell source wrapper
-      checkItem = validateCheckedItemAdmission args recipes item source verdict
-  checkCell
-  checkItem
-  -- Both checkpoints must detect a recipe changed since a previous pass.
-  BS.writeFile first "changed"
-  expectFailure "cell template mutation" cellError checkCell
-  expectFailure "item template mutation" itemError checkItem
-  BS.writeFile first "first"
-  checkCell
-  checkItem
-  forM_ [("reordered", drop 1 recipes ++ take 1 recipes), ("deduplicated", take 2 recipes)] $ \(label,templates) -> do
-    expectFailure (label ++ " cell recipes") cellError (validateCheckedCellAdmission args templates cell source wrapper)
-    expectFailure (label ++ " item recipes") itemError (validateCheckedItemAdmission args templates item source verdict)
-  expectFailure "UTF-8 cell bytes" cellError (validateCheckedCellAdmission args recipes cell (source ++ " ") wrapper)
-  expectFailure "wrapper bytes" cellError (validateCheckedCellAdmission args recipes cell source (wrapper ++ " "))
-  expectFailure "injected order" itemError (validateCheckedItemAdmission (args { optionInjectVals = ["Val7", "Val7"] }) recipes item source verdict)
-  expectFailure "generation" itemError (validateCheckedItemAdmission (args { optionBindGen = Just 8 }) recipes item source verdict)
-  expectFailure "verdict" itemError (validateCheckedItemAdmission args recipes item source (StmtBinders KExpr [] []))
-  expectFailure "signature key" itemError (validateCheckedItemAdmission args recipes (item { itemSignatures = [CheckedSignature "wrong" "Int" (BS.singleton 0) []] }) source verdict)
-  let reserved = "let __tidepool_checked_annotation_0 = 1"
-  expectFailure "reserved annotation" "authored checked item uses a compiler-reserved annotation name"
-    (validateCheckedItemAdmission args recipes (item { itemSourceDigest = digest reserved }) reserved verdict)
-  missing <- try (validateCheckedCellAdmission args [("bind", root </> "absent")] cell "changed body" wrapper) :: IO (Either IOException ())
-  unless (either isDoesNotExistError (const False) missing) (fail "missing recipe did not retain file-read error precedence")
-  -- Literal placement must never rescan authored text for protected markers.
-  let template = "__result = do {\n{{TURN_STMT}}\npure ({{BINDERS}})\n}"
-      authored = "let café = \"{{BINDERS}}\""
-  rendered <- checkedRecipeSource emptyCompilerDefaultRecipe [] item template authored
-  unless ("\"{{BINDERS}}\"" `T.isInfixOf` T.pack rendered) (fail "authored placeholder was rescanned")
+  let retainedInput = SymbolIdentity "main" "Tidepool.Session.Val.G6" "value" "input" Nothing
   inspect <- rawRequest [Input "unused", InspectInfo "visible", InspectOut "inspection.cbor", InjectVal "Val7"]
   forM_ [inspect] $ \admitted -> do
     unless (matchesRawInspectionAdmission admitted ["Val7"]) (fail "inspection cap rejected matching complete inputs")
-    forM_ [ admitted { requestTurn = True }, admitted { requestCell = True }
+    forM_ [ admitted { requestTurn = True }
           , admitted { requestCheckSource = True }, admitted { requestCellPlan = True }
           , admitted { requestClassify = True }, admitted { requestCertifyHomeProducts = True }
           , admitted { requestActivationPreview = True }, admitted { requestDeclarationJoin = Just "join" }
@@ -91,29 +33,12 @@ checkedAdmissionChecks = withScratch $ \root -> do
           ] $ \wrong -> unless (not (matchesRawInspectionAdmission wrong ["Val7"]))
             (fail "inspection authority admitted another operation or input inventory")
   inspectionScopeChecks root
-  receiptChecks root item
-  putStrLn "checked admission: mutation, ordering, authority, recipe and receipt checks passed"
-  where
-    digest = shaHex . TE.encodeUtf8 . T.pack
-    cellError = "cell body, wrapper or injected interfaces differ from immutable admission"
-    itemError = "checked item body, verdict, generation, signatures or recipe differs from its protected offer"
-
-request :: [RequestField] -> IO RequestOptions
-request fields = do
-  raw <- rawRequest ([Input "unused", Cell, CellTemplate "unused", CellOut "unused"] ++ fields)
-  either (fail . show) (pure . admittedRequestOptions) (admitWorkerRequest raw)
+  putStrLn "inspection admission: operation, inventory and legacy scope refusal checks passed"
 
 rawRequest :: [RequestField] -> IO WorkerRequest
 rawRequest fields = case workerRequestFromArgv (workerArgv fields) of
   Right (Just args) -> pure args
   other -> fail ("request fixture failed: " ++ show other)
-
-expectFailure :: String -> String -> IO () -> IO ()
-expectFailure label message action = do
-  result <- try action :: IO (Either IOException ())
-  case result of
-    Left exception | T.pack message `T.isInfixOf` T.pack (show exception) -> pure ()
-    other -> fail (label ++ ": unexpected result " ++ show other)
 
 withScratch :: (FilePath -> IO a) -> IO a
 withScratch = bracket acquire removeDirectoryRecursive
@@ -126,27 +51,6 @@ withScratch = bracket acquire removeDirectoryRecursive
       removeFile path
       createDirectory path
       pure path
-
-receiptChecks :: FilePath -> CheckedItemAdmission -> IO ()
-receiptChecks root item = do
-  path <- writeEmptyScopeCodecFixture root
-  let source = "recipe λ"
-  scope <- readExactScope path >>= either fail pure
-  writeCheckedItemReceipt root scope item source
-  check "checked-item.cbor" (unhex itemGoldenPrefix
-    <> Cbor.toStrictByteString (Cbor.encodeString (T.pack (scopeRequestSha256 scope)))
-    <> unhex itemGoldenSuffix)
-  where
-    check file golden = do
-      actual <- BS.readFile (root </> file)
-      unless (actual == golden) (fail (file ++ " changed its protected receipt bytes"))
-    unhex [] = BS.empty
-    unhex (a:b:rest) = case readHex [a,b] of
-      [(byte,"")] -> BS.cons byte (unhex rest)
-      _ -> error "invalid receipt golden"
-    unhex _ = error "odd receipt golden"
-    itemGoldenPrefix = "886b545045584143544954454d6131"
-    itemGoldenSuffix = "6e6974656d2d61646d697373696f6e6c63656c6c2d7265636569707402784033323839613431343939636133623538653566653036353137386231343138373535303363323639663330356430323630336464383133616563313863656638781974696465706f6f6c2d636865636b65642d7265636970652d32"
 
 inspectionScopeChecks :: FilePath -> IO ()
 inspectionScopeChecks root = do
