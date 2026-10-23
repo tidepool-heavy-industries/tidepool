@@ -826,10 +826,6 @@ fn certify_authored_declaration_inner(
         return Err(contract("certified authored declaration origin differs"));
     }
 
-    let selected_owner = ExactModuleIdentity {
-        unit: selected.owner().unit.clone(),
-        module: selected.owner().module.clone(),
-    };
     let source_imports = match compiled.exact_source_admission.as_ref() {
         Some(admission) => admission.consumed_home_adjacency().clone(),
         None => crate::declaration_context::consumed_source_home_imports(
@@ -860,16 +856,13 @@ fn certify_authored_declaration_inner(
         directory,
         artifacts,
         original_imports,
-        source_lexical_imports: _,
     } = planned::ValidatedAuthoredClosure::admit(
         &originals,
-        &selected_owner,
         toolchain_identity_sha256,
         &evidence,
         compiled.exact_source_admission.as_ref(),
         &source_imports,
         Some(&artifact_context),
-        &[],
         includes,
         &mut validation,
     )?
