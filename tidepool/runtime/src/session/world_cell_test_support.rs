@@ -313,11 +313,6 @@ where
                 .unwrap();
             declarations.push(committed.generation);
         } else {
-            assert_eq!(
-                item.kind(),
-                tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
-                "publication values are actual checked bind items"
-            );
             let turn::TurnResult::Bind {
                 bound, compiled, ..
             } = turn::consume_cell_program_item(reservation.clone()).unwrap()
@@ -325,29 +320,49 @@ where
                 panic!("checked value must compile a binding");
             };
             assert_eq!(bound.len(), 1);
-            let outcome =
-                source_action_with_original(resident, original.clone(), |resident, report| {
-                    resident.run_bind_with_sites(
-                        &bound[0].name,
+            let outcome = source_action_with_original(
+                resident,
+                original.clone(),
+                |resident, report| match item.kind() {
+                    tidepool_toolchain::checked_cell::CheckedItemKind::Bind => resident
+                        .run_bind_with_sites(
+                            &bound[0].name,
+                            compiled.code(),
+                            &bound[0],
+                            reservation.generation(),
+                            report,
+                        ),
+                    tidepool_toolchain::checked_cell::CheckedItemKind::Expression => resident
+                        .run_observation_with_sites(
                         compiled.code(),
                         &bound[0],
                         reservation.generation(),
+                        item.expression_lift().unwrap()
+                            == Some(
+                                tidepool_toolchain::checked_cell::CheckedExpressionLift::Effectful,
+                            ),
                         report,
-                    )
-                })
-                .unwrap();
+                    ),
+                    tidepool_toolchain::checked_cell::CheckedItemKind::Declaration => {
+                        unreachable!()
+                    }
+                },
+            )
+            .unwrap();
             assert!(
                 matches!(outcome, ResidentOutcome::Completed { .. }),
                 "actual publication value must complete: {outcome:?}"
             );
-            let visible = resident
-                .public_visibility_snapshot_in(execution.private_scope())
-                .unwrap();
-            assert!(visible
-                .bindings
-                .iter()
-                .any(|(name, id)| name == &bound[0].name
-                    && *id == SessionVarId::from_extract(bound[0].var_id)));
+            if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Bind {
+                let visible = resident
+                    .public_visibility_snapshot_in(execution.private_scope())
+                    .unwrap();
+                assert!(visible
+                    .bindings
+                    .iter()
+                    .any(|(name, id)| name == &bound[0].name
+                        && *id == SessionVarId::from_extract(bound[0].var_id)));
+            }
         }
         assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
         assert_eq!(
