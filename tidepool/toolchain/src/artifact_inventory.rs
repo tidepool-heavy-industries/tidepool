@@ -4659,7 +4659,11 @@ impl ArtifactInventory {
             .map(|entry| (entry.descriptor.id, entry))
             .collect::<BTreeMap<_, _>>();
         let mut supplied = BTreeMap::new();
+        let mut producer_entries = BTreeMap::new();
         for entry in expanded {
+            producer_entries
+                .entry(entry.descriptor.id)
+                .or_insert_with(|| Arc::clone(&entry));
             let entry = state.canonicalize(entry)?;
             let id = entry.descriptor.id;
             let retained = if let Some(previous) = supplied
@@ -5342,7 +5346,7 @@ impl ArtifactInventory {
                 Ok((
                     *id,
                     SuppliedArtifactOutcome {
-                        entry: Arc::clone(entry),
+                        entry: Arc::clone(&producer_entries[id]),
                         binding,
                     },
                 ))

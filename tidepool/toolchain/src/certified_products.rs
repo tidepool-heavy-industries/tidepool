@@ -5774,6 +5774,15 @@ impl CertifiedSourceSelection {
         }))
     }
 
+    pub(crate) fn input_compiler_support(
+        &self,
+    ) -> Option<&crate::artifact_inventory::CompilerSourceSupport> {
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => Some(source),
+            CertifiedInputOrigin::NewProducts => None,
+        }
+    }
+
     pub(crate) fn selected_compiler_rows(
         &self,
     ) -> &crate::artifact_inventory::SelectedCompilerRows {
@@ -5790,6 +5799,7 @@ impl CertifiedSourceSelection {
                 &self.compiler_rows,
                 admission,
                 projection,
+                self,
             )?;
         Ok(())
     }

@@ -906,7 +906,7 @@ pub(crate) struct OriginalCompilerInputs {
 }
 
 pub(crate) struct CapturedCompilerStage {
-    _producer_certificates: Arc<[Arc<ArtifactEntry>]>,
+    producer_certificates: Arc<[Arc<ArtifactEntry>]>,
     physical_artifacts: ArtifactView,
     output: IssuedOriginalOutput,
     operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
@@ -1027,11 +1027,10 @@ impl<'a> PhysicalCohortInputs<'a> {
             .observed_payload(&entry.descriptor.id)
             .is_some_and(|resident| {
                 resident.has_fact_owner(entry.fact_owner())
-                    || self
-                        .stage
-                        .facts
-                        .get(&entry.descriptor.id)
-                        .is_some_and(|captured| entry.has_fact_owner(captured))
+                    || self.stage.producer_certificates().iter().any(|produced| {
+                        produced.descriptor.id == entry.descriptor.id
+                            && entry.has_fact_owner(produced.fact_owner())
+                    })
             })
     }
 }
@@ -1042,6 +1041,10 @@ impl CapturedCompilerStage {
             stage: self,
             selection: self.source_selection(),
         }
+    }
+
+    pub(crate) fn producer_certificates(&self) -> &[Arc<ArtifactEntry>] {
+        &self.producer_certificates
     }
 
     pub(crate) fn output(&self) -> &IssuedOriginalOutput {
@@ -1121,7 +1124,7 @@ impl CapturedCompilerStage {
         };
         timing.finish(true);
         Ok(Self {
-            _producer_certificates: producer_certificates,
+            producer_certificates: producer_certificates,
             physical_artifacts: physical,
             output,
             operation: Arc::clone(&validation.inventory),
@@ -2803,9 +2806,10 @@ impl RequestNativeAvailability {
         let mut rows = imbl::OrdMap::new();
         for (id, contributions) in availability {
             budget.checkpoint()?;
-            let original = metadata
-                .artifacts
+            let original = own
                 .get(&id)
+                .map(|contribution| contribution.offer().original_acquisition())
+                .or_else(|| metadata.artifacts.get(&id))
                 .ok_or_else(|| failure("current cohort lost its exact original custody"))?;
             if !matches!(original.payload, ArtifactPayload::Original(_)) {
                 return Err(failure("current cohort availability is not an Original"));

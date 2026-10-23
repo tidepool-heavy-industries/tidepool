@@ -2335,34 +2335,6 @@ pub(crate) struct SelectedCompilerRows {
 }
 
 impl SelectedCompilerRows {
-    fn derived_projection(&self) -> CompilerInputProjection {
-        CompilerInputProjection {
-            roles: self
-                .rows
-                .iter()
-                .map(|(owner, row)| (owner.clone(), row.assembly_role()))
-                .collect(),
-            recorded_roles: self
-                .rows
-                .iter()
-                .map(|(owner, row)| (owner.clone(), row.recorded_row()))
-                .collect(),
-        }
-    }
-
-    fn derived_decisions(&self) -> RecordedInputNativeDecisions {
-        RecordedInputNativeDecisions {
-            facts: self
-                .rows
-                .iter()
-                .filter_map(|(owner, row)| {
-                    row.recorded_decision()
-                        .map(|decision| (owner.clone(), decision))
-                })
-                .collect(),
-        }
-    }
-
     pub(crate) fn empty() -> Self {
         Self::from_admitted(BTreeMap::new())
     }
@@ -2996,19 +2968,49 @@ impl CompilerSourceSupport {
         inherited: &SelectedCompilerRows,
         admission: &ArtifactAdmission,
         projection: &CompilerInputProjection,
+        selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<SelectedCompilerRows, CompileError> {
         let mut selected = inherited.clone();
         for (owner, role) in projection.snapshot_roles() {
+            let carried_matches = selected.get(owner).is_some_and(|row| {
+                row.interface().0.artifact == role.interface()
+                    && role.original().is_none_or(|original| {
+                        row.original()
+                            .is_some_and(|(binding, _)| binding.artifact == original)
+                    })
+            });
             let Some(canonical) = admission.supplied.get(&role.interface()) else {
-                if selected.get(owner).is_none() {
-                    return Err(failure(
-                        "compiler output lacks its actual canonical producer",
-                    ));
+                if !carried_matches {
+                    return Err(failure("compiler output lacks its actual canonical producer or matching carried row"));
                 }
                 continue;
             };
-            let original = role.original().and_then(|id| admission.supplied.get(&id));
-            if let Some(original) = original {
+            let row = if let Some(original_id) = role.original() {
+                let Some(original) = admission.supplied.get(&original_id) else {
+                    if !carried_matches {
+                        return Err(failure("compiler output lacks its actual Original producer or matching carried row"));
+                    }
+                    continue;
+                };
+                let offer = selection
+                    .completed_compiler_output_offer(owner)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+                let Some(offer) = offer else {
+                    if !carried_matches {
+                        return Err(failure(
+                            "compiler output Original lacks its completed producer",
+                        ));
+                    }
+                    continue;
+                };
+                if !original
+                    .entry
+                    .same_issuing_authority(offer.original_acquisition())
+                {
+                    return Err(failure(
+                        "compiler output completion differs from actual producer acquisition",
+                    ));
+                }
                 let state = admission
                     .artifacts
                     .lease
@@ -3021,11 +3023,35 @@ impl CompilerSourceSupport {
                     canonical.binding,
                     original.binding,
                 )?;
-            }
-            let row = ResolvedCompilerRole::from_issued_bindings(
-                (canonical.binding, Arc::clone(&canonical.entry)),
-                original.map(|original| (original.binding, Arc::clone(&original.entry))),
-            );
+                drop(state);
+                let groups = checked_input_group_choices(
+                    original_id,
+                    offer
+                        .proof()
+                        .into_iter()
+                        .flat_map(|proof| proof.selection.snapshot().roots.keys())
+                        .filter_map(|root| match root {
+                            InventoryNodeKey::Group(group)
+                                if group.binding.artifact() == original_id =>
+                            {
+                                Some(*group)
+                            }
+                            _ => None,
+                        }),
+                )?;
+                ResolvedCompilerRole::from_issued_bindings(
+                    (canonical.binding, Arc::clone(&canonical.entry)),
+                    Some((original.binding, Arc::clone(offer.original_acquisition()))),
+                )
+                .with_native_choice(groups, |_| {
+                    SelectedNativeSupport::Acquired(Arc::from([offer.clone()]))
+                })
+            } else {
+                ResolvedCompilerRole::from_issued_bindings(
+                    (canonical.binding, Arc::clone(&canonical.entry)),
+                    None,
+                )
+            };
             let issuer = match selected.get(owner) {
                 Some(previous) => CompilerInputProjection::choose_role(
                     owner,
@@ -3079,8 +3105,14 @@ impl CompilerSourceSupport {
                 "current native products lack physical cohort issuance",
             ));
         }
-        let selected = selection.selected_compiler_rows().clone();
-        let projection = selected.derived_projection();
+        let desired = selection
+            .compiler_projection(artifacts)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        let selected = Self::certified_output_rows(selection, &desired, artifacts)?;
+        let projection = selection
+            .input_compiler_support()
+            .map(|source| source.projection.clone())
+            .unwrap_or_default();
         let availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
             selection.issued_native_availability().cloned(),
         )?;
@@ -3095,7 +3127,8 @@ impl CompilerSourceSupport {
                 }
             }
         }
-        for role in projection.roles() {
+        for (_, row) in selected.iter() {
+            let role = row.assembly_role();
             if role
                 .original()
                 .is_some_and(|original| !offers.iter().any(|offer| offer.original() == original))
@@ -3105,7 +3138,10 @@ impl CompilerSourceSupport {
                 ));
             }
         }
-        let input_decisions = selected.derived_decisions();
+        let input_decisions = selection
+            .input_compiler_support()
+            .map(|source| source.input_decisions.clone())
+            .unwrap_or_default();
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.output_fragment",
             "retain_issuance",
@@ -3140,20 +3176,46 @@ impl CompilerSourceSupport {
             .filter(|owner| !projection.roles.contains_key(*owner))
             .cloned()
             .collect::<Vec<_>>();
-        for owner in removed {
-            selected.rows.remove(&owner);
-            selected.changed_owners.insert(owner);
+        for owner in &removed {
+            selected.rows.remove(owner);
+            selected.changed_owners.insert(owner.clone());
         }
         for (owner, role) in projection.snapshot_roles() {
             let row = selected
                 .rows
                 .get(owner)
                 .ok_or_else(|| failure("compiler output lacks its captured selected row"))?;
-            if row.interface().0.artifact != role.interface() {
+            if row.interface().0.artifact != role.interface()
+                || role.original().is_some_and(|original| {
+                    row.original()
+                        .is_none_or(|(binding, _)| binding.artifact != original)
+                })
+            {
                 return Err(failure(
-                    "compiler output differs from its selected canonical row",
+                    "compiler output differs from its captured whole row",
                 ));
             }
+            if role.original().is_none() && row.original().is_some() {
+                let mut row = row.clone();
+                row.select_type_only();
+                selected.rows.insert(owner.clone(), row);
+                selected.changed_owners.insert(owner.clone());
+            } else if role.is_published_source_original() {
+                row.clone().with_issued_provenance(role)?;
+            }
+        }
+        if !removed.is_empty() {
+            let units = selected
+                .rows
+                .values()
+                .filter_map(|row| match &row.interface().1.payload {
+                    ArtifactPayload::Canonical(interface) => Some(interface.home_units()),
+                    _ => None,
+                })
+                .flatten()
+                .cloned()
+                .collect();
+            selected.home_units = Arc::new(units);
         }
         Ok(selected)
     }
