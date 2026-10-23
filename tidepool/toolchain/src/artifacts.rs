@@ -9920,6 +9920,7 @@ mod module_product_tests {
                 )
                 .unwrap();
                 assert_eq!(aliases.names().count(), 2);
+                aliases.assert_shared_row_alias_removal_for_test();
                 let mut foreign = symbol.clone();
                 foreign.module.push_str(".Foreign");
                 assert!(VisibleWorldBindings::from_published_bindings(

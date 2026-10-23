@@ -922,6 +922,69 @@ impl VisibleWorldBindings {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn assert_shared_row_alias_removal_for_test(&self) {
+        assert_eq!(self.entries.len(), 2);
+        assert_eq!(self.rows.len(), 1);
+        assert_eq!(
+            self.row_users.values().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
+        let names = self.entries.keys().cloned().collect::<Vec<_>>();
+        assert!(self
+            .advance(
+                self.query_scope,
+                [(names[0].clone(), None), (names[0].clone(), None)]
+            )
+            .is_err());
+        assert_eq!(
+            self.entries.len(),
+            2,
+            "refused change preserves predecessor"
+        );
+        let next = self
+            .advance(self.query_scope, [(names[0].clone(), None)])
+            .unwrap()
+            .bindings;
+        let expected = Self::from_published_bindings(
+            self.query_scope,
+            next.entries.iter().map(|(name, fact)| {
+                CompilerWorldBinding::from_checked_value(
+                    name,
+                    &fact.symbol,
+                    fact.session_var,
+                    fact.defining_scope,
+                    fact.row.clone(),
+                )
+            }),
+        )
+        .unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(
+            next.row_users.values().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(next.rows.len(), expected.rows.len());
+        assert_eq!(next.metadata_bytes, expected.metadata_bytes);
+        for (owner, row) in &next.rows {
+            assert!(expected.rows.get(owner).unwrap().same_world_type_row(row));
+            assert!(self.rows.get(owner).unwrap().same_world_type_row(row));
+        }
+        let empty = next
+            .advance(self.query_scope, [(names[1].clone(), None)])
+            .unwrap()
+            .bindings;
+        let expected_empty =
+            Self::from_published_bindings(self.query_scope, std::iter::empty()).unwrap();
+        assert!(empty.entries.is_empty() && empty.rows.is_empty() && empty.row_users.is_empty());
+        assert_eq!(empty.metadata_bytes, expected_empty.metadata_bytes);
+        assert_eq!(
+            self.entries.len(),
+            2,
+            "successful derivation preserves predecessor"
+        );
+    }
+
     /// The scope this occurrence table was published for.
     pub fn scope(&self) -> u64 {
         self.query_scope
