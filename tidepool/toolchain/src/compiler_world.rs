@@ -7189,6 +7189,35 @@ mod answer_tests {
         assert_eq!(decoded.binding.artifact.0, [7; 32]);
         assert_eq!(decoded.binding.selection.0, [8; 32]);
         assert_eq!(decoded.generation, 7);
+        let commitment = |terminal: &DependencyTerminalReference| {
+            let mut digest = blake3::Hasher::new();
+            frame_dependency_terminal(terminal, &mut |bytes| {
+                digest.update(&(bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            });
+            *digest.finalize().as_bytes()
+        };
+        let original_commitment = commitment(&decoded);
+        for field in 0..5 {
+            let mut different = decoded.clone();
+            match field {
+                0 => different.origin = DependencyTerminalOrigin::NativeOriginal,
+                1 => different.demander.original_ordinal += 1,
+                2 => different.global_index += 1,
+                3 => different.binding.selection.0[0] ^= 1,
+                _ => {
+                    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                        original,
+                        ..
+                    } = &mut different.original_use
+                    else {
+                        unreachable!()
+                    };
+                    original.selection.0[0] ^= 1;
+                }
+            }
+            assert_ne!(original_commitment, commitment(&different));
+        }
         for (field, replacement) in [
             (0, integer(2)),
             (
