@@ -1129,6 +1129,7 @@ impl CapturedCompilerStage {
             selection,
             &issued.artifacts,
         )?);
+        selection.seal_compiler_prefix(&inputs);
         let output = IssuedOriginalOutput {
             selection: selection.clone(),
             artifacts: inputs.issued_artifacts().clone(),

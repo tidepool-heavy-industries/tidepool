@@ -2324,6 +2324,29 @@ mod type_query_work {
     }
 }
 
+/// The immutable selected base and its maintained fact indexes stay paired.
+/// Capture may add persistent row edits; only closing the resulting support
+/// installs a new base. Historical request provenance is held elsewhere.
+#[derive(Clone, Debug)]
+pub(crate) struct CarriedCompilerSelection {
+    base: Arc<CompilerSourceSupport>,
+    rows: SelectedCompilerRows,
+}
+impl CarriedCompilerSelection {
+    pub(crate) fn empty() -> Self {
+        CompilerSourceSupport::empty().carry_compiler_selection()
+    }
+    pub(crate) fn rows(&self) -> &SelectedCompilerRows {
+        &self.rows
+    }
+    pub(crate) fn native_fact_base(&self) -> &Arc<crate::exact_context::PublicationNativeFacts> {
+        self.base.native_fact_owner()
+    }
+    pub(crate) fn acquired_native_closures(&self) -> &AcquiredNativeClosures {
+        self.base.acquired_native_closures()
+    }
+}
+
 /// Canonical classification belongs to the exact admitted rows. A raw role
 /// projection cannot supply home units independently of those interfaces.
 /// Persistent rows let a publication share unchanged exact bindings with forks.
@@ -2960,17 +2983,20 @@ impl CompilerSourceSupport {
         &self.native_fact_owner.roles
     }
 
-    pub(crate) fn carry_selected_compiler_rows(&self) -> SelectedCompilerRows {
-        self.selected.as_ref().clone()
+    pub(crate) fn carry_compiler_selection(&self) -> CarriedCompilerSelection {
+        CarriedCompilerSelection {
+            base: Arc::new(self.clone()),
+            rows: self.selected.as_ref().clone(),
+        }
     }
 
     pub(crate) fn capture_compiler_output_rows(
-        inherited: &SelectedCompilerRows,
+        inherited: &CarriedCompilerSelection,
         admission: &ArtifactAdmission,
         projection: &CompilerInputProjection,
         selection: &crate::certified_products::CertifiedSourceSelection,
-    ) -> Result<SelectedCompilerRows, CompileError> {
-        let mut selected = inherited.clone();
+    ) -> Result<CarriedCompilerSelection, CompileError> {
+        let mut selected = inherited.rows.clone();
         for (owner, role) in projection.snapshot_roles() {
             let carried_matches = selected.get(owner).is_some_and(|row| {
                 row.interface().0.artifact == role.interface()
@@ -3064,7 +3090,10 @@ impl CompilerSourceSupport {
                 selected.insert_incoming(owner.clone(), row);
             }
         }
-        Ok(selected)
+        Ok(CarriedCompilerSelection {
+            base: Arc::clone(&inherited.base),
+            rows: selected,
+        })
     }
 
     pub(super) fn fork_selected_rows(&self) -> SelectedCompilerRows {
@@ -3110,9 +3139,10 @@ impl CompilerSourceSupport {
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let selected = Self::project_completed_output_visibility(selection, &desired)?;
         let projection = selection
-            .input_compiler_support()
-            .map(|source| source.projection.clone())
-            .unwrap_or_default();
+            .current_compiler_selection()
+            .base
+            .projection
+            .clone();
         let availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
             selection.issued_native_availability().cloned(),
         )?;
@@ -3139,9 +3169,10 @@ impl CompilerSourceSupport {
             }
         }
         let input_decisions = selection
-            .input_compiler_support()
-            .map(|source| source.input_decisions.clone())
-            .unwrap_or_default();
+            .current_compiler_selection()
+            .base
+            .input_decisions
+            .clone();
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.output_fragment",
             "retain_issuance",

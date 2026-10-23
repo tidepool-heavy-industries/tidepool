@@ -1967,7 +1967,9 @@ impl CertifiedSegmentOriginals {
         let original_inputs = cursor
             .advance_compiler_prefix(self.captured_stage(), produced, &validation.inventory)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
-        source_selection.compiler_rows = original_inputs.compiler_source_support().carry_selected_compiler_rows();
+        source_selection.compiler_rows = original_inputs
+            .compiler_source_support()
+            .carry_compiler_selection();
         let products = CertifiedProducts {
             issued: Some(IssuedCompilerProducts {
                 prefix: original_inputs,
@@ -4753,7 +4755,7 @@ fn duplicate_source_binder(
 /// that request's validated output rows. Full retained custody is not an offer.
 #[derive(Clone, Debug)]
 pub(crate) struct CertifiedSourceSelection {
-    compiler_rows: crate::artifact_inventory::SelectedCompilerRows,
+    compiler_rows: crate::artifact_inventory::CarriedCompilerSelection,
     modules: Arc<BTreeMap<(String, String), ReceiptSourceSelection>>,
     produced_types: Option<crate::checked_cell::ProducedValueTypeInterfaces>,
     private_native: crate::declaration_context::RequestNativeAvailability,
@@ -5775,19 +5777,23 @@ impl CertifiedSourceSelection {
         }))
     }
 
-    pub(crate) fn input_compiler_support(
-        &self,
-    ) -> Option<&crate::artifact_inventory::CompilerSourceSupport> {
-        match &self.input_origin {
-            CertifiedInputOrigin::Continuation(source) => Some(source),
-            CertifiedInputOrigin::NewProducts => None,
-        }
-    }
-
     pub(crate) fn selected_compiler_rows(
         &self,
     ) -> &crate::artifact_inventory::SelectedCompilerRows {
+        self.compiler_rows.rows()
+    }
+
+    pub(crate) fn current_compiler_selection(
+        &self,
+    ) -> &crate::artifact_inventory::CarriedCompilerSelection {
         &self.compiler_rows
+    }
+
+    pub(crate) fn seal_compiler_prefix(
+        &mut self,
+        inputs: &crate::declaration_context::OriginalCompilerInputs,
+    ) {
+        self.compiler_rows = inputs.compiler_source_support().carry_compiler_selection();
     }
 
     pub(crate) fn capture_compiler_rows(
@@ -5851,10 +5857,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn native_fact_base(
         &self,
     ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
-        match &self.input_origin {
-            CertifiedInputOrigin::Continuation(source) => Some(source.native_fact_owner()),
-            CertifiedInputOrigin::NewProducts => None,
-        }
+        Some(self.compiler_rows.native_fact_base())
     }
 
     /// A validated output with no certified original rows carries no inherited
@@ -5866,10 +5869,7 @@ impl CertifiedSourceSelection {
     pub(crate) fn acquired_native_closures(
         &self,
     ) -> crate::artifact_inventory::AcquiredNativeClosures {
-        match &self.input_origin {
-            CertifiedInputOrigin::Continuation(source) => source.acquired_native_closures().clone(),
-            CertifiedInputOrigin::NewProducts => Default::default(),
-        }
+        self.compiler_rows.acquired_native_closures().clone()
     }
 
     pub(crate) fn continuation_input(
@@ -5909,7 +5909,7 @@ impl CertifiedSourceSelection {
 
     fn new_product_ingress() -> Self {
         Self {
-            compiler_rows: crate::artifact_inventory::SelectedCompilerRows::empty(),
+            compiler_rows: crate::artifact_inventory::CarriedCompilerSelection::empty(),
             modules: Arc::new(BTreeMap::new()),
             produced_types: None,
             private_native: Default::default(),
@@ -5993,9 +5993,7 @@ impl CertifiedSourceSelection {
         }
         let mut selected =
             Self::from_compiler_projection(inputs.projection(), &metadata.retained, operation)?;
-        selected.compiler_rows = inputs
-            .compiler_source_support()
-            .carry_selected_compiler_rows();
+        selected.compiler_rows = inputs.compiler_source_support().carry_compiler_selection();
         selected.input_origin =
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         selected.original_bindings = inputs.original_bindings().cloned();
