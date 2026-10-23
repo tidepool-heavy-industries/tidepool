@@ -793,6 +793,23 @@ impl<'a> WorldNativeDemandResolver<'a> {
                     })
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 for row in basis.rows() {
+                    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+                        binder,
+                        ..
+                    } = row.reference()
+                    else {
+                        unreachable!("SOURCE observations name Original bindings")
+                    };
+                    tracing::trace!(
+                        target: "tidepool_toolchain::compiler_world::native_demand",
+                        admission = ?demand.owner.admission,
+                        stage = demand.stage,
+                        binder_module = %binder.module,
+                        binder_occurrence = %binder.occurrence,
+                        interface = ?interface,
+                        original = ?original,
+                        "source_dependency_query"
+                    );
                     self.validation
                         .inventory
                         .reserve::<crate::declaration_context::NativeRetainedOccurrence<'_>>(
