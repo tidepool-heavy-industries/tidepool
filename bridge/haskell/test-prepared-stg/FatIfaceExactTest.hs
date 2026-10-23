@@ -64,6 +64,7 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
   readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor,
+  newOriginalInterfaceArtifactsWithSessionCaptures,
   InterfaceInputFailure(..))
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
@@ -148,6 +149,17 @@ verifyCompletedInterfaceMerges libdir work environment = do
   empty <- either throwIO pure (capturedInterfaceInputs [])
   completed <- captureCompletedInterfaceInputs injected empty [(artifact,capture)] []
   decoded <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
+  decoder <- newRequestIfaceDecoder
+  let alias = artifact {exactPath="primary-4/iface"}
+  aliased <- readCapturedExactIfaceClosureWithCheckedValues decoder
+    (\requested -> if requested == alias then pure body else fail "unexpected receiving alias")
+    environment [] [alias] >>= either fail pure
+  forM_ [[completed,aliased],[aliased,completed]] $ \inputs -> do
+    merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
+    retained <- captureCompletedInterfaceInputs injected merged [] []
+    borrowed <- either throwIO pure (capturedSessionInterfaceFor retained alias)
+    assert (maybe False (sameCapturedSessionInterfaceOwner capture) borrowed)
+      "completed input retention lost an authenticated logical receiving alias"
   actualIdentity <- evaluate actualHome >>= makeStableName
   forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
@@ -177,6 +189,11 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case mergeCapturedInterfaceInputs [completed,otherCompleted] of
       Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)
     "equal interface bytes silently selected another completed owner"
+  _ <- newOriginalInterfaceArtifactsWithSessionCaptures injected Map.empty [] [capture,capture] work
+  competing <- try (newOriginalInterfaceArtifactsWithSessionCaptures injected Map.empty []
+    [capture,otherCapture] work >> pure ()) :: IO (Either SomeException ())
+  assert (case competing of Left _ -> True; Right () -> False)
+    "original artifact retention selected between competing completed session issuers"
 
 scenario :: IO ()
 scenario = do
