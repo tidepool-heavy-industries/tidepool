@@ -21367,13 +21367,14 @@ mod tests {
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
             assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
                 "published fixture must carry a real issued decision domain");
-            assert!(left.compiler_source_support().recorded_input_decisions().values()
-                .any(|fact| !fact.groups.is_empty()),
-                "withdrawal history starts with an actually chosen native Group");
+            assert!(!left.artifact_view().selected_native_groups().is_empty(),
+                "withdrawal starts from the completed target's actually selected native Groups");
             let interface_roots = left.compiler_input_projection().roles().into_iter()
                 .map(|role| role.interface()).collect();
             let withdrawn_support = left.compiler_source_support().select_support_roots(interface_roots).unwrap();
             let withdrawn = left.clone().rebuild(|facts| facts.compiler_support = withdrawn_support).finish().unwrap();
+            assert!(withdrawn.artifact_view().selected_native_groups().is_empty(),
+                "interface-root withdrawal leaves the exact native Groups in custody only");
             assert!(!withdrawn.compiler_source_support().recorded_input_decisions().is_empty());
             assert!(withdrawn.compiler_source_support().recorded_input_decisions().values()
                 .all(|fact| fact.groups.is_empty()), "withdrawal preserves domains but no chosen Group");
@@ -22705,15 +22706,23 @@ mod tests {
             let selections = restored.published_source_original_selections().unwrap();
             assert_eq!(selections.len(), 1);
             assert_eq!(selections[0].public_root(), &root);
-            let born = selections[0].context();
-            let row = born
+            drop(selections);
+            // The published role retains its acquired pre-endorsement owner.
+            // Reopening a publication may normalize another transient row.
+            let born = restored
                 .compiler_source_support()
+                .publication_birth_support(&root)
+                .unwrap();
+            let row = born
                 .native_availability()
                 .rows()
                 .find(|row| row.original.descriptor.id == original)
                 .unwrap();
-            let expected_row = expected
+            let expected_birth = expected
                 .compiler_source_support()
+                .publication_birth_support(&root)
+                .unwrap();
+            let expected_row = expected_birth
                 .native_availability()
                 .rows()
                 .find(|row| row.original.descriptor.id == original)
@@ -30456,8 +30465,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         .unwrap()
                         .select_support_roots(roots.clone())
                         .unwrap();
-                    // Narrowing roles does not release the exact bytes owned
-                    // by a carried native completion.
+                    // Completion, publication authority and relevant opaque
+                    // offers each retain their own immutable byte owners.
                     let mut expected_custody = expected_view
                         .artifact_ids()
                         .into_iter()
@@ -30468,6 +30477,41 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         .iter()
                     {
                         expected_custody.extend(closure.artifacts().artifact_ids());
+                    }
+                    let selected_originals = roles
+                        .iter()
+                        .filter_map(|role| role.original())
+                        .filter(|id| expected_view.contains_namespace_artifact(*id))
+                        .collect::<BTreeSet<_>>();
+                    for (owner, role) in parent.compiler_input_projection().snapshot_roles() {
+                        if role.is_published_source_original()
+                            && role
+                                .original()
+                                .is_some_and(|id| selected_originals.contains(&id))
+                        {
+                            expected_custody.extend(
+                                parent
+                                    .compiler_source_support()
+                                    .publication_birth_support(owner)
+                                    .unwrap()
+                                    .artifacts()
+                                    .artifact_ids(),
+                            );
+                        }
+                    }
+                    for offer in parent.compiler_source_support().native_offers() {
+                        let nodes = offer.custody_snapshot().retained_nodes().unwrap();
+                        let direct = roles.iter().any(|role| {
+                            role.interface() == offer.snapshot_facts().interface
+                                && expected_view.contains_namespace_artifact(role.interface())
+                        });
+                        if direct
+                            || nodes
+                                .iter()
+                                .any(|node| selected_originals.contains(&node.artifact()))
+                        {
+                            expected_custody.extend(nodes.into_iter().map(|node| node.artifact()));
+                        }
                     }
                     let scoped = support.projection().roles();
                     // Requested carriers can include dependencies. The oracle
@@ -30504,10 +30548,15 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                             .into_iter()
                             .collect::<BTreeSet<_>>(),
                         expected_custody,
+                        "requested roles={states:?}, unrelated custody={unrelated}",
                     );
                     assert_eq!(
                         support.artifacts().selected_native_groups(),
                         expected_view.selected_native_groups(),
+                    );
+                    assert_eq!(
+                        support.artifacts().capture_graph_selection().namespace,
+                        expected_view.capture_graph_selection().namespace,
                     );
                     // Repeated extension/reopening cannot convert a type carrier to native authority.
                     let reopened = support
@@ -30640,18 +30689,29 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &mut PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let consumer =
-            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
-        let artifacts = effective
-            .context()
-            .artifact_view()
-            .merge_fixture_selections(&support_view(&[consumer]))
-            .unwrap();
-        let original = effective
-            .receipt_admission()
-            .product_admission(&admission)
-            .retained_product_context_fixture(&artifacts)
-            .unwrap();
+        let product_admission = effective.receipt_admission().product_admission(&admission);
+        let issued = OriginalCompilerInputs::from_issued_support(
+            product_admission
+                .compiler_inputs()
+                .compiler_source_support(),
+        );
+        let original = product_admission
+            .prepare_execution_context(&issued)
+            .unwrap()
+            .context;
+        for role in roles
+            .iter()
+            .filter(|role| role.is_published_source_original())
+        {
+            assert!(original.compiler_input_roles().contains(role));
+        }
+        assert!(!baseline.source_scope().rows().is_empty());
+        for row in baseline.source_scope().rows() {
+            assert_eq!(
+                original.source_scope().imports(&row.owner),
+                Some(row.imports.as_slice())
+            );
+        }
         assert_eq!(
             original
                 .lexical_graph()
@@ -30662,7 +30722,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             vec![identity("fixture", "InstanceOwner")]
         );
         assert_eq!(baseline.semantic_sha256(), before);
-        // The issued completion owns captured generated bytes, independently
+        // The validated receipt owns captured generated bytes, independently
         // of later changes to the compiler's primary scratch source.
         let decoded = read_exact_compilation_receipt(&receipt).unwrap();
         assert_eq!(decoded.source_path, admission.witness.source_path);
