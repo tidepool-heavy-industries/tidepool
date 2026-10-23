@@ -576,10 +576,7 @@ pub struct ModuleCandidateOffer {
     producer: Vec<u8>,
     include: Vec<PathBuf>,
     exact: Option<crate::declaration_context::ExactCompilationRequest>,
-    checked_cell: Option<Arc<crate::checked_cell::CheckedCellRequest>>,
-    planned_cell: Option<crate::checked_cell::CheckedPlannedCellSpecification>,
     checked_values: Option<Arc<crate::checked_cell::CheckedValueInputs>>,
-    checked_projections: Vec<Arc<crate::declaration_join::AcceptedJoin>>,
     activation_preview: Option<crate::activation_preview::ActivationPreviewOffer>,
 }
 
@@ -688,17 +685,11 @@ impl AppliedModuleCandidateOffer {
 /// Compiler-authenticated physical outputs. This owner carries no endpoint;
 /// contextual sealing continues after the physical transaction has settled.
 pub struct PreparedCellProgram {
-    root_owner: Option<Arc<tempfile::TempDir>>,
     checked: Arc<crate::checked_cell::ExactCheckedCell>,
     basis: crate::checked_cell::CellProgramBacking,
     slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
     items: Vec<PreparedProgramItem>,
     produced_outputs: crate::checked_cell::ProducedValueTypeInterfaces,
-    pending_segments: Vec<(
-        SelectedModuleCandidateOffer,
-        crate::declaration_context::ExactProgramSegmentAdmission,
-    )>,
-    validation: crate::recovery_artifacts::PackageInterfaceValidation,
 }
 
 pub(crate) struct ProgramItemAdmission {
@@ -765,14 +756,11 @@ impl PreparedCellProgram {
         };
         cancellation.checkpoint()?;
         let Self {
-            root_owner: _root_owner,
             checked: cell,
             basis,
             slots,
             items: prepared,
             produced_outputs,
-            pending_segments,
-            mut validation,
         } = self;
         if prepared.len() != cell.item_count() {
             return Err(CompileError::ExtractFailed(
@@ -866,11 +854,6 @@ impl PreparedCellProgram {
             slots,
             items,
         });
-        cancellation.checkpoint()?;
-        for (offer, segment) in pending_segments {
-            cancellation.checkpoint()?;
-            offer.publish_segment_original_products(&segment, &mut validation, cancellation)?;
-        }
         cancellation.checkpoint()?;
         Ok(program)
     }
@@ -1129,165 +1112,18 @@ fn prepare_world_cell_program_inner(
     }
     let slots = program.reservation().slots().collect();
     Ok(PreparedCellProgram {
-        root_owner: Some(program.directory().clone()),
         checked,
         basis: checked_cell::CellProgramBacking::World(program),
         slots,
         items,
         produced_outputs,
-        pending_segments: Vec::new(),
-        validation,
     })
-}
-
-/// Fixed physical compiler authority and private output inventory for one
-/// segment. Item progress belongs exclusively to its mutable cursor.
-struct BoundSegment {
-    offer: SelectedModuleCandidateOffer,
-    source: crate::declaration_context::ExactProgramSegmentAdmission,
-    produced_types: crate::checked_cell::ProducedValueTypeInterfaces,
-    artifacts: crate::artifact_inventory::BoundArtifactSelection,
 }
 
 struct SegmentItemDemand<'a> {
     selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
     view: &'a crate::artifact_inventory::ArtifactView,
     groups: crate::declaration_context::CertifiedNativeGroupBaseline<'a>,
-}
-
-impl<'a> SegmentItemDemand<'a> {
-    /// Native progress borrows one target owner for both its selected view and
-    /// certified rows. The original output retains independent compiler custody.
-    fn from_target(
-        selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
-        target: &'a crate::artifact_inventory::CertifiedTargetNativeInputs,
-    ) -> Self {
-        Self {
-            selection,
-            view: target.artifacts(),
-            groups: crate::declaration_context::CertifiedNativeGroupBaseline::Target(
-                target.certified_groups(),
-            ),
-        }
-    }
-}
-
-struct SegmentCursor {
-    next: usize,
-    end: usize,
-    request: crate::declaration_context::ProgramAdmissionContinuation,
-    context: Arc<crate::declaration_context::ExactDeclarationContext>,
-    native_prefix: SegmentNativePrefix,
-}
-
-// Keep the issued target decision with the artifacts and certified groups that
-// it was sealed alongside. Artifact custody alone does not select native code.
-enum SegmentNativePrefix {
-    Initial(Arc<crate::declaration_context::ProgramAdmissionContinuation>),
-    Advanced(Arc<SealedTurnProducts>),
-}
-
-impl SegmentNativePrefix {
-    fn item_demand<'a>(
-        &'a self,
-        selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
-    ) -> SegmentItemDemand<'a> {
-        match self {
-            Self::Initial(request) => SegmentItemDemand {
-                selection,
-                view: request.compiler_inputs().artifacts(),
-                groups: crate::declaration_context::CertifiedNativeGroupBaseline::InitialRequest(
-                    request,
-                ),
-            },
-            Self::Advanced(products) => SegmentItemDemand::from_target(selection, &products.target),
-        }
-    }
-}
-
-struct ItemAdmission<'a> {
-    segment: &'a mut BoundSegment,
-    cursor: &'a mut SegmentCursor,
-    ordinal: usize,
-}
-
-impl BoundSegment {
-    fn item<'a>(
-        &'a mut self,
-        cursor: &'a mut SegmentCursor,
-        ordinal: usize,
-    ) -> Result<ItemAdmission<'a>, CompileError> {
-        if ordinal != cursor.next || ordinal >= cursor.end {
-            return Err(CompileError::ExtractFailed(
-                "segment item differs from its admitted prefix".into(),
-            ));
-        }
-        self.produced_types.for_item(ordinal)?;
-        Ok(ItemAdmission {
-            segment: self,
-            cursor,
-            ordinal,
-        })
-    }
-}
-
-impl ItemAdmission<'_> {
-    #[allow(clippy::too_many_arguments)]
-    fn admit(
-        self,
-        root: &Path,
-        source_directory: &Path,
-        typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
-        admission_digest: [u8; 32],
-        generation: u64,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ProgramNativeOutput, CompileError> {
-        let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.item", inclusive = true, ordinal = self.ordinal).entered();
-        let mut timing = timing::InvocationTiming::start_scoped(
-            "products.cell_program.item",
-            "read_and_seal_output",
-        );
-        let produced = self.segment.produced_types.for_item(self.ordinal)?;
-        let directory = root.join(format!("item-{}", self.ordinal));
-        let output = self.segment.offer.read_program_output(
-            &directory,
-            source_directory,
-            &produced,
-            typed_segments,
-            self.ordinal,
-            admission_digest,
-            &self.segment.source,
-            self.cursor
-                .native_prefix
-                .item_demand(&mut self.segment.artifacts),
-            validation,
-        )?;
-        timing.advance("support_context_continuation");
-        let mut request = self.cursor.request.clone();
-        let next_context = self.segment.offer.admit_program_support(
-            &mut request,
-            self.cursor.context.clone(),
-            &output,
-            &self.segment.source,
-            Some(&produced),
-        )?;
-        timing.advance("value_context_extension");
-        let next_context = self.segment.offer.admit_program_value(
-            next_context,
-            generation,
-            &output.turn,
-            &produced,
-        )?;
-        timing.advance("cursor_advance");
-        // All fallible admission work precedes the single prefix/demand advance.
-        let products = output.products.as_ref().expect("program output was sealed");
-        self.cursor.native_prefix = SegmentNativePrefix::Advanced(Arc::clone(products));
-        self.cursor.request = request;
-        self.cursor.context = next_context;
-        self.cursor.next += 1;
-        timing.finish(true);
-        Ok(output)
-    }
 }
 
 // Protected compilation manifests bind the actual worker search order as well
@@ -1570,34 +1406,14 @@ fn private_native_availability(
 
 fn checked_candidate_reservations(
     specification: &crate::checked_cell::CheckedCellRequest,
-    planned: Option<&crate::checked_cell::CheckedPlannedCellSpecification>,
 ) -> BTreeSet<String> {
-    use crate::checked_cell::CheckedPlannedCellSlot;
-    use tidepool_repr::{Generation, SessionModule};
-    let mut reserved = specification
+    specification
         .recipe()
         .injected_modules()
         .iter()
         .chain(specification.reserved_declaration_modules())
         .cloned()
-        .collect::<BTreeSet<_>>();
-    if let Some(planned) = planned {
-        for slot in &planned.slots {
-            match slot {
-                CheckedPlannedCellSlot::Prologue { declaration }
-                | CheckedPlannedCellSlot::Declaration { declaration } => {
-                    reserved.insert(SessionModule::lib(Generation(*declaration)).module_name());
-                }
-                CheckedPlannedCellSlot::Bind { value } => {
-                    reserved.insert(SessionModule::val(Generation(*value)).module_name());
-                }
-                CheckedPlannedCellSlot::Expression { capture, .. } => {
-                    reserved.insert(SessionModule::val(Generation(*capture)).module_name());
-                }
-            }
-        }
-    }
-    reserved
+        .collect()
 }
 
 impl ModuleCandidateOffer {
@@ -1695,10 +1511,8 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
-            checked_cell: None,
-            planned_cell: None,
+
             checked_values: None,
-            checked_projections: Vec::new(),
             activation_preview: None,
         })
     }
@@ -1766,10 +1580,8 @@ impl ModuleCandidateOffer {
                     )?
                     .with_source_search_context(include),
             ),
-            checked_cell: None,
-            planned_cell: None,
+
             checked_values: None,
-            checked_projections: Vec::new(),
             activation_preview: None,
         })
     }
@@ -1934,10 +1746,8 @@ impl ModuleCandidateOffer {
                     .with_source_search_context(include)
                     .with_checked_value_imports(inputs.import_authority()),
             ),
-            checked_cell: None,
-            planned_cell: None,
+
             checked_values: Some(inputs),
-            checked_projections: Vec::new(),
             activation_preview: None,
         })
     }
@@ -1979,7 +1789,7 @@ impl ModuleCandidateOffer {
             retained_interfaces,
         )?;
         let context = checked_value_context(Some(publication_context), &checked_values)?;
-        let checked_projections =
+        let _checked_projections =
             crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
         let authorization = checked_cell_authorization(
             purpose,
@@ -1993,7 +1803,7 @@ impl ModuleCandidateOffer {
             producer,
             include,
             scratch,
-            checked_candidate_reservations(&specification, None),
+            checked_candidate_reservations(&specification),
         )?;
         let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
@@ -2015,157 +1825,10 @@ impl ModuleCandidateOffer {
                         &specification.template_sources(),
                     )?,
             ),
-            checked_cell: Some(specification),
-            planned_cell: None,
+
             checked_values: Some(checked_values),
-            checked_projections,
             activation_preview: None,
         })
-    }
-
-    /// Reserve the complete original identity inventory before compilation.
-    pub fn select_cell_program(
-        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: Arc<crate::checked_cell::CheckedCellRequest>,
-        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
-        planned: crate::checked_cell::CheckedPlannedCellSpecification,
-        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
-        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
-    ) -> Result<Self, CompileError> {
-        Self::select_cell_program_with_catalog(
-            endpoint,
-            include,
-            scratch,
-            context,
-            specification,
-            values,
-            planned,
-            retained_interfaces,
-            retained_projections,
-            &crate::toolchain::CatalogSelection::FreshConfigured,
-        )
-    }
-
-    #[tracing::instrument(
-        target = "exomonad_harness::timing", name = "products.cell_program.select_offer",
-        level = "debug", skip_all,
-        fields(inclusive = true, include_paths = include.len(), value_count = values.len(),
-            retained_interfaces = retained_interfaces.len(), retained_projections = retained_projections.len())
-    )]
-    pub fn select_cell_program_with_catalog(
-        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-        include: &[PathBuf],
-        scratch: &Path,
-        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
-        specification: Arc<crate::checked_cell::CheckedCellRequest>,
-        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
-        planned: crate::checked_cell::CheckedPlannedCellSpecification,
-        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
-        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
-        catalog: &crate::toolchain::CatalogSelection,
-    ) -> Result<Self, CompileError> {
-        let mut timing = timing::InvocationTiming::start_scoped(
-            "products.cell_program.select_offer",
-            "catalog_deployment",
-        );
-        let catalog = catalog.for_deployment(endpoint.deployment())?;
-        timing.advance("validate_injected_inventory");
-        let producer = endpoint.identity().producer_bytes();
-        let expected = specification
-            .recipe()
-            .injected_modules()
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let actual = values
-            .iter()
-            .map(|(module, _)| module.module_name())
-            .collect::<BTreeSet<_>>();
-        if actual.len() != values.len() || actual != expected {
-            return Err(CompileError::ExtractFailed(
-                "compiled initial interface inventory differs from injected owners".into(),
-            ));
-        }
-        timing.advance("planned_authorization");
-        let extension = planned.authorization(&specification, producer, include, scratch)?;
-        timing.advance("manifest_authorization");
-        let mut authorization = specification
-            .manifest_value(crate::checked_cell::CheckedCellManifestPurpose::Program)?;
-        timing.advance("publication_context");
-        let compile_context = context;
-        let publication_context = checked_offer_context(
-            compile_context
-                .as_ref()
-                .map(|context| context.declarations().clone()),
-        )?;
-        timing.advance("capture_checked_values");
-        let inputs =
-            crate::checked_cell::CheckedValueInputs::capture_checked(values, retained_interfaces)?;
-        timing.advance("retained_value_context");
-        let context = checked_value_context(Some(publication_context), &inputs)?;
-        timing.advance("retain_projection_inputs");
-        let checked_projections =
-            crate::checked_cell::retain_projection_inputs(&context, retained_projections)?;
-        timing.advance("extend_authorization");
-        let Value::Array(fields) = &mut authorization else {
-            unreachable!("closed authorization")
-        };
-        fields.push(inputs.baseline_authorization());
-        fields.push(
-            context
-                .selected_template_imports(&specification.template_sources())?
-                .authorization_value(),
-        );
-        fields.extend(extension);
-        fields.push(Value::Array(
-            include
-                .iter()
-                .map(|path| Value::Text(path.to_string_lossy().into_owned()))
-                .collect(),
-        ));
-        timing.advance("candidate_selection");
-        let selected = immutable_candidates_in_context_with_catalog(
-            &context,
-            producer,
-            include,
-            scratch,
-            checked_candidate_reservations(&specification, Some(&planned)),
-            &catalog,
-        )?;
-        timing.advance("private_native_availability");
-        let private = private_native_availability(&context, producer, selected.as_deref())?;
-        let producer_bytes = producer.to_vec();
-        let include_paths = include.to_vec();
-        timing.advance("prepare_exact_input");
-        let exact = compile_context_with_declarations(compile_context, context.clone())
-            .prepare_compilation_with_private_input(
-                &scratch.join("exact-scope"),
-                producer,
-                Some(authorization),
-                private,
-            )?;
-        timing.advance("initial_template_interfaces");
-        let exact = exact
-            .with_source_search_context(include)
-            .with_checked_value_imports(inputs.import_authority())
-            .with_initial_template_interfaces(context.clone(), &specification.template_sources())?;
-        timing.advance("assemble_offer");
-        let offer = Self {
-            selected,
-            producer: producer_bytes,
-            include: include_paths,
-            exact: Some(exact),
-            checked_cell: Some(specification),
-            planned_cell: Some(planned),
-            checked_values: Some(inputs),
-            checked_projections,
-            activation_preview: None,
-        };
-        timing.finish(true);
-        Ok(offer)
     }
 
     /// Specialize a pure renderer against its compiler-issued display facts.
@@ -2255,10 +1918,8 @@ impl ModuleCandidateOffer {
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: Some(exact),
-            checked_cell: None,
-            planned_cell: None,
+
             checked_values: None,
-            checked_projections: Vec::new(),
             activation_preview: Some(offer),
         })
     }
@@ -2552,720 +2213,6 @@ impl SelectedModuleCandidateOffer {
                 warnings,
             }),
         ))
-    }
-
-    /// Admit every prepared segment and target before issuing execution data.
-    /// The runtime can consume this immutable result without compiling a prefix.
-    #[tracing::instrument(
-        target = "exomonad_harness::timing",
-        name = "products.cell_program",
-        level = "debug",
-        skip_all,
-        fields(inclusive = true)
-    )]
-    pub fn admit_cell_program(
-        &self,
-        root: &Path,
-    ) -> Result<Arc<crate::checked_cell::CellProgram>, CompileError> {
-        self.prepare_cell_program_outputs(root)?
-            .seal(&tidepool_extract_cmd::HostAdmissionCancellation::new())
-    }
-
-    /// Retain compiler-observed outputs and validate all targets while the
-    /// caller still owns the physical compiler transaction.
-    #[tracing::instrument(
-        target = "exomonad_harness::timing",
-        name = "products.cell_program.prepare",
-        level = "debug",
-        skip_all,
-        fields(inclusive = true)
-    )]
-    pub fn prepare_cell_program(
-        &self,
-        root: Arc<tempfile::TempDir>,
-    ) -> Result<PreparedCellProgram, CompileError> {
-        let mut prepared = self.prepare_cell_program_outputs(root.path())?;
-        prepared.root_owner = Some(root);
-        Ok(prepared)
-    }
-
-    fn prepare_cell_program_outputs(
-        &self,
-        root: &Path,
-    ) -> Result<PreparedCellProgram, CompileError> {
-        use crate::cell_plan::ParsedCellPlanKind;
-        use crate::checked_cell::{self, CheckedPlannedCellSlot};
-        let mut preparation_timing = timing::InvocationTiming::start_scoped(
-            "products.cell_program.prepare",
-            "input_owners_and_typed_segments",
-        );
-        let specification = self.checked_cell.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("program has no source specification".into())
-        })?;
-        let planned = self.planned_cell.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("ordinary checking cannot issue a complete program".into())
-        })?;
-        let initial = self.exact.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("program has no exact compiler offer".into())
-        })?;
-        let values = self
-            .checked_values
-            .as_ref()
-            .ok_or_else(|| CompileError::ExtractFailed("program has no interface owner".into()))?;
-        let typed_segments = checked_cell::read_program_typed_segments(
-            root,
-            &initial.request_sha256,
-            specification,
-            planned,
-        )?;
-        let mut context = initial.context().clone();
-        let mut program_request = initial
-            .clone()
-            .with_source_search_context(&self.include)
-            .program_admission();
-        // One host admission observes package bytes once across all original
-        // outputs. The next admission starts a fresh filesystem observation.
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        preparation_timing.advance("capture_produced_types");
-        let produced_outputs = values.capture_produced_types(
-            initial.producer_sha256,
-            planned,
-            0..planned.slots.len(),
-            &mut validation,
-        )?;
-        preparation_timing.advance("planned_item_admissions");
-        let mut declarations = BTreeMap::new();
-        let mut pending_segments = Vec::new();
-        let mut admissions = Vec::new();
-        let mut segment = 0usize;
-        let mut index = 0usize;
-        let mut declaration_cursor = 0usize;
-        while index < planned.parsed_plan.items().len() {
-            let item = &planned.parsed_plan.items()[index];
-            let declaration = matches!(
-                item.kind(),
-                ParsedCellPlanKind::Declaration | ParsedCellPlanKind::Prologue
-            );
-            let segment_root = root.join(format!("segment-{segment}"));
-            if declaration {
-                let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.declaration", inclusive = true, ordinal = index, segment).entered();
-                let declaration_ordinal = declaration_cursor;
-                declaration_cursor += 1;
-                let mut declaration_timing = timing::InvocationTiming::start_scoped(
-                    "products.cell_program.declaration",
-                    "context_and_source_specification",
-                );
-                match planned.slots[index] {
-                    CheckedPlannedCellSlot::Prologue { .. }
-                    | CheckedPlannedCellSlot::Declaration { .. } => {}
-                    _ => {
-                        return Err(CompileError::ExtractFailed(
-                            "declaration has another reserved slot".into(),
-                        ));
-                    }
-                }
-                program_request = program_request.in_program_context(context.clone())?;
-                let effective = self.program_offer(initial.clone());
-                let produced_types = produced_outputs.for_segment(index..index)?;
-                declaration_timing.advance("admit_and_seal_planned_declaration");
-                let original = effective
-                    .admit_planned_declaration(
-                        &segment_root,
-                        &program_request,
-                        specification,
-                        declaration_ordinal,
-                        Some(&produced_types),
-                        &mut validation,
-                    )?
-                    .ok_or_else(|| {
-                        CompileError::ExtractFailed(
-                            "program original declaration output is absent".into(),
-                        )
-                    })?;
-                declaration_timing.advance("source_lexical_and_context_extension");
-                let surface = original.certificate.extend_source_surface(
-                    &crate::declaration_join::AdmittedDeclarationSurface::default(),
-                )?;
-                context = Arc::new(context.as_ref().clone().admit_authored_publication(
-                    std::slice::from_ref(&original.certificate),
-                    &surface,
-                )?);
-                declaration_timing.advance("private_input_context_continuation");
-                program_request = program_request.in_program_context_with_private_input(
-                    context.clone(),
-                    &original.compiler_input,
-                )?;
-                admissions.push(ProgramItemAdmission {
-                    context: crate::checked_cell::CellProgramItemContext {
-                        context: context.clone(),
-                        source_lexical: program_request.program_source_lexical().to_vec(),
-                    },
-                    output: None,
-                });
-                declarations.insert(index, original);
-                index += 1;
-                declaration_timing.finish(true);
-            } else {
-                let _span = tracing::debug_span!(target: "exomonad_harness::timing", "products.cell_program.segment_setup", inclusive = true, first_ordinal = index, segment).entered();
-                let mut segment_timing = timing::InvocationTiming::start_scoped(
-                    "products.cell_program.segment_setup",
-                    "context_and_source_receipts",
-                );
-                let end = planned.parsed_plan.items()[index..]
-                    .iter()
-                    .position(|item| {
-                        matches!(
-                            item.kind(),
-                            ParsedCellPlanKind::Declaration | ParsedCellPlanKind::Prologue
-                        )
-                    })
-                    .map_or(planned.parsed_plan.items().len(), |offset| index + offset);
-                let segment_input = program_request.in_program_context(context.clone())?;
-                let mut source_segment = segment_input.admit_program_segment(&segment_root)?;
-                let produced_types = produced_outputs.for_segment(index..end)?;
-                let segment_offer = self.program_offer(initial.clone());
-                segment_timing.advance("certify_segment_original_products");
-                segment_offer.admit_segment_original_products(
-                    &segment_root,
-                    &mut source_segment,
-                    &produced_types,
-                    &mut validation,
-                )?;
-                segment_timing.advance("bind_segment_custody");
-                let physical = segment_offer.exact.as_ref().expect("exact segment");
-                let artifacts =
-                    crate::declaration_context::bind_certified_segment_artifacts_with_validation(
-                        source_segment.original_products(physical, &validation.inventory)?,
-                        &mut validation,
-                    )?;
-                segment_timing.advance("initialize_segment_cursor");
-                let mut bound = BoundSegment {
-                    artifacts,
-                    offer: segment_offer,
-                    source: source_segment,
-                    produced_types,
-                };
-                let mut cursor = SegmentCursor {
-                    next: index,
-                    end,
-                    native_prefix: SegmentNativePrefix::Initial(Arc::new(segment_input.clone())),
-                    request: segment_input,
-                    context,
-                };
-                segment_timing.finish(true);
-                drop(_span);
-                while index < end {
-                    let generation = match &planned.slots[index] {
-                        CheckedPlannedCellSlot::Bind { value } => *value,
-                        CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
-                        _ => {
-                            return Err(CompileError::ExtractFailed(
-                                "native item has another reserved slot".into(),
-                            ));
-                        }
-                    };
-                    let output = bound.item(&mut cursor, index)?.admit(
-                        root,
-                        &segment_root,
-                        &typed_segments,
-                        specification.admission_digest(),
-                        generation,
-                        &mut validation,
-                    )?;
-                    admissions.push(ProgramItemAdmission {
-                        context: crate::checked_cell::CellProgramItemContext {
-                            context: cursor.context.clone(),
-                            source_lexical: cursor.request.program_source_lexical().to_vec(),
-                        },
-                        output: Some(output),
-                    });
-                    index += 1;
-                }
-                context = cursor.context;
-                program_request = cursor.request;
-                pending_segments.push((bound.offer, bound.source));
-            }
-            segment += 1;
-        }
-        preparation_timing.advance("final_checked_cell_admission");
-        let cell = checked_cell::admit_checked_cell(
-            root,
-            &self.producer,
-            initial.semantic_sha256,
-            initial.context().clone(),
-            self.checked_projections.clone(),
-            &initial.request_sha256,
-            Arc::clone(specification),
-            pending_segments
-                .iter()
-                .flat_map(|(_, segment)| segment.admissions()),
-            &self.include,
-            None,
-            values.clone(),
-            declarations,
-            Some(planned),
-        )?;
-        preparation_timing.advance("capture_prepared_items");
-        let mut items = Vec::with_capacity(admissions.len());
-        for (index, admission) in admissions.into_iter().enumerate() {
-            let native = if let Some(output) = admission.output {
-                let (generation, observation) = match &planned.slots[index] {
-                    CheckedPlannedCellSlot::Bind { value } => (*value, None),
-                    CheckedPlannedCellSlot::Expression {
-                        capture,
-                        observation_name,
-                    } => (*capture, Some(observation_name.as_str())),
-                    _ => {
-                        return Err(CompileError::ExtractFailed(
-                            "program native slot differs".into(),
-                        ))
-                    }
-                };
-                let _capture_span = tracing::debug_span!(
-                    target: "exomonad_harness::timing", "products.cell_program.capture_item",
-                    inclusive = true, ordinal = index, generation,
-                    turn_bytes = output.turn.len(), metadata_bytes = output.metadata.len(),
-                )
-                .entered();
-                let mut capture_timing = timing::InvocationTiming::start_scoped(
-                    "products.cell_program.capture_item",
-                    "capture_call",
-                );
-                let checked = checked_cell::PreparedCheckedItemOutput::capture(
-                    &cell.item(index)?,
-                    generation,
-                    observation,
-                    true,
-                    &output,
-                    checked_cell::PreparedItemOrigin::Finite(&initial.request_sha256),
-                )?;
-                capture_timing.finish(true);
-                Some(PreparedProgramNativeItem { output, checked })
-            } else {
-                None
-            };
-            items.push(PreparedProgramItem {
-                context: admission.context,
-                native,
-            });
-        }
-        preparation_timing.advance("assemble_prepared_owner");
-        let prepared = PreparedCellProgram {
-            root_owner: None,
-            checked: cell,
-            basis: checked_cell::CellProgramBacking::Finite(planned.parsed_plan.clone()),
-            slots: planned.slots.clone(),
-            items,
-            produced_outputs,
-            pending_segments,
-            validation,
-        };
-        preparation_timing.advance("temporary_request_and_segments_drop");
-        drop(program_request);
-        drop(typed_segments);
-        preparation_timing.finish(true);
-        Ok(prepared)
-    }
-
-    fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
-        Self {
-            offer: ModuleCandidateOffer {
-                selected: self.selected.clone(),
-                producer: self.producer.clone(),
-                include: self.include.clone(),
-                exact: Some(exact.with_source_search_context(&self.include)),
-                checked_cell: None,
-                planned_cell: None,
-                checked_values: None,
-                checked_projections: Vec::new(),
-                activation_preview: None,
-            },
-            selected_session_values: self.selected_session_values.clone(),
-        }
-    }
-
-    fn admit_segment_original_products(
-        &self,
-        root: &Path,
-        segment: &mut crate::declaration_context::ExactProgramSegmentAdmission,
-        produced: &crate::checked_cell::ProducedValueTypeInterfaces,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<(), CompileError> {
-        let request = self.exact.as_ref().ok_or_else(|| {
-            CompileError::ExtractFailed("segment originals lack exact request".into())
-        })?;
-        let source_paths = segment
-            .admissions()
-            .iter()
-            .map(|source| source.witness().source_path())
-            .collect::<BTreeSet<_>>();
-        let source_paths = source_paths.into_iter().collect::<Vec<_>>();
-        let source_path = match source_paths.as_slice() {
-            [path] => path.to_path_buf(),
-            _ => {
-                return Err(CompileError::ExtractFailed(
-                    "segment originals lack one generated source".into(),
-                ))
-            }
-        };
-        let source = std::fs::read_to_string(&source_path)?;
-        let products = CompilerSidecar::ModuleProducts.read(root, &validation.inventory)?;
-        let packages = CompilerSidecar::ModulePackageImports.read(root, &validation.inventory)?;
-        let evidence = CompilerSidecar::Dependencies.read(root, &validation.inventory)?;
-        let receipt = CompilerSidecar::CertifiedProducts.read(root, &validation.inventory)?;
-        timing::record_inventory_work("segment.originals.before", root, &validation.inventory);
-        let parsed = certified_products::ParsedModuleProducts::decode_with_operation(
-            &products,
-            &packages,
-            validation.inventory.clone(),
-        )
-        .map_err(compiler_evidence_failure)?;
-        let receipt = certified_products::decode_segment_originals_with_operation(
-            &receipt,
-            root,
-            &validation.inventory,
-        )
-        .map_err(compiler_evidence_failure)?;
-        let inventory = validation.inventory.clone();
-        let source_admission =
-            segment.product_admission(request, &source_path, &source, &evidence, &inventory)?;
-        ensure_ready_module_inventory(
-            &receipt.modules,
-            &source_admission.exact().source().evidence(),
-        )?;
-        let package_interfaces =
-            certified_products::capture_independent_package_interfaces(&receipt, validation)
-                .map_err(compiler_evidence_failure)?;
-        let originals = certified_products::CertifiedSegmentOriginals::issue(
-            parsed,
-            receipt,
-            source_admission,
-            root,
-            &self.producer,
-            &self.include,
-            None,
-            self.selected.as_deref(),
-            &self.selected_session_values,
-            Some(produced),
-            &package_interfaces,
-            validation,
-        )
-        .map_err(compiler_evidence_failure)?;
-        timing::record_inventory_work("segment.originals.after", root, &validation.inventory);
-        segment.install_original_products(originals)
-    }
-
-    fn publish_segment_original_products(
-        &self,
-        segment: &crate::declaration_context::ExactProgramSegmentAdmission,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-        cancellation: &tidepool_extract_cmd::HostAdmissionCancellation,
-    ) -> Result<(), CompileError> {
-        cancellation.checkpoint()?;
-        let request = segment.physical_request();
-        let originals = segment.original_products(request, &validation.inventory)?;
-        let source = segment.admissions().first().ok_or_else(|| {
-            CompileError::ExtractFailed("segment publication lacks generated source".into())
-        })?;
-        let bytes = std::fs::read_to_string(source.witness().source_path())?;
-        if !source
-            .witness()
-            .matches_source(source.witness().source_path(), &bytes)
-            || source.evidence().revalidate(&bytes).is_err()
-        {
-            return Err(CompileError::ExtractFailed(
-                "segment source changed before publication".into(),
-            ));
-        }
-        if empty_exact_context(segment.source_input_context()) {
-            let parsed = originals
-                .raw()
-                .copy_for_publication()
-                .map_err(compiler_evidence_failure)?;
-            let (_, publication) = module_candidates::prepare_publication(
-                &self.producer,
-                &self.include,
-                source.evidence(),
-                parsed,
-                &bytes,
-                module_candidates::CandidateVersionOrigin::Exact {
-                    semantic_sha256: request.semantic_sha256,
-                },
-                originals.recovery_products(),
-            );
-            cancellation.checkpoint()?;
-            module_candidates::publish_prepared(publication)?;
-        } else {
-            cancellation.checkpoint()?;
-            module_candidates::record_exact_context_publication_skip(originals.raw().products());
-        }
-        cancellation.checkpoint()?;
-        module_candidates::record_deployment_acceptance(
-            self.selected.as_deref(),
-            originals.receipt(),
-        );
-        Ok(())
-    }
-
-    fn read_program_output(
-        &self,
-        directory: &Path,
-        source_directory: &Path,
-        produced_types: &crate::checked_cell::ProducedValueTypeInterfaces,
-        typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
-        item_index: usize,
-        admission_digest: [u8; 32],
-        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
-        cursor: SegmentItemDemand<'_>,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ProgramNativeOutput, CompileError> {
-        let turn: Arc<[u8]> =
-            crate::checked_cell::read(directory.join("turn.cbor"), 32 << 20)?.into();
-        let value = crate::checked_cell::decode(&turn)?;
-        let record = crate::checked_cell::row(&value, 2)?;
-        if crate::checked_cell::string(&record[0])? != "Bind" {
-            return Err(CompileError::ExtractFailed(
-                "program output is not a bind".into(),
-            ));
-        }
-        let source =
-            crate::checked_cell::string(&crate::checked_cell::row(&record[1], 5)?[4])?.to_owned();
-        let mut output = read_native_turn_artifacts(directory, turn, source)?;
-        let module = extract_module_name(&output.source).ok_or_else(|| {
-            CompileError::ExtractFailed("program native source has no module owner".into())
-        })?;
-        output.products = Some(Arc::new(
-            seal_turn_outputs_with_validation(
-                self,
-                Some(source_segment.receipt_admission()),
-                directory,
-                // Entries are projections of one compiled segment. Its exact
-                // receipt binds the consumed source path, not the item copy.
-                &source_directory.join(format!("{module}.hs")),
-                &output.source,
-                &output.program,
-                "__prepared",
-                None,
-                None,
-                OriginalOutputPublication::Transaction,
-                Some(produced_types),
-                Some((typed_segments, item_index, admission_digest)),
-                Some(source_segment),
-                Some(cursor),
-                None,
-                validation,
-            )?
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("program native products are not sealed".into())
-            })?,
-        ));
-        Ok(output)
-    }
-
-    fn admit_program_support(
-        &self,
-        request: &mut crate::declaration_context::ProgramAdmissionContinuation,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
-        output: &ProgramNativeOutput,
-        source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
-        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
-    ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
-        let mut support_timing = timing::InvocationTiming::start_scoped(
-            "products.cell_program.support",
-            "source_owner_and_support_projection",
-        );
-        let generated =
-            crate::declaration_context::ExactSourceAdmission::matching_generated_source_owner(
-                source_segment.admissions(),
-                &output.source,
-            )?;
-        let sealed = output.products.as_ref().expect("program output was sealed");
-        let support = program_support_artifacts(sealed.artifact_view(), &generated)?;
-        support_timing.advance("compiler_input_continuation");
-        let private = sealed
-            .original_compiler_inputs()?
-            .for_program_continuation(&support, source_segment.admissions(), &output.source)?;
-        support_timing.advance("private_input_context");
-        let mut continued =
-            request.in_program_context_with_private_input(context.clone(), &private)?;
-        support_timing.advance("publish_segment_support_context");
-        let published = continued.admit_program_segment_support_with_selection(
-            context,
-            &support,
-            source_segment,
-            produced_types,
-            sealed.source_selection(),
-        )?;
-        support_timing.advance("replace_previous_request");
-        *request = continued;
-        support_timing.finish(true);
-        Ok(published)
-    }
-
-    fn admit_program_value(
-        &self,
-        context: Arc<crate::declaration_join::ExactDeclarationContext>,
-        generation: u64,
-        turn: &[u8],
-        produced_types: &crate::checked_cell::ProducedValueTypeInterfaces,
-    ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
-        let value = crate::checked_cell::decode(turn)?;
-        let record = crate::checked_cell::row(&value, 2)?;
-        let fields = crate::checked_cell::row(&record[1], 5)?;
-        if matches!(&fields[2], Value::Array(rows) if rows.is_empty()) {
-            return Ok(context);
-        }
-        let interface = produced_types.current_interface(generation)?.clone();
-        Ok(Arc::new(
-            (*context)
-                .clone()
-                .extend_program_value_interface(interface)?,
-        ))
-    }
-
-    fn admit_planned_declaration(
-        &self,
-        root: &Path,
-        continuation: &crate::declaration_context::ProgramAdmissionContinuation,
-        specification: &crate::checked_cell::CheckedCellRequest,
-        declaration_ordinal: usize,
-        produced_types: Option<&crate::checked_cell::ProducedValueTypeInterfaces>,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<Option<crate::checked_cell::PlannedCheckedDeclaration>, CompileError> {
-        use sha2::{Digest, Sha256};
-        let exact = continuation.receipt_admission();
-        let receipt_path = root.join("planned-declaration.cbor");
-        if !receipt_path.exists() {
-            return Ok(None);
-        }
-        let bytes = crate::checked_cell::read(&receipt_path, 16 * 1024 * 1024)?;
-        let receipt = crate::checked_cell::decode(&bytes)?;
-        let fields = crate::checked_cell::row(&receipt, 8)?;
-        let string = crate::checked_cell::string;
-        let fail = || {
-            CompileError::ExtractFailed(
-                "planned declaration differs from its same compiler offer".into(),
-            )
-        };
-        let module_name = string(&fields[3])?;
-        let module = module_name
-            .strip_prefix("Tidepool.Session.Lib.G")
-            .and_then(|generation| generation.parse::<u64>().ok())
-            .filter(|generation| *generation > 0)
-            .map(|generation| {
-                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
-            })
-            .ok_or_else(fail)?;
-        let source = string(&fields[4])?;
-        let directory = root.join("planned-declaration");
-        let source_path = directory.join(format!("{module_name}.hs"));
-        if string(&fields[0])? != "TPEXACTDECL"
-            || string(&fields[1])? != "1"
-            || string(&fields[2])? != exact.physical_request().request_sha256
-            || specification
-                .reserved_declaration_modules()
-                .get(declaration_ordinal)
-                .map(String::as_str)
-                != Some(module_name)
-            || module.module_name() != module_name
-            || string(&fields[7])? != "planned-declaration"
-            || extract_module_name(source).as_deref() != Some(module_name)
-            || crate::checked_cell::read(&source_path, 32 * 1024 * 1024)? != source.as_bytes()
-        {
-            return Err(fail());
-        }
-        // The exact original source transaction was issued before enriching the
-        // checking scope. It therefore validates only against the captured baseline.
-        let admission =
-            exact.admit_source_receipt_with_validation(&source_path, source, validation)?;
-        let dependency_evidence =
-            crate::checked_cell::read(directory.join("dependencies.json"), 32 * 1024 * 1024)?;
-        let source_inventory = Arc::clone(&validation.inventory);
-        let source_product = exact.match_product(
-            &admission,
-            &source_path,
-            source,
-            &dependency_evidence,
-            &source_inventory,
-        )?;
-        let program_artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
-            Arc::new(crate::checked_cell::read(
-                directory.join("__result.prepared.cbor"),
-                128 * 1024 * 1024,
-            )?),
-            &crate::prepared_artifact::production_requirements()?,
-            DecodeLimits::default(),
-        );
-        let program_artifact =
-            program_artifact.map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
-        let program = program_artifact.bind_package_program();
-        let authored = crate::declaration_join::NativeAuthoredDeclarationAdmission::from_planned(
-            &module, &admission,
-        )?;
-        let sealed = seal_turn_outputs_with_validation(
-            self,
-            Some(exact),
-            &directory,
-            &source_path,
-            source,
-            &program,
-            "__result",
-            None,
-            Some(&authored),
-            OriginalOutputPublication::Transaction,
-            produced_types,
-            None,
-            None,
-            None,
-            None,
-            validation,
-        )?
-        .ok_or_else(fail)?;
-        let original_owner = admission.generated_source_owner();
-        if original_owner.module != module_name {
-            return Err(fail());
-        }
-        let selected_originals = sealed
-            .source_selection()
-            .selected_authored_original_closure(
-                sealed.artifact_view(),
-                &original_owner.unit,
-                &original_owner.module,
-            )
-            .map_err(compiler_evidence_failure)?;
-        let products = selected_originals
-            .products()
-            .iter()
-            .filter(|product| product.owner().module == module_name)
-            .collect::<Vec<_>>();
-        let [original] = products.as_slice() else {
-            return Err(fail());
-        };
-        let interface = original.module_interface();
-        let iface = interface.interface_bytes();
-        let digest = crate::checked_cell::hash(iface);
-        if string(&fields[5])? != digest || original.interface_bytes() != iface {
-            return Err(fail());
-        }
-        let certificate = crate::declaration_join::certify_same_offer_planned_declaration(
-            module,
-            source,
-            &self.producer,
-            &selected_originals,
-            sealed.planned_original_output()?,
-            source_product.exact(),
-            &self.include,
-            string(&fields[6])?.as_bytes(),
-        )?;
-        if std::fs::read(&receipt_path)? != bytes {
-            return Err(fail());
-        }
-        Ok(Some(crate::checked_cell::PlannedCheckedDeclaration {
-            source: source.to_owned(),
-            certificate: Arc::new(certificate),
-            receipt_digest: Sha256::digest(&bytes).into(),
-            compiler_input: sealed.original_compiler_inputs()?.clone(),
-        }))
     }
 }
 
@@ -6122,10 +5069,8 @@ fn compile_invocation_inner(
                     producer: producer.to_vec(),
                     include: inv.include.to_vec(),
                     exact: None,
-                    checked_cell: None,
-                    planned_cell: None,
+
                     checked_values: None,
-                    checked_projections: Vec::new(),
                     activation_preview: None,
                 },
                 selected_session_values,

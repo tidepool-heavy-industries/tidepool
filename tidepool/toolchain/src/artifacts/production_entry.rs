@@ -985,10 +985,7 @@ pub fn load_selected_production_entry_with_catalog(
         producer: manifest.producer.to_vec(),
         include: sources.include_roots(),
         exact: None,
-        checked_cell: None,
-        planned_cell: None,
         checked_values: None,
-        checked_projections: Vec::new(),
         activation_preview: None,
     };
     let offer = SelectedModuleCandidateOffer {
