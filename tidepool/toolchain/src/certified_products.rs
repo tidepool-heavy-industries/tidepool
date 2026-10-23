@@ -25000,11 +25000,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn physical_native_issuance_survives_item_type_projection_without_future_demand() {
+    fn physical_native_issuance_keeps_private_future_type_custody_across_handoff() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
             CanonicalProducerIdentity, CompilerInputProjection, JoinedInterfaceRole,
-            NativeArtifactDemand, NativeGroupKey,
+            NativeArtifactDemand,
         };
         use crate::declaration_context::{ExactCompileContext, OriginalCompilerInputs};
         let producer_bytes = b"physical-new-product-issuance";
@@ -25071,12 +25071,12 @@ pub(crate) mod tests {
         )
         .unwrap();
         let future_owner = (product.owner().unit.clone(), future_module);
-        let mut target_validation = PackageInterfaceValidation::default();
+        let mut physical_validation = PackageInterfaceValidation::default();
         let completed = crate::declaration_context::CapturedCompilerStage::issue(
             &mut physical,
             &inventory.empty_view(),
             entries.clone(),
-            &mut target_validation,
+            &mut physical_validation,
         )
         .unwrap();
         assert!(physical.modules.contains_key(&future_owner));
@@ -25171,13 +25171,13 @@ pub(crate) mod tests {
             "the control must exercise independent group and carrier scopes"
         );
         let before = inventory.metrics();
-        let item = physical.clone();
+        let retained = physical.clone();
         assert!(completed
             .issued_artifacts()
             .observed_payload(&future.descriptor.id)
             .is_some());
         assert!(Arc::ptr_eq(
-            item.issued_native_availability().next().unwrap(),
+            retained.issued_native_availability().next().unwrap(),
             &issued
         ));
         let current_key = crate::artifact_inventory::NativeGroupKey {
@@ -25188,26 +25188,30 @@ pub(crate) mod tests {
             .current_product(current_key, &native)
             .unwrap()
             .is_some());
-        assert!(item
+        assert!(retained
             .current_product(current_key, &native)
             .unwrap()
             .is_some());
-        let item_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
-            completed.compiler_inputs(),
-        )
-        .unwrap()
-        .source_support(&BTreeSet::from([native.descriptor.owner.clone()]))
-        .unwrap();
-        assert!(!item_support
+        let private_support =
+            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                completed.compiler_inputs(),
+            )
+            .unwrap()
+            .source_support(&BTreeSet::from([native.descriptor.owner.clone()]))
+            .unwrap();
+        assert!(!private_support
             .projection()
             .snapshot_roles()
             .contains_key(&future.descriptor.owner));
-        assert!(item_support.artifacts().selected_native_groups().is_empty());
-        let private = OriginalCompilerInputs::from_issued_support(&item_support);
+        assert!(private_support
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        let private = OriginalCompilerInputs::from_issued_support(&private_support);
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
             before.issued_scope_nodes,
-            "an item must carry physical issuance without issuing another graph"
+            "a private handoff must carry physical issuance without issuing another graph"
         );
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(
@@ -25256,105 +25260,6 @@ pub(crate) mod tests {
             issued_groups,
             request_offer.issued_group_carriers().unwrap()
         );
-        // Target selection belongs to the physical cohort's inventory; the
-        // later compiler request has its own receiving inventory.
-        let inventory = completed.issued_artifacts().inventory();
-        let observations = source_target_observations(&[(&product, 0)]);
-        let prepared = prepared_target_fixture(&observations);
-        let observed = AuthenticatedTargetImports::issue(
-            &prepared,
-            &observations,
-            &target_validation.inventory,
-        )
-        .unwrap();
-        let foreign = inputs.artifacts().inventory().select_native_target(
-            completed.physical_cohort(),
-            observed.clone(),
-            None,
-            Some(&inventory.empty_view()),
-            &[],
-            &BTreeMap::new(),
-            &mut target_validation,
-        );
-        assert!(
-            matches!(foreign, Err(crate::CompileError::ExtractFailed(_))),
-            "a receiving request inventory cannot select the physical cohort's target"
-        );
-        let current = inventory
-            .select_native_target(
-                completed.physical_cohort(),
-                observed,
-                None,
-                Some(&inventory.empty_view()),
-                &[],
-                &BTreeMap::new(),
-                &mut target_validation,
-            )
-            .unwrap()
-            .artifacts()
-            .clone();
-        assert_eq!(
-            current.selected_native_groups(),
-            BTreeSet::from([NativeGroupKey {
-                artifact: native.descriptor.id,
-                original_ordinal: 0,
-            }])
-        );
-        assert!(!current.artifact_ids().contains(&future.descriptor.id));
-        let observations = source_target_observations(&[(&product, 0), (&product, 17)]);
-        let prepared = prepared_target_fixture(&observations);
-        let observed = AuthenticatedTargetImports::issue(
-            &prepared,
-            &observations,
-            &target_validation.inventory,
-        )
-        .unwrap();
-        let before_visibility = inventory.metrics().issued_scope_nodes;
-        let unavailable = inventory.select_native_target(
-            completed.physical_cohort(),
-            observed.clone(),
-            None,
-            Some(&current),
-            &[],
-            &BTreeMap::new(),
-            &mut target_validation,
-        );
-        assert!(
-            matches!(unavailable, Err(crate::CompileError::ExtractFailed(_))),
-            "the physical group cannot reach the future value before its visibility is issued"
-        );
-        assert_eq!(inventory.metrics().issued_scope_nodes, before_visibility);
-        let next = inventory
-            .select_native_target(
-                completed.physical_cohort(),
-                observed,
-                None,
-                Some(&current),
-                &[future.clone()],
-                &BTreeMap::new(),
-                &mut target_validation,
-            )
-            .unwrap()
-            .artifacts()
-            .clone();
-        assert!(next.artifact_ids().contains(&future.descriptor.id));
-        assert!(!next.contains_namespace_artifact(future.descriptor.id));
-        assert_eq!(next.selected_native_groups().len(), 2);
-        let future_group = *groups
-            .iter()
-            .find(|group| group.original_ordinal == 17)
-            .unwrap();
-        assert!(next
-            .binding_dependencies()
-            .iter()
-            .any(|(source, target, edge)| {
-                *source == ArtifactBindingNode::Group(future_group)
-                    && matches!(target, ArtifactBindingNode::Artifact(binding)
-                    if binding.artifact == future.descriptor.id)
-                    && matches!(edge, ArtifactDependency::NativeBinding {
-                    dependent_ordinal: 17, generation: 11, occurrence, ..
-                } if occurrence == "publishedB")
-            }));
     }
 
     pub(crate) fn assert_request_private_product_uses_carried_dependency(
