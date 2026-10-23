@@ -139,7 +139,7 @@ struct NativeTransportCoverage {
     equal_payload_scopes: usize,
     shared_carriers: usize,
     distinct_carriers: usize,
-    full_without_demand: usize,
+    issued_demand_preservations: usize,
     partial_with_ambient_full: usize,
     custody_expansions: usize,
     captures: usize,
@@ -547,8 +547,8 @@ fn replay_native_transport_history(
         )
     };
     let private = std::array::from_fn::<_, 2, _>(|index| {
-        // This is a selected existing Input root, independently of its empty
-        // executable demand. Dependency bodies remain private type support.
+        // The existing role issuer selects the parent Original's exact Group
+        // root. Its TYPE child is reached through the issued dependency edge.
         let root_projection = interfaces
             .merge(
                 &CompilerInputProjection::from_issued_entries(&[entries[index + 1].clone()])
@@ -575,15 +575,7 @@ fn replay_native_transport_history(
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(binding(&selected, id), binding(&sources[index], id));
         }
-        let complete_input =
-            issue_fixture_compiler_support(root_projection.clone(), selected).unwrap();
-        let roots = root_projection
-            .roles()
-            .into_iter()
-            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
-            .collect();
-        let support = complete_input.select_support_roots(roots).unwrap();
-        assert!(support.same_selected_acquisitions(&complete_input));
+        let support = issue_fixture_compiler_support(root_projection, selected).unwrap();
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(
                 binding(support.artifacts(), id),
@@ -615,7 +607,36 @@ fn replay_native_transport_history(
             .unwrap();
         assert!(dependency_row.permits(if index == 0 || overlap { 7 } else { 9001 }));
         assert!(!dependency_row.permits(if index == 0 || overlap { 9001 } else { 7 }));
-        assert!(support.artifacts().selected_native_groups().is_empty());
+        let expected_parent = *expected[index]
+            .keys()
+            .find(|group| {
+                group.binding.artifact() == entries[index + 1].descriptor.id
+                    && group.original_ordinal == 7
+            })
+            .unwrap();
+        assert_eq!(
+            support
+                .artifacts()
+                .capture_graph_selection()
+                .roots
+                .into_iter()
+                .filter_map(|root| match root {
+                    ArtifactBindingNode::Group(group) => Some(group),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([expected_parent])
+        );
+        assert_eq!(
+            support.artifacts().selected_native_groups(),
+            expected[index]
+                .keys()
+                .map(|group| NativeGroupKey {
+                    artifact: group.binding.artifact(),
+                    original_ordinal: group.original_ordinal
+                })
+                .collect()
+        );
         let input = OriginalCompilerInputs::from_issued_support(&support);
         assert_eq!(input.role_projection(), support.projection());
         assert!(input
@@ -645,9 +666,9 @@ fn replay_native_transport_history(
     joined_support = closed[0].merge(&joined_support).unwrap();
     let joined = OriginalCompilerInputs::from_issued_support(&joined_support);
     coverage.namespace_pins += 1;
-    // The private product constructor deliberately has no full issuer view.
-    // Eager-fold equivalence is covered by the independently issued history
-    // above; this history follows the real opaque-owner consumer path.
+    // This history transports the issued execution graph and its opaque owners.
+    // Full availability without demand is covered by the actual captured-output
+    // control full_native_choices_survive_role_and_output_projection_without_demand.
     let before_retention = base_context.artifact_view().capture_graph_selection();
     let retained = base_context
         .artifact_view()
@@ -666,7 +687,44 @@ fn replay_native_transport_history(
         .unwrap();
     coverage.joined_preparations += 1;
     let inputs = request.compiler_inputs();
-    assert!(inputs.metadata().retained.selected_native_groups.is_empty());
+    let winning_indices = if same_root { vec![0] } else { vec![0, 1] };
+    let expected_native = winning_indices
+        .iter()
+        .flat_map(|index| expected[*index].keys())
+        .map(|group| NativeGroupKey {
+            artifact: group.binding.artifact(),
+            original_ordinal: group.original_ordinal,
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_parent_roots = winning_indices
+        .iter()
+        .map(|index| {
+            *expected[*index]
+                .keys()
+                .find(|group| {
+                    group.binding.artifact() == entries[*index + 1].descriptor.id
+                        && group.original_ordinal == 7
+                })
+                .unwrap()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        inputs.metadata().retained.selected_native_groups,
+        expected_native
+    );
+    assert_eq!(
+        inputs
+            .artifacts()
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|root| match root {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        expected_parent_roots
+    );
     assert_eq!(
         inputs.projection().snapshot_roles()[&entries[1].descriptor.owner].original(),
         Some(entries[1].descriptor.id)
@@ -694,9 +752,20 @@ fn replay_native_transport_history(
         issued_mode(if overlap { &[7] } else { &[7, 9001] }),
         "a union of issued dependency groups never issues Full"
     );
-    assert!(wire_groups(&request).values().all(Vec::is_empty));
+    let expected_wire = entries
+        .iter()
+        .map(|entry| {
+            let ordinals = expected_native
+                .iter()
+                .filter(|group| group.artifact == entry.descriptor.id)
+                .map(|group| group.original_ordinal)
+                .collect::<Vec<_>>();
+            (entry.descriptor.owner.module.clone(), ordinals)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(wire_groups(&request), expected_wire);
     assert_eq!(wire_mode(&request, "IndependentLeft"), full_mode());
-    coverage.full_without_demand += 1;
+    coverage.issued_demand_preservations += 1;
     for index in 0..2 {
         let availability = inputs.native_availability(proofs[index].original).unwrap();
         assert!(availability
@@ -1111,11 +1180,30 @@ fn replay_native_transport_history(
         )
         .unwrap();
     let continued_inputs = continued_request.compiler_inputs();
-    assert!(continued_inputs
-        .metadata()
-        .retained
-        .selected_native_groups
-        .is_empty());
+    assert_eq!(
+        continued_inputs.metadata().retained.selected_native_groups,
+        produced
+            .compiler_inputs()
+            .issued_artifacts()
+            .selected_native_groups()
+    );
+    assert_eq!(
+        continued_inputs
+            .artifacts()
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
+            .collect::<BTreeSet<_>>(),
+        produced
+            .compiler_inputs()
+            .issued_artifacts()
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
+            .collect::<BTreeSet<_>>()
+    );
     let continued_selection =
         crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             continued_inputs,
@@ -1196,7 +1284,7 @@ fn replay_native_transport_history(
 }
 
 #[test]
-fn private_transport_preserves_independent_closures_until_exact_demand() {
+fn private_transport_preserves_independent_closures_and_exact_demand() {
     let mut coverage = NativeTransportCoverage::default();
     for same_root in [false, true] {
         for overlap in [false, true] {
@@ -1233,7 +1321,7 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
     assert_eq!(coverage.equal_payload_scopes, 16);
     assert_eq!(coverage.captures, 72);
     assert_eq!(coverage.partial_with_ambient_full, 24);
-    assert_eq!(coverage.full_without_demand, 24);
+    assert_eq!(coverage.issued_demand_preservations, 24);
     assert_eq!(coverage.joined_preparations, 24);
     assert_eq!(coverage.namespace_pins, 24);
     assert_eq!(coverage.output_request_preparations, 24);
