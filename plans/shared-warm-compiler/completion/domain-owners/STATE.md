@@ -3,18 +3,18 @@
 Updated 2026-10-23. G2/G3 remain unqualified.
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted plan: `LIVE-COMPLETION.md`.
-Current implementation checkpoint: `051e6b7e1c`; joined validation in progress.
+Current implementation checkpoint: `4d2da2e663`; joined validation in progress.
 This is a review branch, not a release-qualified checkpoint.
 
 | Work | State | Evidence / remaining check |
 |---|---|---|
 | Receiver-bound checked extension | Integrated | Promotion and equal-witness controls passed at 9db5; decisions are applied once |
 | Strict append versus independent reconciliation | Integrated | Actual source-grant premise corrected; joined history execution pending |
-| Actual selected rows and paired index base | Integrated | 97264 compiled; World capture/publication advanced; direct new-value closure regression added, operand fixture repaired at392bd |
-| Pending certificate data / mandatory captured products | Integrated | Consuming capture, legal native phases, all known callers compile at97264; capture/selection separation control passes |
+| Actual selected rows and paired index base | Integrated | 051e compiled; independent no-operand prefix case registered at32b6; corrected production operand recipe integrated at22c7, execution pending |
+| Pending certificate data / mandatory captured products | Integrated | Consuming capture and legal native phases; all25 production/cfg consumers compile at051e; capture/selection separation control passes |
 | Prepared exact request/backing owner | Integrated | All four transport controls have passing evidence across 9db5/a840/de968 |
 | Module-local Haskell fixture producers | Integrated | FatIface 11/11 and sourceboot 4/4 passed at 9db5 |
-| Independent producer-B history | Integrated, source-reviewed | Executes at97264; source-scope projection refuses before final seal; exact owner diagnostic added atc2a |
+| Independent producer-B history | Integrated, failing | 051e proves terminal output drops unused Lib.G90 while inherited SOURCE scope still requires it; bounded projection repair in flight |
 | Actual World declaration/capture history | Still failing at b493 | Initial capture/publication pass; post-declaration reuse rejects Val.G1.historyValue0 |
 
 The live projection-to-receipt reconstruction route, optional capture fallback,
@@ -40,27 +40,28 @@ is not an accepted repair.
 
 ## Open tranche closeout work
 
-- A compiler-row merge promotes recorded available native choices to executable
-  roots. Keep actual winning execution demand separate from available choices;
-  retain independently selected roots without a compiler Original, and refuse
-  genuine competing exact bindings. The merge repair is integrated at1ebf; adjacent request-close narrowing remains
-  under direct review, since it also compares choices with executable roots.
-- Physical future-value fixture selected an unissued ordinary compiler role.
-  Retain the actual certificate privately, then test target refusal before runtime
-  visibility and exact dependency reachability afterward. Do not invent source
-  or produced-value authority.
-- Authored publication fixture applied an endorsement to pre-finalization support;
-  c2a uses the actual finalized issuer and preserves the wrong-owner refusal.
-  e3fb distinguishes ordinary publication from explicit request-choice issuance.
-- Producer B reaches its body and clean compiler shutdown, then source-scope
-  preservation refuses. Missing versus changed canonical owner remains unobserved;
-  c2a adds filtered logging and e3fb retains exact owner/optional IDs in the
-  error itself. The unit process had no subscriber; missing debug events prove nothing.
-- Actual World operand fixture revision392bd did not establish the required
-  authored alias. Production explicitly composes a qualified host-input import
-  and alias; the compiler exposure is only a reverse demand association. The two
-  operand tests now reach narrower setup failures. Trace the actual template and
-  unused-operand retention contract before changing assertions again.
+- Choice/demand repair: 7d203/aafa preserves each surviving Original's native
+  choice through role, output and request projection, without manufacturing
+  executable roots. Unissued policy retains actual exact roots until the request
+  issuer decides. Source-reviewed; warm execution pending. Additional rival-issuer
+  and refusal controls are in flight. A stale merge test must test whole Receiving
+  precedence, not require distinct native choices to compare as identical facts.
+- Physical future-value fixture: supplying bytes without selecting the physical
+  TYPE role cannot issue its dependency. Repair the positive full physical cohort,
+  then narrow through the existing item projection. Keep missing dependency and
+  invisible runtime value refusals. No production authority change is approved.
+- Authored history: 4d2d branches source and World continuation from the same
+  actual published helper. The prior test installed incoming TYPE rows before
+  asserting a nonempty World delta. Wrong-owner and issuance-phase checks remain.
+- Producer B: exact retained diagnostics identify missing `main:Tidepool.Session.Lib.G90`,
+  not a changed Helper identity. Terminal output must project inherited lexical
+  scope using actual output roles plus consumed obligations. Persistent extension
+  stays strict; required missing and changed canonical owners must still refuse.
+- Operand controls: 22c7 restores the production qualified import and input alias;
+  unused operand TYPE retention is checked separately from emitted/demanded values.
+  The new no-operand prefix case isolates physical/current-prefix ownership from
+  any operand installation defect. A possible compiler Finder/interface installation
+  gap remains an unqualified lead, not permission to grant SOURCE authority.
 
 After these checks settle, independent adversarial reviewers must challenge the
 ownership boundaries, production consumers and discriminating test evidence.
@@ -83,10 +84,16 @@ A later failure boundary does not by itself qualify this tranche or G2.
 - c2a: four behavioral tests executed and failed; all process/compiler cleanup
   confirmed. No Rust subscriber was established for the filtered debug event.
   At1ebf the final25-consumer compile found three ordinary borrow/privacy errors;
-  051e repairs all three. The same25 compile plus nine controls are queued.
-- 2de75d9177: host cfg compiled; later joined host compilation remains pending.
+  051e repairs all three.
+- 051e: all25 production/cfg consumers compiled, including actor and host. Nine
+  controls executed: four passed, five failed. Exact issuer/demand merge, affinity,
+  and capture/selection controls pass. Failures: native choices lost on handoff,
+  physical fixture dependency, authored delta premise, producer-B scope, and merge
+  fixture premise. All process and resident compiler cleanup was confirmed.
+- 4d2d: owning toolchain production/cfg compile and focused execution are running.
+  Later test evidence must name this pin; the prior25 pass is not a new full25 pass.
 
-Exact evidence lives in `9726-checkpoint.json`, `b493-checkpoint.json`, and the
+Exact evidence lives in `051e-checkpoint.json`, `9726-checkpoint.json`, `b493-checkpoint.json`, and the
 individual logs/reports. Next: settle the bounded owner repairs and execute the
 actual World operand controls, then perform adversarial review of the consolidated
 revision. G2 cohorts and matched frozen Persona qualification remain pending;

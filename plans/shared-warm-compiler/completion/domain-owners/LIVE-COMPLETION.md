@@ -96,7 +96,7 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The accepted structural boundaries are integrated through `051e6b7e1c`;
+The accepted structural boundaries are integrated through `4d2da2e663`;
 see `STATE.md` for exact compile/execution evidence and pending gates.
 Closeout still includes actual demand versus carried choices and fixture-owner
 contracts. These remain unqualified until the joined behavior and independent
