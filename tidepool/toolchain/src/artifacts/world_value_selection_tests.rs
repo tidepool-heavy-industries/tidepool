@@ -490,10 +490,14 @@ fn assert_private_future_dependency(
                 )
                 .map_err(compiler_evidence_failure)?;
             before_retry.assert_item_reuses_segment(&segment.originals, &retried);
-            assert!(retried
-                .compiler_inputs()
-                .compiler_source_support()
-                .same_selected_acquisitions(certified.compiler_inputs().compiler_source_support()));
+            assert!(Arc::ptr_eq(
+                retried.captured_stage(),
+                certified.captured_stage()
+            ));
+            assert_eq!(
+                retried.compiler_inputs().role_projection(),
+                certified.compiler_inputs().role_projection(),
+            );
             assert_eq!(retry_packages, packages);
 
             let before_foreign = foreign_inventory.metrics().issued_scope_nodes;
