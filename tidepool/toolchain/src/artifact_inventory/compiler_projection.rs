@@ -5601,18 +5601,28 @@ impl CompilerSourceSupport {
         let availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
             selection.issued_native_availability().cloned(),
         )?;
-        let fragment = Self::from_authenticated_rows(
-            incoming,
-            artifacts.clone(),
-            selected.rows.into_iter().collect(),
+        let base = &selection.current_compiler_selection().base;
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.program_source",
+            "carry_selected_rows",
+        );
+        let fragment = Self::complete_resolved(
+            ResolvedCompilerInputs {
+                projection: base.projection.clone(),
+                artifacts: artifacts.clone(),
+                selected,
+                input_decisions: base.input_decisions.clone(),
+            },
             selection
                 .issued_native_availability()
                 .flat_map(|row| row.offers().cloned()),
             availability,
-            RecordedInputNativeDecisions::default(),
-            selection.native_fact_base(),
-            selection.acquired_native_closures(),
-        )?;
+            Some(base.native_fact_owner()),
+            base.acquired_native_closures().clone(),
+            &mut timing,
+        )?
+        .close()?;
+        timing.finish(true);
         self.merge_output_fragments(&fragment)
     }
 
