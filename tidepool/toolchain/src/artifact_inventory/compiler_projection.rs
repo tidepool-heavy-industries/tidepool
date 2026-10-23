@@ -625,13 +625,22 @@ impl PartialEq<RecordedCompilerRole> for CompilerInputRole {
 
 /// One compiler namespace selected by accepted declarations and import proofs.
 /// Availability and executable native demand remain in the retained view.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct CompilerInputProjection {
     roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
     // Updated only with changed roles. Snapshots borrow this pure fact root;
     // live roles separately retain their actual acquired publication owners.
     recorded_roles: imbl::OrdMap<ExactModuleIdentity, RecordedCompilerRow>,
 }
+
+impl PartialEq for CompilerInputProjection {
+    fn eq(&self, other: &Self) -> bool {
+        // Assembly compares role facts only. The derived encoding index also
+        // carries native choices and cannot decide an acquired row's authority.
+        self.roles == other.roles
+    }
+}
+impl Eq for CompilerInputProjection {}
 
 /// Acquired compiler-prefix code is retained with its exact occurrence grants.
 /// Scalar records support persistence; equal records never replace live owners.
@@ -9487,10 +9496,13 @@ mod tests {
         };
         let import = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
             let definitions =
-                crate::certified_products::original_native_group_definitions(product, ordinal).unwrap();
+                crate::certified_products::original_native_group_definitions(product, ordinal)
+                    .unwrap();
             let binder = match &definitions.bindings()[0] {
                 tidepool_repr::execution_schema::Group::NonRecursive(binding) => &binding.identity,
-                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0].identity,
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
+                    &bindings[0].identity
+                }
             }
             .clone();
             PendingImportOwner::Source {
