@@ -272,10 +272,6 @@ fn admit_original_entry(
                     Some((&table, &sites)),
                     None,
                     OriginalOutputPublication::RetainedEntry,
-                    None,
-                    None,
-                    None,
-                    None,
                     Some((&native.native_output(), &native.receipt)),
                     validation,
                 )?
