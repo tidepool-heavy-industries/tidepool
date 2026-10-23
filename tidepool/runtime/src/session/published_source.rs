@@ -7,7 +7,7 @@ use tidepool_toolchain::artifacts::PublishedSourceOriginalSelection;
 use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 
 use super::admission::RuntimeAdmissionOwner;
-use super::{PersistentSession, PublicVisibilitySnapshot, SessionError};
+use super::{PersistentSession, PublicVisibilitySnapshot, SessionError, SessionTransitionReason};
 
 /// A composed original selection awaiting the same installation's settlement.
 /// Dropping this token changes neither the public compiler view nor its epoch.
@@ -40,10 +40,10 @@ impl PersistentSession {
     ) -> Result<PendingPublishedSourceOriginals, SessionError> {
         let admitted = self
             .public_visibility_snapshot_in(scope)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+            .ok_or(SessionTransitionReason::ScopeRevoked)?;
         let view_digest = self
             .compile_view_digest_in(scope)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+            .ok_or(SessionTransitionReason::ScopeRevoked)?;
         let base = self.lib().current_exact_context_in(scope);
         let mut context = match base {
             Some(base) => (*base).clone(),
@@ -71,10 +71,17 @@ impl PersistentSession {
         let scope = pending.admitted.scope;
         if !Arc::ptr_eq(&pending.owner, self.admission_owner())
             || pending.owner_epoch != self.admission_owner().epoch()
-            || self.public_visibility_snapshot_in(scope).as_ref() != Some(&pending.admitted)
-            || self.compile_view_digest_in(scope) != Some(pending.view_digest)
         {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(SessionTransitionReason::OwnerChanged.into());
+        }
+        let current = self
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionTransitionReason::ScopeRevoked)?;
+        let view_digest = self
+            .compile_view_digest_in(scope)
+            .ok_or(SessionTransitionReason::ScopeRevoked)?;
+        if current != pending.admitted || view_digest != pending.view_digest {
+            return Err(SessionTransitionReason::PublicBaselineChanged.into());
         }
         let epoch = self.prepare_public_visibility_advance(scope)?;
         let tip = pending.admitted.declaration_tip;
