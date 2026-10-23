@@ -81,7 +81,7 @@ import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts, newPreparedOriginalInterfaceArtifacts, retainTypeInterfaceCaptures, retainedTypeInterfaceBody)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, pprPackageImports, preparedFreshDependencies, prHscEnv, prResultType, PipelineSelection(..)
-  , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected, withSourceImportIntents )
+  , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
   , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope, writeGenuineCandidateManifestFor )
@@ -93,7 +93,6 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.ModuleCandidates (candidateModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
-import Tidepool.Binders (analyzeCellWithFlags, CellSourcePlan(..))
 import SourceBootCases (admitCheckedScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, captureDiagnostics, capturePreparedFixture
@@ -1132,11 +1131,7 @@ unownedUpToDateDependency = withTiming $ withScratch $ \work -> do
     let consumer = work </> "CurrentOriginalConsumer.hs"
         session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
     writeFile consumer "module CurrentOriginalConsumer where\nimport MetadataCurrentSourceTarget qualified as Original\n__result :: Int\n__result = Original.__result\n"
-    parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult prepared))) ""
-      "import MetadataCurrentSourceTarget qualified as Original\nOriginal.__result"
-      >>= either (fail . show) pure
-    let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
-    _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
+    _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile admitted)
       (Just session) consumer [work] Nothing
     copyFile (fixtures </> "MetadataQuoteSupportChanged.hs") owner
     (_, changedDiagnostics) <- captureDiagnostics $

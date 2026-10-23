@@ -124,7 +124,7 @@ import Tidepool.GhcPipeline
   , heldWorldCellQuestion, heldWorldCellPlan, heldWorldCellSlots
   , WorldCellRefusal(..), CompilerTransactionFailure(..), emitWorldAcquisitionRejection
   , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts, prTargetTcGblEnv
-  , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
+  , preparedExactCompilation, preparedFreshDependencies
   , withResidentCompilerScopes, scopedRunGhc )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ImportSyntax
@@ -3278,11 +3278,8 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
       includes = [emptyRoot,work]
   createDirectory emptyRoot
   admitted <- admitCheckedScope retained includes []
-  plan <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
-    "import CanonicalSource as Source (Answer)\nimport CanonicalSource (Answer)\n(1 :: Answer)"
-    >>= either (fail . show) pure
   prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
-    (ExactScopeCompile (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile) admitted)
+    (ExactScopeCompile GeneralCompile admitted)
     (Just emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)})
     source includes Nothing
   compilation <- maybe (fail "publication fixture has no exact completion") pure

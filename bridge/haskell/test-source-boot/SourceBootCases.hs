@@ -193,7 +193,8 @@ import Tidepool.ExactHydration
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
   , generatedScaffoldRecipeWithImportRendering
-  , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
+  , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe
+  , generatedCheckingTemplateRecipeWithImportRendering )
 import Tidepool.TypedSegment.Source
   ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope
   , moduleImportRequests, moduleDemandCapturedImports )
@@ -211,7 +212,7 @@ import Tidepool.GhcPipeline
   , retainProgramSourceImports, withProgramSourceImports
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
   , retainedCompilerArtifactClosure, retainedCompilerInterface
-  , renderType, generatedScaffoldRecipe, activationPreviewInputType, withSourceImportIntents
+  , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
   , withResidentPipelineSelectedRequests, withExactInterfaceTransaction, withResidentCompilerScopes )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
@@ -794,9 +795,7 @@ canonicalMixedSourceAdjacency = withScratch $ \work -> do
   original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
     Nothing (originalRoot </> "CanonicalMixedConsumer.hs") [originalRoot] Nothing
   fixture <- capturePreparedFixture originalRoot original
-  parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
-    "import CanonicalMixedSupport\n(1, 2, 3 :: Int)" >>= either (fail . show) pure
-  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+  let purpose = GeneralCompile
   withResidentPipelineSelected includes $ \compile ->
     forM_ [0::Int .. 7] $ \mask' -> forM_ [False,True] $ \reversed -> do
       let history = work </> (show mask' ++ "-" ++ show reversed)
@@ -905,10 +904,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile purpose = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
-  parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
-    "import CanonicalSource as Source (Answer)\nimport CanonicalSource (Answer)\n(1 :: Answer)"
-    >>= either (fail . show) pure
-  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+  let purpose = GeneralCompile
   originalBytes <- BS.readFile owner
   dependencyBytes <- BS.readFile (work </> "CanonicalDependency.hs")
   withResidentPipelineSelected includes $ \compile -> do
@@ -971,10 +967,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
         localOwner = ("main","CanonicalLocalSupport")
         localSource = work </> "CanonicalLocalSupport.hs"
         captureDirectory = work </> "local-original-capture"
-    parsedLocal <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
-      "import CanonicalLocalSupport\n(1 :: Answer)" >>= either (fail . show) pure
-    let localPurpose = withSourceImportIntents (cellPlanPrologue parsedLocal) GeneralCompile
-    captured <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile localPurpose admitted)
+    captured <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile GeneralCompile admitted)
       (Just session) localTarget includes Nothing
     createDirectory captureDirectory
     originals <- newOriginalInterfaceArtifacts (prHscEnv (pprPipelineResult captured))
@@ -1199,15 +1192,30 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
   base <- readExactScope scopePath >>= either fail pure
   admitted <- admitCheckedScope base includes []
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
-      parsedPurpose flags source = do
-        plan <- analyzeCellWithFlags flags "" source >>= either (fail . show) pure
-        pure (withSourceImportIntents (cellPlanPrologue plan) GeneralCompile)
-  writeFile target (targetSource "import MetadataQuotedTarget\nimport MetadataHiddenQuoted ()")
+      protectedTemplate = targetSource ("import MetadataHiddenQuoted ()\n" ++ preambleImportMarker)
+  -- The hidden original is a compiler dependency. Only the genuinely parsed
+  -- submitted import contributes a reusable authored source root.
   flags <- defaultParserDynFlags
-  requested <- parsedPurpose flags "import MetadataQuotedTarget\n(7 :: Int)"
+  authored <- analyzeCellWithFlags flags protectedTemplate "import MetadataQuotedTarget\n(7 :: Int)"
+    >>= either (fail . show) pure
+  rendered <- either fail pure $ replaceImportRendering preambleImportMarker
+    (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
+      (literalImportRendering preambleImportMarker)) (literalImportRendering protectedTemplate)
+  writeFile target (importRenderingSource rendered)
+  protected <- either fail pure
+    (captureProtectedTemplateImports flags protectedTemplate >>= renderProtectedTemplateImports 0)
+  initialRecipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+    protected protectedTemplate rendered target "CompletedOriginalConsumer" >>= either fail pure
   withResidentPipelineSelected includes $ \compile -> do
     completed <- compile (PreparedProducts (if reuseCandidate then Just (manifest work) else Nothing))
-      Set.empty (ExactScopeCompile requested admitted) (Just session) target includes Nothing
+      Set.empty (ExactScopeCompile (GeneratedScaffoldCompile initialRecipe GeneralCompile) admitted)
+      (Just session) target includes Nothing
+    initialAdmission <- maybe (fail "completed import fixture omitted its actual source admission") pure
+      (preparedExactCompilation completed)
+    let rootRoles = sourceImportsHomeRoles (compilationSourceImports initialAdmission)
+    unless ([mask | ("none","MetadataQuotedTarget",False,"main",mask) <- rootRoles] == [1]
+        && [mask | ("none","MetadataHiddenQuoted",False,"main",mask) <- rootRoles] == [4])
+      (fail "completed imports lost their actual authored and protected source owners")
     unless (map candidateModule (pprAcceptedCandidates completed)
         == (if reuseCandidate then ["MetadataQuoteSupport"] else []))
       (fail "completed import fixture did not exercise its selected cached provider")
@@ -1298,12 +1306,11 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     initialRuns <- lines <$> readFile marker
     unless (length initialRuns >= 2) (fail "fresh and hidden support did not execute the real quoter")
     writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
-    aliased <- parsedPurpose flags "import qualified MetadataQuotedTarget as Captured\n(7 :: Int)"
     _ <- compile CheckedEnvironment Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
+      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
       (Just session) target includes Nothing
     later <- compile (PreparedProducts Nothing) Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
+      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
       (Just session) target includes Nothing
     unless (null (preparedNames later) || preparedNames later == ["CompletedOriginalConsumer"])
       (fail "later pass rebuilt retained authored support")
@@ -1324,7 +1331,7 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
         writeFile target quotedTarget
         (quotedAgain, diagnostics) <- captureDiagnostics $
           compile (PreparedProducts Nothing) Set.empty
-            (ExactScopeCompile (withProgramSourceImports imports aliased) retained)
+            (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
             (Just session) target includes Nothing
         unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult quotedAgain))
             && counterValues "exact_execution_original_load_owners" diagnostics == [2]
@@ -1344,26 +1351,23 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     writeFile target (targetSource "import qualified MetadataQuotedTarget as Captured")
     requireOriginalSourceRejection "new cell cannot reuse completed original imports"
       (ExecutionSourceUnsupported root)
-      (compile CheckedEnvironment Set.empty (ExactScopeCompile aliased retained)
+      (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile retained)
         (Just session) target includes Nothing)
     writeFile target (targetSource "import \"this\" MetadataQuotedTarget")
-    qualified <- parsedPurpose flags "{-# LANGUAGE PackageImports #-}\nimport \"this\" MetadataQuotedTarget\n(7 :: Int)"
     requireOriginalSourceRejection "changed package qualifier requires current source"
       (ExecutionSourceUnsupported root)
       (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports qualified) retained)
+        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
         (Just session) target includes Nothing)
     writeFile target (targetSource "import MetadataHiddenQuoted")
-    hiddenPurpose <- parsedPurpose flags "import MetadataHiddenQuoted\n(7 :: Int)"
     requireOriginalSourceRejection "generated hidden original has no completed authored demand"
       (ExecutionSourceUnsupported hidden)
       (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports hiddenPurpose) retained)
+        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
         (Just session) target includes Nothing)
     writeFile target (targetSource "import MetadataQuoter")
-    newPurpose <- parsedPurpose flags "import MetadataQuoter\n(7 :: Int)"
     demanded <- compile (PreparedProducts Nothing) Set.empty
-      (ExactScopeCompile (withProgramSourceImports imports newPurpose) retained)
+      (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
       (Just session) target includes Nothing
     unless (maybe False (any ((== ("main","MetadataQuoter")) . firstOwner) . selectedOriginalRows)
         (preparedExactCompilation demanded >>= compilationSourceSelection))
@@ -1376,24 +1380,23 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
     requireOriginalSourceRejection "new selected dependency still requires its current-source receipt"
       (ExecutionSourceUnsupported root)
       (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports retainedImports requested) selected)
+        (ExactScopeCompile (withProgramSourceImports retainedImports GeneralCompile) selected)
         (Just session) target includes Nothing)
     originalBytes <- BS.readFile (work </> "MetadataQuotedTarget.hs")
     BS.appendFile (work </> "MetadataQuotedTarget.hs") "\n-- current source changed\n"
     requireOriginalSourceBytesChanged "new cell rechecks changed current source" root
       (work </> "MetadataQuotedTarget.hs") (digest originalBytes)
-      (compile CheckedEnvironment Set.empty (ExactScopeCompile requested retained)
+      (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile retained)
         (Just session) target includes Nothing)
     writeFile (work </> "MetadataQuotedTarget.hs") (T.unpack (TE.decodeUtf8 originalBytes))
     let helper = work </> "MetadataQuoteSupport.hs"
     helperBytes <- BS.readFile helper
     BS.appendFile helper "\n-- current dependency changed\n"
     writeFile target (targetSource "import MetadataQuoteSupport")
-    helperPurpose <- parsedPurpose flags "import MetadataQuoteSupport\n(7 :: Int)"
     requireOriginalSourceBytesChanged "new demand rechecks changed completed dependency"
       ("main","MetadataQuoteSupport") helper (digest helperBytes)
       (compile CheckedEnvironment Set.empty
-        (ExactScopeCompile (withProgramSourceImports imports helperPurpose) retained)
+        (ExactScopeCompile (withProgramSourceImports imports GeneralCompile) retained)
         (Just session) target includes Nothing)
   putStrLn "completed program imports: fresh/cached providers, arbitrary runIO original retained once, source-less later quoter, alias reuse, unaccepted provider, new cell/qualifier/hidden/new-demand and source/dependency drift controls"
   where
@@ -1425,10 +1428,7 @@ completedProgramSourceImportPairing = withTiming $ withScratch $ \work -> do
   base <- readExactScope scopePath >>= either fail pure
   admitted <- admitCheckedScope base includes []
   let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
-  flags <- defaultParserDynFlags
-  parsed <- analyzeCellWithFlags flags "" "import MetadataQuotedTarget\n(7 :: Int)"
-    >>= either (fail . show) pure
-  let purpose = ExactScopeCompile (withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile) admitted
+  let purpose = ExactScopeCompile GeneralCompile admitted
       prepare value = do
         writeFile expansion (show value)
         prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty purpose
@@ -1504,10 +1504,8 @@ canonicalSourceObligations = withTiming $ withScratch $ \work -> do
       && Map.member dependencyKey (scopeModuleInterfaceProofs base) == required
       && null (scopeProducts base) && null (scopeExecutionGraphs base)) $
     fail "unused import scope invented an interface or native obligation"
-  parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
-    "import CanonicalUnusedSource (Answer)\n(1 :: Answer)" >>= either (fail . show) pure
   admitted <- admitCheckedScope base includes []
-  let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+  let purpose = GeneralCompile
       session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       check compile = compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
         (Just session) consumer includes Nothing
@@ -2210,10 +2208,7 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
       -- This is a real authored current-source demand, separate from capture.
       -- This fixture has no checked include authority and must refuse before
       -- considering changed current source; it does not qualify drift checks.
-      parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult original))) ""
-        "import MetadataQuoteSupport (answerValue)\nanswerValue" >>= either (fail . show) pure
-      let current = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
-      refused <- try (void (compile CheckedEnvironment Set.empty current (Just scope)
+      refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
         (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
       case refused of
         Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable key)) | key == helperKey -> pure ()
@@ -2312,10 +2307,7 @@ exactReexportQuoter = withTiming $ withScratch $ \work -> do
       (work </> "ExecutionReexportTarget.hs") [work] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult changed))) $
       fail "captured reexport changed meaning with its former helper source"
-    parsed <- analyzeCellWithFlags (hsc_dflags environment) ""
-      "import MetadataQuoteSupport (answerValue)\nanswerValue" >>= either (fail . show) pure
-    let current = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
-    currentRefusal <- try (void (compile CheckedEnvironment Set.empty current (Just scope)
+    currentRefusal <- try (void (compile CheckedEnvironment Set.empty GeneralCompile (Just scope)
       (work </> "MetadataCurrentSourceTarget.hs") [work] Nothing)) :: IO (Either InputRejection ())
     case currentRefusal of
       Left (OriginalSourceSelectionRejected (ExecutionSourceUnavailable ("main","MetadataQuoteSupport"))) -> pure ()

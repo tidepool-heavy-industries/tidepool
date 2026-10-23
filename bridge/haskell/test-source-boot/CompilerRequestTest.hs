@@ -47,6 +47,7 @@ import Tidepool.ExecutionSchema (WireProgram(..), SymbolIdentity(..), Group(..),
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.PackageWitness (requireObservationPackageEnvironment)
 import Tidepool.ExactScope (decodeWorldSources)
+import Tidepool.ExactHydration (CheckedTemplateImports(..), generatedCheckingTemplateRecipe)
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.CertifiedProducts
   ( captureSelectedPackageWitnesses, encodeReceiptIdentity
@@ -158,11 +159,18 @@ worldRequestBoundaries = do
         Left CheckedPurposeMismatch -> pure ()
         Left failure -> throwIO failure
         Right _ -> fail "held World request entered the generic compiler path"
-      conflict <- try (compileBoundRequest request CheckedEnvironment Set.empty
-        (ParsedImportSelection [] (ParsedImportSelection [] GeneralCompile)) Nothing "/unavailable/target.hs")
-        :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
-      unless (either (== DuplicateCompilePurposeSetting "ParsedImportSelection") (const False) conflict)
-        (fail "conflicting compile purpose was not refused before held-world work")
+      withScratch $ \work -> do
+        let path = work </> "PurposeConflict.hs"
+            source = "module PurposeConflict where\nvalue = ()\n"
+        writeFile path source
+        recipe <- generatedCheckingTemplateRecipe (scopedParserFlags scope)
+          (CheckedTemplateImports [] []) source source path "PurposeConflict" >>= either fail pure
+        conflict <- try (compileBoundRequest request CheckedEnvironment Set.empty
+          (GeneratedScaffoldCompile recipe (GeneratedScaffoldCompile recipe GeneralCompile))
+          Nothing "/unavailable/target.hs")
+          :: IO (Either CompilePurposeConflict CheckedEnvironmentResult)
+        unless (either (== DuplicateCompilePurposeSetting "GeneratedScaffoldCompile") (const False) conflict)
+          (fail "conflicting compile purpose was not refused before held-world work")
       pure (void (boundWorldCellPreparation request))
     pure (latePlan,latePrepare)
   try latePlan >>= requireCancellation
