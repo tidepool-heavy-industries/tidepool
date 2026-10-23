@@ -16453,6 +16453,7 @@ impl ExactDeclarationContext {
         let scaffold = ProtectedScaffoldRequirements::default();
         let transport = NativeCompilerTransport::lower(scaffold.compiler_inputs(self, None)?)?;
         let metadata = &transport.metadata;
+        let transported_artifacts = transport.inputs.artifacts();
         if !root.is_absolute()
             || self
                 .owner
@@ -16460,6 +16461,9 @@ impl ExactDeclarationContext {
                 .compiler_support
                 .artifacts()
                 .retained_materialization(&metadata)?
+                .is_some()
+            || transported_artifacts
+                .retained_materialization(metadata)?
                 .is_some()
             || self.owner.facts.producer
                 != crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
@@ -16473,35 +16477,33 @@ impl ExactDeclarationContext {
         }
         std::fs::create_dir_all(root)?;
 
-        self.owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .retain_materialization(&metadata, |parents| {
-                if !parents.is_empty() {
-                    return Err(failure(
-                        "fixture delivery cannot borrow process-local artifact owners",
-                    ));
-                }
-                let mut directory = tempfile::Builder::new()
-                    .prefix("tidepool-exact-artifacts-")
-                    .tempdir_in(root)?;
-                let cleanup_on_failure = directory.path().to_path_buf();
-                // These paths already belong to the packet's scoped directory. Its
-                // owner releases them after the downstream process consumes them.
-                directory.disable_cleanup(true);
-                let result = self.materialize_retained_artifacts(
-                    transport.inputs.artifacts(),
-                    &metadata,
-                    parents,
-                    directory,
-                    &RequestInputTransport::DurableFiles,
-                );
-                if result.is_err() {
-                    let _ = std::fs::remove_dir_all(cleanup_on_failure);
-                }
-                result
-            })?;
+        // Lowering may issue a new selected view. Keep the packet's physical
+        // custody on the exact view consumed by request preparation.
+        transported_artifacts.retain_materialization(metadata, |parents| {
+            if !parents.is_empty() {
+                return Err(failure(
+                    "fixture delivery cannot borrow process-local artifact owners",
+                ));
+            }
+            let mut directory = tempfile::Builder::new()
+                .prefix("tidepool-exact-artifacts-")
+                .tempdir_in(root)?;
+            let cleanup_on_failure = directory.path().to_path_buf();
+            // These paths already belong to the packet's scoped directory. Its
+            // owner releases them after the downstream process consumes them.
+            directory.disable_cleanup(true);
+            let result = self.materialize_retained_artifacts(
+                transport.inputs.artifacts(),
+                &metadata,
+                parents,
+                directory,
+                &RequestInputTransport::DurableFiles,
+            );
+            if result.is_err() {
+                let _ = std::fs::remove_dir_all(cleanup_on_failure);
+            }
+            result
+        })?;
         self.prepare_compilation_from_metadata(
             root,
             producer,
