@@ -1563,6 +1563,37 @@ impl TryFrom<ExactLexicalNode> for CanonicalLexicalNode {
     }
 }
 
+impl CanonicalLexicalNode {
+    fn require_same(&self, previous: &ExactLexicalNode) -> Result<(), LexicalGraphError> {
+        if previous != &self.0 {
+            return Err(LexicalGraphError::ConflictingAdjacency {
+                owner: self.0.owner.clone(),
+                previous: previous.imports.clone(),
+                incoming: self.0.imports.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Compose DATA rows with the same canonical policy as resident facts, without
+/// encoding temporary immutable facts that the receiving owner would reissue.
+pub(crate) fn compose_lexical_nodes<'a>(
+    nodes: impl IntoIterator<Item = &'a ExactLexicalNode>,
+) -> Result<Vec<ExactLexicalNode>, crate::CompileError> {
+    let mut selected =
+        std::collections::BTreeMap::<ExactModuleIdentity, CanonicalLexicalNode>::new();
+    for node in nodes {
+        let node = CanonicalLexicalNode::try_from(node.clone())?;
+        if let Some(previous) = selected.get(&node.0.owner) {
+            node.require_same(&previous.0)?;
+        } else {
+            selected.insert(node.0.owner.clone(), node);
+        }
+    }
+    Ok(selected.into_values().map(|node| node.0).collect())
+}
+
 /// Canonical immutable lexical facts share resident nodes and their encoded bytes.
 #[derive(Clone, Debug)]
 pub struct ImmutableLexicalFactRef {
@@ -1618,14 +1649,7 @@ impl ExactLexicalSnapshot {
             });
             let node = CanonicalLexicalNode::try_from(node)?;
             if let Some(previous) = facts.get(&node.0.owner) {
-                if previous.node.as_ref() != &node.0 {
-                    return Err(LexicalGraphError::ConflictingAdjacency {
-                        owner: node.0.owner,
-                        previous: previous.node.imports.clone(),
-                        incoming: node.0.imports,
-                    }
-                    .into());
-                }
+                node.require_same(previous.node.as_ref())?;
                 continue;
             }
             let owner = node.0.owner.clone();

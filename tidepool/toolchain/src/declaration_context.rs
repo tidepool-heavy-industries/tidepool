@@ -17403,35 +17403,7 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
-/// Compose selections by exact owner and unordered import set. Duplicate
-/// edges inside an individual input remain malformed, and differing sets
-/// for one owner never acquire authority by union.
-pub(crate) fn compose_lexical_nodes<'a>(
-    nodes: impl IntoIterator<Item = &'a ExactLexicalNode>,
-) -> Result<Vec<ExactLexicalNode>, CompileError> {
-    let mut selected: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>> = BTreeMap::new();
-    for node in nodes {
-        let mut imports = node.imports.clone();
-        imports.sort();
-        if imports.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(failure("duplicate selected lexical import"));
-        }
-        if let Some(previous) = selected.get(&node.owner) {
-            if previous != &imports {
-                return Err(failure(format!(
-                    "conflicting selected lexical imports for {}:{}",
-                    node.owner.unit, node.owner.module
-                )));
-            }
-        } else {
-            selected.insert(node.owner.clone(), imports);
-        }
-    }
-    Ok(selected
-        .into_iter()
-        .map(|(owner, imports)| ExactLexicalNode { owner, imports })
-        .collect())
-}
+pub(crate) use crate::exact_context::compose_lexical_nodes;
 
 // These native-only fixtures export all payload custody in their exact view,
 // independently of selected executable demand. Partitioning grants no roles.
@@ -23467,8 +23439,9 @@ mod tests {
         let error = merged
             .extend_lexical_joins(&[], &[conflicting])
             .unwrap_err();
-        assert!(matches!(error, CompileError::ExtractFailed(detail)
-            if detail == "exact declaration context: conflicting selected lexical imports for fixture:Alpha"));
+        assert!(matches!(error, CompileError::LexicalGraph(cause)
+            if matches!(cause.as_ref(), crate::exact_context::LexicalGraphError::ConflictingAdjacency { owner, .. }
+                if *owner == identity("fixture", "Alpha"))));
 
         // A constructor still requires one row per owner; only explicit
         // composition may combine equal selections from independent receipts.
@@ -23481,8 +23454,9 @@ mod tests {
             .lexical
             .replace(duplicate)
             .unwrap_err();
-        assert!(matches!(error, CompileError::ExtractFailed(detail)
-            if detail == "duplicate selected lexical owner fixture:Alpha"));
+        assert!(matches!(error, CompileError::LexicalGraph(cause)
+            if matches!(cause.as_ref(), crate::exact_context::LexicalGraphError::DuplicateOwner { owner, .. }
+                if *owner == identity("fixture", "Alpha"))));
     }
 
     #[test]
