@@ -3885,7 +3885,7 @@ impl RuntimeCellAdmission {
                     match reservation.slots().get(index) {
                         Some(
                             Slot::Prologue { declaration } | Slot::Declaration { declaration },
-                        ) => Some(Generation(*declaration)),
+                        ) => Some(Generation(declaration)),
                         _ => None,
                     }
                 }
@@ -4292,15 +4292,15 @@ impl PersistentSession {
                     (
                         Slot::Prologue { declaration } | Slot::Declaration { declaration },
                         CheckedKind::Declaration,
-                    ) => (*declaration, None),
-                    (Slot::Bind { value }, CheckedKind::Bind) => (*value, None),
+                    ) => (declaration, None),
+                    (Slot::Bind { value }, CheckedKind::Bind) => (value, None),
                     (
                         Slot::Expression {
                             capture,
                             observation_name,
                         },
                         CheckedKind::Expression,
-                    ) => (*capture, Some(observation_name.clone())),
+                    ) => (capture, Some(observation_name)),
                     _ => return Err(SessionError::StaleStagedDeclaration),
                 };
                 (Generation(generation), observation)
@@ -4423,7 +4423,7 @@ impl PersistentSession {
             use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
             match reservation.slots().get(item.index()) {
                 Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
-                    Generation(*declaration)
+                    Generation(declaration)
                 }
                 _ => return Err(SessionError::StaleStagedDeclaration),
             }
@@ -5155,7 +5155,11 @@ impl PersistentSession {
         if !admission.belongs_to(self)
             || !Arc::ptr_eq(checked.reservation(), reservation)
             || program.admission_digest() != admission.digest()
-            || program.slots() != reservation.slots()
+            || program
+                .slots()
+                .iter()
+                .cloned()
+                .ne(reservation.items().iter().map(|item| item.slot()))
             || program.items().len() != checked.items().len()
             || program.items().iter().enumerate().any(|(ordinal, item)| {
                 item.checked_item().index() != ordinal
@@ -6568,7 +6572,10 @@ impl PersistentSession {
             if stages.contains_key(&stage) {
                 continue;
             }
-            let selected = checked.world_selected_dependency_terminals()?;
+            let selected = checked
+                .world_stage_dependencies()
+                .ok_or(super::SessionTransitionReason::WrongPhase)?
+                .terminals();
             let mut bound = Vec::with_capacity(selected.len());
             for terminal in selected {
                 let module = tidepool_repr::SessionModule::val(Generation(terminal.generation()));

@@ -1517,8 +1517,9 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
                         .iter()
                         .flat_map(|item| {
                             item.checked_item()
-                                .world_selected_dependency_terminals()
-                                .unwrap()
+                                .world_stage_dependencies()
+                                .map(|owner| owner.terminals().collect::<Vec<_>>())
+                                .unwrap_or_default()
                         })
                         .collect::<Vec<_>>();
                     assert!(terminals.iter().any(|terminal| {
