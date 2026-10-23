@@ -22878,9 +22878,10 @@ mod tests {
     fn empty_admission_and_parent_only_release_do_not_scan_history() {
         let inventory = ArtifactInventory::default();
         let empty = inventory.empty_view();
-        let view = inventory
-            .admit(&empty, vec![entry("Original", &[])])
-            .unwrap();
+        let original = entry("Original", &[]);
+        let original_id = original.descriptor.id;
+        let view = inventory.admit(&empty, vec![original]).unwrap();
+        let original_payload = Arc::downgrade(&view.lease.payloads[&original_id]);
         let before = inventory.metrics();
         let unchanged = inventory.admit(&view, Vec::new()).unwrap();
         assert!(Arc::ptr_eq(&view.lease, &unchanged.lease));
@@ -22909,17 +22910,10 @@ mod tests {
         .unwrap();
         let support =
             CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
-        let before_merge = inventory.metrics();
         let merged = support.merge(&support).unwrap();
         assert_eq!(
             merged.artifacts().capture_graph_selection(),
             support.artifacts().capture_graph_selection()
-        );
-        let after_merge = inventory.metrics();
-        eprintln!(
-            "separate_support_merge graph_visits={} admission_owner_lookups={}",
-            after_merge.graph_visits - before_merge.graph_visits,
-            after_merge.admission_owner_lookups - before_merge.admission_owner_lookups
         );
         drop(merged);
         drop(support);
@@ -22932,9 +22926,30 @@ mod tests {
             inventory.metrics().admission_owner_lookups - before_consumer.admission_owner_lookups,
             4
         );
+        let before_release = inventory.metrics().graph_visits;
         drop(second);
         drop(view);
-        assert_eq!(inventory.node_count(), 0);
+        assert_eq!(
+            inventory.node_count(),
+            1,
+            "the live selected compiler acquisition retains its exact node"
+        );
+        assert!(
+            original_payload.upgrade().is_some(),
+            "the live selection retains the same immutable payload"
+        );
+        assert_eq!(inventory.metrics().graph_visits, before_release);
+        drop(selection);
+        assert_eq!(
+            inventory.node_count(),
+            0,
+            "the last selected owner released"
+        );
+        assert!(
+            original_payload.upgrade().is_none(),
+            "no payload owner survives the last selected acquisition"
+        );
+        assert_eq!(inventory.metrics().graph_visits, before_release);
         // A later offer independently reacquires payload ownership under its immutable proof.
         let replacement = inventory
             .admit(&empty, vec![entry("Original", &[])])
