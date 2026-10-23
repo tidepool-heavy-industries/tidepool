@@ -106,13 +106,12 @@ impl ExactSourceFixture {
         let applied = &self.applied;
         let run = test_support::with_settlement(|settlement| {
             let outcome = tidepool_extract_cmd::with_compiler_transaction(settlement, || {
-                let run = CompileError::compiler_invocation_result(
-                    endpoint.execute_with_input_files(
+                let run =
+                    CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
                         applied.command(),
                         applied.input_transport_files(),
                         |_| {},
-                    ),
-                )?;
+                    ))?;
                 crate::diag::decode_extract_result(
                     run.success(),
                     &run.output.stdout,
