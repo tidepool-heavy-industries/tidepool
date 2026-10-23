@@ -744,7 +744,7 @@ impl PersistentSession {
 
     /// One resolution pass over the exact scoped dependency closure. Sorted
     /// IDs preserve the binding owner's choice among same-owner aliases.
-    fn scoped_prepared_bindings_in(
+    pub(super) fn scoped_prepared_bindings_in(
         &self,
         scope: ScopeId,
     ) -> HashMap<(&SymbolIdentity, SessionModule), &BindingEntry> {

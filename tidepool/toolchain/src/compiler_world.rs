@@ -5362,7 +5362,7 @@ fn world_cell_output_certificate(
         digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     };
-    frame(b"TidepoolCheckedWorldCellProgram5");
+    frame(b"TidepoolCheckedWorldCellProgram6");
     frame(reservation.admission_digest());
     frame(&output.plan_receipt_sha256);
     frame(logical.logical_id());
@@ -5442,6 +5442,10 @@ fn world_cell_output_certificate(
                 .map(|selected| &selected.reference),
             &mut frame,
         );
+        frame(&(stage.dependency_terminals.len() as u64).to_le_bytes());
+        for terminal in &stage.dependency_terminals {
+            frame_dependency_terminal(terminal, &mut frame);
+        }
     }
     for id in &output.demanded_session_bindings {
         frame(&id.raw().to_le_bytes());
@@ -5460,6 +5464,61 @@ fn world_cell_output_certificate(
         frame(file.sha256());
     }
     *digest.finalize().as_bytes()
+}
+
+fn frame_dependency_terminal(
+    terminal: &DependencyTerminalReference,
+    frame: &mut impl FnMut(&[u8]),
+) {
+    let symbol = |symbol: &tidepool_repr::execution_schema::SymbolIdentity,
+                  frame: &mut dyn FnMut(&[u8])| {
+        for part in [
+            &symbol.unit,
+            &symbol.module,
+            &symbol.namespace,
+            &symbol.occurrence,
+        ] {
+            frame(part.as_bytes());
+        }
+        match &symbol.record_parent {
+            None => frame(&[0]),
+            Some(parent) => {
+                frame(&[1]);
+                frame(parent.as_bytes());
+            }
+        }
+    };
+    let binding = |binding: crate::artifact_inventory::ArtifactBinding,
+                   frame: &mut dyn FnMut(&[u8])| {
+        frame(&binding.artifact.0);
+        frame(&binding.selection.0);
+    };
+    frame(&[match terminal.origin {
+        DependencyTerminalOrigin::SourceDefinition => 0,
+        DependencyTerminalOrigin::NativeOriginal => 1,
+    }]);
+    let crate::certified_products::ReceiptImportOwner::OriginalBinding {
+        unit,
+        module,
+        interface,
+        original,
+        binder,
+    } = &terminal.original_use
+    else {
+        unreachable!("a decoded terminal names an Original binding")
+    };
+    frame(unit.as_bytes());
+    frame(module.as_bytes());
+    binding(*interface, frame);
+    binding(*original, frame);
+    symbol(binder, frame);
+    frame(&terminal.demander.binding.artifact().0);
+    frame(&terminal.demander.binding.selection().0);
+    frame(&terminal.demander.original_ordinal.to_le_bytes());
+    frame(&terminal.global_index.to_le_bytes());
+    binding(terminal.binding, frame);
+    symbol(&terminal.identity, frame);
+    frame(&terminal.generation.to_le_bytes());
 }
 
 fn frame_world_stage_selection<'a>(
@@ -5925,6 +5984,13 @@ pub struct SelectedDependencyTerminal {
 }
 
 impl SelectedDependencyTerminal {
+    /// Compare immutable compiler evidence only. The receiving runtime must
+    /// independently resolve and retain its actual scoped prepared value.
+    pub fn matches_checked_value(&self, row: &CheckedValueArtifact) -> Result<bool, CompileError> {
+        self.issuer
+            .matches_dependency_terminal_checked_value(&self.reference, row)
+    }
+
     pub fn origin(&self) -> DependencyTerminalOrigin {
         self.reference.origin
     }
