@@ -4943,7 +4943,8 @@ impl WorldPrimaryInputs {
         let delta = self
             .inputs
             .source_support
-            .append_program_fragment(incoming)?;
+            .checked_program_extension(incoming)?
+            .apply()?;
         let metadata = delta.support.program_fragment_metadata(
             &self.inputs.metadata,
             incoming,
@@ -8547,7 +8548,8 @@ impl ProgramSourceSupport {
             Some(previous) => {
                 previous
                     .compiler_support
-                    .append_program_fragment(incoming)?
+                    .checked_program_extension(incoming)?
+                    .apply()?
                     .support
             }
             None => incoming.clone(),

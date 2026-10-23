@@ -7,6 +7,11 @@ use crate::exact_context::{
     RecordedPublicationBirth,
 };
 
+#[cfg(test)]
+thread_local! {
+    static COMPILER_ROLE_DECISIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Immutable publication observations in assembly/transport records. These
 /// facts cannot issue the actual birth support held by a selected row.
 #[derive(Clone, Debug)]
@@ -1493,6 +1498,74 @@ pub(crate) struct ProgramSupportDelta {
     pub(crate) support: CompilerSourceSupport,
     pub(crate) changed_owners: Vec<ExactModuleIdentity>,
     pub(crate) promotion_qualifier_invocations: usize,
+}
+
+/// A checked same-namespace continuation. Independent scopes use reconciliation.
+/// Borrowing both inputs keeps the validated selection immutable until apply.
+pub(crate) struct CheckedProgramExtension<'a> {
+    receiving: &'a CompilerSourceSupport,
+    incoming: &'a CompilerSourceSupport,
+    projection: CompilerInputProjection,
+    selected: SelectedCompilerRows,
+    changed_owners: Vec<ExactModuleIdentity>,
+    promotion: bool,
+    offers: Vec<IssuedNativeOffer>,
+    new_offers: Vec<IssuedNativeOffer>,
+    native_offer_facts: imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>,
+    native_availability: crate::declaration_context::RequestNativeAvailability,
+    native_closures: AcquiredNativeClosures,
+}
+
+impl CheckedProgramExtension<'_> {
+    pub(crate) fn apply(self) -> Result<ProgramSupportDelta, CompileError> {
+        let Self {
+            receiving,
+            incoming,
+            projection,
+            selected,
+            changed_owners,
+            promotion,
+            offers,
+            new_offers,
+            native_offer_facts,
+            mut native_availability,
+            native_closures,
+        } = self;
+        crate::host_work::checkpoint()?;
+        let artifacts = receiving.artifacts.append_admitted_custody(
+            incoming.selected.iter().flat_map(|(_, row)| {
+                row.bindings()
+                    .map(|(binding, entry)| (incoming.artifacts.lease.as_ref(), *binding, entry))
+            }),
+            &new_offers,
+        )?;
+        let artifacts = incoming
+            .native_closures
+            .iter()
+            .try_fold(artifacts, |view, completion| {
+                view.retain_custody(completion.artifacts())
+            })?;
+        if promotion {
+            native_availability =
+                native_availability.for_compiler_roles(selected.admitted_roles(), &artifacts)?;
+        }
+        Ok(ProgramSupportDelta {
+            support: SupportDraft {
+                projection,
+                artifacts,
+                native_fact_owner: Some(Arc::clone(&receiving.native_fact_owner)),
+                native_offers: offers.into(),
+                native_offer_facts,
+                native_closures,
+                native_availability,
+                selected: Arc::new(selected),
+                input_decisions: receiving.input_decisions.clone(),
+            }
+            .close()?,
+            changed_owners,
+            promotion_qualifier_invocations: usize::from(promotion),
+        })
+    }
 }
 
 /// An operation's role closure borrows its original complete issuer. Native
@@ -4294,14 +4367,13 @@ impl CompilerSourceSupport {
         })
     }
 
-    /// Add the actual closed support fragment issued for one program prefix.
-    /// Unchanged roles and native facts share their persistent owners. Incoming
-    /// offers retain custody without choosing additional executable roots.
-    #[track_caller]
-    pub(crate) fn append_program_fragment(
-        &self,
-        incoming: &Self,
-    ) -> Result<ProgramSupportDelta, CompileError> {
+    /// Validate a continuation against this exact immutable receiver. The
+    /// resulting operation retains the chosen whole rows; application cannot
+    /// substitute another receiver or make a second namespace decision.
+    pub(crate) fn checked_program_extension<'a>(
+        &'a self,
+        incoming: &'a Self,
+    ) -> Result<CheckedProgramExtension<'a>, CompileError> {
         let mut projection = self.projection.clone();
         let mut selected = self.selected.as_ref().clone();
         let mut home_units = self.selected.home_units.as_ref().clone();
@@ -4313,32 +4385,36 @@ impl CompilerSourceSupport {
             if let Some(previous) = selected.get(owner) {
                 promotion |= previous.original().is_none() && row.original().is_some();
                 if previous.interface().0.artifact != row.interface().0.artifact {
-                    return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                        owner: owner.clone(),
-                    }));
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::ProgramExtension {
+                            owner: owner.clone(),
+                            reason: ProgramExtensionRefusal::InterfaceArtifacts {
+                                receiving: previous.interface().0,
+                                incoming: row.interface().0,
+                            },
+                        },
+                    ));
                 }
                 if previous.interface().0 != row.interface().0 {
-                    tracing::debug!(
-                        target: "tidepool::artifact_inventory::ambiguity_trace",
-                        ?owner,
-                        previous_binding = ?previous.interface().0,
-                        incoming_binding = ?row.interface().0,
-                        previous_role = ?self.projection.roles[owner],
-                        incoming_role = ?role,
-                        receiving_caller = %std::panic::Location::caller(),
-                        "program fragment carries different issued interface bindings"
-                    );
                     return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: row.interface().0.artifact,
+                        ArtifactInventoryFailure::ProgramExtension {
+                            owner: owner.clone(),
+                            reason: ProgramExtensionRefusal::InterfaceBinding {
+                                receiving: previous.interface().0,
+                                incoming: row.interface().0,
+                            },
                         },
                     ));
                 }
                 if let (Some((old, _)), Some((new, _))) = (previous.original(), row.original()) {
                     if old != new {
                         return Err(admission_failure(
-                            ArtifactInventoryFailure::BindingAmbiguity {
-                                artifact: new.artifact,
+                            ArtifactInventoryFailure::ProgramExtension {
+                                owner: owner.clone(),
+                                reason: ProgramExtensionRefusal::OriginalBinding {
+                                    receiving: *old,
+                                    incoming: *new,
+                                },
                             },
                         ));
                     }
@@ -4387,53 +4463,27 @@ impl CompilerSourceSupport {
                 offers.push(offer.clone());
             }
         }
-        let artifacts = self.artifacts.append_admitted_custody(
-            incoming.selected.iter().flat_map(|(_, row)| {
-                row.bindings()
-                    .map(|(binding, entry)| (incoming.artifacts.lease.as_ref(), *binding, entry))
-            }),
-            &new_offers,
-        )?;
-        // The draft invariant owns completion custody in its artifacts before
-        // the draft exists; self's completions stay retained through the
-        // append, and incoming completions merge here exactly once.
-        let artifacts = incoming
-            .native_closures
-            .iter()
-            .try_fold(artifacts, |view, completion| {
-                view.retain_custody(completion.artifacts())
-            })?;
-        let input_decisions = self.input_decisions.clone();
-        let mut native_availability = match self
+        let native_availability = match self
             .native_availability
             .merge(&incoming.native_availability)?
         {
             crate::declaration_context::NativeAvailabilityMerge::Unchanged(rows)
             | crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => rows,
         };
-        if promotion {
-            // Only this semantic transition can change qualification of prior
-            // optional Full rows. The existing qualifier preserves exact
-            // historical dependencies independently of direct root choices.
-            native_availability =
-                native_availability.for_compiler_roles(selected.admitted_roles(), &artifacts)?;
-        }
+        let native_closures = self.native_closures.append(&incoming.native_closures)?;
         selected.home_units = Arc::new(home_units);
-        Ok(ProgramSupportDelta {
-            support: SupportDraft {
-                projection,
-                artifacts,
-                native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
-                native_offers: offers.into(),
-                native_offer_facts,
-                native_closures: self.native_closures.append(&incoming.native_closures)?,
-                native_availability,
-                selected: Arc::new(selected),
-                input_decisions,
-            }
-            .close()?,
+        Ok(CheckedProgramExtension {
+            receiving: self,
+            incoming,
+            projection,
+            selected,
             changed_owners: changed.into_iter().collect(),
-            promotion_qualifier_invocations: usize::from(promotion),
+            promotion,
+            offers,
+            new_offers,
+            native_offer_facts,
+            native_availability,
+            native_closures,
         })
     }
 
@@ -6472,6 +6522,8 @@ impl CompilerInputProjection {
         previous: &CompilerInputRole,
         incoming: &CompilerInputRole,
     ) -> Result<CompilerRoleIssuer, CompileError> {
+        #[cfg(test)]
+        COMPILER_ROLE_DECISIONS.with(|count| count.set(count.get() + 1));
         if previous == incoming {
             return Ok(CompilerRoleIssuer::Receiving);
         }
@@ -8493,7 +8545,11 @@ mod tests {
             let prior_view = source.artifacts.capture_graph_selection();
             let expected = source.merge(&incoming).unwrap();
             take_native_fact_work();
-            let inserted = source.append_program_fragment(&incoming).unwrap();
+            let inserted = source
+                .checked_program_extension(&incoming)
+                .unwrap()
+                .apply()
+                .unwrap();
             let changed = inserted.support;
             let delta = take_native_fact_work();
             assert_eq!(inserted.promotion_qualifier_invocations, 0);
@@ -8705,7 +8761,9 @@ mod tests {
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            let appended = receiving.append_program_fragment(&incoming);
+            let appended = receiving
+                .checked_program_extension(&incoming)
+                .and_then(|extension| extension.apply());
             let delta = appended.unwrap();
             let support = delta.support;
             let metadata = support
@@ -8834,7 +8892,21 @@ mod tests {
         let old_rows = previous.native_availability.snapshot_facts().unwrap();
         let old_view = previous.artifacts.capture_graph_selection();
         let expected = previous.merge(&incoming).unwrap();
-        let inserted = previous.append_program_fragment(&incoming).unwrap();
+        let before_plan = COMPILER_ROLE_DECISIONS.with(std::cell::Cell::get);
+        let extension = previous.checked_program_extension(&incoming).unwrap();
+        let after_plan = COMPILER_ROLE_DECISIONS.with(std::cell::Cell::get);
+        let overlapping_rows = incoming
+            .selected
+            .iter()
+            .filter(|(owner, _)| previous.selected.get(owner).is_some())
+            .count();
+        assert_eq!(after_plan - before_plan, overlapping_rows);
+        let inserted = extension.apply().unwrap();
+        assert_eq!(
+            COMPILER_ROLE_DECISIONS.with(std::cell::Cell::get),
+            after_plan,
+            "applying a checked extension must not choose compiler roles again"
+        );
         assert_eq!(inserted.promotion_qualifier_invocations, 1);
         assert_eq!(inserted.support.projection, expected.projection);
         let summarize = |support: &CompilerSourceSupport| {
@@ -8891,7 +8963,12 @@ mod tests {
             .issued_row(child_id)
             .unwrap()
             .permits(9));
-        let repeated = inserted.support.append_program_fragment(&incoming).unwrap();
+        let repeated = inserted
+            .support
+            .checked_program_extension(&incoming)
+            .unwrap()
+            .apply()
+            .unwrap();
         assert_eq!(repeated.promotion_qualifier_invocations, 0);
         assert_eq!(repeated.support.projection, inserted.support.projection);
     }
@@ -8943,7 +9020,11 @@ mod tests {
                 .unwrap()
                 .for_source_owners(&BTreeSet::new())
                 .unwrap();
-                let delta = first_support.append_program_fragment(&incoming).unwrap();
+                let delta = first_support
+                    .checked_program_extension(&incoming)
+                    .unwrap()
+                    .apply()
+                    .unwrap();
                 assert_eq!(delta.promotion_qualifier_invocations, 0);
                 let maintained = delta
                     .support

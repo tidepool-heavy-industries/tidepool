@@ -1626,6 +1626,25 @@ pub enum PackageCodeRefusal {
     AmbiguousInheritance { candidates: usize },
 }
 
+/// A program continuation may extend only the receiver's exact namespace.
+/// Independently issued scopes require reconciliation instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ProgramExtensionRefusal {
+    InterfaceArtifacts {
+        receiving: ArtifactBinding,
+        incoming: ArtifactBinding,
+    },
+    InterfaceBinding {
+        receiving: ArtifactBinding,
+        incoming: ArtifactBinding,
+    },
+    OriginalBinding {
+        receiving: ArtifactBinding,
+        incoming: ArtifactBinding,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArtifactInventoryFailure {
@@ -1644,6 +1663,11 @@ pub enum ArtifactInventoryFailure {
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("artifact {artifact:?} has multiple issued dependency bindings")]
     BindingAmbiguity { artifact: ArtifactId },
+    #[error("program extension for {owner:?} requires matching issued bindings: {reason:?}")]
+    ProgramExtension {
+        owner: ExactModuleIdentity,
+        reason: ProgramExtensionRefusal,
+    },
     #[error(
         "issued original {artifact:?} group {original_ordinal} differs from its issued selection"
     )]

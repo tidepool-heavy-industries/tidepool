@@ -4859,7 +4859,9 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
         let delta = captured
             .inputs
             .source_support
-            .append_program_fragment(&incoming)
+            .checked_program_extension(&incoming)
+            .unwrap()
+            .apply()
             .unwrap();
         assert!(
             delta.changed_owners.is_empty(),
