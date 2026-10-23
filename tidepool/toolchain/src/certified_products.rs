@@ -24740,14 +24740,27 @@ pub(crate) mod tests {
                         &mut validation,
                     )
                     .unwrap();
+                assert_eq!(
+                    next.compiler_inputs().compiler_source_support().recorded_input_decisions(),
+                    source.recorded_input_decisions(),
+                    "handoff preserves the actual selected row choices mode={mode} broaden={broaden}",
+                );
                 if matches!(mode, "full" | "current") {
-                    // Full transports body availability; the initial request
-                    // deliberately chose no executable root for this owner.
-                    assert!(next
+                    let choices = &next
                         .compiler_inputs()
                         .compiler_source_support()
                         .recorded_input_decisions()[&entry.descriptor.owner]
-                        .groups
+                        .groups;
+                    assert_eq!(
+                        choices.keys().copied().collect::<BTreeSet<_>>(),
+                        BTreeSet::from([7, 9001])
+                    );
+                    // Completed own-offer choices survive even while this
+                    // request has demanded no executable groups.
+                    assert!(next
+                        .compiler_inputs()
+                        .artifacts()
+                        .selected_native_groups()
                         .is_empty());
                 }
                 let before_targets = physical
@@ -24781,7 +24794,8 @@ pub(crate) mod tests {
                         )
                         .map(|selected| selected.artifacts().selected_native_groups());
                     eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={outcome:?}");
-                    let allowed = mode == "partial" && ordinal == 7;
+                    let allowed =
+                        matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
                     if allowed {
                         let mut groups =
                             next.compiler_inputs().artifacts().selected_native_groups();
@@ -24792,18 +24806,6 @@ pub(crate) mod tests {
                         match outcome {
                             Ok(actual) => assert_eq!(actual, groups),
                             Err(error) => unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected success actual={error:?}")),
-                        }
-                    } else if matches!(mode, "full" | "current") {
-                        if !matches!(
-                            &outcome,
-                            Err(crate::CompileError::ArtifactInventory(error))
-                                if error.failure == crate::artifact_inventory::ArtifactInventoryFailure::NativeGroupUnavailable {
-                                    artifact: entry.descriptor.id, original_ordinal: ordinal,
-                                } && matches!(&error.native_refusal, Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty {
-                                    owner, original_ordinal,
-                                }) if owner == &entry.descriptor.owner && *original_ordinal == ordinal)
-                        ) {
-                            unexpected.push(format!("mode={mode} broaden={broaden} ordinal={ordinal} expected empty initial choice actual={outcome:?}"));
                         }
                     } else if !matches!(
                         &outcome,
@@ -25079,11 +25081,12 @@ pub(crate) mod tests {
                     dependency: crate::artifact_inventory::ArtifactDependency::NativeBinding { dependent_ordinal: 17, generation: 11, .. }, ..
                 })
         ));
+        let mut target_validation = PackageInterfaceValidation::default();
         let completed = crate::declaration_context::CapturedCompilerStage::issue(
             &mut physical,
             &inventory.empty_view(),
             entries.clone(),
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            &mut target_validation,
         )
         .unwrap();
         let physical_availability = physical.issued_native_availability().collect::<Vec<_>>();
@@ -25219,8 +25222,9 @@ pub(crate) mod tests {
             issued_groups,
             request_offer.issued_group_carriers().unwrap()
         );
-        let inventory = inputs.artifacts().inventory();
-        let mut target_validation = PackageInterfaceValidation::default();
+        // Target selection belongs to the physical cohort's inventory; the
+        // later compiler request has its own receiving inventory.
+        let inventory = completed.issued_artifacts().inventory();
         let observations = source_target_observations(&[(&product, 0)]);
         let prepared = prepared_target_fixture(&observations);
         let observed = AuthenticatedTargetImports::issue(
@@ -25229,6 +25233,19 @@ pub(crate) mod tests {
             &target_validation.inventory,
         )
         .unwrap();
+        let foreign = inputs.artifacts().inventory().select_native_target(
+            completed.physical_cohort(),
+            observed.clone(),
+            None,
+            Some(&inventory.empty_view()),
+            &[],
+            &BTreeMap::new(),
+            &mut target_validation,
+        );
+        assert!(
+            matches!(foreign, Err(crate::CompileError::ExtractFailed(_))),
+            "a receiving request inventory cannot select the physical cohort's target"
+        );
         let current = inventory
             .select_native_target(
                 completed.physical_cohort(),
