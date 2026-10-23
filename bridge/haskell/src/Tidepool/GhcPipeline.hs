@@ -3423,7 +3423,7 @@ restoreWorldCellPrefixFor views observation summary environment prefix@(WorldCel
             [(mkNodeKey node,Set.fromList (sourceImportNodeKeys current))
               | node@(ModuleNode _ current) <- mgModSummaries' (hsc_mod_graph ready)]
           addEdges node@(ModuleNode edges current) =
-            let imported = Set.toList (Map.findWithDefault Set.empty (mkNodeKey node) scaffold
+            let imported = Set.toList (Map.findWithDefault Set.empty (mkNodeKey node) imports
                   `Set.intersection` retainedKeys)
                 inherited = [dependency | retainedNode@(ModuleNode dependencies _) <- retained
                   , mkNodeKey retainedNode == mkNodeKey node, dependency <- dependencies]
@@ -10029,7 +10029,7 @@ captureHeldWorldSourceSelection owner facts privateInputs imported (WorldPrefixL
     canonical <- liftIO $ captureCanonicalOriginalInputs (hexBytes (worldInputsProducer facts)) closure
       [(worldSourceEntryProof entry,worldSourceEntryPackages entry)
       | (key,entry) <- Map.toAscList entries,key `Set.member` selectedKeys]
-    pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) scaffold
+    pure (WorldSourceSelection (Just (SourceSelectedOriginals claims evidence)) imports
       (Map.elems typeEntries) selectedProofs (Just canonical))
 
 -- The logical module path and its canonical byte observation are paired at
