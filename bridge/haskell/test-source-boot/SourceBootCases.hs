@@ -70,6 +70,7 @@ import GHC.Types.Name (getOccString, nameOccName, nameSrcSpan, nameUnique, mkExt
 import GHC.Types.Avail (availNames)
 import GHC.Types.TypeEnv (typeEnvIds)
 import GHC.Types.Unique.Supply (mkSplitUniqSupply, takeUniqFromSupply)
+import GHC.Types.Name.Cache (NameCache(..))
 import GHC.Utils.Outputable (ppr, showSDocUnsafe, text)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hscEPS)
 import GHC.Driver.Env.KnotVars (knotVarElems)
@@ -215,7 +216,8 @@ import Tidepool.GhcPipeline
   , retainedCompilerArtifactClosure, retainedCompilerInterface
   , renderType, generatedScaffoldRecipe, activationPreviewInputType
   , CompilePurpose(..), runPipelineSelected, runPipelineSessionSelected, withResidentPipelineSelected
-  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction, withResidentCompilerScopes )
+  , withResidentPipelineSelectedRequests, withExactInterfaceTransaction, withResidentCompilerScopes
+  , scopedCompile, scopedRunGhc )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..), CandidateGlobal(..)
   , readModuleCandidates, readModuleCandidatesWithGraphs, candidateExecutionSources, candidateOriginalIdentity
   , candidateCoreDescriptor, captureCandidateManifest, readCapturedModuleCandidatesWithGraphs)
@@ -7609,6 +7611,37 @@ verifyHydration work cold = do
 -- Observe actual GHC finder operations, without timing thresholds or compiler
 -- authority fixtures. A missing package key must never consult an ancestor
 -- attempt; package results survive while source choices and file hashes do not.
+compilerBootStateIsolation :: IO ()
+compilerBootStateIsolation = withScratch $ \work -> do
+  let helper = mkModuleName "BootDependency"
+      target = work </> "BootTarget.hs"
+  writeFile (work </> "BootDependency.hs")
+    "module BootDependency where\nanswer :: Int\nanswer = 41\n"
+  writeFile target "module BootTarget where\nimport BootDependency\n__result = answer + 1\n"
+  withResidentCompilerScopes [work] $ \runScope -> do
+    names <- runScope (pure ()) $ \scope -> do
+      initial <- scopedRunGhc scope getSession
+      unless (isNothing (lookupHpt (hsc_HPT initial) helper)) $
+        fail "new compiler scope inherited a HOME interface before compilation"
+      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (crResultType result) == Just "Int") $
+        fail "boot-state producer changed the checked result type"
+      observed <- scopedRunGhc scope getSession
+      unless (isJust (lookupHpt (hsc_HPT observed) helper)) $
+        fail "active attempt lost its actual completed HOME interface"
+      pure (nsUniqChar (hsc_NC observed),nsNames (hsc_NC observed))
+    runScope (pure ()) $ \scope -> do
+      initial <- scopedRunGhc scope getSession
+      unless (isNothing (lookupHpt (hsc_HPT initial) helper)
+          && null (mgModSummaries' (hsc_mod_graph initial)) && null (hsc_targets initial)) $
+        fail "END published the previous attempt's HOME table, graph or targets"
+      unless (names == (nsUniqChar (hsc_NC initial),nsNames (hsc_NC initial))) $
+        fail "new scope replaced the fixed boot NameCache owner"
+      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (crResultType result) == Just "Int"
+          && isJust (lookupHpt (hsc_HPT (crHscEnv result)) helper)) $
+        fail "fresh scope could not select its completed dependency after END"
+
 packageFinderHistoryIsolation :: IO ()
 packageFinderHistoryIsolation = withScratch $ \work -> do
   libdir <- getLibdir

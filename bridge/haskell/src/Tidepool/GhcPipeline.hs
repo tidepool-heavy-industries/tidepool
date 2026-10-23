@@ -1808,18 +1808,30 @@ evictCompilerRecovery caches stale = do
   evictPreparedBodyMatching (compilerPreparedBodies caches) stale
   evictOriginalProjectionMatching (compilerOriginalProjections caches) stale
 
--- The universe is fixed by the booted package closure, compiler producer and
--- base compilation policy. Changing a request's lexical view cannot discard
--- its loaded package facts or completed module versions. Attempts fork its
--- home resolution cells; lazy retained interfaces share their fixed package
--- state owner with the selected attempt.
+-- Only initialization issues this fixed package/NameCache owner. Attempts
+-- borrow its shared package cells and allocate independent HOME resolution.
+data CompilerBootContext = CompilerBootContext HscEnv PackageFinderFacts
+
+data CompilerBootFailure = CompilerBootContainsHomeInterfaces
+  deriving Show
+instance Exception CompilerBootFailure
+
+universeBootEnvironment :: CompilerUniverse -> HscEnv
+universeBootEnvironment universe = case universeBoot universe of
+  CompilerBootContext environment _ -> environment
+
+universePackageFinder :: CompilerUniverse -> PackageFinderFacts
+universePackageFinder universe = case universeBoot universe of
+  CompilerBootContext _ finder -> finder
+
+-- Completed versions retain their actual HMI knots independently of the
+-- active attempt. No last-operation environment becomes another HOME owner.
 data CompilerUniverse = CompilerUniverse
-  { universeEnvironment :: HscEnv
+  { universeBoot :: CompilerBootContext
   , universeSourceVersions :: Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
   , universeOriginalVersions :: Map.Map (Module, HomeDependencyDigest, Maybe String) CompletedOriginalVersion
   , universeRecovery :: RecoveryContext
   , universeInterpreter :: IORef CompilerInterpreterState
-  , universePackageFinder :: PackageFinderFacts
   , universeOriginalInputs :: ExactInputOwner
   , universePackageAssociation :: Maybe ServicePackageAssociation
   , universeWorlds :: CompilerWorldCache
@@ -1924,7 +1936,7 @@ beginHeldWorldDependencyAttempt universe
       | otherwise -> throwIO WorldCellCorrupt
   cache <- newIfaceCache
   memo <- newIORef Map.empty
-  recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe) []
+  recovery <- selectCompilerRecoveryCaches (universeBootEnvironment universe) (universeRecovery universe) []
   recoveryRef <- newIORef recovery
   pure (WorldDependencyAttempt (worldInputsIdentity facts) reference policy paths versions canonicalRecovery cache memo recoveryRef (universeInterpreter universe))
 
@@ -1934,7 +1946,7 @@ worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions canonicalRecovery 
     (universeInterpreter universe) (universePackageFinder universe) attempt
   where
     activate selected = do
-      recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe)
+      recovery <- selectCompilerRecoveryCaches (universeBootEnvironment universe) (universeRecovery universe)
         [(owner,completedModuleRecovery node) | (owner,node) <- Map.toList selected]
       writeIORef recoveryRef recovery
       pure recovery
@@ -2225,7 +2237,7 @@ retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized prep
     (throwIO WorldCellCorrupt)
   WorldPreparedModules table receipts dependencies demandScope <- readIORef preparedRef
   universe <- readIORef universeRef
-  updatedScope <- traverse (updateSegmentDemandScope (universeEnvironment universe)
+  updatedScope <- traverse (updateSegmentDemandScope (universeBootEnvironment universe)
     [(alias,WorldBaseBinding <$> Map.lookup alias (worldInputsBindings facts)) | alias <- Set.toAscList (worldSuccessorChangedAliases successorInputs)]) demandScope
   prepared <- newIORef (WorldPreparedModules table receipts dependencies updatedScope)
   unless (Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts (universeWorlds universe)))
@@ -2376,7 +2388,7 @@ runWorldPublicModule producer universe baseEnv timing
       StructuredPublicModule name | not (isReservedSessionModuleName name) -> pure name
       _ -> liftIO (throwIO WorldQueryUnsupported)
     prepared@(WorldPreparedModules table receipts dependencies demandScope) <- liftIO (readIORef preparedRef)
-    borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+    borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
     let flags = (hsc_dflags baseEnv) {importPaths=[],workingDirectory=Nothing}
         fresh = (hscUpdateHPT (const table) (hscUpdateFlags (const flags) borrowed))
           {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]}
@@ -2392,7 +2404,7 @@ runWorldPublicModule producer universe baseEnv timing
           Nothing -> do
             -- A cold demand checks the real module and its transitive source
             -- closure. Historical memo/candidate/home alternatives are absent.
-            compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+            compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
             -- This metadata route retains the actual in-memory HMI. No lazy
             -- realization may depend on a generated home interface file.
             let compileFlags = foldl' gopt_unset ((hsc_dflags baseEnv)
@@ -2860,7 +2872,7 @@ heldWorldDemandScope universe timing (HeldCompilerWorld facts _ _ preparedRef) =
     Nothing -> do
       emitCount timing "world.cell.demand_scope_builds" 1
       emitCount timing "world.cell.demand_scope_aliases" (toInteger (Map.size (worldInputsBindings facts)))
-      scope <- newSegmentDemandScope (universeEnvironment universe) (Map.map WorldBaseBinding (worldInputsBindings facts))
+      scope <- newSegmentDemandScope (universeBootEnvironment universe) (Map.map WorldBaseBinding (worldInputsBindings facts))
       writeIORef preparedRef (WorldPreparedModules table receipts dependencies (Just scope))
       pure scope
 
@@ -2924,7 +2936,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     traceStageIO "directory-containment-refused"
       [("resolved_target", LogText target),("directory", LogText directory)]
     throwIO WorldCellCorrupt)
-  borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+  borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
   let flags = heldWorldCellFlags baseEnv directory roots
       policy = retainedContext retained
   -- Source compatibility runs before the target hook refines value demand.
@@ -8597,8 +8609,13 @@ withResidentCompilerScopes baseIncludes useRequests = do
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
     packageFinder <- liftIO (newPackageFinderFacts baseEnv)
+    boot <- liftIO $ do
+      environment <- retainClosedHomeContext packageFinder Nothing baseEnv
+      unless (null (eltsHpt (hsc_HPT environment)))
+        (throwIO CompilerBootContainsHomeInterfaces)
+      pure (CompilerBootContext environment packageFinder)
     originalInputs <- liftIO newExactInputOwner
-    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder originalInputs packageAssociation emptyCompilerWorldCache worldDirectory))
+    universe <- liftIO (newIORef (CompilerUniverse boot Map.empty Map.empty initialRecovery interpreter originalInputs packageAssociation emptyCompilerWorldCache worldDirectory))
     active <- liftIO (newIORef Nothing)
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
@@ -9029,16 +9046,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       retainedUniverse <- readIORef universe
                       current <- readIORef active
                       borrowed <- forkExactContextWithPackageFacts (universePackageFinder retainedUniverse)
-                        (maybe (universeEnvironment retainedUniverse) activeEnvironment current)
+                        (maybe (universeBootEnvironment retainedUniverse) activeEnvironment current)
                       result <- reflectGhc (setSession (borrowed
                         {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv}) >> operation) session
-                      observed <- reflectGhc getSession session
-                      -- A successful helper may demand package declarations. Retain
-                      -- its EPS/finder cells without publishing its home visibility.
-                      modifyIORef' universe (\state -> state {universeEnvironment =
-                        (universeEnvironment state)
-                          {hsc_FC=hsc_FC observed, hsc_unit_env=(hsc_unit_env (universeEnvironment state))
-                            {ue_eps=ue_eps (hsc_unit_env observed)}}})
+                      -- Package cells are shared by the fixed boot owner. The
+                      -- helper's HOME table, graph and Finder stay private.
                       pure result)
                 finish = do
                   writeIORef phase CompilerClosed
@@ -9173,7 +9185,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
   candidates <- liftIO $ traverse captureCandidateManifest (candidateManifestFor selection)
   universe <- liftIO (readIORef universeRef)
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe)
-    (universeEnvironment universe))
+    (universeBootEnvironment universe))
   initialEpoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
   -- Only currently admitted original nodes become initially visible. Fresh
   -- source nodes are installed after this graph's dependency validation.
@@ -9223,6 +9235,10 @@ residentCompileOne guard producer selection retained universeRef active interpre
   -- Commit after the complete compiler operation. Failed/cancelled targets or
   -- partial dependency additions never enter this inventory.
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
+  -- Validate the retained dependency closure without publishing its request
+  -- environment. SOURCE backedges may keep the target HMI in this closure.
+  closed <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) final)
+  let completedHomes = hsc_HPT closed
   let sourceNodes = Map.fromListWith Map.union
         [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
             (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
@@ -9230,26 +9246,21 @@ residentCompileOne guard producer selection retained universeRef active interpre
         | entry <- Map.elems admittedSnapshot
         , let owner = payloadOwner (gmePayload entry)
         , owner /= targetOwner
-        , let home = retainCompletedModuleHome (lookupHpt (hsc_HPT final) (moduleName owner))]
+        , let home = retainCompletedModuleHome (lookupHpt completedHomes (moduleName owner))]
       originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
           CompletedOriginalVersion home recoveryContext epoch)
         | scope <- maybe [] pure (pvExactScope variant), (artifact,_,_) <- scopeInterfaces scope
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , Just digest <- [Map.lookup (exactUnit artifact,exactModule artifact) originals]
-        , Just home <- [lookupHpt (hsc_HPT final) (moduleName owner)]
+        , Just home <- [lookupHpt completedHomes (moduleName owner)]
         , mi_module (hm_iface home) == owner]
-      -- A SOURCE-cycle dependency can retain the target's HMI as part of its
-      -- details knot. The closure keeps it only when reached by another home;
-      -- the target still never enters sourceNodes.
-      retainedHomes = hscUpdateFlags (const baseFlags) final
-  retainedView <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) retainedHomes)
   liftIO $ do
     evictCompilerRecovery recovery (== targetOwner)
     writeIORef active (Just context)
     emitCount timing "original_inputs.context_variants_before" (fromIntegral (Map.size (universeOriginalVersions universe)))
     emitCount timing "original_inputs.context_variants_selected" (fromIntegral (Map.size originalVersions))
     modifyIORef' universeRef (\current -> current
-      { universeEnvironment=retainedView, universeRecovery=recoveryContext
+      { universeRecovery=recoveryContext
       , universeSourceVersions=Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
           sourceNodes (universeSourceVersions current)
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion

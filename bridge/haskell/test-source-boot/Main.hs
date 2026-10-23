@@ -112,6 +112,7 @@ tests = testGroup "source-boot"
   , testCase "exact transaction reuse" $ exactTransactionReuse
   , testCase "exact transaction cancellation" $ exactTransactionCancellation
   , testCase "package finder history isolation" packageFinderHistoryIsolation
+  , testCase "compiler boot state survives END without HOME publication" compilerBootStateIsolation
   , testCase "lazy original home package instances survive context forks" lazyHomePackageInstances
   , testCase "exact transaction candidate reuse" $ exactTransactionCandidateReuse
   , testCase "exact legacy value isolation" $ exactLegacyValueIsolation
