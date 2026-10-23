@@ -229,7 +229,7 @@ impl WorldDependencyObservations {
                     .as_ref()
                     .ok_or_else(|| source_failure("native terminal has no native stage selection"))?
                     .selected_groups
-                    .select_retained_values_for_use(&original_use, &requested)?,
+                    .select_retained_values_for_use(original_use, &requested)?,
                 DependencyTerminalOrigin::SourceDefinition => {
                     // Repeated observations retain their actual issuer. Merge only
                     // exact occurrence membership, never permission or generations.
@@ -238,7 +238,7 @@ impl WorldDependencyObservations {
                         for row in basis
                             .rows()
                             .iter()
-                            .filter(|row| row.reference() == &original_use)
+                            .filter(|row| row.reference() == original_use)
                         {
                             self.operation
                                 .reserve::<(NativeRetainedOccurrence<'_>, usize)>(
@@ -266,7 +266,7 @@ impl WorldDependencyObservations {
                             .map(|index| requested[*index])
                             .collect::<Vec<_>>();
                         let admitted = pending.source[basis]
-                            .select_retained_values_for_use(&original_use, &subset)?;
+                            .select_retained_values_for_use(original_use, &subset)?;
                         for (index, value) in positions.into_iter().zip(admitted) {
                             evidence[index] = Some(value);
                         }
