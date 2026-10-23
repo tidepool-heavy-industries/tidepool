@@ -129,6 +129,10 @@ pub enum CompileError {
     /// variant therefore denotes an extractor/runtime contract mismatch.
     #[error("extractor contract failure: {0}")]
     ExtractFailed(String),
+    #[error("incomplete original compiler execution: {0}")]
+    IncompleteOriginalExecution(
+        #[source] Box<crate::declaration_context::IncompleteOriginalExecution>,
+    ),
     #[error("compiler lexical graph: {0}")]
     LexicalGraph(#[source] Box<crate::exact_context::LexicalGraphError>),
     #[error("extractor contract failure: {0}")]

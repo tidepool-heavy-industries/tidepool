@@ -45,7 +45,7 @@ impl std::fmt::Display for IncompleteOriginalExecution {
 impl std::error::Error for IncompleteOriginalExecution {}
 impl From<IncompleteOriginalExecution> for CompileError {
     fn from(error: IncompleteOriginalExecution) -> Self {
-        failure(error.to_string())
+        CompileError::IncompleteOriginalExecution(Box::new(error))
     }
 }
 
@@ -252,5 +252,30 @@ impl OriginalExecutionDraft {
             census: self.census,
             identity: OnceLock::new(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_error_retains_typed_target_and_census_through_classification() {
+        let target = identity("fixture", "Target");
+        let missing = vec![identity("fixture", "Missing")];
+        let error = CompileError::from(IncompleteOriginalExecution {
+            target: target.clone(),
+            missing_owners: missing.clone().into(),
+        });
+        assert!(
+            matches!(&error, CompileError::IncompleteOriginalExecution(cause)
+            if cause.target() == &target && cause.missing_owners() == missing)
+        );
+        let envelope = crate::failclass::classify_compile(&error);
+        assert!(
+            matches!(envelope.cause, Some(crate::failclass::CompileFailureCause::IncompleteOriginalExecution {
+            target: actual, missing_owners,
+        }) if actual == target && missing_owners == missing)
+        );
     }
 }

@@ -637,9 +637,6 @@ impl PreparedValueSourceSupport {
     }
 }
 
-/// Only the original compiler output proof can establish complete instance
-/// visibility. Type projections and generic declaration contexts have none.
-
 /// Trusted source recipe associated with request-local native type custody.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RequestHelperRecipe {
@@ -12074,7 +12071,7 @@ impl WorldProgramSegment {
         }
         let completed = next
             .inputs
-            .with_native_completion_from(&products.original_execution_context()?)?;
+            .with_native_completion_from(products.original_execution_evidence()?.context())?;
         next.inputs = completed.inputs;
         next.context = completed.context;
         next.private_input = Some(Arc::clone(&output.inputs));
@@ -14004,7 +14001,7 @@ impl ExactDeclarationContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_authenticated_execution(
+    pub(crate) fn retained_execution_fixture(
         producer: [u8; 32],
         artifacts: &ArtifactView,
         projection: CompilerInputProjection,
@@ -14013,13 +14010,32 @@ impl ExactDeclarationContext {
         required_instance_owners: &[ExactModuleIdentity],
     ) -> Result<Self, CompileError> {
         let support = issue_fixture_compiler_support(projection, artifacts.clone())?;
-        Self::from_authenticated_execution_support(
+        Self::retained_execution_support_fixture(
             producer,
             support,
             lexical,
             target,
             required_instance_owners,
         )
+    }
+
+    /// A data-only selected context fixture. This never issues output completion.
+    #[cfg(test)]
+    pub(crate) fn retained_execution_support_fixture(
+        producer: [u8; 32],
+        support: crate::artifact_inventory::CompilerSourceSupport,
+        lexical: Vec<ExactLexicalNode>,
+        target: ExactModuleIdentity,
+        required_instance_owners: &[ExactModuleIdentity],
+    ) -> Result<Self, CompileError> {
+        Ok(Self::prepare_execution_from_authenticated_support(
+            producer,
+            support,
+            lexical,
+            target,
+            required_instance_owners,
+        )?
+        .context)
     }
 
     fn prepare_execution_from_authenticated_support(

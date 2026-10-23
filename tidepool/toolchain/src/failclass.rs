@@ -125,6 +125,10 @@ pub enum CompileFailureCause {
     CompilerCloseUnconfirmed,
     CompilerActionRetired,
     ExtractorContract,
+    IncompleteOriginalExecution {
+        target: crate::declaration_join::ExactModuleIdentity,
+        missing_owners: Vec<crate::declaration_join::ExactModuleIdentity>,
+    },
     LexicalGraph {
         failure: crate::exact_context::LexicalGraphError,
     },
@@ -468,6 +472,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::SessionValueSelection(_)
         | CompileError::ExtractFailed(_)
         | CompileError::LexicalGraph(_)
+        | CompileError::IncompleteOriginalExecution(_)
         | CompileError::SourceAdmission(_)
         | CompileError::ExactImportWitness(_)
         | CompileError::ArtifactInventory(_)
@@ -583,6 +588,12 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::ExtractFailed(_)
         | CompileError::SourceAdmission(_)
         | CompileError::ExactImportWitness(_) => CompileFailureCause::ExtractorContract,
+        CompileError::IncompleteOriginalExecution(error) => {
+            CompileFailureCause::IncompleteOriginalExecution {
+                target: error.target().clone(),
+                missing_owners: error.missing_owners().to_vec(),
+            }
+        }
         CompileError::LexicalGraph(error) => CompileFailureCause::LexicalGraph {
             failure: error.as_ref().clone(),
         },
