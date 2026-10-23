@@ -157,6 +157,51 @@ impl PersistentSession {
     }
 }
 
+impl PersistentSession {
+    pub(super) fn binding_runtime_origin(
+        &self,
+        id: SessionVarId,
+    ) -> Option<BindingRuntimeOrigin<'_>> {
+        self.bindings.get(id)?;
+        Some(match self.binding_provenance.get(&id.raw()) {
+            Some(provenance) => BindingRuntimeOrigin::Program(provenance),
+            None => BindingRuntimeOrigin::WithoutProgramProvenance,
+        })
+    }
+
+    pub(super) fn binding_provenance(
+        &self,
+        id: u64,
+    ) -> Option<&Arc<super::resident::ProgramProvenance>> {
+        match self.binding_runtime_origin(SessionVarId::from_extract(id))? {
+            BindingRuntimeOrigin::Program(provenance) => Some(provenance),
+            BindingRuntimeOrigin::WithoutProgramProvenance => None,
+        }
+    }
+
+    pub(super) fn record_binding_provenance(
+        &mut self,
+        id: u64,
+        provenance: Arc<super::resident::ProgramProvenance>,
+    ) {
+        assert!(
+            self.bindings.get(SessionVarId::from_extract(id)).is_some(),
+            "provenance accompanies an installed binding"
+        );
+        self.binding_provenance.insert(id, provenance);
+    }
+
+    pub(super) fn prune_binding_provenance(&mut self) {
+        self.binding_provenance
+            .retain(|id, _| self.bindings.get(SessionVarId::from_extract(*id)).is_some());
+    }
+
+    #[cfg(test)]
+    pub(super) fn binding_provenance_is_empty(&self) -> bool {
+        self.binding_provenance.is_empty()
+    }
+}
+
 fn value_import_specs(entries: impl IntoIterator<Item = (String, SessionModule)>) -> Vec<String> {
     let mut grouped = Vec::<(SessionModule, Vec<String>)>::new();
     for (name, module) in entries {

@@ -3219,31 +3219,31 @@ impl CapturedCheckedValueSet {
     pub(super) fn commit(
         self,
         session: &mut PersistentSession,
-        provenance: &mut HashMap<u64, Arc<ProgramProvenance>>,
         scope: ScopeId,
         epoch: Option<u64>,
     ) {
         if let CapturedCheckedValuePayload::Values { stage, values } = self.payload {
             let mut entries = Vec::with_capacity(values.len());
             for mut value in values {
-                provenance.insert(value.id().raw(), Arc::clone(&self.provenance));
                 value.custody.handle.take();
                 entries.push(value.entry);
             }
+            let ids = entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>();
             session.commit_checked_private_values_in(
                 scope,
                 entries,
                 stage,
                 epoch.expect("prepared value epoch"),
             );
+            for id in ids {
+                session.record_binding_provenance(id, Arc::clone(&self.provenance));
+            }
             if let Some((id, dependencies)) = self.observation {
                 session.save_observation(id, &dependencies);
-                provenance.retain(|id, _| {
-                    session
-                        .bindings()
-                        .get(SessionVarId::from_extract(*id))
-                        .is_some()
-                });
+                session.prune_binding_provenance();
             }
         }
     }
@@ -9248,7 +9248,7 @@ where
         ) {
             if let Some(captured) = captured {
                 let (ticket, values) = captured.into_parts();
-                ticket.settle(&mut self.state, values, &mut self.binding_provenance)?;
+                ticket.settle(&mut self.state, values)?;
             }
         }
         Ok(outcome)
@@ -11250,8 +11250,9 @@ mod authored_publication_tests {
                 .is_none());
             assert!(!fixture
                 .resident
-                .binding_provenance
-                .contains_key(&binder.var_id));
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
         }
         let completed = source_action(
             &mut fixture.resident,
@@ -11289,8 +11290,9 @@ mod authored_publication_tests {
             );
             assert!(fixture
                 .resident
-                .binding_provenance
-                .contains_key(&binder.var_id));
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
         }
         fixture
             .resident

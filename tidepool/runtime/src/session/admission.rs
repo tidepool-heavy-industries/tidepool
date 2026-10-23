@@ -3011,13 +3011,12 @@ impl CheckedCaptureTicket {
         mut self,
         session: &mut PersistentSession,
         captured: super::resident::CapturedCheckedValueSet,
-        provenance: &mut std::collections::HashMap<u64, Arc<super::resident::ProgramProvenance>>,
     ) -> Result<(), SessionError> {
         let completion = CheckedTurnCompletion {
             prefix: Arc::clone(&self.prefix),
             running: Arc::clone(&self.running),
         };
-        completion.settle_captured(session, &self, captured, provenance)?;
+        completion.settle_captured(session, &self, captured)?;
         self.committed = true;
         Ok(())
     }
@@ -3305,7 +3304,6 @@ impl CheckedTurnCompletion {
         session: &mut PersistentSession,
         ticket: &CheckedCaptureTicket,
         captured: super::resident::CapturedCheckedValueSet,
-        provenance: &mut std::collections::HashMap<u64, Arc<super::resident::ProgramProvenance>>,
     ) -> Result<(), SessionError> {
         self.validate_capture_ticket(ticket)?;
         let value_epoch = captured.prepare_commit(session, ticket)?;
@@ -3437,12 +3435,7 @@ impl CheckedTurnCompletion {
                 if !self.prefix.admission.belongs_to(session) {
                     return Err(super::SessionTransitionReason::OwnerChanged.into());
                 }
-                captured.commit(
-                    session,
-                    provenance,
-                    self.prefix.admission.scope,
-                    value_epoch,
-                );
+                captured.commit(session, self.prefix.admission.scope, value_epoch);
                 prepared.commit(
                     session,
                     &mut state,
