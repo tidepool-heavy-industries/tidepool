@@ -11772,12 +11772,12 @@ mod tests {
         reversed: bool,
         repetitions: usize,
         retain_source: bool,
-        test_display_projection: bool,
+        test_value_projection: bool,
     ) {
         let producer = b"target-prefix-issued-history";
         let producer_sha256 = CanonicalProducerIdentity::from_producer_bytes(producer).sha256();
         let inventory = ArtifactInventory::default();
-        let home_unit = if test_display_projection {
+        let home_unit = if test_value_projection {
             "main"
         } else {
             "fixture"
@@ -12001,15 +12001,11 @@ mod tests {
                     .native_groups,
                 prefix.capture_graph_selection().native_groups,
             );
-            if test_display_projection {
+            if test_value_projection {
                 let expanded = crate::activation_preview::native_declaration_input_tests::admit_irrelevant_value_root(
                     &Arc::new(context.clone()),
                     "Tidepool.Session.ProjectionAudit.G100",
                 );
-                let prototype =
-                    crate::activation_preview::native_declaration_input_tests::display_prototype(
-                        &chosen_context,
-                    );
                 let before = expanded.artifact_view().capture_graph_selection();
                 let irrelevant_value = expanded
                     .artifact_view()
@@ -12061,22 +12057,22 @@ mod tests {
                     "multiple exact group bindings share one carrier/ordinal"
                 );
                 assert!(same_carrier.iter().all(|group| demanded.contains(group)));
-                let display =
-                    crate::activation_preview::OriginalDisplayContext::issue(&prototype, &expanded)
-                        .unwrap_or_else(|error| {
-                            panic!(
-                        "display projection must preserve existing exact group bindings: {error:?}"
-                    )
-                        })
-                        .unwrap();
-                let projected = display.declarations();
-                assert!(projected.value_interfaces().is_empty());
+                let projected = expanded
+                    .artifact_view()
+                    .without_value_interface_roots(&BTreeSet::from([irrelevant_value
+                        .descriptor
+                        .id]))
+                    .unwrap();
+                assert!(projected.entries().iter().all(|entry| !matches!(
+                    entry.payload,
+                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                )));
                 assert_eq!(
-                    projected.artifact_view().selected_native_groups(),
+                    projected.selected_native_groups(),
                     expanded.artifact_view().selected_native_groups(),
-                    "activation display must preserve the exact nonempty demand"
+                    "value-root projection preserves the exact nonempty demand"
                 );
-                let after = projected.artifact_view().capture_graph_selection();
+                let after = projected.capture_graph_selection();
                 let expected_roots = before
                     .roots
                     .iter()
@@ -12103,7 +12099,7 @@ mod tests {
                 );
                 assert_eq!(after.custody_roots, before.custody_roots);
                 assert_eq!(
-                    projected.artifact_view().binding_dependencies(),
+                    projected.binding_dependencies(),
                     expanded.artifact_view().binding_dependencies(),
                     "exact selected child closures survive"
                 );
@@ -15587,7 +15583,124 @@ mod tests {
     }
 
     #[test]
-    fn published_original_admission_preserves_issuer_choice_over_equivalent_custody() {
+    fn ordinary_publication_and_display_preserve_the_actual_sealed_issuer() {
+        let fixture =
+            crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        let evidence = fixture
+            .entry
+            .products()
+            .original_execution_evidence()
+            .unwrap();
+        let original = evidence.context();
+        let publication = fixture
+            .entry
+            .products()
+            .published_source_original_selection("revision", &fixture.root.descriptor.owner)
+            .unwrap();
+        let published = publication.context();
+        let expected = published.artifact_view().capture_graph_selection();
+        let expected_edges = published.artifact_view().binding_dependencies();
+        let root_group = expected
+            .native_groups
+            .iter()
+            .find(|group| {
+                group.binding.artifact() == fixture.root.descriptor.id
+                    && group.original_ordinal == fixture.root_ordinals[1]
+            })
+            .copied()
+            .unwrap();
+        assert!(expected_edges.iter().any(|(from, to, _)| {
+            *from == ArtifactBindingNode::Group(root_group)
+                && matches!(to, ArtifactBindingNode::Group(child)
+                    if child.binding.artifact() == fixture.helper.descriptor.id)
+        }));
+        let selected_groups = expected.native_groups.iter().copied().collect();
+        assert_eq!(
+            published
+                .published_source_original_selections_for_target(
+                    &selected_groups,
+                    &[issued_source(&fixture.root, fixture.root_ordinals[1])],
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(published
+            .published_source_original_selections_for_target(&BTreeSet::new(), &[],)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            fixture.entry.products().published_source_original_selection("revision", &ExactModuleIdentity {
+                unit: fixture.root.descriptor.owner.unit.clone(),
+                module: "UnissuedPublicationRoot".into(),
+            }),
+            Err(CompileError::ExtractFailed(detail))
+                if detail == "exact declaration context: published root lacks an admitted source scope"
+        ));
+
+        let broader = published
+            .artifact_view()
+            .merge_fixture_selections(original.artifact_view())
+            .unwrap();
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                broader.entries(),
+                &broader.capture_graph_selection(),
+                &broader.binding_dependencies(),
+            )
+            .unwrap();
+        for view in [broader, recovered] {
+            let inventory = view.inventory();
+            let mut retained = view.clone();
+            for _ in 0..2 {
+                retained = inventory
+                    .admit_projected_with_native_requirements(
+                        &retained,
+                        vec![fixture.root.clone()],
+                        published.compiler_input_projection(),
+                        &[],
+                    )
+                    .unwrap();
+                let selected = retained
+                    .select_admission_roots(vec![fixture.root.descriptor.id])
+                    .unwrap();
+                assert_eq!(
+                    selected.capture_graph_selection().native_groups,
+                    expected.native_groups
+                );
+                for edge in &expected_edges {
+                    assert!(selected.binding_dependencies().contains(edge));
+                }
+            }
+        }
+
+        let prototype =
+            crate::activation_preview::native_declaration_input_tests::display_prototype(original);
+        let display = crate::activation_preview::OriginalDisplayContext::issue(
+            &prototype,
+            evidence.completed().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(display.execution_evidence().identity(), evidence.identity());
+        assert!(display.declarations().value_interfaces().is_empty());
+        let native_before = original
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups;
+        assert_eq!(
+            display
+                .declarations()
+                .artifact_view()
+                .capture_graph_selection()
+                .native_groups,
+            native_before
+        );
+    }
+
+    #[test]
+    fn original_requirements_preserve_issuer_choice_over_equivalent_custody() {
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::ExactLexicalNode;
 
@@ -15664,18 +15777,21 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
             .unwrap();
-            let publication = issued
-                .issue_published_source_original("revision", "input", &native.descriptor.owner)
-                .unwrap();
-            let published = publication.context();
+            let issuer_context = Arc::new(issued);
+            let requirements = NativeOriginalRequirement::for_projection(
+                issuer_context.compiler_input_projection(),
+                issuer_context.artifact_view(),
+                &[],
+            )
+            .unwrap();
             assert_eq!(
-                published
+                issuer_context
                     .artifact_view()
                     .capture_graph_selection()
                     .native_groups,
                 vec![group]
             );
-            let published_projection = published.compiler_input_projection();
+            let selected_projection = issuer_context.compiler_input_projection();
             for joined in [
                 first.merge_fixture_selections(&second).unwrap(),
                 second.merge_fixture_selections(&first).unwrap(),
@@ -15685,8 +15801,8 @@ mod tests {
                     .admit_projected_with_native_requirements(
                         &joined,
                         vec![Arc::new(native.clone())],
-                        published_projection,
-                        &[],
+                        selected_projection,
+                        &requirements,
                     )
                     .unwrap();
                 assert_eq!(
@@ -15706,18 +15822,18 @@ mod tests {
                     Arc::new(next_values.clone()),
                 ])
                 .unwrap();
-                let published_role = published_projection
+                let selected_role = selected_projection
                     .roles()
                     .into_iter()
-                    .find(CompilerInputRole::is_published_source_original)
+                    .find(|role| role.original() == Some(native.descriptor.id))
                     .unwrap();
                 conflicting
-                    .admit_role(native.descriptor.owner.clone(), published_role)
+                    .admit_role(native.descriptor.owner.clone(), selected_role)
                     .unwrap();
                 let unchanged = admitted.capture_graph_selection();
                 let nodes_before = inventory.node_count();
                 assert!(matches!(
-                    inventory.admit_projected_with_native_requirements(&admitted, vec![Arc::new(next_values.clone())], &conflicting, &[]),
+                    inventory.admit_projected_with_native_requirements(&admitted, vec![Arc::new(next_values.clone())], &conflicting, &requirements),
                     Err(CompileError::ArtifactInventory(error))
                         if error.failure == ArtifactInventoryFailure::NativeGroupSelectionConflict {
                             artifact: native.descriptor.id,
@@ -15735,7 +15851,7 @@ mod tests {
     }
 
     #[test]
-    fn published_original_admission_keeps_transitive_exact_group_choices() {
+    fn original_requirements_keep_transitive_exact_group_choices() {
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::ExactLexicalNode;
 
@@ -15844,19 +15960,24 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
             .unwrap();
-            let publication = issued
-                .issue_published_source_original("revision", "input", &root.descriptor.owner)
-                .unwrap();
-            let published = publication.context();
+            let issuer_context = Arc::new(issued);
+            let requirements = NativeOriginalRequirement::for_projection(
+                issuer_context.compiler_input_projection(),
+                issuer_context.artifact_view(),
+                &[],
+            )
+            .unwrap();
             let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let inputs = issuer_context
+                .capture_world_primary_compiler_inputs([2; 32])
+                .unwrap();
             let certified =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    published.compiler_input_projection(),
-                    &published.artifact_view().metadata_snapshot(),
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    &inputs,
                     &validation.inventory,
                 )
                 .unwrap();
-            let expected = published
+            let expected = issuer_context
                 .artifact_view()
                 .capture_graph_selection()
                 .native_groups;
@@ -15887,8 +16008,8 @@ mod tests {
                     inventory.admit_projected_with_native_requirements(
                         &joined,
                         vec![Arc::new(root.clone())],
-                        published.compiler_input_projection(),
-                        &[],
+                        issuer_context.compiler_input_projection(),
+                        &requirements,
                     )
                 }
                 .unwrap();
@@ -15934,8 +16055,8 @@ mod tests {
                     recovered_inventory.admit_projected_with_native_requirements(
                         &recovered,
                         vec![Arc::new(root.clone())],
-                        published.compiler_input_projection(),
-                        &[],
+                        issuer_context.compiler_input_projection(),
+                        &requirements,
                     )
                 }
                 .unwrap();
@@ -16725,7 +16846,7 @@ mod tests {
     }
 
     #[test]
-    fn published_group_keeps_its_exact_artifact_child_over_equivalent_custody() {
+    fn issued_group_keeps_its_exact_artifact_child_over_equivalent_custody() {
         use crate::declaration_context::ExactDeclarationContext;
         use crate::declaration_join::ExactLexicalNode;
 
@@ -16788,11 +16909,14 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        let publication = issued
-            .issue_published_source_original("revision", "input", &native.descriptor.owner)
-            .unwrap();
-        let published = publication.context();
-        let expected = published.artifact_view().capture_graph_selection();
+        let issuer_context = Arc::new(issued);
+        let requirements = NativeOriginalRequirement::for_projection(
+            issuer_context.compiler_input_projection(),
+            issuer_context.artifact_view(),
+            &[],
+        )
+        .unwrap();
+        let expected = issuer_context.artifact_view().capture_graph_selection();
         let group = expected.native_groups[0];
         for joined in [
             original.merge_fixture_selections(&sibling).unwrap(),
@@ -16824,10 +16948,12 @@ mod tests {
                     .collect::<BTreeSet<_>>();
                 let before_edges = parent.binding_dependencies();
                 let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let inputs = issuer_context
+                    .capture_world_primary_compiler_inputs([2; 32])
+                    .unwrap();
                 let receipt =
-                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                        published.compiler_input_projection(),
-                        &parent.metadata_snapshot(),
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                        &inputs,
                         &validation.inventory,
                     )
                     .unwrap();
@@ -16865,8 +16991,8 @@ mod tests {
                         .admit_projected_with_native_requirements(
                             &admitted,
                             vec![Arc::new(native.clone())],
-                            published.compiler_input_projection(),
-                            &[],
+                            issuer_context.compiler_input_projection(),
+                            &requirements,
                         )
                         .unwrap();
                     // Compiler roles preserve their selected namespace independently
@@ -17601,11 +17727,7 @@ mod tests {
         producer_bytes: &[u8],
     ) {
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
-        let crate::certified_products::PendingImportOwner::Source {
-            original_ordinal: helper_ordinal,
-            ..
-        } = &helper_import
-        else {
+        let crate::certified_products::PendingImportOwner::Source { .. } = &helper_import else {
             panic!("recapture helper import must be a source group");
         };
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
@@ -17634,37 +17756,6 @@ mod tests {
                 .product;
             Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
         });
-        // Source publication follows certified lexical imports, which are
-        // distinct from the canonical type-dependency requirements.
-        let mut source_imports = interfaces
-            .iter()
-            .filter_map(|entry| {
-                let ArtifactPayload::Canonical(interface) = &entry.payload else {
-                    panic!("recapture interfaces must be canonical");
-                };
-                Some((
-                    entry.descriptor.owner.clone(),
-                    interface
-                        .source_imports()?
-                        .iter()
-                        .filter_map(|edge| {
-                            Some(ExactModuleIdentity {
-                                unit: edge.home_unit.as_ref()?.clone(),
-                                module: edge.module.clone(),
-                            })
-                        })
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                ))
-            })
-            .collect::<BTreeMap<_, Vec<_>>>();
-        if helper.catalog_input_custody().is_none() {
-            // The synthetic helper above is explicitly authored without imports.
-            assert!(source_imports
-                .insert(helper.descriptor.owner.clone(), Vec::new())
-                .is_none());
-        }
         let mut entries = interfaces;
         entries.extend([helper.clone(), originals[0].clone(), originals[1].clone()]);
         let available = inventory
@@ -17778,99 +17869,6 @@ mod tests {
             "distinct group issuers retain the same exact carrier"
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let helper_lexical = crate::declaration_join::source_lexical_closure(
-            std::slice::from_ref(&helper.descriptor.owner),
-            &source_imports,
-            &[],
-            &available.retained_source_implementations(),
-        )
-        .expect("recapture source graph must retain certified import evidence")
-        .lexical;
-        let issue_context =
-            |index: usize,
-             view: &ArtifactView,
-             helper_lexical: &[crate::declaration_join::ExactLexicalNode]| {
-                let mut lexical = vec![crate::declaration_join::ExactLexicalNode {
-                    owner: originals[index].descriptor.owner.clone(),
-                    imports: vec![helper.descriptor.owner.clone()],
-                }];
-                lexical.extend_from_slice(helper_lexical);
-                ExactDeclarationContext::retained_execution_fixture(
-                    producer.sha256(),
-                    view,
-                    projection.clone(),
-                    lexical,
-                    originals[index].descriptor.owner.clone(),
-                    &[
-                        originals[index].descriptor.owner.clone(),
-                        helper.descriptor.owner.clone(),
-                    ],
-                )
-            };
-        if helper.catalog_input_custody().is_some() {
-            // A complete interface namespace cannot compensate for missing
-            // source imports when publication selects the lexical closure.
-            let missing_imports = [crate::declaration_join::ExactLexicalNode {
-                owner: helper.descriptor.owner.clone(),
-                imports: vec![],
-            }];
-            let incomplete = issue_context(0, &issuers[0], &missing_imports)
-                .expect("namespace admission precedes source publication")
-                .issue_published_source_original("issuer", "input", &helper.descriptor.owner);
-            assert!(
-                matches!(&incomplete,
-                Err(CompileError::ArtifactInventory(error)) if matches!(&error.failure,
-                    ArtifactInventoryFailure::MissingDependency { dependent, required, dependency: ArtifactDependency::Interface, .. }
-                    if dependent == &helper.descriptor.owner
-                        && required == &ExactModuleIdentity {
-                            unit: helper.descriptor.owner.unit.clone(),
-                            module: "Tidepool.Inspection.Tree".into(),
-                        })),
-                "incomplete catalog source imports: {incomplete:?}"
-            );
-        }
-        let publications = issuers
-            .iter()
-            .enumerate()
-            .map(|(index, issuer)| {
-                issue_context(index, issuer, &helper_lexical)
-                    .unwrap()
-                    .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        for publication in &publications {
-            let imports = [helper_import.clone()];
-            let groups = publication
-                .context()
-                .artifact_view()
-                .native_requirements_with_group_bindings_from_roots(&[
-                    NativeRequirementRoot::Group {
-                        artifact: helper.descriptor.id,
-                        original_ordinal: *helper_ordinal,
-                    },
-                ])
-                .map(|(_, groups)| groups)
-                .unwrap();
-            assert!(!groups.is_empty());
-            assert_eq!(
-                publication
-                    .context()
-                    .published_source_original_selections_for_target(&groups, &imports,)
-                    .unwrap()
-                    .len(),
-                1,
-                "an authenticated source root retains its issued compilation policy",
-            );
-            assert!(
-                publication
-                    .context()
-                    .published_source_original_selections_for_target(&BTreeSet::new(), &[])
-                    .unwrap()
-                    .is_empty(),
-                "an unrelated publication is not selected by ambient availability",
-            );
-        }
         for (index, issuer) in issuers.iter().enumerate() {
             let actual = issuer
                 .native_requirements_with_group_bindings_from_roots(&[
@@ -17886,30 +17884,6 @@ mod tests {
                 .find(|group| group.binding.artifact() == helper.descriptor.id)
                 .unwrap();
             assert!(issuer.contains_issued_native_group(helper_group));
-            assert_eq!(
-                publications[index]
-                    .context()
-                    .published_source_original_selections_for_target(&actual, &[])
-                    .unwrap()
-                    .len(),
-                1
-            );
-            assert!(publications[1 - index]
-                .context()
-                .published_source_original_selections_for_target(&actual, &[])
-                .unwrap()
-                .is_empty());
-            let mixed = actual
-                .iter()
-                .copied()
-                .chain(helper_groups.iter().copied())
-                .collect();
-            assert!(publications[index]
-                .context()
-                .published_source_original_selections_for_target(&mixed, &[])
-                .unwrap()
-                .is_empty());
-
             assert!(!issuers[1 - index].contains_issued_native_group(helper_group));
             let narrowed = issuer
                 .select_publication_roots(
@@ -19028,7 +19002,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_source_import_does_not_select_current_publication_by_module_name() {
+    fn historical_native_import_does_not_select_current_requirement_by_module_name() {
         use crate::declaration_context::ExactDeclarationContext;
         let old = Arc::new(issued_native_groups(
             "SourceEpoch",
@@ -19106,26 +19080,32 @@ mod tests {
             ],
         )
         .unwrap();
-        let publication = context
-            .issue_published_source_original("revision", "input", &new.descriptor.owner)
+        let selected = Arc::new(context);
+        let requirements = NativeOriginalRequirement::for_projection(
+            selected.compiler_input_projection(),
+            selected.artifact_view(),
+            &[],
+        )
+        .unwrap();
+        let required = requirements
+            .iter()
+            .find(|fact| fact.original == new.descriptor.id)
             .unwrap();
-        let published = publication.context();
         let available = old_view
             .merge_selected(
-                published.artifact_view(),
-                published.compiler_input_projection(),
+                selected.artifact_view(),
+                selected.compiler_input_projection(),
             )
             .unwrap();
-        let support = published
+        let support = selected
             .compiler_source_support()
             .retain_custody(&available)
             .unwrap();
-        let current = published
+        let current = selected
             .as_ref()
             .clone()
             .extend_issued_compiler_support(&support)
             .unwrap();
-        let historical_imports = [issued_source(&old, 7)];
         let historical_groups = current
             .artifact_view()
             .native_requirements_with_group_bindings_from_roots(&[NativeRequirementRoot::Group {
@@ -19138,14 +19118,10 @@ mod tests {
         assert!(historical_groups
             .iter()
             .any(|group| group.binding.artifact() == old.descriptor.id));
-        assert!(current
-            .published_source_original_selections_for_target(
-                &historical_groups,
-                &historical_imports
-            )
-            .unwrap()
-            .is_empty());
-        let selected_imports = [issued_source(&new, 7)];
+        let selected_requirement = required.selection.graph_selection();
+        assert!(historical_groups
+            .iter()
+            .all(|group| { !selected_requirement.native_groups.contains(group) }));
         let selected_groups = current
             .artifact_view()
             .native_requirements_with_group_bindings_from_roots(&[NativeRequirementRoot::Group {
@@ -19154,16 +19130,19 @@ mod tests {
             }])
             .map(|(_, groups)| groups)
             .unwrap();
-        assert_eq!(
-            current
-                .published_source_original_selections_for_target(
-                    &selected_groups,
-                    &selected_imports
-                )
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(selected_groups
+            .iter()
+            .all(|group| { selected_requirement.native_groups.contains(group) }));
+        let retained = NativeOriginalRequirement::for_projection(
+            current.compiler_input_projection(),
+            current.artifact_view(),
+            &requirements,
+        )
+        .unwrap();
+        assert!(retained.iter().any(|fact| fact == required));
+        assert!(retained
+            .iter()
+            .all(|fact| fact.original != old.descriptor.id));
     }
 
     #[test]
