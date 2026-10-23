@@ -11532,6 +11532,221 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn native_retained_resolution_visits_distinct_acquisitions_and_anchored_descendants() {
+        use super::super::prepared::{NativeInstantiationPlan, RetainedNativeOrigin};
+        use super::super::turn::{consume_cell_program_item, TurnPurpose, TurnResult};
+        use tidepool_toolchain::linked_native::{AcquiredNativeImport, NativeOccurrenceId};
+
+        let CheckedCaptureFixture {
+            root: _root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture_from(
+            SessionId(1014),
+            include_str!("fixtures/checked-native-resolver-history.hs"),
+        );
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+                report,
+            )
+        })
+        .unwrap();
+        let declaration = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), checked.checked_item(1).unwrap())
+        })
+        .unwrap();
+        source_action(&mut resident, &original, |resident, _| {
+            resident.adopt_checked_declaration(declaration)
+        })
+        .unwrap();
+        let scope = execution.private_scope();
+
+        // This callback exercises traversal only. The neighboring acquired-slot
+        // test checks actual row, ordinal and full-binding authentication.
+        let probe = |resident: &mut TestSession,
+                     compiled: &super::super::turn::CompiledTurn,
+                     refuse_second: bool,
+                     expect_anchor: bool| {
+            let code = compiled.code();
+            let certification = code.certification().unwrap();
+            let TurnPurpose::Execution { execution, prefix } = certification.purpose() else {
+                panic!("fixture must issue an actual checked execution");
+            };
+            let linked = certification.linked_target.as_ref().unwrap();
+            let retained_owners = linked
+                .acquired()
+                .filter(|owner| {
+                    owner
+                        .imports()
+                        .any(|import| matches!(import, AcquiredNativeImport::Retained { .. }))
+                })
+                .map(|owner| owner.occurrence())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(
+                retained_owners.len() >= 2,
+                "fixture must emit distinct acquired HOME groups with real retained slots"
+            );
+            let parents = linked
+                .imports()
+                .iter()
+                .filter_map(|import| match import {
+                    tidepool_toolchain::linked_native::LinkedNativeTargetImport::Code {
+                        acquired,
+                        ..
+                    } if acquired.imports().any(|child| {
+                        matches!(child,
+                        AcquiredNativeImport::Code { acquired: descendant, .. }
+                        if retained_owners.contains(&descendant.occurrence()))
+                    }) =>
+                    {
+                        Some(acquired.code().id())
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(
+                !parents.is_empty(),
+                "target must reach a retained descendant through an acquired parent"
+            );
+            let inputs = prefix
+                .scoped_inputs_for(&resident.state, execution)
+                .unwrap();
+            let plan = Arc::new(
+                NativeInstantiationPlan::prepare_code(
+                    &code,
+                    &resident.state.certified_image_registry(),
+                )
+                .unwrap(),
+            );
+            let selection = resident
+                .state
+                .bindings()
+                .native_domain_selection_in(resident.state.scope_tree(), scope)
+                .unwrap();
+            let before = resident.state.residency().unwrap();
+            let mut resolved = Vec::<NativeOccurrenceId>::new();
+            let mut anchors = 0;
+            let result = plan.instantiate(
+                selection,
+                |request, selected| {
+                    let permit = resident
+                        .state
+                        .bindings()
+                        .native_slot_permit_in(resident.state.scope_tree(), scope, request)
+                        .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+                    let witness = resident
+                        .state
+                        .prepared_mut()
+                        .unwrap()
+                        .lookup_world_native_slot(&permit, selected)?;
+                    anchors +=
+                        usize::from(witness.is_some() && parents.contains(&request.binding_key()));
+                    Ok((permit, witness))
+                },
+                |requirement| {
+                    let value = inputs.resolve_native_requirement(execution.item(), requirement)?;
+                    if let RetainedNativeOrigin::Acquired { owner, .. } = requirement.origin() {
+                        let occurrence = owner.occurrence();
+                        assert!(retained_owners.contains(&occurrence));
+                        if !resolved.contains(&occurrence) {
+                            resolved.push(occurrence);
+                            if refuse_second && resolved.len() == 2 {
+                                return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                            }
+                        }
+                    }
+                    Ok(value)
+                },
+            );
+            assert_eq!(
+                resident.state.residency().unwrap(),
+                before,
+                "resolution must finish or refuse before native installation"
+            );
+            if refuse_second {
+                assert!(matches!(
+                    result,
+                    Err(PreparedRuntimeError::CertifiedTargetOwners)
+                ));
+                assert_eq!(resolved.len(), 2);
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "unchanged acquired obligations must resolve"
+                );
+                assert_eq!(
+                    resolved
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    retained_owners
+                );
+            }
+            if expect_anchor {
+                assert!(
+                    anchors > 0,
+                    "second execution must observe a real installed anchor"
+                );
+            } else {
+                assert_eq!(anchors, 0);
+            }
+        };
+        let mut installed_handles = None;
+        for index in 2..4 {
+            let next = source_action(&mut resident, &original, |resident, _| {
+                resident.admit_checked_item(prefix.clone(), checked.checked_item(index).unwrap())
+            })
+            .unwrap();
+            let TurnResult::Bind {
+                bound, compiled, ..
+            } = consume_cell_program_item(next.clone()).unwrap()
+            else {
+                panic!("fixture consumer must be a checked binding");
+            };
+            probe(&mut resident, &compiled, true, index == 3);
+            probe(&mut resident, &compiled, false, index == 3);
+            source_action(&mut resident, &original, |resident, report| {
+                resident.run_bind_with_sites(
+                    &bound[0].name,
+                    compiled.code(),
+                    &bound[0],
+                    next.generation(),
+                    report,
+                )
+            })
+            .unwrap();
+            let handles = resident
+                .state
+                .bindings()
+                .source_instances_in(resident.state.scope_tree(), scope)
+                .iter()
+                .map(|lease| lease.handle())
+                .collect::<Vec<_>>();
+            if let Some(previous) = &installed_handles {
+                assert_eq!(
+                    &handles, previous,
+                    "anchored reuse must preserve the original installed source instances"
+                );
+            } else {
+                assert!(!handles.is_empty());
+                installed_handles = Some(handles);
+            }
+        }
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 4);
+        resident.freeze_private_execution(&execution).unwrap();
+    }
+
+    #[test]
     fn checked_snapshot_retains_expired_observation_until_its_last_owner_drops() {
         use super::super::turn::{consume_cell_program_item, TurnResult};
         let CheckedCaptureFixture {
