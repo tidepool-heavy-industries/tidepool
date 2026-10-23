@@ -1,6 +1,6 @@
 module TypedSegmentCases
   ( typedSegmentRewriteSemantics, typedSegmentNativePreparation
-  , typedSegmentRecordMetadataProperty
+  , typedSegmentRecordMetadataProperty, typedSegmentFixturePurpose
   ) where
 
 import Control.Exception (SomeException, bracket, evaluate, fromException, try)
@@ -63,7 +63,9 @@ import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
 import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, capturedInterfaceInputs, captureCompletedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules, capturedInterfaceInputs, captureCompletedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment
+  , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedTypedSegmentRecipeWithImportRendering)
 import Tidepool.Identity (nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.Test.Runner (requiredInput)
@@ -71,6 +73,18 @@ import Tidepool.TurnSource (preambleDefaultDeclaration)
 import qualified Tidepool.TypedSegment as TypedSegment
 import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Unsafe.Coerce (unsafeCoerce)
+
+-- Standalone compiler fixtures use the production recipe issuer for their
+-- actual generated source, without claiming a World reservation or admission.
+typedSegmentFixturePurpose :: DynFlags -> PreparedTypedSegmentSource -> FilePath -> String -> IO CompilePurpose
+typedSegmentFixturePurpose flags source path owner = do
+  let protected = preparedTypedSegmentTemplate source
+      operations = preparedTypedSegmentOperations source
+  imports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" flags protected)
+  mapped <- either fail pure (renderProtectedTemplateImports (preparedTypedSegmentLineOffset source) imports)
+  scaffold <- generatedTypedSegmentRecipeWithImportRendering operations flags (CheckedTemplateImports [] [])
+    mapped protected (preparedTypedSegmentImports source) path owner >>= either fail pure
+  pure (GeneratedScaffoldCompile scaffold (TypedSegmentCompile (preparedTypedSegmentPlan source) operations GeneralCompile))
 
 -- Consume an interface actually emitted by the whole-do/typed-batch issuer.
 -- This checks the real alias importer without constructing a world or value
@@ -179,9 +193,10 @@ typedSegmentNativePreparation = bracket temporary removeDirectoryRecursive $ \ro
             pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
               typedSegmentSessionInterfaces batch)
       writeFile path (preparedTypedSegmentSource source)
+      purpose <- typedSegmentFixturePurpose flags source path ("TypedPrepared" ++ show index)
       result <- try (runRequest (pure ()) $ \compiler -> compiler
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))
-        mempty (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile) Nothing path includes Nothing)
+        mempty purpose Nothing path includes Nothing)
           :: IO (Either SomeException PreparedSegmentProductsResult)
       case (expected, result) of
         (PrepareAccepted, Right products) -> do
@@ -296,9 +311,10 @@ typedSegmentRecordMetadataProperty = bracket temporary removeDirectoryRecursive 
             pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
               typedSegmentSessionInterfaces batch)
       writeFile path (preparedTypedSegmentSource source)
+      purpose <- typedSegmentFixturePurpose flags source path owner
       products <- runRequest (pure ()) (\compiler -> compiler
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))
-        mempty (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile)
+        mempty purpose
         Nothing path includes Nothing)
       let prepared = preparedSegmentProducts products
           segment = preparedSegmentCaptures products

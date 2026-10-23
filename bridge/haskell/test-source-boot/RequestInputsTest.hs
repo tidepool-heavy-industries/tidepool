@@ -82,10 +82,13 @@ import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, prologueImports, analyzeOrderedCellWithFlags, BoundBinder(..)
   , CellSourcePlan(..), CellAnalysisItem(..), TurnKind(..), StmtBinders(..), cellInferenceSegments
-  , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
+  , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations
+  , preparedTypedSegmentTemplate, preparedTypedSegmentLineOffset, preparedTypedSegmentImports)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), hydrateExactScope)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), hydrateExactScope
+  , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedTypedSegmentRecipeWithImportRendering)
 import Tidepool.DeclarationJoin (DeclarationExport(..), ExportIdentity(..), interfaceExports, encodeDeclarationExports, normalizeDeclarationExports)
 import Tidepool.ExactScope
   ( ExactScope, SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
@@ -3048,8 +3051,8 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
           ["let (telemetryValue,telemetryOther) = ((42 :: Int),(43 :: Int))"
           ,"_ <- pure ()"
           ,"let afterDiscard = telemetryValue + telemetryOther"]
-    ordered <- analyzeOrderedCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult plain)))
-      template body >>= either (fail . show) pure
+    let flags = hsc_dflags (prHscEnv (pprPipelineResult plain))
+    ordered <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
     source <- either fail pure (prepareTypedSegmentSource template ordered (digest (BS8.pack body))
       [(0,1,Nothing),(1,2,Nothing),(2,3,Nothing)])
     completedBatch <- newIORef Nothing
@@ -3061,10 +3064,16 @@ compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
           pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
             typedSegmentSessionInterfaces batch)
     writeFile path (preparedTypedSegmentSource source)
+    let protected = preparedTypedSegmentTemplate source
+        operations = preparedTypedSegmentOperations source
+    imports <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" flags protected)
+    mapped <- either fail pure (renderProtectedTemplateImports (preparedTypedSegmentLineOffset source) imports)
+    scaffold <- generatedTypedSegmentRecipeWithImportRendering operations flags (CheckedTemplateImports [] [])
+      mapped protected (preparedTypedSegmentImports source) path "TelemetryTyped" >>= either fail pure
     typed <- runPipelineSessionSelected
       (WithCompilerExecution grant executor
         (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))) Set.empty
-      (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile)
+      (GeneratedScaffoldCompile scaffold (TypedSegmentCompile plan operations GeneralCompile))
       Nothing path [work,effects,prelude] Nothing
     batch <- readIORef completedBatch >>= maybe (fail "typed producer omitted its actual capture batch") pure
     actualTarget <- case [value | value <- pprModules (preparedSegmentProducts typed)

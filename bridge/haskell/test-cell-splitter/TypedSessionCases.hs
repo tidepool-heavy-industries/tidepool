@@ -46,7 +46,7 @@ import Tidepool.Binders
   ( BoundBinder(..), ValueTier(..), CellSplitError(..)
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags
   , prepareTypedSegmentSource, preparedTypedSegmentPlan
-  , preparedTypedSegmentSource, preparedTypedSegmentOperations )
+  , preparedTypedSegmentSource )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.DependencyEvidence (DependencyEvidence(..))
 import Tidepool.ExactHydration
@@ -57,7 +57,7 @@ import Tidepool.FinalizedModuleArtifacts
 import Tidepool.CheckedCell (captureCheckedSignature, resolveCheckedSignature)
 import Tidepool.ConstructorIdentity (captureIdentityResolver)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), CompilePurpose(..), withResidentPipelineSelectedRequests
+  ( PipelineSelection(..), withResidentPipelineSelectedRequests
   , preparedSegmentCaptures )
 import Tidepool.Identity (stableVarId)
 import Tidepool.Session
@@ -67,6 +67,7 @@ import Tidepool.Session
   , mkThinSessionIface, renderSessionModule, sessionHiPath, writeSessionIface )
 import Tidepool.SessionArtifacts
 import Tidepool.Test.Runner (requiredInput)
+import TypedSegmentCases (typedSegmentFixturePurpose)
 import Tidepool.TypedSegment
   ( PendingTypedSegment
   , typedSegmentItems, pendingSegmentItems, typedItemCaptures, typedCaptureIdentifier
@@ -184,6 +185,7 @@ acquirePrefixFixture = do
       sourcePlan <- analyzeOrderedCellWithFlags flags template body >>= either (fail . show) pure
       source <- either fail pure (prepareTypedSegmentSource template sourcePlan (replicate 64 'd') reservations)
       writeFile target (preparedTypedSegmentSource source)
+      purpose <- typedSegmentFixturePurpose flags source target "TypedSessionDelayedCapture"
       prepared <- withResidentPipelineSelectedRequests includes $ \runRequest -> do
         observed <- newIORef Nothing
         let complete initial admitted typed = do
@@ -207,7 +209,7 @@ acquirePrefixFixture = do
                 typedSegmentSessionInterfaces batch)
         void $ runRequest (pure ()) $ \compiler -> compiler
           (WithTypedSegmentPreparation complete (PreparedSegmentProducts (preparedTypedSegmentPlan source) Nothing))
-          mempty (TypedSegmentCompile (preparedTypedSegmentPlan source) (preparedTypedSegmentOperations source) GeneralCompile)
+          mempty purpose
           Nothing target includes Nothing
         readIORef observed >>= maybe (fail "delayed-prefix preparation callback did not execute") pure
       let snapshots = typedSegmentSessionInterfaces prepared
@@ -266,8 +268,8 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
   source <- either fail pure (prepareTypedSegmentSource template sourcePlan (replicate 64 'a')
     [(0, 701, Nothing), (1, 702, Nothing)])
   let plan = preparedTypedSegmentPlan source
-      operations = preparedTypedSegmentOperations source
   writeFile target (preparedTypedSegmentSource source)
+  purpose <- typedSegmentFixturePurpose flags source target "TypedSessionCaptures"
   withResidentPipelineSelectedRequests includes $ \runRequest -> do
     let acquire staging afterHydration = runRequest (pure ()) $ \compiler -> do
           observed <- newIORef Nothing
@@ -280,7 +282,7 @@ typedSessionHydrationPublicationChecks = bracket temporary removeDirectoryRecurs
                   typedSegmentSessionGlobals prepared, typedSegmentSessionInterfaces prepared)
           result <- compiler
             (WithTypedSegmentPreparation complete (PreparedSegmentProducts plan Nothing))
-            mempty (TypedSegmentCompile plan operations GeneralCompile) Nothing target includes Nothing
+            mempty purpose Nothing target includes Nothing
           case typedSegmentItems (preparedSegmentCaptures result) of
             [_, _] -> pure ()
             _ -> fail "Session control did not receive two compiler-issued items"

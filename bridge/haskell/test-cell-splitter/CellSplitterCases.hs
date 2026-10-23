@@ -1073,7 +1073,7 @@ checkingSourceRequestRoundTrip = do
   [planningFlag, planningPayload] <- pure (workerArgv planning)
   assertEqual "cell planning retains the current launcher protocol" "--worker-request-v29" planningFlag
   assertEqual "cell plan 51 and template/output 32/33 retain their wire grammar"
-    "545052455130323800010000000100000004000000010700000043656c6c2e687333200800000074656d706c617465210800000063656c6c2d6f7574"
+    "545052455130323900010000000100000004000000010700000043656c6c2e687333200800000074656d706c617465210800000063656c6c2d6f7574"
     planningPayload
   case workerRequestFromArgv [planningFlag,planningPayload] of
     Right (Just request) -> do
@@ -1083,7 +1083,7 @@ checkingSourceRequestRoundTrip = do
       assertEqual "cell planning admits its supported operation" (Right CellPlanOperation)
         (requestOperation <$> admitWorkerRequest request)
     other -> fail ("current cell planning request refused: " ++ show other)
-  case workerRequestFromArgv [planningFlag,"5450524551303238000100000001000000010000001f"] of
+  case workerRequestFromArgv [planningFlag,"5450524551303239000100000001000000010000001f"] of
     Left message | "retired field tag 31" `isInfixOf` message -> pure ()
     other -> fail ("retired finite cell field 31 was not explicitly refused: " ++ show other)
 
