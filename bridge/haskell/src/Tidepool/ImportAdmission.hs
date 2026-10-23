@@ -9,6 +9,7 @@ module Tidepool.ImportAdmission
   , appendCompletedProgramImports
   , ExactCompilation, compilationScope, compilationTransaction, compilationSourceImports
   , compilationExactImports, compilationSourceSelection, compilationSource
+  , IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , ExactCompilationPublication(..)
   , writeExactCompilation, writeCheckedExactCompilation
@@ -35,7 +36,6 @@ import GHC.Unit.Module (ModuleName, mkModuleName)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence, DependencySource(..), DependencyQualifier
   , dependencySources, revalidateDependencyEvidence, renderDependencyQualifier, renderDependencyEvidence )
-import Tidepool.ExactHydration (IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles)
 import Tidepool.ExactScope
   ( ExactScope, scopeCheckedCell, scopeCheckedItem, scopeLexical, scopeInterfaceEvidence, scopeInterfaces, scopeValueInterfaces
   , CheckedItemAdmission(..), ExactInterfaceEvidence(..)
@@ -51,7 +51,7 @@ import Tidepool.LocalNativeDeclaration (localNativeOwner, localNativeProof)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.Binders (CellSourcePlan(..), SourcePrologue(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
-import Tidepool.ImportAdmission.Internal (ExactCompilation(..))
+import Tidepool.ImportAdmission.Internal (ExactCompilation(..), CompletedFiniteImportAdmission(..), ImportAttempt(..), IssuedSourceImports(..))
 import Tidepool.ImportSyntax.Internal
   ( CellSourceSpan(..), LocatedImport(..), ImportIntent(..)
   , ProtectedImports(..), protectedImportsRendering )
@@ -93,11 +93,11 @@ checkedItemImportNamespaces (CheckedItemImportRendering _ _ namespaces) = namesp
 -- not merely from payload custody. Values retain their independent Protected
 -- route and must match the exact checked-value interface already in the scope.
 appendCompletedProgramImports :: ExactScope -> [CompletedValueImport]
-  -> [((String,String),String)] -> CellSourcePlan -> Either String CellSourcePlan
+  -> [(String,String)] -> CellSourcePlan -> Either String CellSourcePlan
 appendCompletedProgramImports scope values originals plan = do
   unless (maybe False (const True) (scopeCheckedCell scope))
     (Left "program prefix imports lack their checked cell admission")
-  forM_ originals $ \(owner,_) -> do
+  forM_ originals $ \owner -> do
     unless (owner `elem` map fst (scopeLexical scope))
       (Left "program declaration import lacks its admitted lexical owner")
     case Map.lookup owner (scopeInterfaceEvidence scope) of
@@ -115,7 +115,7 @@ appendCompletedProgramImports scope values originals plan = do
     (Left "program value import differs from its checked interface")
   let prologue = cellPlanPrologue plan
       imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner)
-          InheritedLexicalImport [mkModuleName owner] | ((_,owner),_) <- originals]
+          InheritedLexicalImport [mkModuleName owner] | (_,owner) <- originals]
         ++ [LocatedImport (CellSourceSpan 1 1 1 1)
           ("import " ++ completedValueModule value ++ " ("
             ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")")
@@ -124,20 +124,26 @@ appendCompletedProgramImports scope values originals plan = do
 
 
 compilationScope :: ExactCompilation -> ExactScope
-compilationScope (ExactCompilation scope _ _ _ _) = scope
+compilationScope (ExactCompilation (CompletedFiniteImportAdmission scope _ _ _ _) _) = scope
 
 compilationTransaction :: ExactCompilation -> Word64
-compilationTransaction (ExactCompilation _ transaction _ _ _) = transaction
+compilationTransaction (ExactCompilation (CompletedFiniteImportAdmission _ (ImportAttempt transaction _ _ _ _) _ _ _) _) = transaction
 
 compilationSourceImports :: ExactCompilation -> IssuedSourceImports
-compilationSourceImports (ExactCompilation _ _ imports _ _) = imports
+compilationSourceImports (ExactCompilation (CompletedFiniteImportAdmission _ _ imports _ _) _) = imports
 
 compilationExactImports :: ExactCompilation
   -> [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
-compilationExactImports (ExactCompilation _ _ _ imports _) = imports
+compilationExactImports (ExactCompilation _ imports) = imports
 
 compilationSourceSelection :: ExactCompilation -> Maybe SourceSelectedOriginals
-compilationSourceSelection (ExactCompilation _ _ _ _ selected) = selected
+compilationSourceSelection (ExactCompilation (CompletedFiniteImportAdmission _ _ _ _ selected) _) = selected
+
+sourceImportsSnapshot :: IssuedSourceImports -> (FilePath,BS.ByteString)
+sourceImportsSnapshot (IssuedSourceImports path _ digest _ _ _) = (path,digest)
+
+sourceImportsHomeRoles :: IssuedSourceImports -> [(String,String,Bool,String,Int)]
+sourceImportsHomeRoles (IssuedSourceImports _ _ _ _ _ roles) = roles
 
 compilationSource :: ExactCompilation -> FilePath
 compilationSource = fst . sourceImportsSnapshot . compilationSourceImports

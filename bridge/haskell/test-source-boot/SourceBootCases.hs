@@ -192,7 +192,7 @@ import Tidepool.ExactHydration
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
-  , generatedScaffoldRecipeWithImportRendering, sourceImportsSnapshot, sourceImportsHomeRoles
+  , generatedScaffoldRecipeWithImportRendering
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.TypedSegment.Source
   ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope
@@ -233,7 +233,9 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), JoinRejection(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..))
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
-import Tidepool.ImportAdmission (ExactCompilation, compilationScope, compilationSourceSelection, compilationSourceImports, compilationExactImports, writeCheckedExactCompilation)
+import Tidepool.ImportAdmission
+  ( ExactCompilation, compilationScope, compilationSourceSelection, compilationSourceImports
+  , compilationExactImports, sourceImportsSnapshot, sourceImportsHomeRoles, writeCheckedExactCompilation )
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes

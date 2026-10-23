@@ -45,8 +45,6 @@ module Tidepool.ExactHydration
   , capturedGeneratedImportSource, capturedGeneratedImportFlags, capturedGeneratedImportSyntax
   , CapturedGeneratedImportOccurrence, capturedGeneratedImportOccurrences
   , capturedGeneratedImportOccurrenceSyntax, capturedGeneratedImportOccurrenceOrigin
-  , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot
-  , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
   , installExactLexicalGraphWithScaffold
@@ -66,7 +64,6 @@ import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, toLower)
 import Data.Maybe (isJust, isNothing)
-import Data.Bits ((.|.))
 import Data.List (sortOn)
 import GHC.Data.Strict qualified as Strict
 import qualified Data.ByteString as BS
@@ -659,81 +656,6 @@ captureGeneratedScaffoldSource (GeneratedScaffoldRecipe path _ expected _ _ _ _ 
 captureGeneratedScaffoldTarget :: GeneratedScaffoldRecipe -> FilePath -> IO (Either String BS.ByteString)
 captureGeneratedScaffoldTarget recipe requested =
   fmap capturedGeneratedScaffoldBytes <$> captureGeneratedScaffoldSource recipe requested
-
--- The source and its classification have one owner. Only the compiler's actual
--- parsed target can issue this value; rendering origins alone are not claims.
-data IssuedSourceImports = IssuedSourceImports
-  FilePath BS.ByteString BS.ByteString (String,String)
-  [((String,String,Bool),Int)] [(String,String,Bool,String,Int)]
-  deriving (Eq)
-
-instance Show IssuedSourceImports where
-  show (IssuedSourceImports path _ _ root occurrences roles) =
-    "IssuedSourceImports " ++ show (path,root,length occurrences,length roles)
-
-sourceImportsSnapshot :: IssuedSourceImports -> (FilePath,BS.ByteString)
-sourceImportsSnapshot (IssuedSourceImports path _ digest _ _ _) = (path,digest)
-
-sourceImportsHomeRoles :: IssuedSourceImports -> [(String,String,Bool,String,Int)]
-sourceImportsHomeRoles (IssuedSourceImports _ _ _ _ _ roles) = roles
-
-issueSourceImports :: Maybe GeneratedScaffoldRecipe -> ParsedModule -> [(String,String,Bool,String)]
-  -> IO (Either String IssuedSourceImports)
-issueSourceImports recipe parsed homeEdges = do
-  let summary = pm_mod_summary parsed
-  captured <- case recipe of
-    Just protected -> case ml_hs_file (ms_location summary) of
-      Nothing -> pure (Left "source import census lacks its source path")
-      Just path -> captureGeneratedScaffoldSource protected path
-    Nothing -> case ml_hs_file (ms_location summary) of
-      Nothing -> pure (Left "source import census lacks its source path")
-      Just path -> do
-        canonical <- canonicalizePath path
-        bytes <- BS.readFile canonical
-        pure (Right (CapturedGeneratedScaffoldSource canonical bytes []))
-  observation <- case captured of
-    Left _ -> pure Nothing
-    Right (CapturedGeneratedScaffoldSource path _ _) -> Just <$> sourceEvidenceWithFingerprint path
-  pure $ do
-    CapturedGeneratedScaffoldSource path bytes census <- captured
-    (observed,fingerprint) <- maybe (Left "source import census lacks its captured observation") Right observation
-    let digest = SHA256.hash bytes
-    unless (fingerprint == ms_hs_hash summary && dependencySourceSha256 observed == hexBytes digest)
-      (Left "source import census differs from its parsed snapshot")
-    let declarations = hsmodImports (unLoc (pm_parsed_source parsed))
-        roleBit AuthoredCurrent = 1
-        roleBit InheritedLexical = 2
-        roleBit ProtectedCompiler = 4
-        qualifier NoPkgQual = "none"
-        qualifier (ThisPkg unit) = "this:" ++ unitString unit
-        qualifier (OtherPkg unit) = "other:" ++ unitString unit
-    origins <- case recipe of
-      Nothing -> Right (replicate (length declarations) AuthoredCurrent)
-      Just _ -> capturedSourceImportOrigins (CapturedGeneratedScaffoldSource path bytes census) (pm_parsed_source parsed)
-    checked <- forM (zip declarations origins) $ \(located,origin) -> do
-      let declaration = unLoc located
-          name = ideclName declaration
-          boot = ideclSource declaration == IsBoot
-      selected <- case [qualifier raw | (isBoot,imports) <- [(False,ms_textual_imps summary),(True,ms_srcimps summary)]
-          , isBoot == boot, (raw,imported) <- imports, getLoc imported == getLocA name] of
-        [raw] -> Right raw
-        _ -> Left "parsed source import has another consumed import occurrence"
-      pure ((selected,moduleNameString (unLoc name),boot),roleBit origin)
-    let root = ms_mod summary
-    bindSourceHomeImports homeEdges (IssuedSourceImports path bytes digest
-      (unitString (moduleUnit root),moduleNameString (moduleName root)) checked [])
-
--- HOME resolution comes from the already-consumed graph, never another Finder
--- lookup. Package occurrences stay in the private complete syntactic census.
-bindSourceHomeImports :: [(String,String,Bool,String)] -> IssuedSourceImports -> Either String IssuedSourceImports
-bindSourceHomeImports edges (IssuedSourceImports path bytes digest root occurrences _) = do
-  let syntax = Map.fromListWith (.|.) occurrences
-      unique = Map.fromList [(edge,()) | edge <- edges]
-  roles <- forM (Map.keys unique) $ \(qualifier,name,boot,unit) -> do
-    role <- maybe (Left "consumed HOME import lacks its issued occurrence role") Right
-      (Map.lookup (qualifier,name,boot) syntax)
-    pure (qualifier,name,boot,unit,role)
-  pure (IssuedSourceImports path bytes digest root occurrences roles)
 
 data GeneratedScaffoldOwner
   = NativeScaffoldOwner ExecutionSourceIdentity

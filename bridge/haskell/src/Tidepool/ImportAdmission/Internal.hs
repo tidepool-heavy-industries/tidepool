@@ -4,10 +4,11 @@
 module Tidepool.ImportAdmission.Internal
   ( CapturedImportAdmission(..), ImportAdmissionContext(..)
   , ImportAttempt(..), ScopedImportAdmission(..)
+  , MatchedImportDriver(..), ImportDriverOccurrence(..)
   , ResolvedImportAdmission(..), ResolvedImportOccurrence(..)
   , PreparedImportAdmission(..), CompletedImportAdmission(..)
-  , ImportCompletionContext(..)
-  , ExactCompilation(..)
+  , CompletedFiniteImportAdmission(..), CompletedWorldImportAdmission(..), WorldImportCompletionIdentity(..)
+  , IssuedSourceImports(..), ExactCompilation(..)
   ) where
 
 import qualified Data.ByteString as BS
@@ -18,10 +19,11 @@ import GHC.Unit.Module (ModuleName)
 import GHC.Types.PkgQual (PkgQual, RawPkgQual)
 import Tidepool.ArtifactBytes (ArtifactBytes)
 import Tidepool.CheckedCell (NativeParsedModule)
-import Tidepool.ExactHydration (CapturedGeneratedImports, ExactIfaceArtifact, IssuedSourceImports)
+import Tidepool.ExactHydration (CapturedGeneratedImports, ExactIfaceArtifact)
 import Tidepool.ExactScope (ExactScope, SourceSelectedOriginals)
 import Tidepool.DependencyEvidence (DependencyQualifier)
 import Tidepool.ImportSyntax (DriverImportSyntax, ImportOccurrenceId)
+import Tidepool.Binders (ImportIntent)
 import Tidepool.TurnSource (ImportOrigin)
 
 -- Ordinary source deliberately has no raw import census: CPP and other
@@ -43,16 +45,26 @@ data ImportAdmissionContext
 -- captured source and incarnation remain independently bound throughout the
 -- transitions; a matching number alone is never an admission proof.
 data ImportAttempt = ImportAttempt Word64 (Maybe String) Module FilePath Fingerprint
+  deriving (Eq, Show)
 
 data ScopedImportAdmission = ScopedImportAdmission
   CapturedImportAdmission ImportAdmissionContext ImportAttempt
+
+-- Syntax correspondence is data, not a selected-owner proof. Exact source-
+-- less interfaces are installed selectively immediately before their actual
+-- frontend, so no Finder observation is allowed to stand in for that issuer.
+data ImportDriverOccurrence = ImportDriverOccurrence
+  ImportOccurrenceId ImportOrigin ModuleName RawPkgQual PkgQual Bool
+
+data MatchedImportDriver = MatchedImportDriver
+  ScopedImportAdmission DriverImportSyntax [ImportDriverOccurrence]
+  (Maybe SourceSelectedOriginals)
 
 data ResolvedImportOccurrence = ResolvedImportOccurrence
   ImportOccurrenceId ImportOrigin ModuleName RawPkgQual PkgQual Bool Module
 
 data ResolvedImportAdmission = ResolvedImportAdmission
-  ScopedImportAdmission DriverImportSyntax [ResolvedImportOccurrence]
-  (Maybe SourceSelectedOriginals)
+  MatchedImportDriver [ResolvedImportOccurrence]
 
 -- The only constructor sites are the closed actual frontend recipes. The
 -- NativeParsedModule includes the same driver's import lineage and type uses.
@@ -61,19 +73,39 @@ data PreparedImportAdmission = PreparedImportAdmission
 
 -- Successful compilation drops the parsed module and refinement buffer. The
 -- completed owner retains only the exact decisions required by its receipt.
-data CompletedImportAdmission = CompletedImportAdmission
-  ImportAttempt ImportCompletionContext IssuedSourceImports
-  [ResolvedImportOccurrence] (Maybe SourceSelectedOriginals)
+data CompletedImportAdmission
+  = CompletedFiniteImports CompletedFiniteImportAdmission
+  | CompletedWorldImports CompletedWorldImportAdmission
+  | CompletedOrdinaryImports ImportAttempt
 
-data ImportCompletionContext
-  = FiniteCompletionContext String String String
-  | WorldCompletionContext BS.ByteString BS.ByteString Word64
-
--- No public record labels can attach a completed result to a different scope.
--- The actual pipeline issuer constructs this only from its own successful
--- frontend and the same finite scoped admission.
-data ExactCompilation = ExactCompilation
-  ExactScope Word64 IssuedSourceImports
-  [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
+data CompletedFiniteImportAdmission = CompletedFiniteImportAdmission
+  ExactScope ImportAttempt IssuedSourceImports [(ImportIntent,DependencyQualifier,(String,String))]
   (Maybe SourceSelectedOriginals)
+  deriving (Eq, Show)
+
+data CompletedWorldImportAdmission = CompletedWorldImportAdmission
+  WorldImportCompletionIdentity ImportAttempt IssuedSourceImports
+
+data WorldImportCompletionIdentity = WorldImportCompletionIdentity
+  { completedWorldInputsIdentity :: BS.ByteString
+  , completedWorldCompilerIdentity :: BS.ByteString
+  , completedWorldBindingScope :: Word64
+  }
+
+-- This compact census is issued only after successful compilation. Its rows
+-- retain the selected HOME owner for every terminal role; package syntax stays
+-- in the private complete occurrence census.
+data IssuedSourceImports = IssuedSourceImports
+  FilePath BS.ByteString BS.ByteString (String,String)
+  [((String,String,Bool),Int)] [(String,String,Bool,String,Int)]
+  deriving (Eq)
+
+instance Show IssuedSourceImports where
+  show (IssuedSourceImports path _ _ root occurrences roles) =
+    "IssuedSourceImports " ++ show (path,root,length occurrences,length roles)
+
+-- A finite receipt cannot be paired with a World or ordinary completion, nor
+-- can a caller attach a different ExactScope to a successful finite result.
+data ExactCompilation = ExactCompilation CompletedFiniteImportAdmission
+  [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
   deriving (Eq, Show)
