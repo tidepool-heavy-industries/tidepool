@@ -299,8 +299,9 @@ mod program_source_support_history {
             let execution = (&request)
                 .receipt_admission()
                 .product_admission(&admission)
-                .original_execution_context(full_input)
+                .prepare_execution_context(full_input)
                 .unwrap();
+            let execution = execution.context;
             expected.extend(offered_owners(&sparse));
             assert_eq!(expected.len(), 22);
             assert_eq!(

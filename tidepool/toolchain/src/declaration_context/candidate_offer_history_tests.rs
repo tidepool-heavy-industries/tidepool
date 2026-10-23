@@ -70,7 +70,6 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
             .unwrap(),
             lexical: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
     };
     let candidates = crate::module_candidates::CandidateSet {
@@ -209,7 +208,6 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
         .unwrap(),
         lexical: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     let input = OriginalCompilerInputs::from_candidates(&selected_a, producer, &candidates)
         .unwrap()

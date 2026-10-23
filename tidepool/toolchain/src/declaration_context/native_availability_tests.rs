@@ -123,7 +123,6 @@ fn type_context(products: &[CertifiedRecoveryProduct]) -> Arc<ExactDeclarationCo
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ))
 }
@@ -262,7 +261,6 @@ fn partial_context(
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ))
 }
@@ -801,7 +799,6 @@ fn issued_offer_retention_preserves_materialization_parent_precedence() {
         lexical: Default::default(),
         source_scope: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
         .unwrap()
@@ -1339,7 +1336,6 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
         ProtectedScaffoldRequirements::default().compiler_inputs(&source_context, None)
     };
@@ -1587,7 +1583,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
         let missing_row = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&context, None)
@@ -1909,7 +1904,6 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
     };
     let selected_a = inventory
@@ -2126,7 +2120,6 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 lexical: Default::default(),
                 source_scope: Default::default(),
                 template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
         ));
         let baseline = ProtectedScaffoldRequirements::default()
@@ -2307,7 +2300,6 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         })
     };
     let issued = ProtectedScaffoldRequirements::default()
@@ -2893,7 +2885,6 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
     let before = context.as_ref().clone();
@@ -3198,7 +3189,6 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
     let acquisition = ExactCompileContext::new(reusable_context)
@@ -3339,7 +3329,6 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
     let root = tempfile::tempdir().unwrap();
@@ -4521,7 +4510,6 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     lexical: Default::default(),
                     source_scope: Default::default(),
                     template_imports: None,
-                    original_instance_environment: OriginalInstanceEnvironment::Unknown,
                 },
             ));
             let root = tempfile::tempdir().unwrap();
@@ -4752,7 +4740,6 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("availability-only-does-not-read-manifest"),
@@ -5203,7 +5190,6 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
     let before = context.as_ref().clone();
@@ -5639,10 +5625,6 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
         .compiler_input_roles()
         .iter()
         .all(|role| role.original().is_none()));
-    assert_eq!(
-        context.owner.facts.original_instance_environment,
-        OriginalInstanceEnvironment::Unknown
-    );
     let baseline_scope = scope(&baseline);
     let actual_scope = scope(&request);
     assert!(baseline_scope[6].as_array().unwrap().is_empty());
@@ -5960,7 +5942,7 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
         // activation request preparation requires; raw recovery custody alone
         // carries none.
         let support = issued.unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
+        let context = ExactDeclarationContext::retained_execution_support_fixture(
             producer.sha256(),
             support,
             vec![ExactLexicalNode {
@@ -5972,10 +5954,9 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
         )
         .unwrap();
         let before = context.artifact_view().capture_graph_selection();
-        let inputs =
-            crate::activation_preview::original_native_declaration_inputs(&context, PRODUCER)
-                .unwrap()
-                .unwrap();
+        let inputs = OriginalCompilerInputs::reuse_selected_authored(&context)
+            .unwrap()
+            .unwrap();
         assert_eq!(inputs.native_offers, vec![offer.clone()]);
         assert_eq!(
             inputs.native_offers[0].snapshot_facts().identity().unwrap(),
@@ -7025,7 +7006,6 @@ fn independent_original_without_issued_groups_keeps_empty_availability() {
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
     let root = tempfile::tempdir().unwrap();
@@ -7177,7 +7157,6 @@ fn request_subset_and_empty_availability_cannot_borrow_custody_during_target_adm
                 lexical: Default::default(),
                 source_scope: Default::default(),
                 template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
         ));
         let request = ExactCompileContext::new(context)
@@ -7492,7 +7471,6 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                 lexical: Default::default(),
                 source_scope: Default::default(),
                 template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
             });
             assert_eq!(
                 context
@@ -7765,7 +7743,6 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
         lexical: Default::default(),
         source_scope: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     let store = MemoryBlockstore::new();
     let mut materializer = Materializer::new(&store);
@@ -8348,7 +8325,6 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
         lexical: Default::default(),
         source_scope: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     let acquire = |context: &ExactDeclarationContext, path: &Path| {
         std::fs::create_dir_all(path).unwrap();
@@ -8419,7 +8395,6 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         });
         assert!(context.artifact_view().selected_native_groups().is_empty());
         let store = MemoryBlockstore::new();
@@ -8752,7 +8727,6 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                                 lexical: Default::default(),
                                 source_scope: Default::default(),
                                 template_imports: None,
-                                original_instance_environment: OriginalInstanceEnvironment::Unknown,
                             });
                         if changed_canonical {
                             let support = recover_fixture_compiler_support(
@@ -9038,7 +9012,6 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
                 lexical: Default::default(),
                 source_scope: Default::default(),
                 template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
         ))
     };
@@ -9079,7 +9052,6 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ));
 
@@ -9225,7 +9197,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     "equal canonical payloads must have independently issued bindings"
                 );
             }
-            let original = ExactDeclarationContext::from_authenticated_execution_support(
+            let original = ExactDeclarationContext::retained_execution_support_fixture(
                 producer,
                 support,
                 vec![ExactLexicalNode {
@@ -10084,7 +10056,6 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
         lexical: Default::default(),
         source_scope: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     assert_eq!(
         context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].original(),
@@ -10539,7 +10510,6 @@ fn native_context(product: &CertifiedRecoveryProduct) -> Arc<ExactDeclarationCon
             lexical: Default::default(),
             source_scope: Default::default(),
             template_imports: None,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
         },
     ))
 }
@@ -10766,7 +10736,6 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         lexical: Default::default(),
         source_scope: Default::default(),
         template_imports: None,
-        original_instance_environment: OriginalInstanceEnvironment::Unknown,
     });
     let directory = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(Arc::new(context))
@@ -11002,7 +10971,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .retain_offers(full_support.native_offers().iter().cloned())
             .unwrap();
         assert!(support.native_offers().iter().any(|offer| offer.is_full()));
-        let original = ExactDeclarationContext::from_authenticated_execution_support(
+        let original = ExactDeclarationContext::retained_execution_support_fixture(
             producer,
             support,
             vec![ExactLexicalNode {

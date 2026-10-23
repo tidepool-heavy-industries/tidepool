@@ -9971,10 +9971,10 @@ impl<'a> ExactProductAdmission<'a> {
         self.facts.groups
     }
 
-    // Fixture roles are explicit request/support roles plus the authenticated
-    // generated target, transferred through its already admitted native graph.
+    // Data-only receipt projection: explicit support roles and generated target
+    // may be inspected without issuing output completion or native authority.
     #[cfg(test)]
-    pub(crate) fn original_execution_fixture(
+    pub(crate) fn retained_product_context_fixture(
         &self,
         artifacts: &ArtifactView,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
@@ -9997,7 +9997,10 @@ impl<'a> ExactProductAdmission<'a> {
                 projection.merge(&support.compiler_support.projection().within_view(artifacts))?;
         }
         let support = issue_fixture_compiler_support(projection, artifacts.clone())?;
-        self.original_execution_context(&OriginalCompilerInputs::from_issued_support(&support))
+        Ok(Arc::new(
+            self.prepare_execution_context(&OriginalCompilerInputs::from_issued_support(&support))?
+                .context,
+        ))
     }
 
     pub(crate) fn original_output_source_scope(
@@ -10051,15 +10054,14 @@ impl<'a> ExactProductAdmission<'a> {
         &self,
         issued: &crate::artifacts::AdmittedNativeTargetProducts,
     ) -> Result<Arc<OriginalExecutionEvidence>, CompileError> {
-        self.prepare_original_execution(issued.output())?
+        self.prepare_execution_context(issued.output().compiler_inputs())?
             .finalize_native_target(issued)
     }
 
-    fn prepare_original_execution(
+    fn prepare_execution_context(
         &self,
-        output: &IssuedOriginalOutput,
+        inputs: &OriginalCompilerInputs,
     ) -> Result<OriginalExecutionDraft, CompileError> {
-        let inputs = output.compiler_inputs();
         let support = crate::artifact_inventory::CompilerSourceSupport::from_original_output(
             self.facts.compiler.compiler_source_support(),
             self.facts.context.compiler_source_support(),
@@ -17680,13 +17682,8 @@ mod tests {
         assert_context_observation_wire(&context);
         let before = context.clone();
         let digest = context.semantic_sha256();
-        context =
-            context.rebuild(|facts| {
-                facts.original_instance_environment =
-                    OriginalInstanceEnvironment::MissingOriginalOwners(
-                        vec![identity("u", "Missing")].into(),
-                    )
-            });
+        let lexical = context.owner.facts.lexical.replace(vec![]).unwrap();
+        context = context.rebuild(|facts| facts.lexical = lexical);
         assert!(context.owner.observations.get().is_none());
         assert_ne!(context, before);
         assert_ne!(context.semantic_sha256(), digest);
@@ -17696,50 +17693,13 @@ mod tests {
     }
 
     #[test]
-    fn context_observation_wire_preserves_v8_v9_and_missing_owner_order() {
-        let base = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+    fn retained_context_observations_use_current_semantic_contract() {
+        let base = ExactDeclarationContext::empty();
         assert_context_observation_wire(&base);
         assert_eq!(
-            hex(&base.semantic_sha256()),
-            "57662e6c4c6d51913dd8c9d18ee75f4f44e87f8d616707ffe269ecbb768b72cd"
+            base.observation().semantics.as_ref(),
+            base.original_semantic_bytes_oracle(&base.artifact_view().metadata_snapshot())
         );
-        let mut complete = base.clone();
-        complete = complete.rebuild(|facts| {
-            facts.original_instance_environment = OriginalInstanceEnvironment::Complete {
-                target: identity("unit", "Target"),
-            }
-        });
-        assert_context_observation_wire(&complete);
-        assert_eq!(
-            hex(&complete.semantic_sha256()),
-            "095f07297f14b1bf77e3e1110364052f66a3200be55ec74f7381e2fcc3e9e3de"
-        );
-        let mut missing = base.clone();
-        missing =
-            missing.rebuild(|facts| {
-                facts.original_instance_environment =
-                    OriginalInstanceEnvironment::MissingOriginalOwners(
-                        vec![identity("unit", "Z"), identity("unit", "A")].into(),
-                    )
-            });
-        assert_context_observation_wire(&missing);
-        assert_eq!(
-            hex(&missing.semantic_sha256()),
-            "799457f756f754673b43633481143ed49ba45afff5f65cd9d8e2ba9e68bdc53c"
-        );
-        let reversed = {
-            let mut context = missing.clone();
-            context = context.rebuild(|facts| {
-                if let OriginalInstanceEnvironment::MissingOriginalOwners(owners) =
-                    &mut facts.original_instance_environment
-                {
-                    Arc::make_mut(owners).reverse();
-                }
-            });
-            context
-        };
-        assert_context_observation_wire(&reversed);
-        assert_ne!(missing.semantic_sha256(), reversed.semantic_sha256());
     }
     use super::*;
     use crate::artifact_inventory::ArtifactKind;
@@ -20269,7 +20229,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_execution_uses_issued_roles_not_available_interfaces() {
+    fn retained_execution_preparation_uses_selected_roles_not_available_interfaces() {
         let producer = [7; 32];
         let entries = ["Target", "A", "B", "C"].map(|module| {
             Arc::new(ArtifactEntry::canonical(
@@ -20311,15 +20271,15 @@ mod tests {
                 imports: Vec::new(),
             }))
             .collect();
-            let context = ExactDeclarationContext::from_authenticated_execution(
+            let draft = ExactDeclarationContext::prepare_execution_from_authenticated_support(
                 producer,
-                &view,
-                projection.clone(),
+                issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap(),
                 lexical,
                 target.clone(),
                 &dependencies,
             )
             .unwrap();
+            let context = &draft.context;
             assert_eq!(context.compiler_input_roles(), projection.roles());
             assert_eq!(context.artifact_view().artifact_ids(), view.artifact_ids());
             assert_eq!(
@@ -20340,14 +20300,7 @@ mod tests {
                 .enumerate()
                 .filter_map(|(index, owner)| (mask & (1 << index) == 0).then(|| owner.clone()))
                 .collect::<Vec<_>>();
-            let expected = if missing.is_empty() {
-                OriginalInstanceEnvironment::Complete {
-                    target: target.clone(),
-                }
-            } else {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
-            };
-            assert_eq!(context.original_instance_environment(), &expected);
+            assert_eq!(draft.missing_owners(), missing);
             assert_eq!(context.lexical_graph().len(), issued_entries.len());
         }
     }
@@ -20371,7 +20324,7 @@ mod tests {
             .admit(base.artifact_view(), vec![canonical])
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
-        ExactDeclarationContext::from_authenticated_execution(
+        ExactDeclarationContext::retained_execution_fixture(
             base.owner.facts.producer,
             &view,
             projection,
@@ -20778,7 +20731,7 @@ mod tests {
             let view = inventory
                 .admit_shared(&inventory.empty_view(), entries)
                 .unwrap();
-            ExactDeclarationContext::from_authenticated_execution(
+            ExactDeclarationContext::retained_execution_fixture(
                 producer,
                 &view,
                 projection,
@@ -20891,7 +20844,7 @@ mod tests {
             support.native_offers(),
         )
         .unwrap();
-        let partial_source = ExactDeclarationContext::from_authenticated_execution_support(
+        let partial_source = ExactDeclarationContext::retained_execution_support_fixture(
             source.owner.facts.producer,
             support.retain_normalized_availability(&rows).unwrap(),
             source.lexical_graph().to_vec(),
@@ -21027,7 +20980,7 @@ mod tests {
             let mut lexical = issued.lexical_graph().to_vec();
             lexical.iter_mut().find(|node| node.owner.module == "PrivateSourceTarget").unwrap().imports.push(identity("fixture","Beta"));
             lexical.push(ExactLexicalNode { owner: identity("fixture","Beta"), imports: vec![] });
-            let source = ExactDeclarationContext::from_authenticated_execution(
+            let source = ExactDeclarationContext::retained_execution_fixture(
                 issued.owner.facts.producer, issued.artifact_view(), issued.owner.facts.compiler_support.projection().clone(), lexical,
                 identity("fixture","PrivateSourceTarget"), &[identity("fixture","PrivateSourceTarget"),identity("fixture","Alpha"),identity("fixture","Beta")],
             ).unwrap();
@@ -21112,7 +21065,6 @@ mod tests {
                     next.compiler_source_support().recorded_input_decisions(),
                     "authenticated context recovery must preserve the same issued choices without policy resurrection",
                 );
-                proptest::prop_assert_eq!(recovered.original_instance_environment(),&OriginalInstanceEnvironment::Unknown);
                 assert_context_observation_wire(&recovered);
                 recovered.bind_snapshot_baseline(&restored).unwrap();
                 assert_context_observation_wire(&recovered);
@@ -21161,7 +21113,7 @@ mod tests {
                 imports: vec![],
             })
             .collect::<Vec<_>>();
-        let context = ExactDeclarationContext::from_authenticated_execution(
+        let context = ExactDeclarationContext::retained_execution_fixture(
             [7; 32],
             &view,
             projection,
@@ -21954,7 +21906,7 @@ mod tests {
             let actual_support = actual_context.compiler_source_support();
             let expected_support = expected_context.compiler_source_support();
             eprintln!(
-                "publication reconstruction: context_equal={} semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} offers_equal={} availability_equal={} decisions_equal={} lexical_equal={} templates_equal={} instance_environment_equal={}",
+                "publication reconstruction: context_equal={} semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} offers_equal={} availability_equal={} decisions_equal={} lexical_equal={} templates_equal={}",
                 actual_context == expected_context,
                 actual_context.semantic_sha256() == expected_context.semantic_sha256(),
                 actual_support == expected_support,
@@ -21966,7 +21918,6 @@ mod tests {
                 actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
                 actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
                 actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
-                actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
             );
             if actual_support.artifacts() != expected_support.artifacts() {
                 eprintln!(
@@ -22105,7 +22056,7 @@ mod tests {
                     let actual_support = actual_context.compiler_source_support();
                     let expected_support = expected_context.compiler_source_support();
                     eprintln!(
-                        "restored publication consumer: semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} ordered_offers_equal={} offer_facts_equal={} availability_equal={} row_facts_equal={} decisions_equal={} lexical_equal={} templates_equal={} instance_equal={}",
+                        "restored publication consumer: semantic_equal={} support_equal={} roles_equal={} artifacts_equal={} graph_equal={} ordered_offers_equal={} offer_facts_equal={} availability_equal={} row_facts_equal={} decisions_equal={} lexical_equal={} templates_equal={}",
                         actual_context.semantic_sha256() == expected_context.semantic_sha256(),
                         actual_support == expected_support,
                         actual_support.projection() == expected_support.projection(),
@@ -22118,8 +22069,7 @@ mod tests {
                         actual_support.input_decisions().recorded_facts() == expected_support.input_decisions().recorded_facts(),
                         actual_context.owner.facts.lexical == expected_context.owner.facts.lexical,
                         actual_context.owner.facts.template_imports == expected_context.owner.facts.template_imports,
-                        actual_context.owner.facts.original_instance_environment == expected_context.owner.facts.original_instance_environment,
-                    );
+                            );
                     eprintln!(
                         "restored publication offer order actual={:?} expected={:?}",
                         actual_support
@@ -22458,7 +22408,7 @@ mod tests {
             .unwrap();
         assert_eq!(support.native_offers().len(), 1);
         assert!(support.native_offers()[0].is_full());
-        let source = ExactDeclarationContext::from_authenticated_execution_support(
+        let source = ExactDeclarationContext::retained_execution_support_fixture(
             base.owner.facts.producer,
             support,
             base.lexical_graph().to_vec(),
@@ -22651,7 +22601,7 @@ mod tests {
             )
             .unwrap();
             let support = support.retain_normalized_availability(&rows).unwrap();
-            let source = ExactDeclarationContext::from_authenticated_execution_support(
+            let source = ExactDeclarationContext::retained_execution_support_fixture(
                 base.owner.facts.producer,
                 support,
                 base.lexical_graph().to_vec(),
@@ -22976,7 +22926,7 @@ mod tests {
             owner: beta.clone(),
             imports: vec![],
         });
-        let source = ExactDeclarationContext::from_authenticated_execution_support(
+        let source = ExactDeclarationContext::retained_execution_support_fixture(
             base.owner.facts.producer,
             support,
             lexical,
@@ -23913,7 +23863,7 @@ mod tests {
                 );
             }
         }
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
+        let context = ExactDeclarationContext::retained_execution_support_fixture(
             producer,
             support,
             vec![
@@ -25001,7 +24951,7 @@ mod tests {
                 .source_support
                 .for_source_owners(&BTreeSet::from([parent_owner.clone()]))
                 .unwrap();
-            let context = ExactDeclarationContext::from_authenticated_execution_support(
+            let context = ExactDeclarationContext::retained_execution_support_fixture(
                 [2; 32],
                 support,
                 vec![
@@ -29429,7 +29379,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap();
         let original = (&request)
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .unwrap();
         assert_eq!(context.lexical_graph(), shared);
         assert_eq!(
@@ -29459,10 +29409,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .rows()
             .iter()
             .all(|node| node.owner != mounted && node.owner != obsolete));
-        assert!(matches!(
-            original.original_instance_environment(),
-            OriginalInstanceEnvironment::Complete { .. }
-        ));
         // Change only the raw checked input to the production authority
         // capture boundary. Existing selected interfaces and SOURCE proof
         // remain unchanged, so neither mismatch can be satisfied by custody.
@@ -29479,7 +29425,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(matches!(
             (&mismatched_request)
                 .product_admission(&admission)
-                .original_execution_fixture(&artifacts),
+                .retained_product_context_fixture(&artifacts),
             Err(CompileError::ExtractFailed(detail))
                 if detail == "exact declaration context: checked value instance evidence differs from its exact interface authority"
         ));
@@ -29494,7 +29440,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(matches!(
             (&missing_request)
                 .product_admission(&admission)
-                .original_execution_fixture(&artifacts),
+                .retained_product_context_fixture(&artifacts),
             Err(CompileError::ExtractFailed(detail))
                 if detail == "exact declaration context: checked value instance evidence lacks its selected interface"
         ));
@@ -29507,7 +29453,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let refusal = captured_request
             .receipt_admission()
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .expect_err("an earlier FreshSource claim cannot be replayed against its Original");
         assert!(
             matches!(&refusal, CompileError::SourceAdmission(error)
@@ -30570,7 +30516,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let original = effective
             .receipt_admission()
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .unwrap();
         assert_eq!(
             original
@@ -30706,11 +30652,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let original = effective
             .receipt_admission()
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .unwrap();
-        assert!(matches!(original.original_instance_environment(),
-            OriginalInstanceEnvironment::Complete { target }
-                if target == &identity("fixture", "Consumer")));
         assert_eq!(
             original
                 .lexical_graph()
@@ -30735,12 +30678,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let incomplete = incomplete
             .receipt_admission()
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .unwrap();
         assert!(
-            matches!(incomplete.original_instance_environment(),
-            OriginalInstanceEnvironment::MissingOriginalOwners(owners)
-                if owners.contains(&identity("fixture", "InstanceOwner"))),
+            incomplete
+                .lexical_graph()
+                .iter()
+                .all(|row| row.owner != identity("fixture", "InstanceOwner")),
             "retained interface custody cannot invent an absent original import row"
         );
         let receipt = import_receipt(
@@ -31870,12 +31814,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let original = current
             .receipt_admission()
             .product_admission(&admission)
-            .original_execution_fixture(&artifacts)
+            .retained_product_context_fixture(&artifacts)
             .unwrap();
-        assert!(matches!(
-            original.original_instance_environment(),
-            OriginalInstanceEnvironment::Complete { .. }
-        ));
         assert!(original
             .lexical_graph()
             .iter()
@@ -32675,7 +32615,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
         let context = Arc::new(
-            ExactDeclarationContext::from_authenticated_execution(
+            ExactDeclarationContext::retained_execution_fixture(
                 [2; 32],
                 &view,
                 CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
@@ -32965,7 +32905,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let target = entry.descriptor.owner.clone();
         let support =
             recover_fixture_compiler_support(projection, artifacts, [partial.clone()]).unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
+        let context = ExactDeclarationContext::retained_execution_support_fixture(
             producer,
             support.clone(),
             vec![ExactLexicalNode {
@@ -32987,7 +32927,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             support.artifacts().capture_graph_selection()
         );
         assert!(
-            ExactDeclarationContext::from_authenticated_execution_support(
+            ExactDeclarationContext::retained_execution_support_fixture(
                 [99; 32],
                 support,
                 vec![],
@@ -33230,10 +33170,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert_eq!(
             advanced.context.owner.facts.lexical,
             primary.owner.facts.lexical
-        );
-        assert_eq!(
-            advanced.context.owner.facts.original_instance_environment,
-            primary.owner.facts.original_instance_environment
         );
         assert_eq!(
             advanced.context.owner.facts.template_imports,
@@ -34879,21 +34815,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let initial = make_context(b"first interface", true);
         let current = make_context(b"first interface", false);
         let changed = make_context(b"changed interface", false);
-        assert!(initial.original_preview_interface_graph().is_err());
-        let joined_target = ExactDeclarationContext::from_authenticated_execution(
-            initial.owner.facts.producer,
-            initial.artifact_view(),
-            initial.owner.facts.compiler_support.projection().clone(),
-            initial.lexical_graph().to_vec(),
-            identity("main", "CapturedInterface"),
-            &[identity("main", "CapturedInterface")],
-        )
-        .unwrap();
-        assert!(
-            joined_target.original_instance_target().is_err(),
-            "a lexical join cannot replace the original canonical target's import census"
-        );
-        assert!(joined_target.original_preview_interface_graph().is_err());
+        // Read-only graph observation accepts selected lexical anchors. It does
+        // not issue output completion or an activation display owner.
+        let joined_graph = initial
+            .preview_interface_graph_for_target(&identity("main", "CapturedInterface"))
+            .unwrap();
+        assert_eq!(joined_graph.len(), 1);
         let canonical_target =
             ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
                 initial.owner.facts.producer,
@@ -34910,7 +34837,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             owner: identity("main", "OriginalTarget"),
             imports: vec![],
         });
-        let original = ExactDeclarationContext::from_authenticated_execution(
+        let original = ExactDeclarationContext::retained_execution_fixture(
             initial.owner.facts.producer,
             &retained,
             initial
@@ -34926,27 +34853,15 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             &[identity("main", "CapturedInterface")],
         )
         .unwrap();
-        assert_eq!(
-            original.original_instance_target().unwrap(),
-            &identity("main", "OriginalTarget")
-        );
-        let mut exchanged = original.clone();
-        {
-            let updated = OriginalInstanceEnvironment::Complete {
-                target: identity("main", "OtherTarget"),
-            };
-            exchanged = exchanged.rebuild(|facts| facts.original_instance_environment = updated);
-        }
-        assert_ne!(
-            original.semantic_sha256(),
-            exchanged.semantic_sha256(),
-            "the context commitment binds the original target identity"
-        );
         assert!(
-            exchanged.original_preview_interface_graph().is_err(),
-            "a retained graph cannot replace its missing original target"
+            original
+                .preview_interface_graph_for_target(&identity("main", "OtherTarget"))
+                .is_err(),
+            "an observation cannot select a target outside the retained graph"
         );
-        let original_graph = original.original_preview_interface_graph().unwrap();
+        let original_graph = original
+            .preview_interface_graph_for_target(&identity("main", "OriginalTarget"))
+            .unwrap();
         assert_eq!(original_graph.len(), 2);
         assert!(original
             .template_interface_graph(&["module Input where\n".to_owned()])
@@ -34956,10 +34871,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         edit_lexical(&mut malformed, |nodes| {
             nodes[0].imports.push(identity("main", "MissingOriginal"))
         });
-        assert!(malformed.original_preview_interface_graph().is_err());
+        assert!(malformed
+            .preview_interface_graph_for_target(&identity("main", "OriginalTarget"))
+            .is_err());
         let mut foreign = original;
         edit_lexical(&mut foreign, |nodes| nodes[0].owner.unit = "foreign".into());
-        assert!(foreign.original_preview_interface_graph().is_err());
+        assert!(foreign
+            .preview_interface_graph_for_target(&identity("main", "OriginalTarget"))
+            .is_err());
         let source = "module Expr where\nimport CapturedInterface\n";
         let authority = GeneratedScaffoldImportAuthority {
             role: GeneratedScaffoldRole::InitialTemplateInterfaces {

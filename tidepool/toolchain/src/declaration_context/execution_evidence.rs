@@ -224,6 +224,14 @@ impl OriginalExecutionDraft {
             census,
         }
     }
+    #[cfg(test)]
+    pub(super) fn missing_owners(&self) -> &[ExactModuleIdentity] {
+        match &self.census {
+            OriginalInstanceCensus::Complete => &[],
+            OriginalInstanceCensus::MissingOwners(owners) => owners,
+        }
+    }
+
     pub(super) fn finalize_native_target(
         self,
         issued: &crate::artifacts::AdmittedNativeTargetProducts,
@@ -258,6 +266,19 @@ impl OriginalExecutionDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_census_canonicalizes_missing_obligations_without_issuing_evidence() {
+        let a = identity("fixture", "A");
+        let z = identity("fixture", "Z");
+        let draft = OriginalExecutionDraft::new(
+            ExactDeclarationContext::empty(),
+            identity("fixture", "Target"),
+            vec![z.clone(), a.clone(), z.clone()],
+        );
+        assert_eq!(draft.missing_owners(), &[a, z]);
+        assert_eq!(draft.context, ExactDeclarationContext::empty());
+    }
 
     #[test]
     fn incomplete_error_retains_typed_target_and_census_through_classification() {
