@@ -323,7 +323,7 @@ pub(super) struct CompiledProvenancePlan {
     authenticated_inputs: BTreeMap<
         u64,
         (
-            Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+            Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
             [u8; 32],
         ),
     >,
@@ -459,7 +459,7 @@ impl CompiledProvenancePlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthenticatedInputContext {
-    types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    types: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
     type_identity: [u8; 32],
     execution: OriginalExecutionContexts,
 }
@@ -467,7 +467,7 @@ struct AuthenticatedInputContext {
 impl AuthenticatedInputContext {
     #[cfg(test)]
     fn capture(
-        types: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        types: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
         execution: OriginalExecutionContexts,
     ) -> Self {
         Self {
@@ -596,8 +596,8 @@ impl OriginalExecutionContext {
                     .is_some_and(|original| original.original_bytes() == witness.original_bytes())
                 && capture
                     .prototype
-                    .context()
-                    .same_authenticated_context(prototype.context())
+                    .type_interfaces()
+                    .same_authenticated_interfaces(prototype.type_interfaces())
             {
                 return Ok(capture.owner.clone());
             }
@@ -817,7 +817,9 @@ impl ProgramProvenance {
         for (site, interfaces) in &other.authenticated_inputs {
             if self.authenticated_inputs.get(site).is_some_and(|previous| {
                 previous.type_identity != interfaces.type_identity
-                    || !previous.types.same_authenticated_context(&interfaces.types)
+                    || !previous
+                        .types
+                        .same_authenticated_interfaces(&interfaces.types)
             }) {
                 return Err(ProgramProvenanceError::AuthenticatedInputTypeContext {
                     site: *site,
@@ -1268,12 +1270,12 @@ impl HostCarrier {
         Ok(self.type_owner()?.signature())
     }
 
-    /// Retain the exact selected original type context, without execution custody.
-    pub fn type_context(
+    /// Retain the selected original TYPE interfaces, without execution custody.
+    pub fn type_interfaces(
         &self,
-    ) -> Result<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
+    ) -> Result<&Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>, ResidentError>
     {
-        Ok(self.type_owner()?.context())
+        Ok(self.type_owner()?.type_interfaces())
     }
 
     pub fn session_root(&self) -> Result<&Path, ResidentError> {

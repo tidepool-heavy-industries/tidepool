@@ -10,8 +10,7 @@ use crate::declaration_context::{
 pub(crate) struct WorldNativeDemandCompletion {
     pub(super) reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     pub(super) operation: Arc<tidepool_repr::execution_schema::InventoryOperation>,
-    pub(super) context: Arc<ExactDeclarationContext>,
-    pub(super) inputs: Arc<RequestCompilerInputs>,
+    pub(super) primary: crate::declaration_context::WorldPrimaryInputs,
     acquisitions: Vec<Arc<ResolvedNativeDemand>>,
     acquired_uses: BTreeMap<crate::certified_products::ReceiptImportOwner, usize>,
     stages: BTreeMap<u64, WorldNativeDemandStage>,
@@ -80,10 +79,10 @@ impl WorldNativeDemandCompletion {
         &self.operation
     }
     pub(crate) fn initial_context(&self) -> &Arc<ExactDeclarationContext> {
-        &self.context
+        self.primary.context()
     }
     pub(crate) fn initial_inputs(&self) -> &Arc<RequestCompilerInputs> {
-        &self.inputs
+        self.primary.inputs()
     }
 
     pub(crate) fn checked_stage(
@@ -336,15 +335,14 @@ impl<'a> WorldNativeDemandResolver<'a> {
         validation: &'a mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Self, CompileError> {
         let world = reservation.plan().world();
-        let mut context = Arc::clone(&world.restoration.inputs.primary_context);
-        let mut inputs = Arc::clone(&world.restoration.primary_compiler_inputs);
+        let mut primary = world.restoration.primary_inputs.clone();
         if let Some(operand) = reservation.plan().operand() {
-            let types = Arc::new(ExactDeclarationContext::checked_value_interface_context(
-                operand.checked_row(),
-            )?);
-            let advance = inputs.with_type_interfaces(&[types])?;
-            context = advance.context;
-            inputs = advance.inputs;
+            let types = Arc::new(
+                crate::declaration_context::SelectedTypeInterfaces::from_checked_value(
+                    operand.checked_row(),
+                )?,
+            );
+            primary = primary.with_type_interfaces(&[types])?.primary;
         }
         // Reserve the one terminal semantic-refusal reply before traversing
         // untrusted demand. Exhausting admission work must still be reportable.
@@ -397,8 +395,7 @@ impl<'a> WorldNativeDemandResolver<'a> {
             completion: WorldNativeDemandCompletion {
                 reservation: Arc::clone(reservation),
                 operation: Arc::clone(&validation.inventory),
-                context,
-                inputs,
+                primary,
                 acquisitions: Vec::new(),
                 acquired_uses: BTreeMap::new(),
                 stages: BTreeMap::new(),
@@ -460,9 +457,10 @@ impl<'a> WorldNativeDemandResolver<'a> {
         } else {
             let resolved = self
                 .completion
-                .inputs
+                .primary
+                .inputs()
                 .resolve_native_demand(&unacquired, self.validation)?;
-            if !resolved.belongs_to(&self.completion.inputs) {
+            if !resolved.belongs_to(self.completion.primary.inputs()) {
                 return Err(source_failure(
                     "native demand resolved against another input owner",
                 ));

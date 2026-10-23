@@ -133,6 +133,207 @@ pub struct ExactDeclarationContext {
     owner: Arc<DeclarationContextOwner>,
 }
 
+/// Exact canonical TYPE rows selected by an issued signature or value witness.
+/// Source policy and executable authority remain with their separate owners.
+#[derive(Clone, Debug)]
+pub struct SelectedTypeInterfaces {
+    support: crate::artifact_inventory::CompilerSourceSupport,
+    producer: [u8; 32],
+    identity: OnceLock<[u8; 32]>,
+}
+
+impl PartialEq for SelectedTypeInterfaces {
+    fn eq(&self, other: &Self) -> bool {
+        self.producer == other.producer && self.support == other.support
+    }
+}
+impl Eq for SelectedTypeInterfaces {}
+
+impl SelectedTypeInterfaces {
+    pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
+        self.producer
+    }
+    pub fn semantic_sha256(&self) -> [u8; 32] {
+        *self
+            .identity
+            .get_or_init(|| self.materialization_context().semantic_sha256())
+    }
+    pub fn same_authenticated_interfaces(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self == other
+                && self.support.artifacts().binding_dependencies()
+                    == other.support.artifacts().binding_dependencies())
+    }
+    pub fn select(
+        &self,
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
+    ) -> Result<Self, CompileError> {
+        Self::from_support(&self.support, self.producer, witnesses, signatures)
+    }
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.support
+    }
+    fn materialization_context(&self) -> ExactDeclarationContext {
+        ExactDeclarationContext::from_facts(DeclarationContextFacts {
+            source_scope: SourceLexicalScope::default(),
+            compiler_support: self.support.clone(),
+            producer: self.producer,
+            lexical: Default::default(),
+            template_imports: None,
+        })
+    }
+    pub(crate) fn prepare_compilation(
+        &self,
+        root: &Path,
+        producer: &[u8],
+    ) -> Result<ExactCompilationRequest, CompileError> {
+        Arc::new(self.materialization_context()).prepare_compilation(root, producer)
+    }
+    pub(crate) fn with_host_value_interfaces(
+        &self,
+        values: &[Arc<CertifiedValueInterface>],
+    ) -> Result<Self, CompileError> {
+        for value in values {
+            if value.interface().toolchain_identity_sha256() != self.producer {
+                return Err(failure(
+                    "host TYPE interface differs from its prototype producer",
+                ));
+            }
+        }
+        let support = self.support.admit_value_interfaces(values)?;
+        let selected = support.selected_interfaces()?;
+        let owners = selected.iter().map(|(owner, _)| owner.clone()).collect();
+        Ok(Self {
+            support: selected.type_interfaces_for_owners(owners)?,
+            producer: self.producer,
+            identity: OnceLock::new(),
+        })
+    }
+}
+
+impl SelectedTypeInterfaces {
+    fn from_support(
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        producer: [u8; 32],
+        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
+        signatures: &[&crate::checked_cell::ExactCheckedSignature],
+    ) -> Result<Self, CompileError> {
+        if producer == [0; 32] {
+            return Err(failure("original type context lacks its compiler producer"));
+        }
+        let selected = support.selected_interfaces()?;
+        let mut owners = BTreeSet::new();
+        for witness in witnesses {
+            for (unit, module, seal) in witness.interface_seals() {
+                let owner = ExactModuleIdentity {
+                    unit: unit.to_owned(),
+                    module: module.to_owned(),
+                };
+                match selected.get(&owner) {
+                    Some(entry) => {
+                        if entry.descriptor.producer_sha256 != producer
+                            || hex(&entry.descriptor.interface_sha256) != seal
+                        {
+                            return Err(failure(
+                                "original input differs from its certified interface seal",
+                            ));
+                        }
+                        owners.insert(owner);
+                    }
+                    None if unit == "main" || selected.is_home_unit(unit) => {
+                        return Err(failure("original input lacks its certified home interface"));
+                    }
+                    None => {}
+                }
+            }
+        }
+        for name in witnesses
+            .iter()
+            .map(|witness| witness.signature())
+            .chain(signatures.iter().copied())
+            .flat_map(|signature| signature.names())
+        {
+            let owner = ExactModuleIdentity {
+                unit: name.unit().to_owned(),
+                module: name.module().to_owned(),
+            };
+            match selected.get(&owner) {
+                Some(entry) => {
+                    if entry.descriptor.producer_sha256 != producer {
+                        return Err(failure(
+                            "original type interface differs from its compiler producer",
+                        ));
+                    }
+                    owners.insert(owner);
+                }
+                None if name.unit() == "main" || selected.is_home_unit(name.unit()) => {
+                    return Err(failure(
+                        "original native signature lacks its certified Name owner",
+                    ));
+                }
+                None => {}
+            }
+        }
+        Ok(Self {
+            support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
+            producer,
+            identity: OnceLock::new(),
+        })
+    }
+}
+
+impl SelectedTypeInterfaces {
+    /// The actual checked Val interface and its sealed TYPE requirements,
+    /// without source names, original bodies, or executable group authority.
+    pub(crate) fn from_checked_value(
+        value: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
+        let certified = value.certified_interface();
+        let interface = certified.interface();
+        let producer = interface.toolchain_identity_sha256();
+        if producer == [0; 32] || value.world_issuer().0 != producer {
+            return Err(failure(
+                "checked value TYPE row has another compiler producer",
+            ));
+        }
+        let selected = value.compiler_source_support().selected_interfaces()?;
+        let owner = identity(interface.unit(), interface.module());
+        let row = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
+        if row.descriptor.id != certified.artifact_id()
+            || row.descriptor.producer_sha256 != producer
+        {
+            return Err(failure(
+                "checked value TYPE row differs from its certified interface",
+            ));
+        }
+        Ok(SelectedTypeInterfaces {
+            support: selected.type_interfaces_for_owners(vec![owner])?,
+            producer,
+            identity: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn from_checked_value_signature(
+        value: &crate::checked_cell::CheckedValueArtifact,
+        signature: &crate::checked_cell::ExactCheckedSignature,
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
+        SelectedTypeInterfaces::from_support(
+            value.compiler_source_support(),
+            value
+                .certified_interface()
+                .interface()
+                .toolchain_identity_sha256(),
+            &[],
+            &[signature],
+        )
+    }
+}
+
 /// Requested type evidence and execution custody from one validated compiler output.
 /// The borrowed source cannot outlive its issuing output proof.
 pub struct ValidatedOriginalSource<'a> {
@@ -161,7 +362,7 @@ impl<'a> ValidatedOriginalSource<'a> {
         &self,
         witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
         signatures: &[&crate::checked_cell::ExactCheckedSignature],
-    ) -> Result<ExactDeclarationContext, CompileError> {
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
         match &self.execution {
             OriginalExecutionSourceRef::Original(evidence) => evidence
                 .context()
@@ -1557,20 +1758,30 @@ pub(crate) struct RequestCompilerInputs {
     metadata: CompilerArtifactMetadata,
     native_selection: NativeInputSelection,
     original_sources: Arc<crate::certified_products::RetainedOriginalSources>,
-    // Only cold World-primary capture sets this owner. A generic request may
-    // include scaffold/private roles and cannot advance a public primary.
-    world_primary_context: Option<Arc<ExactDeclarationContext>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WorldPrimaryInputs {
+    inputs: Arc<RequestCompilerInputs>,
+    context: Arc<ExactDeclarationContext>,
+}
+
+impl WorldPrimaryInputs {
+    pub(crate) fn inputs(&self) -> &Arc<RequestCompilerInputs> {
+        &self.inputs
+    }
+    pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context
+    }
 }
 
 pub(crate) struct WorldPrimaryTypeInterfaces {
-    pub(crate) inputs: Arc<RequestCompilerInputs>,
-    pub(crate) context: Arc<ExactDeclarationContext>,
+    pub(crate) primary: WorldPrimaryInputs,
     pub(crate) changed_owners: Vec<ExactModuleIdentity>,
 }
 
 pub(crate) struct WorldPrimaryProgramSupport {
-    pub(crate) inputs: Arc<RequestCompilerInputs>,
-    pub(crate) context: Arc<ExactDeclarationContext>,
+    pub(crate) primary: WorldPrimaryInputs,
     pub(crate) changed_owners: Vec<ExactModuleIdentity>,
     pub(crate) promotion_qualifier_invocations: usize,
 }
@@ -1582,9 +1793,8 @@ impl WorldPrimaryProgramSupport {
         mut self,
         issued: &Arc<ExactDeclarationContext>,
     ) -> Result<Self, CompileError> {
-        let completed = self.inputs.with_native_completion_from(issued)?;
-        self.inputs = completed.inputs;
-        self.context = completed.context;
+        let completed = self.primary.with_native_completion_from(issued)?;
+        self.primary = completed.primary;
         Ok(self)
     }
 }
@@ -4818,17 +5028,14 @@ fn compiler_execution_scope(
     Ok(Value::Array(vec![fields[0].clone(), Value::Array(roots)]))
 }
 
-impl RequestCompilerInputs {
+impl WorldPrimaryInputs {
     /// Advance only immutable completion custody from an actually issued context.
     /// The receiver keeps its public compiler namespace and lexical policy.
     pub(crate) fn with_native_completion_from(
-        self: &Arc<Self>,
+        &self,
         issued: &Arc<ExactDeclarationContext>,
     ) -> Result<WorldPrimaryProgramSupport, CompileError> {
-        let primary = self
-            .world_primary_context
-            .as_ref()
-            .ok_or_else(|| failure("native completion requires the actual World primary owner"))?;
+        let primary = &self.context;
         if primary.owner.facts.producer == [0; 32]
             || primary.owner.facts.producer != issued.owner.facts.producer
         {
@@ -4837,15 +5044,15 @@ impl RequestCompilerInputs {
             ));
         }
         let support = self
+            .inputs
             .source_support
             .with_acquired_native_closures_from(issued.compiler_source_support())?;
         if support
             .acquired_native_closures()
-            .same_held_owners(self.source_support.acquired_native_closures())
+            .same_held_owners(self.inputs.source_support.acquired_native_closures())
         {
             return Ok(WorldPrimaryProgramSupport {
-                inputs: Arc::clone(self),
-                context: Arc::clone(primary),
+                primary: self.clone(),
                 changed_owners: Vec::new(),
                 promotion_qualifier_invocations: 0,
             });
@@ -4854,36 +5061,32 @@ impl RequestCompilerInputs {
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
         let metadata = CompilerArtifactMetadata {
-            entries: self.metadata.entries.clone(),
-            retained: Arc::clone(&self.metadata.retained),
+            entries: self.inputs.metadata.entries.clone(),
+            retained: Arc::clone(&self.inputs.metadata.retained),
         }
         .retain_acquisitions(support.artifacts())?;
-        let native_selection = self.native_selection.retain_acquisitions(&support)?;
-        let inputs = Arc::new(Self {
+        let native_selection = self.inputs.native_selection.retain_acquisitions(&support)?;
+        let inputs = Arc::new(RequestCompilerInputs {
             source_support: Arc::new(support),
             metadata,
             native_selection,
-            original_sources: Arc::clone(&self.original_sources),
-            world_primary_context: Some(Arc::clone(&context)),
+            original_sources: Arc::clone(&self.inputs.original_sources),
         });
         Ok(WorldPrimaryProgramSupport {
-            inputs,
-            context,
+            primary: WorldPrimaryInputs { inputs, context },
             changed_owners: Vec::new(),
             promotion_qualifier_invocations: 0,
         })
     }
 
     pub(crate) fn with_type_interfaces(
-        self: &Arc<Self>,
-        contexts: &[Arc<ExactDeclarationContext>],
+        &self,
+        contexts: &[Arc<SelectedTypeInterfaces>],
     ) -> Result<WorldPrimaryTypeInterfaces, CompileError> {
-        let primary = self.world_primary_context.as_ref().ok_or_else(|| {
-            failure("type-interface delta requires the actual World primary owner")
-        })?;
+        let primary = &self.context;
         let producer = primary.owner.facts.producer;
         for context in contexts {
-            if producer == [0; 32] || context.owner.facts.producer != producer {
+            if producer == [0; 32] || context.producer != producer {
                 return Err(failure(
                     "type-interface delta differs from the primary compiler producer",
                 ));
@@ -4894,44 +5097,42 @@ impl RequestCompilerInputs {
             .map(|context| context.compiler_source_support())
             .collect::<Vec<_>>();
         let (support, changed_owners) = self
+            .inputs
             .source_support
             .with_type_interfaces(&incoming, producer)?;
         if changed_owners.is_empty() {
             return Ok(WorldPrimaryTypeInterfaces {
-                inputs: Arc::clone(self),
-                context: Arc::clone(primary),
+                primary: self.clone(),
                 changed_owners,
             });
         }
-        let metadata = support.type_interface_metadata(&self.metadata, &changed_owners)?;
+        let metadata = support.type_interface_metadata(&self.inputs.metadata, &changed_owners)?;
         let mut facts = primary.owner.facts.clone();
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let native_selection =
-            self.native_selection
-                .with_added_type_owners(&support, &metadata, &changed_owners)?;
-        let inputs = Arc::new(Self {
+        let native_selection = self.inputs.native_selection.with_added_type_owners(
+            &support,
+            &metadata,
+            &changed_owners,
+        )?;
+        let inputs = Arc::new(RequestCompilerInputs {
             source_support: Arc::new(support),
             metadata,
             native_selection,
-            original_sources: Arc::clone(&self.original_sources),
-            world_primary_context: Some(Arc::clone(&context)),
+            original_sources: Arc::clone(&self.inputs.original_sources),
         });
         Ok(WorldPrimaryTypeInterfaces {
-            inputs,
-            context,
+            primary: WorldPrimaryInputs { inputs, context },
             changed_owners,
         })
     }
 
     fn advance_program_support(
-        self: &Arc<Self>,
+        &self,
         projection_context: &Arc<ExactDeclarationContext>,
         incoming: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<WorldPrimaryProgramSupport, CompileError> {
-        let primary = self.world_primary_context.as_ref().ok_or_else(|| {
-            failure("program support delta requires the actual World primary owner")
-        })?;
+        let primary = &self.context;
         if primary.owner.facts.producer == [0; 32]
             || projection_context.owner.facts.producer != primary.owner.facts.producer
         {
@@ -4939,22 +5140,26 @@ impl RequestCompilerInputs {
                 "program support delta differs from its primary producer",
             ));
         }
-        let delta = self.source_support.append_program_fragment(incoming)?;
+        let delta = self
+            .inputs
+            .source_support
+            .append_program_fragment(incoming)?;
         let metadata = delta.support.program_fragment_metadata(
-            &self.metadata,
+            &self.inputs.metadata,
             incoming,
             &delta.changed_owners,
         )?;
         let unchanged_native_types = delta
             .support
             .native_availability()
-            .same_acquisition(self.source_support.native_availability())
-            && delta.support.native_offers().len() == self.source_support.native_offers().len()
+            .same_acquisition(self.inputs.source_support.native_availability())
+            && delta.support.native_offers().len()
+                == self.inputs.source_support.native_offers().len()
             && delta
                 .support
                 .native_offers()
                 .iter()
-                .zip(self.source_support.native_offers())
+                .zip(self.inputs.source_support.native_offers())
                 .all(|(current, previous)| current.same_issuance(previous))
             && delta.changed_owners.iter().all(|owner| {
                 delta.support.projection().snapshot_roles()[owner]
@@ -4962,7 +5167,7 @@ impl RequestCompilerInputs {
                     .is_none()
             });
         let native_selection = if unchanged_native_types {
-            self.native_selection.with_added_type_owners(
+            self.inputs.native_selection.with_added_type_owners(
                 &delta.support,
                 &metadata,
                 &delta.changed_owners,
@@ -4985,16 +5190,14 @@ impl RequestCompilerInputs {
         let mut facts = projection_context.owner.facts.clone();
         facts.compiler_support = delta.support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let inputs = Arc::new(Self {
+        let inputs = Arc::new(RequestCompilerInputs {
             source_support: Arc::new(delta.support),
             metadata,
             native_selection,
-            original_sources: Arc::clone(&self.original_sources),
-            world_primary_context: Some(Arc::clone(&context)),
+            original_sources: Arc::clone(&self.inputs.original_sources),
         });
         Ok(WorldPrimaryProgramSupport {
-            inputs,
-            context,
+            primary: WorldPrimaryInputs { inputs, context },
             changed_owners: delta.changed_owners,
             promotion_qualifier_invocations: delta.promotion_qualifier_invocations,
         })
@@ -5004,7 +5207,7 @@ impl RequestCompilerInputs {
     /// The join owns its interface and input closure; its input context alone
     /// does not contain that newly issued facade.
     pub(crate) fn with_declaration_projection(
-        self: &Arc<Self>,
+        &self,
         publication: &crate::declaration_join::PublicationComposition,
     ) -> Result<WorldPrimaryProgramSupport, CompileError> {
         let joined = publication.join();
@@ -5024,34 +5227,37 @@ impl RequestCompilerInputs {
     }
 
     fn with_program_value_interface(
-        self: &Arc<Self>,
+        &self,
         value: Arc<CertifiedValueInterface>,
-    ) -> Result<Arc<Self>, CompileError> {
-        let primary = self.world_primary_context.as_ref().ok_or_else(|| {
-            failure("program value delta requires the actual World primary owner")
-        })?;
+    ) -> Result<Self, CompileError> {
+        let primary = &self.context;
         let owner = identity(value.interface().unit(), value.interface().module());
         let support = self
+            .inputs
             .source_support
             .admit_value_interfaces(std::slice::from_ref(&value))?;
         let metadata =
-            support.type_interface_metadata(&self.metadata, std::slice::from_ref(&owner))?;
+            support.type_interface_metadata(&self.inputs.metadata, std::slice::from_ref(&owner))?;
         let mut facts = primary.owner.facts.clone();
         // Publication retains TYPE availability. The consuming stage selects
         // its checked inputs; a value is not an enduring instance-scope root.
         facts.compiler_support = support.clone();
 
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let native_selection = self.native_selection.retain_acquisitions(&support)?;
-        Ok(Arc::new(Self {
-            source_support: Arc::new(support),
-            metadata,
-            native_selection,
-            original_sources: Arc::clone(&self.original_sources),
-            world_primary_context: Some(context),
-        }))
+        let native_selection = self.inputs.native_selection.retain_acquisitions(&support)?;
+        Ok(Self {
+            inputs: Arc::new(RequestCompilerInputs {
+                source_support: Arc::new(support),
+                metadata,
+                native_selection,
+                original_sources: Arc::clone(&self.inputs.original_sources),
+            }),
+            context,
+        })
     }
+}
 
+impl RequestCompilerInputs {
     pub(crate) fn metadata(&self) -> &CompilerArtifactMetadata {
         &self.metadata
     }
@@ -5165,7 +5371,6 @@ impl ProtectedScaffoldRequirements {
             metadata,
             native_selection,
             original_sources: Default::default(),
-            world_primary_context: None,
         })
     }
 }
@@ -11808,8 +12013,7 @@ pub(crate) struct DecodedWorldSourceReceipt<'a> {
 /// this owner; it carries only actual input and source-output evidence.
 pub(crate) struct WorldProgramContinuation {
     request: Arc<crate::compiler_world::native_demand::WorldNativeDemandCompletion>,
-    context: Arc<ExactDeclarationContext>,
-    inputs: Arc<RequestCompilerInputs>,
+    primary: WorldPrimaryInputs,
     program: ProgramSourceSupportState,
     private_input: Option<Arc<OriginalCompilerInputs>>,
     native_prefix: Option<Arc<crate::artifacts::SealedTurnProducts>>,
@@ -11861,8 +12065,7 @@ impl WorldProgramContinuation {
         // from the native demand acquired during the compiler request.
         Self {
             request: Arc::clone(program.native_demand_completion()),
-            context: Arc::clone(program.primary_context()),
-            inputs: Arc::clone(program.primary_compiler_inputs()),
+            primary: program.primary_inputs().clone(),
             program: ProgramSourceSupportState::default(),
             private_input: None,
             native_prefix: None,
@@ -11928,13 +12131,16 @@ impl WorldProgramContinuation {
             decoded.program,
             &decoded.binding.stage,
         )?;
-        let checked_types = checked_values.type_interface_contexts(&operation)?;
+        let checked_types = checked_values.selected_type_interfaces(&operation)?;
         // Visible checked values own TYPE inputs separately from the World's
         // primary declaration/source namespace. Only this stage borrows them.
         let stage_inputs = if checked_types.is_empty() {
-            Arc::clone(&self.inputs)
+            Arc::clone(&self.primary.inputs)
         } else {
-            self.inputs.with_type_interfaces(&checked_types)?.inputs
+            self.primary
+                .with_type_interfaces(&checked_types)?
+                .primary
+                .inputs
         };
         let demand = decoded.prefix_inputs(&stage_inputs)?;
         // Prefix source/TYPE projection carries no new executable choice.
@@ -11996,7 +12202,7 @@ impl WorldProgramContinuation {
             original_bindings,
             support,
             binding: WorldCompilationIdentity::from_binding(&decoded.binding),
-            context: Arc::clone(&self.context),
+            context: Arc::clone(&self.primary.context),
             checked_values,
             program_support: prepared.prior.support.cloned(),
         };
@@ -12015,8 +12221,7 @@ impl WorldProgramContinuation {
     fn pending_successor(&self) -> Self {
         Self {
             request: Arc::clone(&self.request),
-            context: Arc::clone(&self.context),
-            inputs: Arc::clone(&self.inputs),
+            primary: self.primary.clone(),
             program: self.program.clone(),
             private_input: self.private_input.clone(),
             native_prefix: self.native_prefix.clone(),
@@ -12142,7 +12347,7 @@ impl WorldProgramSegment {
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let next = self.program_support_successor(program, output, produced)?;
         self.continuation = next;
-        Ok(Arc::clone(&self.continuation.context))
+        Ok(Arc::clone(&self.continuation.primary.context))
     }
 
     fn program_support_successor(
@@ -12167,7 +12372,7 @@ impl WorldProgramSegment {
             output,
             produced,
         )?;
-        let context = &continuation.context;
+        let context = &continuation.primary.context;
         let fragment = Arc::new(fragment);
         let admission = SourceAdmissionBundle::issue(
             SourceAdmissionBoundary::WorldStage(self.stage.index()),
@@ -12246,7 +12451,7 @@ impl WorldProgramSegment {
 
         let projected = Arc::new(ExactDeclarationContext::from_facts(facts));
         let advanced = continuation
-            .inputs
+            .primary
             .advance_program_support(&projected, &fragment)?;
         let physical = IssuedOriginalOutput::from_segment_physical(&self.originals);
         continuation.program.program_support = Some(ProgramSourceSupport::append_fragment(
@@ -12267,8 +12472,7 @@ impl WorldProgramSegment {
             admission.selected_roots(),
             continuation.request.operation(),
         )?;
-        continuation.inputs = advanced.inputs;
-        continuation.context = advanced.context;
+        continuation.primary = advanced.primary;
         Ok(continuation)
     }
 
@@ -12277,18 +12481,11 @@ impl WorldProgramSegment {
         &mut self,
         value: Arc<CertifiedValueInterface>,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
-        let inputs = self
+        self.continuation.primary = self
             .continuation
-            .inputs
+            .primary
             .with_program_value_interface(value)?;
-        self.continuation.context = Arc::clone(
-            inputs
-                .world_primary_context
-                .as_ref()
-                .expect("World value owner"),
-        );
-        self.continuation.inputs = inputs;
-        Ok(Arc::clone(&self.continuation.context))
+        Ok(Arc::clone(self.continuation.primary.context()))
     }
 
     pub(crate) fn admit_native_item(
@@ -12301,25 +12498,17 @@ impl WorldProgramSegment {
         let output = products.planned_original_output()?;
         let mut next = self.program_support_successor(program, output, produced)?;
         if let Some(value) = value {
-            let inputs = next.inputs.with_program_value_interface(value)?;
-            next.context = Arc::clone(
-                inputs
-                    .world_primary_context
-                    .as_ref()
-                    .expect("World value owner"),
-            );
-            next.inputs = inputs;
+            next.primary = next.primary.with_program_value_interface(value)?;
         }
-        let completed = next
-            .inputs
-            .with_native_completion_from(products.original_execution_evidence()?.context())?;
-        next.inputs = completed.inputs;
-        next.context = completed.context;
+        next.primary = next
+            .primary
+            .with_native_completion_from(products.original_execution_evidence()?.context())?
+            .primary;
         next.private_input = Some(Arc::clone(&output.inputs));
         next.native_prefix = Some(Arc::clone(products));
         crate::host_work::checkpoint()?;
         self.continuation = next;
-        Ok(Arc::clone(&self.continuation.context))
+        Ok(Arc::clone(self.continuation.primary.context()))
     }
 
     pub(crate) fn finish(mut self) -> (WorldProgramContinuation, WorldStageSourceAdmission) {
@@ -14369,8 +14558,8 @@ impl ExactDeclarationContext {
         &self,
         witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
         signatures: &[&crate::checked_cell::ExactCheckedSignature],
-    ) -> Result<Self, CompileError> {
-        Self::type_interfaces_from_support(
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
+        SelectedTypeInterfaces::from_support(
             &self.owner.facts.compiler_support,
             self.owner.facts.producer,
             witnesses,
@@ -14378,134 +14567,13 @@ impl ExactDeclarationContext {
         )
     }
 
-    /// The actual checked Val interface and its sealed TYPE requirements,
-    /// without source names, original bodies, or executable group authority.
-    pub(crate) fn checked_value_interface_context(
-        value: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<Self, CompileError> {
-        let certified = value.certified_interface();
-        let interface = certified.interface();
-        let producer = interface.toolchain_identity_sha256();
-        if producer == [0; 32] || value.world_issuer().0 != producer {
-            return Err(failure(
-                "checked value TYPE row has another compiler producer",
-            ));
-        }
-        let selected = value.compiler_source_support().selected_interfaces()?;
-        let owner = identity(interface.unit(), interface.module());
-        let row = selected
-            .get(&owner)
-            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
-        if row.descriptor.id != certified.artifact_id()
-            || row.descriptor.producer_sha256 != producer
-        {
-            return Err(failure(
-                "checked value TYPE row differs from its certified interface",
-            ));
-        }
-        Ok(Self::from_facts(DeclarationContextFacts {
-            source_scope: SourceLexicalScope::default(),
-            compiler_support: selected.type_interfaces_for_owners(vec![owner])?,
-            producer,
-            lexical: Default::default(),
-
-            template_imports: None,
-        }))
-    }
-
-    pub(crate) fn checked_value_type_interfaces(
-        value: &crate::checked_cell::CheckedValueArtifact,
-        signature: &crate::checked_cell::ExactCheckedSignature,
-    ) -> Result<Self, CompileError> {
-        Self::type_interfaces_from_support(
-            value.compiler_source_support(),
-            value
-                .certified_interface()
-                .interface()
-                .toolchain_identity_sha256(),
-            &[],
-            &[signature],
-        )
-    }
-
-    fn type_interfaces_from_support(
-        support: &crate::artifact_inventory::CompilerSourceSupport,
-        producer: [u8; 32],
-        witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
-        signatures: &[&crate::checked_cell::ExactCheckedSignature],
-    ) -> Result<Self, CompileError> {
-        if producer == [0; 32] {
-            return Err(failure("original type context lacks its compiler producer"));
-        }
-        let selected = support.selected_interfaces()?;
-        let mut owners = BTreeSet::new();
-        for witness in witnesses {
-            for (unit, module, seal) in witness.interface_seals() {
-                let owner = ExactModuleIdentity {
-                    unit: unit.to_owned(),
-                    module: module.to_owned(),
-                };
-                match selected.get(&owner) {
-                    Some(entry) => {
-                        if entry.descriptor.producer_sha256 != producer
-                            || hex(&entry.descriptor.interface_sha256) != seal
-                        {
-                            return Err(failure(
-                                "original input differs from its certified interface seal",
-                            ));
-                        }
-                        owners.insert(owner);
-                    }
-                    None if unit == "main" || selected.is_home_unit(unit) => {
-                        return Err(failure("original input lacks its certified home interface"));
-                    }
-                    None => {}
-                }
-            }
-        }
-        for name in witnesses
-            .iter()
-            .map(|witness| witness.signature())
-            .chain(signatures.iter().copied())
-            .flat_map(|signature| signature.names())
-        {
-            let owner = ExactModuleIdentity {
-                unit: name.unit().to_owned(),
-                module: name.module().to_owned(),
-            };
-            match selected.get(&owner) {
-                Some(entry) => {
-                    if entry.descriptor.producer_sha256 != producer {
-                        return Err(failure(
-                            "original type interface differs from its compiler producer",
-                        ));
-                    }
-                    owners.insert(owner);
-                }
-                None if name.unit() == "main" || selected.is_home_unit(name.unit()) => {
-                    return Err(failure(
-                        "original native signature lacks its certified Name owner",
-                    ));
-                }
-                None => {}
-            }
-        }
-        Ok(Self::from_facts(DeclarationContextFacts {
-            source_scope: SourceLexicalScope::default(),
-            compiler_support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
-            producer,
-            lexical: Default::default(),
-
-            template_imports: None,
-        }))
-    }
-
     /// Merge original type-interface evidence without granting lexical imports.
     /// Even an empty home closure must agree on its compiler producer.
-    pub fn extend_interface_context(mut self, context: &Self) -> Result<Self, CompileError> {
-        if context.owner.facts.producer != [0; 32] {
-            self = self.admit_producer(context.owner.facts.producer)?;
-        }
+    pub fn extend_type_interfaces(
+        mut self,
+        context: &SelectedTypeInterfaces,
+    ) -> Result<Self, CompileError> {
+        self = self.admit_producer(context.producer)?;
         let support = context.compiler_source_support();
         let interfaces = support.selected_interfaces()?;
         let selected = self
@@ -14607,12 +14675,12 @@ impl ExactDeclarationContext {
     /// captures; a value dependency is never removed just because it is private.
     fn display_projection_for_target(
         &self,
-        input: &Self,
+        input: &SelectedTypeInterfaces,
         target: &ExactModuleIdentity,
     ) -> Result<Self, CompileError> {
         let graph = self.preview_interface_graph_for_target(target)?;
-        let mut context = self.clone().extend_interface_context(input)?;
-        let input_ids = input.artifact_view().artifact_ids();
+        let mut context = self.clone().extend_type_interfaces(input)?;
+        let input_ids = input.support.artifacts().artifact_ids();
         let excluded_value_roots =
             context
                 .owner
@@ -15093,19 +15161,6 @@ impl ExactDeclarationContext {
         let result = self.finish();
         timing.finish(result.is_ok());
         result
-    }
-
-    /// Host operands expose TYPE interfaces without inherited source policy.
-    pub(crate) fn project_host_type_interfaces(
-        self,
-        values: &[Arc<CertifiedValueInterface>],
-    ) -> Result<Self, CompileError> {
-        self.extend_with_value_interfaces(values)?
-            .rebuild(|facts| {
-                facts.lexical = Default::default();
-                facts.source_scope = Default::default();
-            })
-            .finish()
     }
 
     #[tracing::instrument(
@@ -15777,18 +15832,20 @@ impl ExactDeclarationContext {
 
     /// Capture the admitted primary selection once at cold world construction.
     /// Default requirements add no scaffold roots or visible-value support.
-    pub(crate) fn capture_world_primary_compiler_inputs(
+    pub(crate) fn capture_world_primary_inputs(
         &self,
         expected_canonical_producer: [u8; 32],
-    ) -> Result<Arc<RequestCompilerInputs>, CompileError> {
+    ) -> Result<WorldPrimaryInputs, CompileError> {
         if expected_canonical_producer == [0; 32]
             || expected_canonical_producer != self.owner.facts.producer
         {
             return Err(failure("world primary has another canonical producer"));
         }
-        let mut inputs = ProtectedScaffoldRequirements::default().compiler_inputs(self, None)?;
-        inputs.world_primary_context = Some(Arc::new(self.clone()));
-        Ok(Arc::new(inputs))
+        let inputs = ProtectedScaffoldRequirements::default().compiler_inputs(self, None)?;
+        Ok(WorldPrimaryInputs {
+            inputs: Arc::new(inputs),
+            context: Arc::new(self.clone()),
+        })
     }
 
     /// Finalize a context at its issuing boundary. Historical custody remains
@@ -32779,29 +32836,23 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let unbound = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         let before = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
         for expected in [[0; 32], canonical] {
-            assert!(unbound
-                .capture_world_primary_compiler_inputs(expected)
-                .is_err());
+            assert!(unbound.capture_world_primary_inputs(expected).is_err());
         }
         let admitted = unbound.admit_producer(canonical).unwrap();
         for expected in [[0; 32], raw_producer, [9; 32]] {
-            assert!(admitted
-                .capture_world_primary_compiler_inputs(expected)
-                .is_err());
+            assert!(admitted.capture_world_primary_inputs(expected).is_err());
         }
         assert_eq!(
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
             before,
             "producer refusals must precede compiler input issuance",
         );
-        let captured = admitted
-            .capture_world_primary_compiler_inputs(canonical)
-            .unwrap();
+        let captured = admitted.capture_world_primary_inputs(canonical).unwrap();
         assert_eq!(
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
             before + 1,
         );
-        assert!(captured.metadata.entries.is_empty());
+        assert!(captured.inputs.metadata.entries.is_empty());
     }
 
     #[test]
@@ -32814,13 +32865,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .filter_map(CompilerInputRole::original)
             .collect::<BTreeSet<_>>();
         assert!(!expected_originals.is_empty());
-        let captured = context
-            .capture_world_primary_compiler_inputs(canonical)
-            .unwrap();
-        assert_eq!(captured.projection().roles(), roles);
-        assert!(!captured.metadata.entries.is_empty());
+        let captured = context.capture_world_primary_inputs(canonical).unwrap();
+        assert_eq!(captured.inputs.projection().roles(), roles);
+        assert!(!captured.inputs.metadata.entries.is_empty());
         assert_eq!(
             captured
+                .inputs
                 .native_selection
                 .availability
                 .0
@@ -32830,7 +32880,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             expected_originals,
         );
         let retained = context.artifact_view().metadata_snapshot();
-        for (id, availability) in captured.native_selection.availability.0.iter() {
+        for (id, availability) in captured.inputs.native_selection.availability.0.iter() {
             assert_eq!(availability.original.descriptor.id, *id);
             let selected = retained.artifacts.get(id).unwrap();
             assert!(Arc::ptr_eq(&availability.original, selected));
@@ -32841,9 +32891,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     fn world_primary_type_delta_keeps_its_actual_context_and_reuses_equal_inputs() {
         let (primary, producer_bytes) = metadata_fixture();
         let producer = CanonicalProducerIdentity::from_producer_bytes(&producer_bytes).sha256();
-        let captured = primary
-            .capture_world_primary_compiler_inputs(producer)
-            .unwrap();
+        let captured = primary.capture_world_primary_inputs(producer).unwrap();
         let entry = Arc::new(ArtifactEntry::canonical(
             crate::certified_products::fixture_module_interface(
                 producer,
@@ -32868,6 +32916,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 template_imports: None,
             },
         ));
+        let incoming = Arc::new(SelectedTypeInterfaces {
+            support: incoming.compiler_source_support().clone(),
+            producer,
+            identity: OnceLock::new(),
+        });
         let computations = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
         let metadata_snapshots = COMPILER_METADATA_SNAPSHOTS.with(|count| count.get());
         let native_lowerings = NATIVE_TRANSPORT_LOWERINGS.with(|count| count.get());
@@ -32878,34 +32931,30 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap()
         });
         assert_eq!(advanced.changed_owners, vec![owner.clone()]);
-        assert!(!Arc::ptr_eq(&captured, &advanced.inputs));
+        assert!(!Arc::ptr_eq(&captured.inputs, &advanced.primary.inputs));
         assert_eq!(
-            advanced.context.owner.facts.lexical,
+            advanced.primary.context.owner.facts.lexical,
             primary.owner.facts.lexical
         );
         assert_eq!(
-            advanced.context.owner.facts.template_imports,
+            advanced.primary.context.owner.facts.template_imports,
             primary.owner.facts.template_imports
         );
         assert_eq!(
-            advanced.context.owner.facts.producer,
+            advanced.primary.context.owner.facts.producer,
             primary.owner.facts.producer
         );
         assert!(Arc::ptr_eq(
-            advanced.inputs.world_primary_context.as_ref().unwrap(),
-            &advanced.context
+            &captured.inputs.original_sources,
+            &advanced.primary.inputs.original_sources
         ));
         assert!(Arc::ptr_eq(
-            &captured.original_sources,
-            &advanced.inputs.original_sources
-        ));
-        assert!(Arc::ptr_eq(
-            &captured.native_selection.candidates.0,
-            &advanced.inputs.native_selection.candidates.0
+            &captured.inputs.native_selection.candidates.0,
+            &advanced.primary.inputs.native_selection.candidates.0
         ));
         assert_eq!(
-            captured.native_selection.availability,
-            advanced.inputs.native_selection.availability
+            captured.inputs.native_selection.availability,
+            advanced.primary.inputs.native_selection.availability
         );
         assert_eq!(
             REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
@@ -32932,6 +32981,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             );
         }
         let row = advanced
+            .primary
             .inputs
             .compiler_source_support()
             .world_primary_type_row(&owner)
@@ -32939,28 +32989,28 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(row.original_binding.is_none());
         assert_eq!(row.entry.descriptor.owner, owner);
         assert_eq!(
-            advanced.context.snapshot().compiler_roles(),
-            advanced.inputs.projection().roles()
+            advanced.primary.context.snapshot().compiler_roles(),
+            advanced.primary.inputs.projection().roles()
         );
-        let repeated = advanced.inputs.with_type_interfaces(&[incoming]).unwrap();
+        let repeated = advanced.primary.with_type_interfaces(&[incoming]).unwrap();
         assert!(repeated.changed_owners.is_empty());
-        assert!(Arc::ptr_eq(&repeated.inputs, &advanced.inputs));
-        assert!(Arc::ptr_eq(&repeated.context, &advanced.context));
-        let empty = repeated.inputs.with_type_interfaces(&[]).unwrap();
-        assert!(Arc::ptr_eq(&empty.inputs, &repeated.inputs));
-        // A generic scaffold/private request has no World-primary owner.
-        let generic = Arc::new(
-            ProtectedScaffoldRequirements::default()
-                .compiler_inputs(&primary, None)
-                .unwrap(),
-        );
-        assert!(generic.with_type_interfaces(&[]).is_err());
+        assert!(Arc::ptr_eq(
+            &repeated.primary.inputs,
+            &advanced.primary.inputs
+        ));
+        assert!(Arc::ptr_eq(
+            &repeated.primary.context,
+            &advanced.primary.context
+        ));
+        let empty = repeated.primary.with_type_interfaces(&[]).unwrap();
+        assert!(Arc::ptr_eq(&empty.primary.inputs, &repeated.primary.inputs));
         let foreign = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
                 .admit_producer([99; 32])
                 .unwrap(),
         );
+        let foreign = Arc::new(foreign.select_original_type_interfaces(&[], &[]).unwrap());
         assert!(
             captured.with_type_interfaces(&[foreign]).is_err(),
             "even empty type evidence must match the producer"

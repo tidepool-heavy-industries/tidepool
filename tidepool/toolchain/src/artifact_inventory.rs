@@ -12370,8 +12370,10 @@ mod tests {
                     .extend_issued_compiler_support(&chosen)
                     .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
+                .unwrap()
+                .inputs()
+                .clone();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -12392,8 +12394,10 @@ mod tests {
                         .extend_issued_compiler_support(&selected)
                         .unwrap();
                 let inputs = context
-                    .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
-                    .unwrap();
+                    .capture_world_primary_inputs(native.descriptor.producer_sha256)
+                    .unwrap()
+                    .inputs()
+                    .clone();
                 let selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         &inputs,
@@ -12522,8 +12526,10 @@ mod tests {
                 .extend_issued_compiler_support(&selected)
                 .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
+                .unwrap()
+                .inputs()
+                .clone();
             let selected_receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
@@ -12575,8 +12581,10 @@ mod tests {
                 .extend_issued_compiler_support(&unselected)
                 .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
-                .unwrap();
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
+                .unwrap()
+                .inputs()
+                .clone();
             let receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
@@ -12786,8 +12794,10 @@ mod tests {
                     .extend_issued_compiler_support(&joined)
                     .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(roots[0].0.descriptor.producer_sha256)
-                .unwrap();
+                .capture_world_primary_inputs(roots[0].0.descriptor.producer_sha256)
+                .unwrap()
+                .inputs()
+                .clone();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -15998,8 +16008,10 @@ mod tests {
             .unwrap();
             let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let inputs = issuer_context
-                .capture_world_primary_compiler_inputs([2; 32])
-                .unwrap();
+                .capture_world_primary_inputs([2; 32])
+                .unwrap()
+                .inputs()
+                .clone();
             let certified =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                     &inputs,
@@ -16978,8 +16990,10 @@ mod tests {
                 let before_edges = parent.binding_dependencies();
                 let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let inputs = issuer_context
-                    .capture_world_primary_compiler_inputs([2; 32])
-                    .unwrap();
+                    .capture_world_primary_inputs([2; 32])
+                    .unwrap()
+                    .inputs()
+                    .clone();
                 let receipt =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
                         &inputs,

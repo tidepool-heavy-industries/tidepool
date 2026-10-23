@@ -1774,25 +1774,17 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     let package_types = compiler_source
         .project_type_interfaces(&[input_witness], &[])
         .unwrap();
-    assert!(
-        package_types.compiler_input_roles().is_empty(),
-        "Int -> Int requires only package interfaces"
-    );
     let expected_types = compiler_source
         .project_type_interfaces(&[result_witness], &[])
         .unwrap();
-    assert!(
-        !expected_types.compiler_input_roles().is_empty(),
-        "ResponseResult () retains its original home interface"
+    assert_ne!(
+        package_types, expected_types,
+        "ResponseResult () retains its original home interface beyond package-only Int -> Int"
     );
-    let expected_descriptors = expected_types.artifact_view().descriptors();
-    assert_eq!(
-        retained_context.artifact_view().descriptors(),
-        expected_descriptors,
+    assert!(
+        retained_context.same_authenticated_interfaces(&expected_types),
         "the joint request projection retains exactly the sealed response interface closure"
     );
-    assert_interface_only_roles_without_native_selection(&retained_context);
-    assert!(retained_context.lexical_graph().is_empty());
     let producer = compiler_context.toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
     assert_eq!(retained_context.toolchain_identity_sha256(), producer);
@@ -1877,10 +1869,13 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         request_context.declarations().toolchain_identity_sha256(),
         producer
     );
-    assert_eq!(
-        request_context.declarations().artifact_view().descriptors(),
-        expected_descriptors
-    );
+    assert_interface_only_roles_without_native_selection(request_context.declarations());
+    assert!(request_context.declarations().lexical_graph().is_empty());
+    assert!(request_context
+        .declarations()
+        .select_original_type_interfaces(&[result_witness], &[])
+        .unwrap()
+        .same_authenticated_interfaces(retained_context));
     let compile_context = input
         .type_evidence()
         .compile_context(Some(&compiler_context))
@@ -3262,7 +3257,14 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
     let (plan, prototype) = tracing::subscriber::with_default(subscriber, || {
         (
             CompiledProvenancePlan::build(&fixture.producer.code()),
-            ExactHostBindingPrototype::from_original_input(witness.clone(), context.clone()),
+            context
+                .select_original_type_interfaces(&[&witness], &[])
+                .and_then(|interfaces| {
+                    ExactHostBindingPrototype::from_original_input(
+                        witness.clone(),
+                        Arc::new(interfaces),
+                    )
+                }),
         )
     });
     eprintln!(
@@ -3291,29 +3293,46 @@ fn original_input_type_consumers_select_canonical_roles_over_native_custody() {
         .get(&site.site)
         .expect("actual selected request site authenticated")
         .0;
-    for (types, expected) in [
-        (request_types.as_ref(), &expected_request),
-        (prototype.context().as_ref(), &expected_input),
-    ] {
-        assert_eq!(types.toolchain_identity_sha256(), producer);
-        assert!(types
-            .compiler_input_roles()
-            .iter()
-            .all(|role| role.original().is_none()));
-        assert!(types.artifact_view().selected_native_groups().is_empty());
-        assert!(types.lexical_graph().is_empty());
-        let actual = types
-            .snapshot()
-            .graph_selection()
+    assert!(prototype.type_interfaces().same_authenticated_interfaces(
+        &context
+            .select_original_type_interfaces(&[&witness], &[])
             .unwrap()
-            .namespace
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            &actual, expected,
-            "type context preserves exact canonical bindings and type closure"
-        );
-    }
+    ));
+    assert!(expected_input.is_subset(&expected_request));
+    assert_eq!(request_types.toolchain_identity_sha256(), producer);
+    assert_eq!(
+        prototype.type_interfaces().toolchain_identity_sha256(),
+        producer
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let captured_site = parked_site(&mut resident, &hole);
+    assert_eq!(captured_site, site.site);
+    let realm = resident.parked_realm(&hole).unwrap();
+    let input = resident
+        .capture_activation_input(&hole, realm, captured_site)
+        .unwrap();
+    assert!(input
+        .type_evidence()
+        .original_request_type_interfaces()
+        .unwrap()
+        .same_authenticated_interfaces(request_types));
+    let request = input.type_evidence().compile_context(None).unwrap();
+    let declarations = request.declarations();
+    assert_interface_only_roles_without_native_selection(declarations);
+    assert!(declarations.lexical_graph().is_empty());
+    let actual = declarations
+        .snapshot()
+        .graph_selection()
+        .unwrap()
+        .namespace
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected_request,
+        "the real receiving compiler context retains exactly the issued canonical TYPE closure"
+    );
     let retained_witness = prototype
         .original_input_type()
         .expect("original witness retained");
@@ -3382,6 +3401,7 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         .capture_activation_input(&hole, realm, site)
         .unwrap();
     let evidence = input.type_evidence().clone();
+    let original_type_interfaces = input.type_prototype().type_interfaces().clone();
     let recipe = Arc::new(InputRecipe::capture(
         fixture
             .recipe
@@ -3447,15 +3467,16 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
         "a mounted type interface grants no notebook source namespace",
     );
     assert!(
-        prototype
-            .upgrade()
-            .expect("mounted interface retains its original type prototype")
-            .context()
-            .artifact_view()
-            .descriptors()
-            .contains(&original),
-        "the mounted interface retains its original type-only dependency",
+        Arc::ptr_eq(
+            prototype
+                .upgrade()
+                .expect("mounted interface retains its original type prototype")
+                .type_interfaces(),
+            &original_type_interfaces,
+        ),
+        "the mounted interface retains its exact original TYPE dependency owner"
     );
+    drop(original_type_interfaces);
     drop(view);
     drop(mounted);
     assert!(inventory.node_count() > 0);
@@ -3752,43 +3773,25 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     let fixture = ordinary_home_display_fixture(SessionId(1739));
     let mut resident = fixture.fresh();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
-    let input_types = interface.prototype().context();
-    assert!(input_types
-        .artifact_view()
-        .descriptors()
-        .iter()
-        .any(|descriptor| descriptor.owner.module == "ActivationDisplayOriginal"));
-    assert_interface_only_roles_without_native_selection(input_types);
-    let expected = input_types
-        .artifact_view()
-        .descriptors()
-        .into_iter()
-        .find(|descriptor| {
-            descriptor.owner.unit == "main"
-                && descriptor.owner.module == "ActivationDisplayOriginal"
-                && descriptor.kind
-                    == tidepool_toolchain::artifact_inventory::ArtifactKind::CanonicalModuleInterface
-                && input_types
-                    .compiler_input_roles()
-                    .iter()
-                    .any(|role| role.interface() == descriptor.id)
-        })
-        .expect("the input type selects its original canonical interface");
-    assert_eq!(expected.producer_sha256, interface.prototype().producer());
-    let expected_seal = expected
-        .interface_sha256
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    assert!(interface
+    let input_types = interface.prototype().type_interfaces();
+    let witness = interface
         .prototype()
         .original_input_type()
-        .expect("the actual input retains its issued type witness")
+        .expect("the actual input retains its issued type witness");
+    assert!(witness
         .interface_seals()
-        .any(|(unit, module, seal)| {
-            unit == expected.owner.unit && module == expected.owner.module && seal == expected_seal
-        }));
-    assert!(input_types.lexical_graph().is_empty());
+        .any(|(unit, module, _)| unit == "main" && module == "ActivationDisplayOriginal"));
+    let code = fixture.producer.code();
+    let source = code.original_source().unwrap().unwrap();
+    let expected = source.project_type_interfaces(&[witness], &[]).unwrap();
+    assert!(input_types.same_authenticated_interfaces(&expected));
+    assert_eq!(
+        input_types.toolchain_identity_sha256(),
+        interface.prototype().producer()
+    );
+    drop(expected);
+    drop(source);
+    drop(code);
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
     let original_context = mounted
@@ -4597,8 +4600,10 @@ fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() 
             assert!(admission
                 .input_interface()
                 .prototype()
-                .context()
-                .same_authenticated_context(previous.input_interface().prototype().context()));
+                .type_interfaces()
+                .same_authenticated_interfaces(
+                    previous.input_interface().prototype().type_interfaces()
+                ));
             assert_ne!(
                 admission.original_execution_digest(),
                 previous.original_execution_digest(),
@@ -5022,9 +5027,7 @@ fn activation_preview_keeps_completed_output_separate_from_type_only_input() {
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
-    let type_only = mounted.interface().prototype().context().clone();
-    assert_interface_only_roles_without_native_selection(&type_only);
-    assert!(type_only.lexical_graph().is_empty());
+    let type_only = mounted.interface().prototype().type_interfaces().clone();
     assert_eq!(
         type_only.toolchain_identity_sha256(),
         mounted

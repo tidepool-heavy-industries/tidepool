@@ -924,7 +924,7 @@ pub struct WorldObservationScaffold {
         Arc<crate::checked_cell::RequestTypeSignatures>,
     )>,
     input_type: Option<Arc<crate::checked_cell::ExactCheckedSignature>>,
-    type_contexts: Arc<[Arc<ExactDeclarationContext>]>,
+    type_interfaces: Arc<[Arc<crate::declaration_context::SelectedTypeInterfaces>]>,
     metadata_bytes: u64,
 }
 
@@ -949,7 +949,7 @@ impl WorldObservationScaffold {
             Arc<crate::checked_cell::RequestTypeSignatures>,
         )>,
         input_type: Option<Arc<crate::checked_cell::ExactCheckedSignature>>,
-        type_contexts: Vec<Arc<ExactDeclarationContext>>,
+        type_interfaces: Vec<Arc<crate::declaration_context::SelectedTypeInterfaces>>,
     ) -> Result<Self, CompileError> {
         if fragment.is_empty() || fragment.contains('\0') {
             return Err(source_failure("invalid protected observation fragment"));
@@ -977,7 +977,7 @@ impl WorldObservationScaffold {
             static_imports: static_imports.into(),
             request_types,
             input_type,
-            type_contexts: type_contexts.into(),
+            type_interfaces: type_interfaces.into(),
             metadata_bytes: 0,
         };
         let bytes = world_bytes(&scaffold.value())?.len() as u64;
@@ -990,8 +990,8 @@ impl WorldObservationScaffold {
 
     /// Actual selected original TYPE owners, retained separately from wire data.
     /// The World primary issuer validates and incorporates their canonical roles.
-    pub fn type_contexts(&self) -> &[Arc<ExactDeclarationContext>] {
-        &self.type_contexts
+    pub fn type_interfaces(&self) -> &[Arc<crate::declaration_context::SelectedTypeInterfaces>] {
+        &self.type_interfaces
     }
 
     fn value(&self) -> ciborium::value::Value {
@@ -1039,10 +1039,12 @@ pub struct CompilerWorldLexicalSurface {
 
 impl CompilerWorldLexicalSurface {
     /// Original TYPE selections attached by the protected source issuer.
-    pub(crate) fn observation_type_contexts(&self) -> &[Arc<ExactDeclarationContext>] {
+    pub(crate) fn observation_type_interfaces(
+        &self,
+    ) -> &[Arc<crate::declaration_context::SelectedTypeInterfaces>] {
         self.observation
             .as_ref()
-            .map_or(&[], |scaffold| scaffold.type_contexts())
+            .map_or(&[], |scaffold| scaffold.type_interfaces())
     }
 
     /// Complete Haskell import statements used to render compiler source.
@@ -1259,7 +1261,7 @@ pub struct CompilerWorldRestoration {
     runtime_context_blocks: ReachableBlocks,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>,
-    primary_compiler_inputs: Arc<crate::declaration_context::RequestCompilerInputs>,
+    primary_inputs: crate::declaration_context::WorldPrimaryInputs,
     bindings: MaterializedMap<String, WorldBindingSnapshotFact>,
     binding_rows: imbl::OrdMap<String, cid::Cid>,
     lexical_root: cid::Cid,
@@ -1725,7 +1727,7 @@ impl CompilerWorld {
             .lexical
             .clone()
             .with_observation(observation)?;
-        self.with_primary_and_lexical(lexical.observation_type_contexts(), Some(&lexical))
+        self.with_primary_and_lexical(lexical.observation_type_interfaces(), Some(&lexical))
     }
 }
 
@@ -1968,7 +1970,7 @@ impl crate::checked_cell::CellProgram {
         }
         let declaration = predecessor
             .restoration
-            .primary_compiler_inputs
+            .primary_inputs
             .with_declaration_projection(publication)?;
         let advance = declaration.with_native_completion_from(issued.compiler_context())?;
         tracing::debug!(target: "exomonad_harness::timing",
@@ -2099,7 +2101,7 @@ impl crate::checked_cell::CellProgram {
         }
         let advance = predecessor
             .restoration
-            .primary_compiler_inputs
+            .primary_inputs
             .with_native_completion_from(issued.compiler_context())?;
         let world = predecessor.project_bindings_with_primary(
             predecessor.restoration.inputs.bindings.query_scope,
@@ -2143,9 +2145,9 @@ impl WorldPrimaryAdvance {
         }
     }
 
-    fn into_inputs(self) -> Arc<crate::declaration_context::RequestCompilerInputs> {
+    fn into_inputs(self) -> crate::declaration_context::WorldPrimaryInputs {
         match self {
-            Self::NativeCompletion(advance) | Self::Declaration { advance, .. } => advance.inputs,
+            Self::NativeCompletion(advance) | Self::Declaration { advance, .. } => advance.primary,
         }
     }
 }
@@ -2170,7 +2172,7 @@ impl CompilerWorld {
         let joined = publication.join();
         let advance = self
             .restoration
-            .primary_compiler_inputs
+            .primary_inputs
             .with_declaration_projection(publication)?;
         let lexical = CompilerWorldLexicalSurface::from_import_lines(
             import_lines,
@@ -2255,7 +2257,7 @@ impl CompilerWorld {
             .map_or_else(
                 || {
                     self.restoration
-                        .primary_compiler_inputs
+                        .primary_inputs
                         .with_native_completion_from(&private.restoration.inputs.primary_context)
                         .map(WorldPrimaryAdvance::NativeCompletion)
                 },
@@ -2425,27 +2427,25 @@ impl CompilerWorld {
     /// authority remain with the existing primary owner.
     pub fn with_type_interfaces(
         self: &Arc<Self>,
-        contexts: &[Arc<ExactDeclarationContext>],
+        contexts: &[Arc<crate::declaration_context::SelectedTypeInterfaces>],
     ) -> Result<Arc<Self>, CompileError> {
         self.with_primary_and_lexical(contexts, None)
     }
 
     fn with_primary_and_lexical(
         self: &Arc<Self>,
-        contexts: &[Arc<ExactDeclarationContext>],
+        contexts: &[Arc<crate::declaration_context::SelectedTypeInterfaces>],
         lexical: Option<&CompilerWorldLexicalSurface>,
     ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
-        let advance = prior
-            .primary_compiler_inputs
-            .with_type_interfaces(contexts)?;
+        let advance = prior.primary_inputs.with_type_interfaces(contexts)?;
         let lexical_changed =
             lexical.is_some_and(|lexical| prior.inputs.lexical.observation != lexical.observation);
         if advance.changed_owners.is_empty() && !lexical_changed {
             return Ok(self.clone());
         }
         let mut inputs = prior.inputs.clone();
-        inputs.primary_context = advance.context;
+        inputs.primary_context = advance.primary.context().clone();
         if let Some(lexical) = lexical {
             inputs.lexical = lexical.clone();
         }
@@ -2477,7 +2477,7 @@ impl CompilerWorld {
         let mut association_facts = prior.primary_associations.facts().clone();
         let mut primary_changes = Vec::new();
         let mut remaining_raw = capture_allowance()?;
-        let support = advance.inputs.compiler_source_support();
+        let support = advance.primary.inputs().compiler_source_support();
         for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
             let selected = support
                 .compiler_primary_input(owner)?
@@ -2579,7 +2579,7 @@ impl CompilerWorld {
             runtime_context_blocks,
             primary_blocks,
             primary_associations,
-            primary_compiler_inputs: advance.inputs,
+            primary_inputs: advance.primary,
             bindings: prior.bindings.clone(),
             binding_rows: prior.binding_rows.clone(),
             lexical_root,
@@ -2620,7 +2620,7 @@ impl CompilerWorld {
         let prior = &self.restoration;
         let mut inputs = prior.inputs.clone();
         if let Some(advance) = &primary {
-            inputs.primary_context = advance.support().context.clone();
+            inputs.primary_context = advance.support().primary.context().clone();
             if let Some(lexical) = advance.lexical() {
                 inputs.lexical = lexical.clone();
             }
@@ -2663,7 +2663,7 @@ impl CompilerWorld {
                 .map_err(|error| source_failure(error.to_string()))?;
             let mut associations = prior.primary_associations.facts().clone();
             let mut remaining = capture_allowance()?;
-            let support = advance.inputs.compiler_source_support();
+            let support = advance.primary.inputs().compiler_source_support();
             for (ordinal, owner) in advance.changed_owners.iter().enumerate() {
                 let selected = support.compiler_primary_input(owner)?.ok_or_else(|| {
                     source_failure("declaration delta omits its issued primary row")
@@ -2906,8 +2906,8 @@ impl CompilerWorld {
             runtime_context_blocks,
             primary_blocks,
             primary_associations,
-            primary_compiler_inputs: primary.map_or_else(
-                || prior.primary_compiler_inputs.clone(),
+            primary_inputs: primary.map_or_else(
+                || prior.primary_inputs.clone(),
                 WorldPrimaryAdvance::into_inputs,
             ),
             bindings,
@@ -3845,13 +3845,13 @@ impl CompilerWorldOpenInputs {
         // Capture the cold primary once, then apply the same exact TYPE-role
         // owner used by warm derivation before any logical root is encoded.
         self.primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
-        let primary_compiler_inputs = self
+        let primary_inputs = self
             .primary_context
-            .capture_world_primary_compiler_inputs(producer)?;
-        let type_advance = primary_compiler_inputs
-            .with_type_interfaces(self.lexical.observation_type_contexts())?;
-        self.primary_context = type_advance.context;
-        let primary_compiler_inputs = type_advance.inputs;
+            .capture_world_primary_inputs(producer)?;
+        let type_advance =
+            primary_inputs.with_type_interfaces(self.lexical.observation_type_interfaces())?;
+        self.primary_context = type_advance.primary.context().clone();
+        let primary_inputs = type_advance.primary;
         let (primary_context, primary_root, runtime_context_blocks) =
             self.materialize_primary(producer)?;
         let primary_blocks = ReachableBlocks::default();
@@ -4026,7 +4026,7 @@ impl CompilerWorldOpenInputs {
             runtime_context_blocks,
             primary_blocks,
             primary_associations,
-            primary_compiler_inputs,
+            primary_inputs,
             bindings,
             binding_rows,
             lexical_root,
@@ -4574,12 +4574,7 @@ impl WorldCellOutputAdmission {
     }
 
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
-        &self.native_demands.context
-    }
-    pub(crate) fn primary_compiler_inputs(
-        &self,
-    ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
-        &self.native_demands.inputs
+        self.native_demands.primary.context()
     }
     pub(crate) fn segments(&self) -> &[Arc<crate::checked_cell::CheckedTypedSegmentPlan>] {
         &self.segments
@@ -5173,10 +5168,8 @@ impl CheckedWorldCellProgram {
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
         self.output.primary_context()
     }
-    pub(crate) fn primary_compiler_inputs(
-        &self,
-    ) -> &Arc<crate::declaration_context::RequestCompilerInputs> {
-        self.output.primary_compiler_inputs()
+    pub(crate) fn primary_inputs(&self) -> &crate::declaration_context::WorldPrimaryInputs {
+        &self.output.native_demands.primary
     }
     pub(crate) fn native_demand_completion(
         &self,

@@ -4487,8 +4487,10 @@ mod normalized_dependency_tests {
             .extend_issued_compiler_support(&root_source)
             .unwrap();
         let root_request = root_context
-            .capture_world_primary_compiler_inputs(producer.sha256())
-            .unwrap();
+            .capture_world_primary_inputs(producer.sha256())
+            .unwrap()
+            .inputs()
+            .clone();
         assert!(root_request
             .artifacts()
             .capture_graph_selection()

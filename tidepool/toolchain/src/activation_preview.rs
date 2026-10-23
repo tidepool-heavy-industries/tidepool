@@ -32,7 +32,7 @@ pub struct OriginalDisplayContext {
     declarations: Arc<ExactDeclarationContext>,
     execution: Arc<OriginalExecutionEvidence>,
     witness: CanonicalInputTypeWitness,
-    input_context: Arc<ExactDeclarationContext>,
+    input_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
 }
 
 impl OriginalDisplayContext {
@@ -41,7 +41,8 @@ impl OriginalDisplayContext {
         original: CompletedOriginalExecution<'_>,
     ) -> Result<Arc<Self>, CompileError> {
         validate_original_display_context(prototype, &original)?;
-        let declarations = Arc::new(original.original_display_projection(prototype.context())?);
+        let declarations =
+            Arc::new(original.original_display_projection(prototype.type_interfaces())?);
         let witness = prototype
             .original_input_type()
             .expect("validated live input")
@@ -55,7 +56,7 @@ impl OriginalDisplayContext {
             declarations,
             execution: original.evidence().clone(),
             witness,
-            input_context: prototype.context().clone(),
+            input_interfaces: prototype.type_interfaces().clone(),
         }))
     }
 
@@ -83,8 +84,8 @@ impl OriginalDisplayContext {
     pub fn matches_prototype(&self, prototype: &ExactHostBindingPrototype) -> bool {
         prototype.producer() == self.declarations.toolchain_identity_sha256()
             && self
-                .input_context
-                .same_authenticated_context(prototype.context())
+                .input_interfaces
+                .same_authenticated_interfaces(prototype.type_interfaces())
             && prototype.original_input_type().is_some_and(|witness| {
                 witness == &self.witness
                     && witness.original_bytes() == self.witness.original_bytes()
@@ -104,8 +105,8 @@ impl PartialEq for OriginalDisplayContext {
                 && self.witness == other.witness
                 && self.witness.original_bytes() == other.witness.original_bytes()
                 && self
-                    .input_context
-                    .same_authenticated_context(&other.input_context)
+                    .input_interfaces
+                    .same_authenticated_interfaces(&other.input_interfaces)
                 && self.declarations == other.declarations)
     }
 }
@@ -280,7 +281,7 @@ pub(crate) fn validate_original_display_context(
     let _ = context
         .as_ref()
         .clone()
-        .extend_interface_context(prototype.context())?;
+        .extend_type_interfaces(prototype.type_interfaces())?;
     if prototype.original_input_type().is_none() {
         return Err(failure(
             "activation preview requires original live input authority",

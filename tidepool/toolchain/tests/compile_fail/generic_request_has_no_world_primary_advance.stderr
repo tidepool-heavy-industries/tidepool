@@ -1,0 +1,2 @@
+error[E0599]: no method named `with_type_interfaces` found for reference `&Arc<ExactCompileContext>` in the current scope
+ --> tests/compile_fail/generic_request_has_no_world_primary_advance.rs:9:11

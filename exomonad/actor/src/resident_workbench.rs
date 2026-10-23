@@ -6175,7 +6175,7 @@ impl ActorWorkbenchSource {
         };
         let inert = PreambleBindings::TypeObservation.body(String::new);
         fragment.push_str(&format!("\n__tidepool_inspection_row :: Eff {effects} ()\n__tidepool_inspection_row = {inert}\n"));
-        let mut type_contexts = Vec::new();
+        let mut type_interfaces = Vec::new();
         let request_types = if self.request_helper_recipe
             == tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply
         {
@@ -6189,23 +6189,25 @@ impl ActorWorkbenchSource {
                 })?;
             let original = annotations
                 .evidence()
-                .original_request_context()
+                .original_request_type_interfaces()
                 .ok_or_else(|| {
                     ResidentActorWorkbenchError::ActorProtocol(
                         "request observation lacks original type context".into(),
                     )
                 })?;
-            let signatures = original.request_types().ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "request observation lacks original native signatures".into(),
-                )
-            })?;
+            let signatures = annotations
+                .evidence()
+                .request_type_signatures()
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "request observation lacks original native signatures".into(),
+                    )
+                })?;
             let mut selected = vec![signatures.reply()];
             selected.extend(signatures.progress());
-            type_contexts.push(Arc::new(
+            type_interfaces.push(Arc::new(
                 original
-                    .declarations()
-                    .select_original_type_interfaces(&[], &selected)
+                    .select(&[], &selected)
                     .map_err(ResidentActorWorkbenchError::Compile)?,
             ));
             Some((annotations.helper_recipe(), signatures.clone()))
@@ -6215,10 +6217,10 @@ impl ActorWorkbenchSource {
         let input_type = match input {
             Some(input) => {
                 let signature = &input.signature;
-                let original = &input.context;
-                type_contexts.push(Arc::new(
-                    original
-                        .select_original_type_interfaces(&[], &[signature.as_ref()])
+                type_interfaces.push(Arc::new(
+                    input
+                        .type_interfaces
+                        .select(&[], &[signature.as_ref()])
                         .map_err(ResidentActorWorkbenchError::Compile)?,
                 ));
                 fragment.push_str(&format!(
@@ -6237,7 +6239,7 @@ impl ActorWorkbenchSource {
                 imports.specs().to_vec(),
                 request_types,
                 input_type,
-                type_contexts,
+                type_interfaces,
             )
             .map_err(ResidentActorWorkbenchError::Compile)?,
         ))
@@ -10852,7 +10854,7 @@ where
         let input = HostInputType {
             binding: HostInputBinding::Activation,
             signature: Arc::new(prototype.signature().clone()),
-            context: prototype.context().clone(),
+            type_interfaces: prototype.type_interfaces().clone(),
         };
         let scaffold = self
             .access
@@ -10898,7 +10900,7 @@ where
                     .map(|prototype| HostInputType {
                         binding: HostInputBinding::CellJson,
                         signature: Arc::new(prototype.compiler().signature().clone()),
-                        context: prototype.compiler().context().clone(),
+                        type_interfaces: prototype.compiler().type_interfaces().clone(),
                     }))
             })
             .await?;
@@ -10916,8 +10918,8 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)?
                     .clone(),
             ),
-            context: carrier
-                .type_context()
+            type_interfaces: carrier
+                .type_interfaces()
                 .map_err(ResidentActorWorkbenchError::Resident)?
                 .clone(),
         };
@@ -10976,8 +10978,8 @@ where
                         .map_err(ResidentActorWorkbenchError::Resident)?
                         .clone(),
                 );
-                let type_context = carrier
-                    .type_context()
+                let type_interfaces = carrier
+                    .type_interfaces()
                     .map_err(ResidentActorWorkbenchError::Resident)?
                     .clone();
                 let original_binder = carrier
@@ -11055,7 +11057,7 @@ where
                     type_evidence: Some(HostInputType {
                         binding: HostInputBinding::CellJson,
                         signature: type_signature,
-                        context: type_context,
+                        type_interfaces,
                     }),
                 };
                 Ok(HostInputRetirement::new(
@@ -17141,7 +17143,7 @@ impl HostInputBinding {
 struct HostInputType {
     binding: HostInputBinding,
     signature: Arc<tidepool_toolchain::checked_cell::ExactCheckedSignature>,
-    context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    type_interfaces: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
 }
 
 /// Session root for retiring the exact mounted host binding under its checkout.
@@ -19773,14 +19775,17 @@ pub(crate) mod request_tests {
                 &source.base_include,
             );
         public.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
-        let (a, private_a) =
-            ResidentActorWorkbench::new(machines, source.bind_preparation(preparation_client), None)
-                .admit_private_cell_with_source_for_test(
-                    public.clone(),
-                    captured.clone(),
-                    source_owner.clone(),
-                )
-                .await;
+        let (a, private_a) = ResidentActorWorkbench::new(
+            machines,
+            source.bind_preparation(preparation_client),
+            None,
+        )
+        .admit_private_cell_with_source_for_test(
+            public.clone(),
+            captured.clone(),
+            source_owner.clone(),
+        )
+        .await;
         if private_edit {
             a.execute_cell_for_test(private_a.clone(), "privateValue <- pure (7 :: Int)")
                 .await
@@ -37254,14 +37259,8 @@ pub(crate) mod request_tests {
         let raw_view = actor_compile_view(&session, &context, &source).unwrap();
         let raw_injection = source.prepare(&raw_view).injected;
         let before_snapshot = raw_view.next_value_generation();
-        let (scoped_source, snapshot) = snapshot_cell_program(
-            &mut session,
-            &context,
-            source.clone(),
-            None,
-            None,
-        )
-        .unwrap();
+        let (scoped_source, snapshot) =
+            snapshot_cell_program(&mut session, &context, source.clone(), None, None).unwrap();
         let prepared = scoped_source.prepare(&snapshot.view);
         assert!(!raw_injection.is_empty());
         assert!(

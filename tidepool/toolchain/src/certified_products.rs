@@ -25769,8 +25769,10 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&support)
             .unwrap();
         let request = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
-            .unwrap();
+            .capture_world_primary_inputs(producer.sha256())
+            .unwrap()
+            .inputs()
+            .clone();
         assert!(!request
             .projection()
             .snapshot_roles()
@@ -26014,8 +26016,10 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&selected)
             .unwrap();
         let inputs = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
-            .unwrap();
+            .capture_world_primary_inputs(producer.sha256())
+            .unwrap()
+            .inputs()
+            .clone();
         let mut uses = Vec::new();
         for (entry, product, ordinal) in [(&g_entry, &g, 7), (&j_entry, &j, 9)] {
             let primary = inputs
