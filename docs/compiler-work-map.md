@@ -1,15 +1,24 @@
 # Compiler work and authority map
 
-This map was checked against joined source `f5e8cb121a` (2026-10-22), with the
-checked-value instance-scope boundary updated for `c92fb6217b`, and publication,
-TYPE and exact restoration boundaries updated through `ccc5dedfe2`, and native
-candidate/output ownership plus strict recovery callers through `ee1d302f0e`.
-World/TYPE ownership is updated through `c8d5cb0469` (joined at `04fb19a11e`);
-live custody merge preserves explicit overlapping seeds through `09ff07f0ad`.
-The linked-code, physical-stage, acquired-prefix, source-scope and Context9
-consumer tranche is joined in source; G2 remains unqualified. Source inspection
-establishes ownership and callers; it does not establish executed acceptance,
-release qualification or a performance improvement.
+The selected-owner and runtime execution boundaries were reviewed against the
+joined domain-owner source through `daef8b8259` (2026-10-23). Source inspection
+establishes ownership and callers, not executed acceptance or measured speedups.
+G2 remains unqualified; [current state and evidence](../plans/shared-warm-compiler/completion/domain-owners/STATE.md)
+tracks exact compilation and execution checkpoints. Historical timing and test
+observations below retain their original revisions.
+
+`CompilerSourceSupport` now holds one persistent selected-row map. A row couples
+its actual canonical/Original acquisition, checked publication birth and native
+decision. Recorded roles and native decisions are derived indexes, updated at
+changed keys; equal records do not substitute for live acquisitions. Context10
+recovery authenticates recorded ownership separately. Fresh compiler-emitted
+dependency demand can acquire an available exact dependency; it cannot promote
+that dependency into an earlier explicitly empty root selection or repair a
+selected group's missing acquisition.
+
+Runtime cell inputs and prepared evidence are World-only. The removed finite
+runtime execution route is distinct from still-supported finite compiler
+operations. Test histories use the same World admission and execution owners.
 
 ## Current dataflow
 
@@ -28,7 +37,7 @@ boundaries, not disjoint timing phases.
 | Captured output → physical cohort and target selection | [CapturedCompilerStage](../tidepool/toolchain/src/declaration_context.rs) owns the actual operation, captured facts, demanded-row issuer and whole-stage output. `CertifiedProducts` privately pairs that stage with its advancing prefix and authoritative selection. [World native-demand resolver](../tidepool/toolchain/src/compiler_world/native_demand.rs) retains initial request inputs and stage demand; `WorldProgramContinuation` advances source/TYPE inputs separately. | `PhysicalCohortInputs` borrows the issued bundle; `ArtifactInventory::select_native_target` consumes it with the actual ordered prepared-target imports. Item prefixes cannot issue physical capture. `stage_inputs` checks the request/stage/inventory owner; an empty prefix `ReceiptNativeInputDemand` does not reconstruct executable demand. `OriginalBindingSelection::from_world_stage` keeps nominal references separate. `CompiledArtifacts`, compile-input sealing and declaration joins carry `IssuedOriginalOutput` instead of reconstructing selection/view pairs. |
 | Selected target → linked code and acquisition | [NativeCodeComponent / NativeCodeRef](../tidepool/repr/src/native_code.rs) own immutable SCCs, canonical bodies and ordered edges. [LinkedNativeTarget / AcquiredNativeClosure](../tidepool/toolchain/src/linked_native.rs) pair the actual target with exact HOME grants, PACKAGE receipt occurrences and retained requirements. [link_native_target](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) is the demand producer; unused availability does not become a code root. | HOME grants retain their certified scoped row; PACKAGE grants retain authenticated products and reached receipt/child occurrence choices. Pure `CodeId` equality permits immutable sharing, not acquisition or Current authority. `physical_current_for` checks the actual target, acquired closure and receiving source-map owner before lending Current. Restored prefix handles are historical. The old completion-row and executable package-scope graphs are removed. |
 | Linked target → runtime installation | [NativeInstantiationPlan](../tidepool/runtime/src/session/prepared/closed.rs) is a compiled-image projection of the same `LinkedNativeTarget`; it does not reconstruct HOME/PACKAGE topology. `ClosedInstantiationPlan` restricts that projection to code without retained imports. [PreparedMachine native slots](../tidepool/codegen/src/prepared_program/machine/native_slots.rs) reuse dependency instances by live source domain and closed `CodeId`; invocation targets stay fresh. Reuse keeps the original dependency `ProgramFacts`, prepared code owner and source custody. | `admit_turn_code_in` in [resident.rs](../tidepool/runtime/src/session/resident.rs) and `PreparedEngine::install_native_turn` retain the existing transaction/permit boundaries. Each actual acquired occurrence is source-authorized before code/domain reuse; historical absence cannot borrow Current from an equal-code sibling. [BindingTable](../tidepool/codegen/src/binding_table.rs) owns scoped instances. Retained captures still require actual type/generation/live custody; parcels preserve existing instances through their own route. Missing Ordinary issuance refuses before preparation. |
-| Successful item → successor/publication/recovery | [CellProgram::item_successor / declaration_item_successor](../tidepool/toolchain/src/compiler_world.rs) issue `CheckedWorldSuccessor` from the actual ordered item, predecessor and installed delta. [CompilerSourceSupport](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) carries actual acquired closure owners through input transformations; these are compiler proofs, not an installed-state graph. Runtime [admission.rs](../tidepool/runtime/src/session/admission.rs) owns settlement; [persistent.rs](../tidepool/runtime/src/session/persistent.rs) owns public promotion. | `adopt_checked_world_successor_in` replaces `Tip.exact_context` and `Tip.inspection_world` together under source/target admission, then invalidates the cached compile view. Public promotion commits bindings and the prepared World with the manifest claim. [Exact-context writer/reader](../tidepool/toolchain/src/exact_context.rs) requires version 9 with independent source-scope facts, shared linked components and exact acquired occurrence records. [Recovery hydration](../tidepool/runtime/src/session/recovery_hydration.rs) restores selected facts; graph observation supplies no execution/source authority. The integrated structures still need joined workflow qualification. |
+| Successful item → successor/publication/recovery | [CellProgram::item_successor / declaration_item_successor](../tidepool/toolchain/src/compiler_world.rs) issue `CheckedWorldSuccessor` from the actual ordered item, predecessor and installed delta. [CompilerSourceSupport](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) carries actual acquired closure owners through input transformations; these are compiler proofs, not an installed-state graph. Runtime [admission.rs](../tidepool/runtime/src/session/admission.rs) owns settlement; [persistent.rs](../tidepool/runtime/src/session/persistent.rs) owns public promotion. | `adopt_checked_world_successor_in` replaces `Tip.exact_context` and `Tip.inspection_world` together under source/target admission, then invalidates the cached compile view. Public promotion commits bindings and the prepared World with the manifest claim. [Exact-context writer/reader](../tidepool/toolchain/src/exact_context.rs) requires version 10 with recorded selected-row/native-decision facts and independent source-scope facts, shared linked components and exact acquired occurrence records. [Recovery hydration](../tidepool/runtime/src/session/recovery_hydration.rs) restores selected facts; graph observation supplies no execution/source authority. The integrated structures still need joined workflow qualification. |
 
 `PreparedOutputAuthority` obtains native provenance from the active
 `CompilerScope`'s process producer and validated service-package association;
@@ -36,7 +45,7 @@ missing configuration refuses. [CanonicalProducerIdentity](../tidepool/toolchain
 is SHA-256 of stable producer bytes, distinct from endpoint identity. The current
 matched readers require TPCERT13, TPHOMEOWNERS6, World source receipt TPCWSOURCE4 and
 [worker request v29](../tidepool/extract-cmd/src/request.rs). These formats and
-the version-9 context cutover are implemented source contracts, not pending
+the version-10 context cutover are implemented source contracts, not pending
 layout proposals or proof of a matched frozen bundle.
 
 The initial request fixes external native acquisition and its inventory owner.
@@ -92,7 +101,7 @@ These reports describe execution and resource settlement independently.
 
 | Fact | Issuing/retaining owner | What it does not establish |
 |---|---|---|
-| Exact compiler roles and selected interfaces | [CompilerSourceSupport / CompilerInputProjection](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) | Lexical visibility, native body demand or live value access merely from TYPE inputs |
+| Exact compiler roles and selected interfaces | [CompilerSourceSupport / SelectedCompilerRows](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) | Lexical visibility, native body demand or live value access merely from TYPE inputs |
 | Authored source permission versus original instance adjacency | [SourceLexicalScope / ExactDeclarationContext](../tidepool/toolchain/src/declaration_context.rs) | Source permission from compiler TYPE closure; complete display instance evidence merely from an admitted native entry |
 | Immutable graph and exact historical binding | [Exact context](../tidepool/toolchain/src/exact_context.rs), [artifact inventory](../tidepool/toolchain/src/artifact_inventory.rs) | Selection of every retained alternative; logical/image equality cannot replace issued binding identity |
 | Physical bytes and acquisition lifetime | Artifact views, captured compiler outputs and retained image plans | Compiler roles, executable roots or runtime instance authority |

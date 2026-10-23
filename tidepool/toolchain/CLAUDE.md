@@ -331,7 +331,7 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Context snapshots use version 9 and persist selected source scope, normalized native availability plus
+Context snapshots use version 10 and persist selected source scope, normalized native availability plus
 references to the same linked native components and acquired occurrence records
 held by compiler prefixes. Restore authenticates exact product/source custody and
 ordered occurrence choices through the linked owner before returning usable code.
