@@ -9475,35 +9475,61 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
-    use crate::artifact_inventory::ArtifactBindingNode;
     let fixture = compiled_publication_fixture();
     let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer);
     let entry = fixture.original.clone();
     let ArtifactPayload::Original(native) = &entry.payload else {
         unreachable!()
     };
-    let source = &fixture.source;
+    // Recover a real selected Full body before publication. The compiler's
+    // available products alone do not imply an executable Group root.
+    let entries = fixture.source.artifact_view().entries();
+    let inventory = ArtifactInventory::default();
+    let initial = inventory
+        .admit_shared_with_demand(
+            &inventory.empty_view(),
+            entries.clone(),
+            NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let full = inventory
+        .admit_recovery_selection(
+            &initial,
+            vec![],
+            &fixture
+                .own_ordinals
+                .iter()
+                .map(|ordinal| NativeGroupKey {
+                    artifact: entry.descriptor.id,
+                    original_ordinal: *ordinal,
+                })
+                .collect(),
+        )
+        .unwrap();
+    let support = fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+        full,
+    );
+    fixture
+        .source
+        .source_scope()
+        .preserve_support(fixture.source.compiler_source_support(), &support)
+        .unwrap();
+    let source = fixture
+        .source
+        .as_ref()
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
+        .unwrap();
     let publication = source
         .issue_published_source_original("revision", "input", &entry.descriptor.owner)
         .unwrap();
     let published = publication.context();
     let role =
         published.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].clone();
-    let policy =
-        crate::artifact_inventory::NativeOriginalRequirement::from_role(role.clone()).unwrap();
-    assert!(policy
-        .selection
-        .graph_selection()
-        .roots
-        .iter()
-        .any(|node| matches!(node, ArtifactBindingNode::Group(_))));
-    // Resolve the published role through its real merge issuer, then narrow
-    // the closed owner to canonical roots. The empty choice remains issued.
-    let resolved = published
+    let empty = published
         .compiler_source_support()
-        .merge(&crate::artifact_inventory::CompilerSourceSupport::empty())
-        .unwrap();
-    let support = resolved
         .select_support_roots(
             published
                 .compiler_input_projection()
@@ -9513,22 +9539,6 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                 .collect(),
         )
         .unwrap();
-    assert!(support.artifacts().selected_native_groups().is_empty());
-    assert!(support
-        .recorded_input_decisions()
-        .values()
-        .all(|fact| fact.groups.is_empty()));
-    assert!(support
-        .recorded_input_decisions()
-        .contains_key(&entry.descriptor.owner));
-    let context = published
-        .as_ref()
-        .clone()
-        .rebuild(|facts| facts.compiler_support = support);
-    assert_eq!(
-        context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
-        role
-    );
     let fresh = recovered_witness_fixtures(&[fixture_finalized_product(
         original_groups_fixture_with_interface(
             "FreshBesidePublishedZeroDemand",
@@ -9541,104 +9551,152 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
     )])
     .remove(0)
     .product;
-    for mixed_fresh in [false, true] {
-        let candidates = crate::module_candidates::CandidateSet {
-            manifest_path: PathBuf::from("candidate-native-issuance-only"),
-            by_owner: BTreeMap::new(),
-            contextual_native_availability: if mixed_fresh {
-                vec![native.clone(), fresh.clone()]
-            } else {
-                vec![native.clone()]
-            },
-            catalog_owner: None,
-            input_transport: Vec::new(),
+    for full_demand in [true, false] {
+        let support = if full_demand {
+            published.compiler_source_support().clone()
+        } else {
+            empty.clone()
         };
-        let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
-            .unwrap()
-            .unwrap();
-        assert!(reused
-            .issued_artifacts()
-            .selected_native_groups()
-            .is_empty());
-        assert!(reused
-            .issued_input_decisions()
-            .unwrap()
-            .recorded_facts()
-            .values()
-            .all(|fact| fact.groups.is_empty()));
-        let selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                published.compiler_input_projection(),
-                &published.artifact_view().metadata_snapshot(),
-                &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
-            )
-            .unwrap();
-        let policy_fragment =
-            OriginalCompilerInputs::from_issued_support(published.compiler_source_support());
-        let owner = &entry.descriptor.owner;
-        let fragment_role = policy_fragment
-            .projection
-            .snapshot_roles()
-            .get(owner)
-            .expect("the policy producer has an actual original role");
-        assert_eq!(fragment_role.original(), Some(entry.descriptor.id));
-        assert_eq!(fragment_role.interface(), role.interface());
-        assert!(
-            selection.continuation_input(owner).unwrap().is_none(),
-            "this producer is NewProduct, not a missing carried input"
-        );
+        assert!(support
+            .native_offers()
+            .iter()
+            .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+        let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
         assert!(matches!(
-            policy_fragment
-                .issued_input_decisions()
-                .unwrap()
-                .for_role(owner, fragment_role),
-            crate::artifact_inventory::InputNativeDecision::UnissuedPolicy
+            support.checked_native_input_decision(entry.descriptor.id, canonical, native.owner()).unwrap(),
+            crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
+                if choices.is_empty() != full_demand
         ));
-        let reused_role = reused.projection.snapshot_roles().get(owner).unwrap();
-        assert_eq!(reused_role, &role);
-        assert!(
-            matches!(reused.issued_input_decisions().unwrap()
-            .for_role(owner, reused_role), crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
-                if choices.is_empty()),
-            "this exact owner's empty choice remains issued"
-        );
-        for (left, right) in [(&reused, &policy_fragment), (&policy_fragment, &reused)] {
-            let merged = left.merge(right).unwrap();
-            assert!(
-                merged
-                    .issued_artifacts()
-                    .selected_native_groups()
-                    .is_empty(),
-                "an explicit empty source cannot fall back to the published role policy in either order"
-            );
-            assert!(merged
-                .issued_input_decisions()
-                .unwrap()
-                .recorded_facts()
-                .values()
-                .all(|fact| fact.groups.is_empty()));
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let request = ExactCompileContext::new(Arc::new(context.clone()))
-            .prepare_compilation_with_private_input(
-                directory.path(),
-                &fixture.producer,
-                None,
-                Some(reused),
-            )
+        let context = published
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = support)
+            .finish()
             .unwrap();
-        assert!(
-            request
-                .compiler_inputs()
-                .artifacts()
-                .selected_native_groups()
-                .is_empty(),
-            "published policy cannot resurrect withdrawn source demand"
-        );
         assert_eq!(
-            request.compiler_inputs().projection().snapshot_roles()[&entry.descriptor.owner],
+            context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
             role
         );
+        for mixed_fresh in [false, true] {
+            let candidates = crate::module_candidates::CandidateSet {
+                manifest_path: PathBuf::from("candidate-native-issuance-only"),
+                by_owner: BTreeMap::new(),
+                contextual_native_availability: if mixed_fresh {
+                    vec![native.clone(), fresh.clone()]
+                } else {
+                    vec![native.clone()]
+                },
+                catalog_owner: None,
+                input_transport: Vec::new(),
+            };
+            let reused = OriginalCompilerInputs::from_candidates(&context, producer, &candidates)
+                .unwrap()
+                .unwrap();
+            let reused_role = reused
+                .projection
+                .snapshot_roles()
+                .get(&entry.descriptor.owner)
+                .unwrap();
+            assert_eq!(reused_role, &role);
+            assert!(matches!(
+                reused.issued_input_decisions().unwrap().for_role(&entry.descriptor.owner, reused_role),
+                crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
+                    if choices.is_empty() != full_demand
+            ));
+            let directory = tempfile::tempdir().unwrap();
+            let request = ExactCompileContext::new(Arc::new(context.clone()))
+                .prepare_compilation_with_private_input(
+                    directory.path(),
+                    &fixture.producer,
+                    None,
+                    Some(reused),
+                )
+                .unwrap();
+            let inputs = request.compiler_inputs();
+            assert_eq!(
+                inputs.projection().snapshot_roles()[&entry.descriptor.owner],
+                role
+            );
+            let mut validation = PackageInterfaceValidation::default();
+            let mut selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    inputs,
+                    &validation.inventory,
+                )
+                .unwrap();
+            for ordinal in &fixture.own_ordinals {
+                assert_eq!(
+                    selection.permits_native_group(entry.descriptor.id, native.owner(), *ordinal),
+                    full_demand,
+                    "request preserves the exact Full/Empty choice for group {ordinal}",
+                );
+            }
+            let physical = CapturedCompilerStage::issue(
+                &mut selection,
+                inputs.artifacts(),
+                Vec::new(),
+                &mut validation,
+            )
+            .unwrap();
+            let definitions =
+                crate::certified_products::original_native_group_definitions(native, fixture.first)
+                    .unwrap();
+            let contract = definitions
+                .export_contracts()
+                .map(Result::unwrap)
+                .find(|contract| contract.identity.occurrence == "first")
+                .unwrap();
+            let binder = contract.identity.clone();
+            let prepared = prepared_target_fixture(vec![GlobalDecl {
+                identity: binder.clone(),
+                rep: contract.rep,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            }]);
+            let accepted = [AcceptedGlobal {
+                identity: binder.clone(),
+                rep: contract.rep,
+                entry_signature: None,
+                required_evaluated: false,
+                owner: ReceiptImportOwner::Source {
+                    unit: native.owner().unit.clone(),
+                    module: native.owner().module.clone(),
+                    module_version: Some(native.owner().module_version.clone()),
+                    original_ordinal: fixture.first,
+                    binder,
+                },
+            }];
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &accepted, &validation.inventory)
+                    .unwrap();
+            let admitted = inputs
+                .artifacts()
+                .inventory()
+                .select_native_target(
+                    physical.physical_cohort(),
+                    observed,
+                    None,
+                    None,
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .map(|_| ());
+            if full_demand {
+                assert!(
+                    admitted.is_ok(),
+                    "issued Full demand must reach native admission: {admitted:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&admitted, Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
+                        if artifact == entry.descriptor.id && original_ordinal == fixture.first)),
+                    "Full availability cannot resurrect explicit Empty demand: {admitted:?}"
+                );
+            }
+        }
     }
 }
 
@@ -9736,11 +9794,9 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         current.module_interface().unwrap().origin(),
         crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
     ));
-    assert_eq!(
-        current.module_interface(),
-        historical.module_interface(),
-        "the two real bodies must share the exact canonical source interface"
-    );
+    assert_eq!(old.descriptor.owner, entry.descriptor.owner);
+    // A changed quotation may change canonical Core and interface evidence.
+    // Historical custody must not replace the exact current Source selection.
     assert_ne!(
         entry.descriptor.id, old.descriptor.id,
         "the external quotation input must produce distinct native bodies"
@@ -9759,6 +9815,29 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         old_offers.iter().any(|offer| offer.is_full()),
         "the historical producer really issued a Full offer for this body"
     );
+
+    // A remains a valid exact historical Source selection in its own request.
+    // The refusal below is scoped to the current request selecting B.
+    let historical_request = ExactCompileContext::new(historical_source.clone())
+        .prepare_compilation(
+            &directory.path().join("historical-request"),
+            endpoint.identity().producer_bytes(),
+        )
+        .unwrap();
+    let historical_canonical =
+        ArtifactEntry::canonical_artifact_id(historical.module_interface().unwrap());
+    assert!(matches!(
+        historical_request
+            .compiler_inputs()
+            .compiler_source_support()
+            .checked_native_input_decision(
+                old.descriptor.id,
+                historical_canonical,
+                historical.owner()
+            )
+            .unwrap(),
+        crate::artifact_inventory::InputNativeDecision::IssuedChoices(_)
+    ));
 
     let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(2)).module_name();
     let fallback = crate::certified_products::fixture_native_declaration_product(
@@ -9834,6 +9913,40 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
             .native_offers()
             .iter()
             .any(|offer| offer.original() == old.descriptor.id));
+        let request = ExactCompileContext::new(Arc::new(mixed.clone()))
+            .prepare_compilation(
+                &directory
+                    .path()
+                    .join(format!("current-request-{published}")),
+                endpoint.identity().producer_bytes(),
+            )
+            .unwrap();
+        let support = request.compiler_inputs().compiler_source_support();
+        let current_canonical =
+            ArtifactEntry::canonical_artifact_id(current.module_interface().unwrap());
+        assert!(matches!(
+            support
+                .checked_native_input_decision(
+                    entry.descriptor.id,
+                    current_canonical,
+                    current.owner()
+                )
+                .unwrap(),
+            crate::artifact_inventory::InputNativeDecision::IssuedChoices(_)
+        ));
+        let crossed = support.checked_native_input_decision(
+            old.descriptor.id,
+            historical_canonical,
+            historical.owner(),
+        );
+        assert!(
+            matches!(crossed,
+            Err(crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch(ref mismatch))
+                if mismatch.stage == crate::certified_products::ArtifactIdentityStage::RequestedIdentityDiffers
+                    && mismatch.expected_original == Some(old.descriptor.id)
+                    && mismatch.observed_original == Some(entry.descriptor.id)),
+            "historical A cannot replace the current Source slot selecting B: {crossed:?}"
+        );
         let reused = OriginalCompilerInputs::reuse_selected_authored(&mixed).expect(
             "unrelated InterfaceOnly fallback cannot requalify selected B against historical A",
         );
