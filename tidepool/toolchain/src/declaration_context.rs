@@ -6143,21 +6143,18 @@ impl RecoveredArtifactInventory {
         Self::recovered_selection(restored, compiler_projection)
     }
 
-    /// Restore a recorded snapshot's bound graph from its owner-keyed role facts.
-    /// The recorded owner, not an interface's later discovery, authenticates each
-    /// acquired role.
+    /// Authenticate recorded graph custody without constructing compiler rows.
+    /// The selected support owner separately acquires each recorded row.
     pub(crate) fn authenticate_recorded_graph_selection(
         &self,
         selection: &ArtifactGraphSelection,
-        roles: &imbl::OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
-    ) -> Result<RecoveredCompilerSelection, CompileError> {
+        roles: &imbl::OrdMap<ExactModuleIdentity, crate::exact_context::RecordedCompilerRow>,
+    ) -> Result<ArtifactView, CompileError> {
         let issued_roles = roles
             .values()
             .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
             .collect::<BTreeSet<_>>();
-        let restored = self.restore_graph_selection_view(selection, issued_roles)?;
-        let compiler_projection = CompilerInputProjection::acquire_recorded(&restored, roles)?;
-        Self::recovered_selection(restored, compiler_projection)
+        self.restore_graph_selection_view(selection, issued_roles)
     }
 
     fn restore_graph_selection_view(
@@ -6252,7 +6249,7 @@ impl RecoveredArtifactInventory {
     }
 
     /// Exercise raw graph and role authentication inside the owning tests.
-    /// Production restoration requires an acquired exact snapshot owner.
+    /// Production restoration authenticates a decoded exact snapshot.
     #[cfg(test)]
     pub(crate) fn context_with_graph_selection(
         &self,
@@ -6280,11 +6277,11 @@ impl RecoveredArtifactInventory {
     pub fn context_for_expected_snapshot(
         &self,
         expected: &crate::exact_context::ContextRoot,
-        acquired: &crate::exact_context::MaterializedContext,
+        decoded: &crate::exact_context::DecodedContext,
     ) -> Result<ExactDeclarationContext, CompileError> {
         self.context_for_expected_snapshot_with_validation(
             expected,
-            acquired,
+            decoded,
             &mut PackageInterfaceValidation::default(),
         )
     }
@@ -6295,14 +6292,14 @@ impl RecoveredArtifactInventory {
         &self,
         expected: &[(
             crate::exact_context::ContextRoot,
-            Arc<crate::exact_context::MaterializedContext>,
+            Arc<crate::exact_context::DecodedContext>,
         )],
     ) -> Result<Vec<ExactDeclarationContext>, CompileError> {
         let mut validation = PackageInterfaceValidation::default();
         expected
             .iter()
-            .map(|(root, acquired)| {
-                self.context_for_expected_snapshot_with_validation(root, acquired, &mut validation)
+            .map(|(root, decoded)| {
+                self.context_for_expected_snapshot_with_validation(root, decoded, &mut validation)
             })
             .collect()
     }
@@ -6310,26 +6307,27 @@ impl RecoveredArtifactInventory {
     fn context_for_expected_snapshot_with_validation(
         &self,
         expected: &crate::exact_context::ContextRoot,
-        acquired: &crate::exact_context::MaterializedContext,
+        decoded: &crate::exact_context::DecodedContext,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ExactDeclarationContext, CompileError> {
-        if acquired.root() != expected {
+        if decoded.root() != expected {
             return Err(CompileError::CompilerEvidence(Box::new(
                 crate::certified_products::CertificationError::Mismatch(
-                    "acquired compiler snapshot root differs from expected context",
+                    "decoded compiler snapshot root differs from expected context",
                 ),
             )));
         }
-        let snapshot = acquired.snapshot();
+        let snapshot = decoded.snapshot();
         let graph = snapshot.graph_selection().map_err(failure)?;
-        let mut authenticated =
-            self.authenticate_recorded_graph_selection(&graph, &snapshot.roles)?;
-        authenticated.artifacts = authenticated
-            .artifacts
+        let artifacts = self
+            .authenticate_recorded_graph_selection(&graph, snapshot.recorded_rows())?
             .recover_snapshot_scope_custody(snapshot.selection())?;
         let compiler_support =
-            crate::artifact_inventory::CompilerSourceSupport::from_recovered_selection(
-                authenticated,
+            crate::artifact_inventory::CompilerSourceSupport::authenticate_recorded_rows(
+                artifacts,
+                snapshot.recorded_rows(),
+                &snapshot.offers,
+                &snapshot.native_availability,
             )?;
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             source_scope: SourceLexicalScope::default(),
@@ -6366,7 +6364,7 @@ impl RecoveredArtifactInventory {
             facts.source_scope = scope;
         });
         context = context.finish()?;
-        context.bind_snapshot_baseline(acquired)?;
+        context.bind_snapshot_baseline(decoded)?;
         Ok(context)
     }
 
@@ -15134,21 +15132,9 @@ impl ExactDeclarationContext {
                 .artifacts()
                 .selection_snapshot()
                 .clone(),
-            roles: self
-                .owner
-                .facts
-                .compiler_support
-                .projection()
-                .recorded_roles()
-                .clone(),
+            roles: self.owner.facts.compiler_support.recorded_rows().clone(),
             lexical: self.owner.facts.lexical.clone(),
             source_scope: self.source_scope().snapshot.clone(),
-            input_decisions: self
-                .owner
-                .facts
-                .compiler_support
-                .recorded_input_decisions()
-                .clone(),
             native_components: self
                 .owner
                 .facts
@@ -15168,7 +15154,7 @@ impl ExactDeclarationContext {
     /// This preserves the authority and instance origin already held here.
     pub fn bind_snapshot_baseline(
         &mut self,
-        baseline: &crate::exact_context::MaterializedContext,
+        baseline: &crate::exact_context::DecodedContext,
     ) -> Result<(), CompileError> {
         let snapshot = baseline.snapshot();
         if self.owner.facts.producer != snapshot.producer
@@ -15181,8 +15167,7 @@ impl ExactDeclarationContext {
         }
         if self.snapshot().native_availability != snapshot.native_availability
             || self.snapshot().offers != snapshot.offers
-            || self.owner.facts.compiler_support.recorded_input_decisions()
-                != &snapshot.input_decisions
+            || self.owner.facts.compiler_support.recorded_rows() != snapshot.recorded_rows()
         {
             return Err(failure(
                 "restored compiler availability differs from exact snapshot",
@@ -15558,16 +15543,22 @@ impl ExactDeclarationContext {
                     self.owner
                         .facts
                         .compiler_support
-                        .recorded_input_decisions()
+                        .recorded_rows()
                         .iter()
-                        .map(|(owner, fact)| {
-                            (
+                        .filter_map(|(owner, row)| {
+                            let Some(crate::exact_context::RecordedNativeChoices::Issued {
+                                groups,
+                            }) = row.native_choices()
+                            else {
+                                return None;
+                            };
+                            Some((
                                 owner,
-                                fact.groups
+                                groups
                                     .iter()
                                     .map(|(ordinal, group)| (*ordinal, *group))
                                     .collect::<Vec<_>>(),
-                            )
+                            ))
                         })
                         .collect::<Vec<_>>(),
                 ))
@@ -15716,16 +15707,22 @@ impl ExactDeclarationContext {
                     self.owner
                         .facts
                         .compiler_support
-                        .recorded_input_decisions()
+                        .recorded_rows()
                         .iter()
-                        .map(|(owner, fact)| {
-                            (
+                        .filter_map(|(owner, row)| {
+                            let Some(crate::exact_context::RecordedNativeChoices::Issued {
+                                groups,
+                            }) = row.native_choices()
+                            else {
+                                return None;
+                            };
+                            Some((
                                 owner,
-                                fact.groups
+                                groups
                                     .iter()
                                     .map(|(ordinal, group)| (*ordinal, *group))
                                     .collect::<Vec<_>>(),
-                            )
+                            ))
                         })
                         .collect::<Vec<_>>(),
                 ))
@@ -21506,12 +21503,20 @@ mod tests {
             let left = empty.clone().with_published_source_originals(&alpha).unwrap();
             let right = empty.clone().with_published_source_originals(&beta).unwrap();
             let joined = left.clone().with_published_source_originals(&beta).unwrap();
-            assert!(!left.compiler_source_support().recorded_input_decisions().is_empty(),
+            let issued_choices = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+                support.recorded_rows().iter().filter_map(|(owner, row)| {
+                    match row.native_choices() {
+                        Some(crate::exact_context::RecordedNativeChoices::Issued { groups }) => Some((owner.clone(), groups.clone())),
+                        _ => None,
+                    }
+                }).collect::<BTreeMap<_, _>>()
+            };
+            let left_choices = issued_choices(left.compiler_source_support());
+            assert!(!left_choices.is_empty(),
                 "published fixture must carry a real issued decision domain");
             assert!(left.artifact_view().selected_native_groups().is_empty(),
                 "publication retains SOURCE policy without selecting executable Groups");
-            assert!(left.compiler_source_support().recorded_input_decisions().values()
-                .all(|fact| fact.groups.is_empty()),
+            assert!(left_choices.values().all(|groups| groups.is_empty()),
                 "the fresh source fixture issued explicit empty compiler-input choices");
             let interface_roots = left.compiler_input_projection().roles().into_iter()
                 .map(|role| role.interface()).collect();
@@ -21519,9 +21524,8 @@ mod tests {
             let narrowed = left.clone().rebuild(|facts| facts.compiler_support = narrowed_support).finish().unwrap();
             assert!(narrowed.artifact_view().selected_native_groups().is_empty(),
                 "interface-root narrowing cannot acquire executable Group demand");
-            assert!(!narrowed.compiler_source_support().recorded_input_decisions().is_empty());
-            assert!(narrowed.compiler_source_support().recorded_input_decisions().values()
-                .all(|fact| fact.groups.is_empty()), "narrowing preserves issued empty domains without adding chosen Groups");
+            assert_eq!(issued_choices(narrowed.compiler_source_support()), left_choices,
+                "narrowing preserves exact issued empty domains without adding chosen Groups");
             let store = MemoryBlockstore::new();
             let mut materializer = Materializer::new(&store);
             let initial = materializer.materialize_context(None,&left.snapshot()).unwrap();
