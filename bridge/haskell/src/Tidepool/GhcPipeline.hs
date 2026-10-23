@@ -3836,6 +3836,11 @@ instance Exception CompletedModuleFailure
 issueCompletedModuleVersion :: HomePackageTable -> GutsMemoEntry -> RecoveryContext
   -> Word64 -> [ModuleProduct] -> IO CompletedModuleVersion
 issueCompletedModuleVersion homes entry recovery epoch products = do
+  home <- requireCompletedModuleHome homes entry
+  pure (CompletedModuleVersion entry home recovery epoch products)
+
+requireCompletedModuleHome :: HomePackageTable -> GutsMemoEntry -> IO HomeModInfo
+requireCompletedModuleHome homes entry = do
   let owner = payloadOwner (gmePayload entry)
       finalized = hm_iface (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
   home <- maybe (throwIO (CompletedModuleHomeMissing owner)) pure
@@ -3845,7 +3850,7 @@ issueCompletedModuleVersion homes entry recovery epoch products = do
       && mi_hsc_src actual == mi_hsc_src finalized
       && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts finalized))
     (throwIO (CompletedModuleHomeMismatch owner))
-  pure (CompletedModuleVersion entry home recovery epoch products)
+  pure home
 
 data CompletedOriginalVersion = CompletedOriginalVersion
   { completedOriginalHome :: HomeModInfo
@@ -5886,9 +5891,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       selectedVersions <- liftIO (readIORef selectedVersionsRef)
       forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
         current <- getSession
+        original <- liftIO (requireCompletedModuleHome (hsc_HPT current) entry)
         let finalized = payloadFinalized (gmePayload entry)
-            original = fromMaybe (finalizedHomeModInfo finalized)
-              (lookupHpt (hsc_HPT current) (ms_mod_name summary))
             nodeEpoch = completedModuleEpoch <$> Map.lookup (ms_mod summary) selectedVersions
             sameEpoch = nodeEpoch == Just epoch
             home = if sameEpoch then original else withoutBytecode original
