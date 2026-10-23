@@ -11111,8 +11111,12 @@ mod module_product_tests {
     #[test]
     #[serial_test::serial]
     fn retained_complete_entries_load_original_quotations_without_compiler_or_source_replay() {
+        use crate::artifact_inventory::ArtifactDescriptor;
+        use crate::declaration_context::{RecoveredArtifactAcquisition, RecoveryPayloadReference};
+        use crate::exact_context::{hydrate_context, Materializer};
         use crate::toolchain::CompilerDeploymentConfiguration;
-        let root = tempfile::tempdir().unwrap();
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+        let root = test_support::compiler_input_directory().unwrap();
         let authored = root.path().join("sources");
         std::fs::create_dir(&authored).unwrap();
         let input = root.path().join("quote-input");
@@ -11216,6 +11220,14 @@ mod module_product_tests {
         );
         let proof = first.products().original_compile_input.as_ref().unwrap();
         assert!(proof.replay_eligible_identity().is_none());
+        let original = first.products().original_execution_context().unwrap();
+        let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
+        assert!(
+            crate::declaration_context::CapturedTemplateImports::capture(&original, &template)
+                .unwrap()
+                .is_some(),
+            "the real sealed output issues original template custody"
+        );
         let compiled_executions = std::fs::read_to_string(&counter).unwrap();
         let _restore = RestoreEnvironment(
             ["TIDEPOOL_EXTRACT", tidepool_extract_cmd::DAEMON_SOCKET_ENV]
@@ -11227,6 +11239,74 @@ mod module_product_tests {
             std::env::set_var("TIDEPOOL_EXTRACT", root.path().join("unavailable-compiler"));
             std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
         }
+        let snapshot = original.snapshot();
+        let store = MemoryBlockstore::new();
+        let mut materializer = Materializer::new(&store);
+        let published = materializer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let restored = hydrate_context(&store, published.root()).unwrap();
+        let graph = restored.snapshot().graph_selection().unwrap();
+        let mut artifacts = graph
+            .bindings
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>();
+        artifacts.extend(snapshot.native_package_artifacts_introduced(None));
+        let recovery = root.path().join("recovered-original");
+        std::fs::create_dir(&recovery).unwrap();
+        let references = original
+            .materialize_recovery_artifacts(&recovery, &artifacts)
+            .unwrap();
+        let descriptors = references
+            .iter()
+            .map(|reference| match reference {
+                RecoveryPayloadReference::Original(reference) => {
+                    ArtifactDescriptor::from_recovery_product(reference)
+                }
+                RecoveryPayloadReference::Canonical(reference) => {
+                    ArtifactDescriptor::from_recovery_module_interface(reference)
+                }
+                RecoveryPayloadReference::Join(reference) => {
+                    ArtifactDescriptor::from_recovery_join(reference)
+                }
+                RecoveryPayloadReference::Value(reference) => {
+                    ArtifactDescriptor::from_recovery_value_interface(reference)
+                }
+                RecoveryPayloadReference::PackageCode(reference) => {
+                    ArtifactDescriptor::from_recovery_package_code(reference)
+                }
+            })
+            .collect::<Vec<_>>();
+        let recovered = RecoveredArtifactAcquisition::new(&recovery)
+            .capture_payloads_bound(
+                &references,
+                &descriptors,
+                &graph.bindings,
+                &restored.snapshot().binding_dependencies().unwrap(),
+            )
+            .unwrap()
+            .context_for_expected_snapshot(published.root(), &restored)
+            .unwrap();
+        assert_eq!(recovered.lexical_graph(), original.lexical_graph());
+        let refusal = match crate::declaration_context::CapturedTemplateImports::capture(
+            &recovered, &template,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("restored retained facts cannot recreate original completion"),
+        };
+        assert!(
+            matches!(&refusal, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: retained template imports require complete original compiler execution evidence"),
+            "unexpected template-capture refusal: {refusal:?}"
+        );
+        assert!(
+            crate::declaration_context::CapturedTemplateImports::capture(&recovered, &[])
+                .unwrap()
+                .is_none(),
+            "no selected template roots require no original completion"
+        );
         std::fs::write(&input, "91").unwrap();
         let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
         let retained = load_selected_production_entry(&output, &authority, &selected).unwrap();
@@ -11289,20 +11369,17 @@ mod module_product_tests {
         use crate::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
         use tidepool_repr::execution_schema::{Atom, Group, HeapRhs, ScalarLiteral};
 
-        let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
+        let root = test_support::compiler_input_directory().unwrap();
+        let cache = root.path().join("compile-cache");
+        std::fs::create_dir(&cache).unwrap();
         let _restore = RestoreEnvironment(
-            [
-                "TIDEPOOL_COMPILE_CACHE_DIR",
-                tidepool_extract_cmd::DAEMON_SOCKET_ENV,
-            ]
-            .into_iter()
-            .map(|name| (name, std::env::var_os(name)))
-            .collect(),
+            ["TIDEPOOL_COMPILE_CACHE_DIR"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
         );
         unsafe {
-            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
-            std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
+            std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", &cache);
         }
         let provider = root.path().join("QuotedProvider.hs");
         let original_path = root.path().join("QuotedOriginal.hs");
@@ -11453,69 +11530,6 @@ mod module_product_tests {
                     !admission.evidence().cache_safe && !admission.evidence().selection_complete
                 );
                 assert!(admission.evidence().revalidate(source).is_ok());
-                let request = Arc::new(context.clone())
-                    .prepare_compilation(
-                        &root.path().join("original-execution-scope"),
-                        compiled.producer_identity.as_ref().unwrap(),
-                    )
-                    .unwrap()
-                    .with_source_search_context(&include);
-                let original_output = compiled
-                    .issued_output
-                    .as_ref()
-                    .expect("issued compiler output")
-                    .compiler_inputs();
-                let original = (&request)
-                    .product_admission(admission)
-                    .original_execution_context(original_output)
-                    .unwrap();
-                let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
-                assert!(
-                    crate::declaration_context::CapturedTemplateImports::capture(
-                        &original, &template,
-                    )
-                    .unwrap()
-                    .is_some(),
-                    "the real completed original issues template custody"
-                );
-                let missing = ExactModuleIdentity {
-                    unit: "main".into(),
-                    module: "MissingOriginalInstanceOwner".into(),
-                };
-                let mut incomplete_graph = original.lexical_graph().to_vec();
-                incomplete_graph
-                    .iter_mut()
-                    .find(|node| node.owner == quoted_owner)
-                    .unwrap()
-                    .imports
-                    .push(missing.clone());
-                let incomplete = ExactDeclarationContext::from_authenticated_execution(
-                    original.toolchain_identity_sha256(),
-                    original.artifact_view(),
-                    original.compiler_input_projection().clone(),
-                    incomplete_graph,
-                    original.original_instance_target().unwrap().clone(),
-                    std::slice::from_ref(&missing),
-                )
-                .unwrap();
-                assert!(matches!(incomplete.original_instance_environment(),
-                    crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(owners)
-                    if owners.contains(&missing)));
-                assert!(
-                    incomplete
-                        .lexical_graph()
-                        .iter()
-                        .all(|node| !node.imports.contains(&missing)),
-                    "the negative exercises the owning constructor's pruned graph"
-                );
-                assert!(
-                    crate::declaration_context::CapturedTemplateImports::capture(
-                        &incomplete,
-                        &template,
-                    )
-                    .is_err(),
-                    "a pruned original graph cannot issue template custody"
-                );
                 // The native test owns this completed quotation output; it
                 // does not issue a replay recipe or a hermetic build artifact.
                 let consumer = root.path().join("QuotedConsumer.hs");
