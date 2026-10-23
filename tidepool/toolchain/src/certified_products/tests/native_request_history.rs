@@ -709,8 +709,8 @@ fn replay_native_transport_history(
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        inputs.metadata().retained.selected_native_groups,
-        expected_native
+        inputs.metadata().retained.selected_native_groups.as_ref(),
+        &expected_native
     );
     assert_eq!(
         inputs
@@ -1181,8 +1181,8 @@ fn replay_native_transport_history(
         .unwrap();
     let continued_inputs = continued_request.compiler_inputs();
     assert_eq!(
-        continued_inputs.metadata().retained.selected_native_groups,
-        produced
+        continued_inputs.metadata().retained.selected_native_groups.as_ref(),
+        &produced
             .compiler_inputs()
             .issued_artifacts()
             .selected_native_groups()
