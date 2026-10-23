@@ -1,14 +1,19 @@
 //! A canonical/Core-only consumer gains native groups after original source removal.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 use tidepool_repr::execution_schema::Group;
-use tidepool_toolchain::artifact_inventory::ArtifactKind;
+use tidepool_toolchain::artifact_inventory::{ArtifactDescriptor, ArtifactKind};
 use tidepool_toolchain::artifacts::{
     prepare_frozen_production_entry, CompileInvocation, FrozenEntrySources,
 };
 use tidepool_toolchain::certified_products::ProductOrigin;
-use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
+use tidepool_toolchain::declaration_join::{
+    ExactModuleIdentity, RecoveredArtifactAcquisition, RecoveryInventoryError,
+    RecoveryPayloadReference,
+};
+use tidepool_toolchain::exact_context::{hydrate_context, Materializer};
 use tidepool_toolchain::CompileError;
 
 #[test]
@@ -18,7 +23,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         tidepool_mcp::actor_local_decl(),
     ])
     .expect("typed receive effect surface");
-    let work = tempfile::tempdir().unwrap();
+    let work = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let owner_source = work.path().join("RetainedReceiveOwner.hs");
     let support_source = work.path().join("RetainedReceiveSupport.hs");
     std::fs::write(
@@ -56,7 +61,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     )
     .unwrap();
     let frozen = FrozenEntrySources::capture(&include, &probe_source).unwrap();
-    let retained = tempfile::tempdir().unwrap();
+    let retained = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let original = tidepool_testing::with_settlement(|settlement| {
         prepare_frozen_production_entry(
             &frozen,
@@ -83,70 +88,94 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let original_producer = execution.toolchain_identity_sha256();
     assert_ne!(original_producer, [0; 32]);
 
-    // Retain the original consumed home-import graph. A lexical selection is
-    // separate from native demand, and its complete interface closure is
-    // admitted by the production inventory owner.
-    let mut pending = vec![owner.clone()];
-    let mut lexical = BTreeMap::new();
-    while let Some(selected) = pending.pop() {
-        if lexical.contains_key(&selected) {
-            continue;
-        }
-        let node = execution
-            .lexical_graph()
-            .iter()
-            .find(|node| node.owner == selected)
-            .expect("selected source owner has its original compiler import graph");
-        pending.extend(node.imports.iter().cloned());
-        lexical.insert(selected, node.clone());
+    assert!(execution
+        .lexical_graph()
+        .iter()
+        .find(|node| node.owner == owner)
+        .expect("source owner retains its actual compiler import graph")
+        .imports
+        .contains(&support));
+    // Restore the exact output selection. Its unrelated entry target may retain
+    // native custody; the requested homes were only imported for their types.
+    let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
+    let snapshot = execution.snapshot();
+    let blocks = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&blocks);
+    let persisted = writer.materialize_context(None, &snapshot).unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        blocks.put_keyed(&cid, &bytes).unwrap();
     }
-    assert!(lexical[&owner].imports.contains(&support));
-    // The complete entry may retain native originals. Recover the consumer
-    // independently from only its sealed canonical interfaces and Core.
-    let durable = tempfile::tempdir().unwrap();
-    let canonical_interfaces = execution
-        .materialize_module_interfaces(durable.path())
-        .unwrap()
-        .into_iter()
-        .filter(|reference| {
-            lexical.contains_key(&ExactModuleIdentity {
-                unit: reference.interface.unit.clone(),
-                module: reference.interface.module.clone(),
-            })
+    let acquired = hydrate_context(&blocks, persisted.root()).unwrap();
+    let selection = acquired.snapshot().graph_selection().unwrap();
+    let edges = acquired.snapshot().binding_dependencies().unwrap();
+    let mut ids = selection
+        .bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    ids.extend(snapshot.native_package_artifacts_introduced(None));
+    let payloads = execution
+        .materialize_recovery_artifacts(durable.path(), &ids)
+        .unwrap();
+    let canonical_interfaces = payloads
+        .iter()
+        .filter_map(|reference| match reference {
+            RecoveryPayloadReference::Canonical(reference) => Some(reference),
+            _ => None,
         })
         .collect::<Vec<_>>();
-    let context = ExactDeclarationContext::capture_recovery(
-        durable.path(),
-        &[],
-        &canonical_interfaces,
-        &[],
-        lexical.values().cloned().collect(),
-    )
-    .unwrap();
-    assert!(context.recovery_products().is_empty());
-    assert!(context
-        .compiler_input_roles()
+    let descriptors = payloads
         .iter()
-        .all(|role| role.original().is_none()));
-    assert!(context.artifact_view().selected_native_groups().is_empty());
-    assert!(context
-        .artifact_view()
-        .capture_graph_selection()
-        .native_groups
-        .is_empty());
-    let consumer_seals = context.artifact_view().descriptors();
-    assert_eq!(consumer_seals.len(), lexical.len());
+        .map(|reference| match reference {
+            RecoveryPayloadReference::Original(reference) => {
+                ArtifactDescriptor::from_recovery_product(reference)
+            }
+            RecoveryPayloadReference::Canonical(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference)
+            }
+            RecoveryPayloadReference::Join(reference) => {
+                ArtifactDescriptor::from_recovery_join(reference)
+            }
+            RecoveryPayloadReference::Value(reference) => {
+                ArtifactDescriptor::from_recovery_value_interface(reference)
+            }
+            RecoveryPayloadReference::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference)
+            }
+        })
+        .collect::<Vec<_>>();
+    let context = RecoveredArtifactAcquisition::new(durable.path())
+        .capture_payloads_bound(&payloads, &descriptors, &selection.bindings, &edges)
+        .unwrap()
+        .context_for_expected_snapshot(persisted.root(), &acquired)
+        .unwrap();
     assert_eq!(
+        context.artifact_view().capture_graph_selection(),
+        execution.artifact_view().capture_graph_selection()
+    );
+    assert_eq!(
+        context.compiler_input_roles(),
+        execution.compiler_input_roles()
+    );
+    assert_eq!(context.lexical_graph(), execution.lexical_graph());
+    for expected in [&owner, &support] {
+        assert!(context.recovery_products().iter().all(|product| {
+            product.owner().unit != expected.unit || product.owner().module != expected.module
+        }));
+    }
+    let consumer_seals = context
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .filter(|descriptor| descriptor.owner == owner || descriptor.owner == support)
+        .collect::<Vec<_>>();
+    assert_eq!(consumer_seals.len(), 2);
+    assert!(consumer_seals.iter().all(|descriptor| {
         context
             .compiler_input_roles()
             .iter()
-            .map(|role| role.interface())
-            .collect::<BTreeSet<_>>(),
-        consumer_seals
-            .iter()
-            .map(|descriptor| descriptor.id)
-            .collect::<BTreeSet<_>>()
-    );
+            .any(|role| role.interface() == descriptor.id && role.original().is_none())
+    }));
     assert!(consumer_seals.iter().all(|descriptor| {
         descriptor.kind == ArtifactKind::CanonicalModuleInterface
             && descriptor.product_sha256.is_none()
@@ -188,45 +217,40 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         );
     }
 
-    // Recover the real support interfaces while omitting the requested owner.
-    // Its lexical graph still requires that owner's own canonical proof.
-    let support_interfaces = canonical_interfaces
+    // Keep the persisted exact selection unchanged while omitting a required
+    // owner. Acquisition must refuse before a compiler context can be restored.
+    let incomplete = payloads
         .iter()
-        .filter(|reference| {
-            reference.interface.unit != owner.unit || reference.interface.module != owner.module
-        })
-        .cloned()
+        .zip(&descriptors)
+        .filter(|(_, descriptor)| descriptor.owner != owner)
+        .map(|(reference, descriptor)| (reference.clone(), descriptor.clone()))
         .collect::<Vec<_>>();
-    let missing = ExactDeclarationContext::capture_recovery(
-        durable.path(),
-        &[],
-        &support_interfaces,
-        &[],
-        vec![],
-    )
-    .unwrap();
-    assert!(missing
-        .artifact_view()
-        .descriptors()
+    let (incomplete_payloads, incomplete_descriptors): (Vec<_>, Vec<_>) =
+        incomplete.into_iter().unzip();
+    let omitted = descriptors
         .iter()
-        .all(|descriptor| descriptor.owner != owner));
-    assert!(missing
-        .artifact_view()
-        .descriptors()
+        .filter(|descriptor| descriptor.owner == owner)
+        .collect::<Vec<_>>();
+    assert_eq!(omitted.len(), 1);
+    assert!(selection
+        .bindings
         .iter()
-        .any(|descriptor| descriptor.owner == support));
-    let refusal = ExactDeclarationContext::capture_recovery(
-        durable.path(),
-        &[],
-        &support_interfaces,
-        &[],
-        lexical.values().cloned().collect(),
-    )
-    .unwrap_err();
-    assert!(matches!(&refusal, CompileError::ExtractFailed(_)));
-    assert!(refusal
-        .to_string()
-        .contains("selected lexical owner lacks its interface main:RetainedReceiveOwner"));
+        .any(|binding| binding.artifact == omitted[0].id));
+    assert!(incomplete_descriptors
+        .iter()
+        .all(|descriptor| descriptor.id != omitted[0].id));
+    let Err(refusal) = RecoveredArtifactAcquisition::new(durable.path()).capture_payloads_bound(
+        &incomplete_payloads,
+        &incomplete_descriptors,
+        &selection.bindings,
+        &edges,
+    ) else {
+        panic!("missing canonical owner must refuse exact acquisition");
+    };
+    assert!(matches!(refusal,
+        RecoveryInventoryError::Certification(CompileError::ExtractFailed(detail))
+        if detail == "exact declaration context: bound recovery has duplicate or missing exact endpoints"
+    ));
 
     drop(original);
     drop(execution);

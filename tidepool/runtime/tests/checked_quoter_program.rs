@@ -16,7 +16,6 @@ use tidepool_runtime::session::{
     SessionLib, SourceImports,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
-use tidepool_toolchain::artifact_inventory::{ArtifactDependency, ArtifactInventoryFailure};
 use tidepool_toolchain::checked_cell::CellRecipe;
 use tidepool_toolchain::CompileError;
 
@@ -27,7 +26,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
     tidepool_testing::eval_harness::require_extract();
     let cache = tempfile::tempdir().unwrap();
     let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
-    let root = tempfile::tempdir().unwrap();
+    let root = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     std::fs::write(
         root.path().join("CheckedQuoterFacade.hs"),
         include_str!("fixtures/CheckedQuoterFacade.hs"),
@@ -188,7 +187,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                     && global.identity.module == "CheckedQuoterFacade"
                     && global.identity.occurrence == "describe"
             }));
-        let durable = tempfile::tempdir().unwrap();
+        let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
         let producer = match program.basis() {
             tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => {
                 plan.producer_sha256()
@@ -255,31 +254,71 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             !type_only_owners.is_empty(),
             "this fixture must exercise canonical dependencies without native products"
         );
+        let selection = original_context.snapshot().graph_selection().unwrap();
+        use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
+        let incomplete_payloads = references
+            .iter()
+            .cloned()
+            .map(RecoveryPayloadReference::Original)
+            .chain(
+                companions
+                    .iter()
+                    .cloned()
+                    .map(RecoveryPayloadReference::Canonical),
+            )
+            .collect::<Vec<_>>();
+        let incomplete_ids = references
+            .iter()
+            .map(tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_product)
+            .chain(companions.iter().map(
+                tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_module_interface,
+            ))
+            .map(|descriptor| descriptor.id)
+            .collect::<BTreeSet<_>>();
+        let descriptors = original_context.artifact_view().descriptors();
+        let omitted = descriptors
+            .iter()
+            .filter(|descriptor| !incomplete_ids.contains(&descriptor.id))
+            .collect::<Vec<_>>();
+        assert!(!omitted.is_empty());
+        for descriptor in omitted {
+            assert!(type_only_owners.contains(&(
+                descriptor.owner.unit.clone(),
+                descriptor.owner.module.clone(),
+            )));
+            assert!(selection
+                .bindings
+                .iter()
+                .any(|binding| binding.artifact == descriptor.id));
+        }
+        let incomplete_descriptors = descriptors
+            .into_iter()
+            .filter(|descriptor| incomplete_ids.contains(&descriptor.id))
+            .collect::<Vec<_>>();
         let incomplete =
-            tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
-                durable.path(),
-                &references,
-                &companions,
-                &[],
-                Vec::new(),
-            );
+            tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition::new(durable.path())
+                .capture_payloads_bound(
+                    &incomplete_payloads,
+                    &incomplete_descriptors,
+                    &selection.bindings,
+                    &original_context.artifact_view().binding_dependencies(),
+                );
         match incomplete {
-            Err(CompileError::ArtifactInventory(error)) => match error.failure {
-                ArtifactInventoryFailure::MissingDependency {
-                    required,
-                    dependency: ArtifactDependency::Interface,
-                    ..
-                } => assert!(type_only_owners.contains(&(required.unit, required.module))),
-                other => panic!("expected omitted type-only interface refusal, got {other:?}"),
-            },
-            other => panic!("expected incomplete recovery closure refusal, got {other:?}"),
+            Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Certification(
+                CompileError::ExtractFailed(detail),
+            )) => assert_eq!(
+                detail,
+                "exact declaration context: bound recovery has duplicate or missing exact endpoints"
+            ),
+            Err(other) => panic!("expected incomplete recovery closure refusal, got {other:?}"),
+            Ok(_) => panic!("incomplete canonical closure cannot authorize exact acquisition"),
         }
         assert_original_durability(
             durable.path(),
             producer,
             original,
             &references,
-            &module_interfaces,
+            &original_context,
             SourceReplay::Unavailable,
         );
         eprintln!(
@@ -304,7 +343,7 @@ fn assert_original_durability(
     producer: [u8; 32],
     original: &tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct,
     references: &[tidepool_toolchain::recovery_artifacts::RecoveryArtifactRef],
-    module_interfaces: &[tidepool_toolchain::recovery_artifacts::RecoveryModuleInterfaceRef],
+    issued: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     replay: SourceReplay,
 ) {
     let is_owner = |unit: &str, module: &str| {
@@ -321,15 +360,69 @@ fn assert_original_durability(
         SourceReplay::Available => assert!(reference.execution_source.is_some()),
         SourceReplay::Unavailable => assert!(reference.execution_source.is_none()),
     }
-    let recovered =
-        tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
-            durable,
-            references,
-            module_interfaces,
-            &[],
-            Vec::new(),
-        )
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+    use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
+    use tidepool_toolchain::declaration_join::{
+        RecoveredArtifactAcquisition, RecoveryPayloadReference,
+    };
+    use tidepool_toolchain::exact_context::{hydrate_context, Materializer};
+    let snapshot = issued.snapshot();
+    let blocks = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&blocks);
+    let persisted = writer.materialize_context(None, &snapshot).unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        blocks.put_keyed(&cid, &bytes).unwrap();
+    }
+    let acquired = hydrate_context(&blocks, persisted.root()).unwrap();
+    let graph = acquired.snapshot().graph_selection().unwrap();
+    let mut payload_ids = graph
+        .bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    payload_ids.extend(snapshot.native_package_artifacts_introduced(None));
+    let payloads = issued
+        .materialize_recovery_artifacts(durable, &payload_ids)
         .unwrap();
+    let descriptors = payloads
+        .iter()
+        .map(|reference| match reference {
+            RecoveryPayloadReference::Original(reference) => {
+                ArtifactDescriptor::from_recovery_product(reference)
+            }
+            RecoveryPayloadReference::Canonical(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference)
+            }
+            RecoveryPayloadReference::Join(reference) => {
+                ArtifactDescriptor::from_recovery_join(reference)
+            }
+            RecoveryPayloadReference::Value(reference) => {
+                ArtifactDescriptor::from_recovery_value_interface(reference)
+            }
+            RecoveryPayloadReference::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference)
+            }
+        })
+        .collect::<Vec<_>>();
+    let recovered = RecoveredArtifactAcquisition::new(durable)
+        .capture_payloads_bound(
+            &payloads,
+            &descriptors,
+            &graph.bindings,
+            &acquired.snapshot().binding_dependencies().unwrap(),
+        )
+        .unwrap()
+        .context_for_expected_snapshot(persisted.root(), &acquired)
+        .unwrap();
+    assert_eq!(
+        recovered.artifact_view().capture_graph_selection(),
+        issued.artifact_view().capture_graph_selection()
+    );
+    assert_eq!(
+        recovered.compiler_input_roles(),
+        issued.compiler_input_roles()
+    );
+    assert_eq!(recovered.lexical_graph(), issued.lexical_graph());
     let recovered_products = recovered.recovery_products();
     let matching = recovered_products
         .iter()
@@ -345,7 +438,7 @@ fn assert_original_durability(
         recovered_original.interface_bytes()
     );
     assert_eq!(original.product_bytes(), recovered_original.product_bytes());
-    let recovered_durable = tempfile::tempdir().unwrap();
+    let recovered_durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let recovered_references =
         tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             recovered_durable.path(),
@@ -375,26 +468,32 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
     tidepool_testing::eval_harness::require_extract();
     let cache = tempfile::tempdir().unwrap();
     let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
-    let root = tempfile::tempdir().unwrap();
+    let root = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     std::fs::write(
         root.path().join("CheckedOriginalReplayOwner.hs"),
         include_str!("fixtures/CheckedOriginalReplayOwner.hs"),
     )
     .unwrap();
     let include = [root.path().to_path_buf()];
-    let compiled = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::compile_invocation(
-            &tidepool_toolchain::artifacts::CompileInvocation {
-                source: include_str!("fixtures/CheckedOriginalReplayProbe.hs"),
-                targets: &["result"],
-                include: &include,
-                fallback_module_name: "CheckedOriginalReplayProbe",
-            },
-            |_, _, _| {},
+    let probe = root.path().join("CheckedOriginalReplayProbe.hs");
+    std::fs::write(
+        &probe,
+        include_str!("fixtures/CheckedOriginalReplayProbe.hs"),
+    )
+    .unwrap();
+    let frozen =
+        tidepool_toolchain::artifacts::FrozenEntrySources::capture(&include, &probe).unwrap();
+    let entry = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::prepare_frozen_production_entry(
+            &frozen,
+            root.path(),
+            &root.path().join("entry"),
             settlement,
         )
     })
     .unwrap();
+    let compiled = entry.products();
+    let issued = compiled.original_execution_context().unwrap();
     let originals = compiled
         .recovery_products
         .iter()
@@ -413,7 +512,7 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
                     && binder.occurrence == "value"
             })
     }));
-    let descriptors = compiled.artifact_view.descriptors();
+    let descriptors = compiled.artifact_view().descriptors();
     let matching = descriptors
         .iter()
         .filter(|descriptor| {
@@ -426,28 +525,19 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1);
     let producer = matching[0].producer_sha256;
-    let durable = tempfile::tempdir().unwrap();
+    let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
         durable.path(),
         producer,
         &compiled.recovery_products,
     )
     .unwrap();
-    let interfaces = references
-        .iter()
-        .map(|reference| {
-            reference
-                .module_interface
-                .clone()
-                .expect("native original retains its issued canonical interface")
-        })
-        .collect::<Vec<_>>();
     assert_original_durability(
         durable.path(),
         producer,
         original,
         &references,
-        &interfaces,
+        &issued,
         SourceReplay::Available,
     );
 }
