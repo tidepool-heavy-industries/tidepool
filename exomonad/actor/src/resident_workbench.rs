@@ -32061,7 +32061,7 @@ pub(crate) mod request_tests {
     }
 
     #[tokio::test]
-    async fn request_annotations_survive_checked_prologue_adoption_and_publication() {
+    async fn checked_prologue_adoption_and_publication_preserves_original_request_issuer() {
         with_test_compiler_owner(|preparation_client| async move {
             let (session, public_context, mut source, inputs, _root) =
                 activation_input_fixture(|_| {});
@@ -32109,18 +32109,22 @@ pub(crate) mod request_tests {
                 tidepool_toolchain::checked_cell::CheckedItemKind::Declaration
             );
             assert!(items[0].ready.item.source().is_empty());
-            let assert_annotations = || {
-                let snapshot = prefix.snapshot();
-                let context = snapshot.view().unwrap().exact_compile_context().unwrap();
-                assert_eq!(context.declarations().toolchain_identity_sha256(), producer);
-                assert!(Arc::ptr_eq(context.request_types().unwrap(), &signatures));
+            // Request signatures remain with their original request issuer.
+            // Checked World advancement does not issue permanent request authority.
+            let assert_original_request_issuer = || {
+                assert_eq!(issuer.declarations().toolchain_identity_sha256(), producer);
+                assert!(Arc::ptr_eq(issuer.request_types().unwrap(), &signatures));
+                assert!(Arc::ptr_eq(
+                    evidence.request_type_signatures().unwrap(),
+                    &signatures
+                ));
                 assert_eq!(
                     issuer.declarations().semantic_sha256(),
                     original_context,
                     "adoption cannot mutate the original request issuer"
                 );
             };
-            assert_annotations();
+            assert_original_request_issuer();
             for (index, item) in items.into_iter().enumerate() {
                 let step = workbench
                     .begin_prepared_cell_item(
@@ -32149,7 +32153,7 @@ pub(crate) mod request_tests {
                     }
                 );
                 assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
-                assert_annotations();
+                assert_original_request_issuer();
                 let expected = public_before.clone();
                 workbench
                     .access
