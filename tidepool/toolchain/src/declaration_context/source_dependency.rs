@@ -193,6 +193,30 @@ impl SourceDependencyBasis {
     pub(crate) fn rows(&self) -> &[SourceDependencyRow] {
         &self.rows
     }
+
+    /// Compare a runtime row's immutable type/evidence with one exact observed
+    /// terminal. Runtime access still belongs to its independently scoped owner.
+    pub(crate) fn matches_checked_value(
+        &self,
+        occurrence: NativeRetainedOccurrence<'_>,
+        row: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<bool, CompileError> {
+        if !self.rows.iter().any(|observed| {
+            observed
+                .retained_occurrences()
+                .any(|candidate| candidate == occurrence)
+        }) {
+            return Ok(false);
+        }
+        let selected = self
+            ._membership
+            .acquisition()
+            .artifacts()
+            .observed_payload(&occurrence.binding.artifact)
+            .ok_or_else(|| refuse("observed SOURCE terminal lost its acquired payload"))?;
+        let (actual, _) = row.world_type_parts()?;
+        Ok(selected.as_ref() == actual.as_ref())
+    }
 }
 
 impl SourceDependencyRow {
