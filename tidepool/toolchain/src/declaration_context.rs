@@ -19021,7 +19021,7 @@ mod tests {
                 original_groups_fixture("TypeChild", vec![(7, vec![])], version, &BTreeMap::new()),
                 [2; 32],
             );
-            let child = product.module_interface().unwrap().clone();
+            let child = product.module_interface().clone();
             if let Some(previous) = &canonical_child {
                 assert_eq!(previous, &child);
             }
@@ -19401,7 +19401,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            recovered_product.module_interface().unwrap().clone(),
+            recovered_product.module_interface().clone(),
         ));
         let canonical_issuer = ArtifactInventory::default();
         let canonical_view = canonical_issuer
@@ -19915,7 +19915,7 @@ mod tests {
         let certification =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
@@ -19934,6 +19934,21 @@ mod tests {
         module: &str,
         interface: Vec<u8>,
     ) -> CertifiedRecoveryProduct {
+        crate::certified_products::tests::recovered_witness_fixtures(&[
+            crate::certified_products::fixture_finalized_product(
+                support_draft_with_interface(unit, module, interface),
+                [2; 32],
+            ),
+        ])
+        .remove(0)
+        .product
+    }
+
+    fn support_draft_with_interface(
+        unit: &str,
+        module: &str,
+        interface: Vec<u8>,
+    ) -> crate::recovery_artifacts::OriginalDraft {
         let product = tidepool_test_data::prepared_encode::encode_module_products(&[
             tidepool_repr::execution_schema::RawModuleProduct {
                 unit: unit.into(),
@@ -19968,20 +19983,13 @@ mod tests {
             &mut packages,
         )
         .unwrap();
-        crate::certified_products::tests::recovered_witness_fixtures(&[
-            crate::certified_products::fixture_finalized_product(
-                CertifiedRecoveryProduct::from_certification(
-                    owner,
-                    interface,
-                    product,
-                    packages,
-                    certification,
-                ),
-                [2; 32],
-            ),
-        ])
-        .remove(0)
-        .product
+        crate::recovery_artifacts::OriginalDraft::from_certification(
+            owner,
+            interface,
+            product,
+            packages,
+            certification,
+        )
     }
 
     // Retain the old identity encoder to prove selection-aware keys invalidate it.
@@ -20286,7 +20294,7 @@ mod tests {
 
         let types = CompilerSupportFixture::RecordedRoles {
             projection: CompilerInputProjection::from_issued_entries(&[Arc::new(
-                ArtifactEntry::canonical(product.module_interface().unwrap().clone()),
+                ArtifactEntry::canonical(product.module_interface().clone()),
             )])
             .unwrap(),
             artifacts: offer.artifacts().clone(),
@@ -20324,21 +20332,25 @@ mod tests {
         assert_eq!(request.program_source_lexical().len(), 2);
         assert!(empty.artifact_view().is_empty());
 
-        let uncertified = CertifiedRecoveryProduct::from_certification(
+        let uncertified = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         )
-        .with_module_interface(product.module_interface().unwrap().clone())
+        .with_module_interface(product.module_interface().clone())
+        .unwrap();
+        let certified = crate::certified_products::certify_original_draft_with_validation(
+            uncertified,
+            &mut PackageInterfaceValidation::default(),
+        )
         .unwrap();
         let mut request = program_request(directory.path(), empty.clone());
-        assert!(uncertified.original_native().is_none());
         let retained = request
             .admit_fixture_support(
                 empty.clone(),
-                &recorded_role_support_offer(&[uncertified]),
+                &recorded_role_support_offer(&[certified]),
                 &[],
                 None,
             )
@@ -20388,10 +20400,11 @@ mod tests {
             identity("fixture", "Consumer")
         );
         let source = std::fs::read(directory.path().join("Consumer.hs")).unwrap();
-        let generated = crate::certified_products::fixture_source_finalized_product(
-            support_product("Consumer").with_source_sha256(Sha256::digest(&source).into()),
+        let generated = crate::certified_products::fixture_source_finalized_product_with_source(
+            support_draft_with_interface("fixture", "Consumer", b"Consumer interface".to_vec()),
             [2; 32],
             vec![],
+            Sha256::digest(&source).into(),
         );
         let generated = crate::certified_products::tests::recovered_witness_fixtures(&[generated])
             .remove(0)
@@ -23671,7 +23684,7 @@ mod tests {
         else {
             panic!("native fixture")
         };
-        let interface = product.module_interface().unwrap().clone();
+        let interface = product.module_interface().clone();
         let mut owner = product.owner().clone();
         owner.module_version = tidepool_repr::execution_schema::ModuleVersion([9; 32]);
         let certification = crate::certified_products::encode_home_certification_with_module(
@@ -23682,7 +23695,7 @@ mod tests {
             <sha2::Sha256 as sha2::Digest>::digest(interface.certificate_bytes()).into(),
         )
         .unwrap();
-        let variant = CertifiedRecoveryProduct::from_certification(
+        let variant = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
@@ -23690,6 +23703,11 @@ mod tests {
             certification,
         )
         .with_module_interface(interface)
+        .unwrap();
+        let variant = crate::certified_products::certify_original_draft_with_validation(
+            variant,
+            &mut PackageInterfaceValidation::default(),
+        )
         .unwrap();
         let variant =
             Arc::new(ArtifactEntry::original(initial.owner.facts.producer, variant).unwrap());
@@ -23999,11 +24017,7 @@ mod tests {
             )
         };
         let child = product("DemandChild", vec![(9, vec![]), (9001, vec![])]);
-        let finalized = crate::certified_products::finalize_original_for_inventory(
-            child.clone(),
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
+        let finalized = child.clone();
         let definitions =
             crate::certified_products::original_native_group_definitions(&finalized, 9).unwrap();
         let binder = match &definitions.bindings()[0] {
@@ -29240,17 +29254,19 @@ mod tests {
                 } else {
                     vec![]
                 };
-                crate::certified_products::fixture_source_finalized_product(
-                (if sparse {
+                crate::certified_products::fixture_source_finalized_product_with_source(
+                if sparse {
                     crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
                         "main", module, vec![(7, vec![]), (11, vec![])], 91,
                         &BTreeMap::new(), format!("{module} sparse interface").into_bytes(),
                         &BTreeMap::new(), &[],
                     )
-                } else { support_product_in_unit("main", module) })
-                    .with_source_sha256(Sha256::digest(source.as_bytes()).into()),
+                } else {
+                    support_draft_with_interface("main", module, format!("{module} interface").into_bytes())
+                },
                 [7; 32],
                 imports,
+                Sha256::digest(source.as_bytes()).into(),
             )
             });
         // Current-source replay and native availability are separate proofs.
@@ -29329,13 +29345,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap();
             let historical = Arc::new(ArtifactEntry::canonical(
                 crate::certified_products::fixture_module_core(
-                    current.module_interface().unwrap(),
+                    current.module_interface(),
                     core.to_vec(),
                 ),
             ));
             assert_ne!(
                 historical.descriptor.id,
-                ArtifactEntry::canonical(current.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(current.module_interface().clone())
                     .descriptor
                     .id
             );
@@ -31176,7 +31192,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             [2; 32],
             Some(BTreeMap::from([(
                 ("fixture".into(), "Hidden".into()),
-                hidden.module_interface().unwrap().interface_sha256(),
+                hidden.module_interface().interface_sha256(),
             )])),
         );
         let relay = crate::certified_products::tests::recovered_witness_fixtures(&[relay])
@@ -31808,7 +31824,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let mut expected_roles = BTreeMap::new();
         for product in [&owner, &relay, &additional] {
             let native = ArtifactEntry::original([2; 32], product.clone()).unwrap();
-            let interface = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+            let interface = ArtifactEntry::canonical(product.module_interface().clone());
             expected_roles.insert(
                 native.descriptor.owner.clone(),
                 CompilerInputRole::ReusableOriginal {
@@ -31908,7 +31924,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn program_support_refuses_same_canonical_interface_with_another_native_owner() {
         let native_variant = |product: &CertifiedRecoveryProduct| {
-            let interface = product.module_interface().unwrap().clone();
+            let interface = product.module_interface().clone();
             let mut owner = product.owner().clone();
             owner.module_version = ModuleVersion([99; 32]);
             let certification = crate::certified_products::encode_home_certification_with_module(
@@ -31919,7 +31935,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 Sha256::digest(interface.certificate_bytes()).into(),
             )
             .unwrap();
-            let mut variant = CertifiedRecoveryProduct::from_certification(
+            let variant = crate::recovery_artifacts::OriginalDraft::from_certification(
                 owner,
                 product.interface_bytes().to_vec(),
                 product.product_bytes().to_vec(),
@@ -31928,9 +31944,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
             .with_module_interface(interface)
             .unwrap();
-            if let Some(source_sha256) = product.source_sha256() {
-                variant = variant.with_source_sha256(source_sha256);
-            }
+            assert!(product.source_sha256().is_none());
+            let variant = crate::certified_products::certify_original_draft_with_validation(
+                variant,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
             crate::certified_products::tests::recovered_witness_fixtures(&[variant])
                 .remove(0)
                 .product
@@ -31986,7 +32005,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let canonical = certified_product_artifact_view(
             [2; 32],
             &[],
-            &[unchanged[0].module_interface().unwrap().clone()],
+            &[unchanged[0].module_interface().clone()],
             None,
         )
         .unwrap();
@@ -31997,7 +32016,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     &recover_fixture_compiler_support(
                         CompilerInputProjection::from_issued_entries(&[Arc::new(
                             ArtifactEntry::canonical(
-                                unchanged[0].module_interface().unwrap().clone(),
+                                unchanged[0].module_interface().clone(),
                             ),
                         )])
                         .unwrap(),
@@ -32706,7 +32725,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let mut package_bytes = Vec::new();
         ciborium::ser::into_writer(&package_value, &mut package_bytes).unwrap();
         let product = crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
+            crate::recovery_artifacts::OriginalDraft::from_certification(
                 owner,
                 interface,
                 product_bytes,
@@ -33018,8 +33037,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .product;
         let inventory = ArtifactInventory::default();
         let entries = [
-            product.module_interface().unwrap(),
-            unchanged.module_interface().unwrap(),
+            product.module_interface(),
+            unchanged.module_interface(),
         ]
         .map(|interface| Arc::new(ArtifactEntry::canonical(interface.clone())));
         let interfaces = inventory
@@ -33145,14 +33164,20 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap();
         assert_eq!(context.semantic_sha256(), repeated.semantic_sha256());
         assert_eq!(repeated.artifact_view().inventory().node_count(), 2);
-        let changed = CertifiedRecoveryProduct::from_certification(
+        let changed = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             b"interface".to_vec(),
             b"changed".to_vec(),
-            Vec::new(),
+            product.package_imports_bytes().to_vec(),
             certification,
-        );
-        assert!(ArtifactEntry::original([2; 32], changed).is_err());
+        )
+        .with_module_interface(product.module_interface().clone())
+        .unwrap();
+        assert!(crate::certified_products::certify_original_draft_with_validation(
+            changed,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .is_err());
         assert!(ArtifactEntry::original([99; 32], product).is_err());
     }
 
@@ -33189,17 +33214,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         )
         .unwrap();
         let product = crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
+            crate::recovery_artifacts::OriginalDraft::from_certification(
                 owner,
                 original.interface,
                 original.product,
                 packages,
                 seal,
-            ),
+            )
+            .with_execution_source_with_validation(graph, &mut validation)
+            .unwrap(),
             [7; 32],
-        )
-        .with_execution_source_with_validation(graph, &mut validation)
-        .unwrap();
+        );
         Arc::new(ArtifactEntry::original([7; 32], product).unwrap())
     }
 
@@ -35609,7 +35634,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
             .unwrap();
             let product = crate::certified_products::fixture_finalized_product(
-                CertifiedRecoveryProduct::from_certification(
+                crate::recovery_artifacts::OriginalDraft::from_certification(
                     owner,
                     originals[1].interface.clone(),
                     originals[1].product.clone(),
@@ -35726,16 +35751,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             &mut validation,
         )
         .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
             product.package_imports_bytes().to_vec(),
             seal,
         )
-        .with_module_interface(product.module_interface().unwrap().clone())
+        .with_module_interface(product.module_interface().clone())
         .unwrap()
         .with_execution_source_with_validation(graph.clone(), &mut validation)
+        .unwrap();
+        let product = crate::certified_products::certify_original_draft_with_validation(
+            product,
+            &mut validation,
+        )
         .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])

@@ -15006,7 +15006,7 @@ pub(crate) mod tests {
             ],
             17,
         );
-        let native = original.original_native().unwrap();
+        let native = original.original_native();
         let groups = native
             .groups
             .iter()
@@ -15022,7 +15022,7 @@ pub(crate) mod tests {
                 &nominal_pending_groups(groups, &InventoryOperation::new(Default::default()))
                     .unwrap()
                     .0,
-                original.module_interface().unwrap(),
+                original.module_interface(),
                 original.execution_source(),
                 &native.interface_requirements,
                 &native.packages,
@@ -15211,7 +15211,7 @@ pub(crate) mod tests {
         };
         let seal = encode_home_certification(&owner, &[certified], &BTreeMap::new()).unwrap();
         let package_bytes = packages(&owner.unit, &owner.module, &interface);
-        let product = CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             interface,
             product_bytes,
@@ -15674,17 +15674,15 @@ pub(crate) mod tests {
                         BTreeMap::new(),
                         Some(&path),
                     );
-                    let group =
-                        Arc::new(testing::projected_group(package_program(name), 7).unwrap());
-                    let product_bytes =
-                        tidepool_test_data::prepared_encode::encode_module_products(&[
-                            RawModuleProduct {
-                                unit: "home-unit".into(),
-                                module: name.clone(),
-                                interface: interface.interface_bytes().to_vec(),
-                                groups: vec![group.as_ref().clone()],
-                            },
-                        ]);
+                    let group = Arc::new(testing::projected_group(package_program(name), 7).unwrap());
+                    let product_bytes = tidepool_test_data::prepared_encode::encode_module_products(&[
+                        RawModuleProduct {
+                            unit: "home-unit".into(),
+                            module: name.clone(),
+                            interface: interface.interface_bytes().to_vec(),
+                            groups: vec![group.as_ref().clone()],
+                        },
+                    ]);
                     let owner = CachedHomeOwner {
                         unit: "home-unit".into(),
                         module: name.clone(),
@@ -15718,7 +15716,7 @@ pub(crate) mod tests {
                     assert_eq!(witness.packages, packages);
                     assert_eq!(witness.groups.len(), 1);
                     assert_eq!(witness.groups[0].2.len(), 1);
-                    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+                    crate::recovery_artifacts::OriginalDraft::from_certification(
                         owner,
                         interface.interface_bytes().to_vec(),
                         product_bytes,
@@ -15726,6 +15724,13 @@ pub(crate) mod tests {
                         certification,
                     )
                     .with_module_interface(interface)
+                    .map_err(CertificationError::CapturedModulePayload)
+                    .and_then(|draft| {
+                        certify_original_draft_with_validation(
+                            draft,
+                            &mut PackageInterfaceValidation::default(),
+                        )
+                    })
                     .unwrap()
                 })
                 .collect::<Vec<_>>();
@@ -16676,13 +16681,13 @@ pub(crate) mod tests {
         };
         let (root_a, child_a, root_b, child_b) = world_stage_choice_products();
         assert_eq!(
-            root_a.module_interface().unwrap().interface_sha256(),
-            root_b.module_interface().unwrap().interface_sha256(),
+            root_a.module_interface().interface_sha256(),
+            root_b.module_interface().interface_sha256(),
             "the alternatives share the selected interface"
         );
         assert_eq!(
-            root_a.module_interface().unwrap().requirements(),
-            root_b.module_interface().unwrap().requirements(),
+            root_a.module_interface().requirements(),
+            root_b.module_interface().requirements(),
         );
         assert_ne!(root_a.owner().product_sha256, root_b.owner().product_sha256);
         let root_owner = crate::declaration_join::ExactModuleIdentity {
@@ -17172,10 +17177,17 @@ pub(crate) mod tests {
                     .map_err(|error| format!("{error:?}"))
             );
         }
-        // An unused payload needs an owner census entry, not a native witness.
+        // An unused complete payload adds custody without selecting its group.
         let unused =
             original_groups_fixture("UnusedUncaptured", vec![(7, vec![])], 7, &BTreeMap::new());
-        assert!(unused.original_native().is_none());
+        assert!(matches!(
+            certify_original_draft_with_validation(
+                unused.clone(),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("original canonical companion"))
+        ));
+        let unused = fixture_finalized_product(unused, [1; 32]);
         let mut with_unused = available.clone();
         with_unused.insert(crate::artifact_inventory::ArtifactId([0; 32]), &unused);
         validate_available_originals_with_validation(
@@ -17215,7 +17227,6 @@ pub(crate) mod tests {
         let leaf = full_native_fixture("PrivateFactsLeaf", vec![(5, vec![])], 7);
         let binder = leaf
             .original_native()
-            .unwrap()
             .group(5)
             .unwrap()
             .group
@@ -17503,7 +17514,7 @@ pub(crate) mod tests {
                 .collect(),
             7,
         );
-        let native = original.original_native().unwrap();
+        let native = original.original_native();
         assert_eq!(
             native
                 .groups
@@ -17600,14 +17611,23 @@ pub(crate) mod tests {
     #[test]
     fn original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners() {
         let original = full_native_fixture("Indexed", vec![(29, vec![]), (3, vec![])], 7);
-        let native = original.original_native().unwrap();
+        let native = original.original_native();
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
+            original.owner().clone(),
+            original.interface_bytes().to_vec(),
+            original.product_bytes().to_vec(),
+            original.package_imports_bytes().to_vec(),
+            original.certification_bytes().to_vec(),
+        )
+        .with_module_interface(original.module_interface().clone())
+        .unwrap();
         let witness =
             || verify_home_witness(original.certification_bytes(), original.owner()).unwrap();
         let mut duplicate = native.groups.to_vec();
         duplicate.push(duplicate[0].clone());
         assert!(matches!(
             retain_authenticated_original_native(
-                original.clone(),
+                draft.clone(),
                 duplicate,
                 witness(),
                 native.package_interfaces(),
@@ -17621,7 +17641,7 @@ pub(crate) mod tests {
         Arc::make_mut(&mut wrong_owner[0]).owner.module_version = ModuleVersion([8; 32]);
         assert!(matches!(
             retain_authenticated_original_native(
-                original.clone(),
+                draft.clone(),
                 wrong_owner,
                 witness(),
                 native.package_interfaces(),
@@ -17635,7 +17655,7 @@ pub(crate) mod tests {
         wrong_witness.owner.module_version = ModuleVersion([8; 32]);
         assert!(matches!(
             retain_authenticated_original_native(
-                original.clone(),
+                draft.clone(),
                 native.groups.to_vec(),
                 wrong_witness,
                 native.package_interfaces(),
@@ -17682,7 +17702,6 @@ pub(crate) mod tests {
         let products = [cached];
         let selected = products[0]
             .original_native()
-            .unwrap()
             .groups
             .iter()
             .filter(|group| {
@@ -17692,7 +17711,7 @@ pub(crate) mod tests {
             })
             .map(|group| {
                 group
-                    .admitted(products[0].original_native().unwrap())
+                    .admitted(products[0].original_native())
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -17715,25 +17734,24 @@ pub(crate) mod tests {
         };
         let base = products[0]
             .original_native()
-            .unwrap()
             .groups
             .iter()
             .flat_map(|group| {
                 rows(
                     &group
-                        .admitted(products[0].original_native().unwrap())
+                        .admitted(products[0].original_native())
                         .unwrap(),
                 )
             })
             .collect::<Vec<_>>();
         let mut current = selected.iter().flat_map(rows).collect::<Vec<_>>();
-        let mut fresh_group = fresh.original_native().unwrap().groups[0]
-            .admitted(fresh.original_native().unwrap())
+        let mut fresh_group = fresh.original_native().groups[0]
+            .admitted(fresh.original_native())
             .unwrap();
         fresh_group.origin = ProductOrigin::Fresh;
         current.extend(rows(&fresh_group));
-        let mut retained_group = retained.original_native().unwrap().groups[0]
-            .admitted(retained.original_native().unwrap())
+        let mut retained_group = retained.original_native().groups[0]
+            .admitted(retained.original_native())
             .unwrap();
         retained_group.origin = ProductOrigin::RetainedCore;
         current.extend(rows(&retained_group));
@@ -17928,7 +17946,7 @@ pub(crate) mod tests {
             let mut basis_view = inventory.empty_view();
             for product in &products {
                 let entry = Arc::new(crate::artifact_inventory::ArtifactEntry::original(
-                    product.module_interface().unwrap().producer_sha256(), product.clone(),
+                    product.module_interface().producer_sha256(), product.clone(),
                 ).unwrap());
                 let sibling = inventory.admit_recovery_selection(
                     &inventory.empty_view(), vec![entry], &BTreeSet::new(),
@@ -17949,8 +17967,8 @@ pub(crate) mod tests {
             for (index, prefix) in prefixes.into_iter().enumerate() {
                 let count = prefix % (ordinals.len() + 1);
                 let product = &products[index % products.len()];
-                let selected = product.original_native().unwrap().groups[..count].iter()
-                    .map(|group| group.admitted(product.original_native().unwrap()).unwrap()).collect::<Vec<_>>();
+                let selected = product.original_native().groups[..count].iter()
+                    .map(|group| group.admitted(product.original_native()).unwrap()).collect::<Vec<_>>();
                 let membership = retained.admit(&basis, &products, &operation).unwrap();
                 assert!(Arc::ptr_eq(&original, &membership));
                 let overlay = membership.overlay(&selected, &operation).unwrap();
@@ -17985,7 +18003,7 @@ pub(crate) mod tests {
     fn selected_group_validation_keeps_exact_bindings_across_equal_owner_custody() {
         use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
         let product = full_native_fixture("SelectedScopeIdentity", vec![(7, vec![])], 1);
-        let producer = product.module_interface().unwrap().producer_sha256();
+        let producer = product.module_interface().producer_sha256();
         let original = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let alternate = Arc::new(
             ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
@@ -18107,7 +18125,7 @@ pub(crate) mod tests {
             )],
             1,
         );
-        let producer = child.module_interface().unwrap().producer_sha256();
+        let producer = child.module_interface().producer_sha256();
         let child_entry = Arc::new(ArtifactEntry::original(producer, child.clone()).unwrap());
         let root_entry = Arc::new(ArtifactEntry::original(producer, root).unwrap());
         let other_entry = Arc::new(
@@ -18741,7 +18759,7 @@ pub(crate) mod tests {
             producer,
             Some(BTreeMap::from([(
                 (owner.unit.clone(), owner.module.clone()),
-                product.module_interface().unwrap().interface_sha256(),
+                product.module_interface().interface_sha256(),
             )])),
         );
         let fresh_entry = Arc::new(ArtifactEntry::original(producer, fresh.clone()).unwrap());
@@ -18750,7 +18768,7 @@ pub(crate) mod tests {
             .admit_current(
                 fresh.owner(),
                 ProductOrigin::Fresh,
-                fresh.module_interface().unwrap(),
+                fresh.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -18882,7 +18900,7 @@ pub(crate) mod tests {
             CompilerSourceSupport::close_complete_output(issued.compiler_inputs()).unwrap();
         let published = closed.certify_original_closure(&publication).unwrap();
         let canonical = ArtifactEntry::canonical_artifact_id(
-            publication.products()[0].module_interface().unwrap(),
+            publication.products()[0].module_interface(),
         );
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = published
             .checked_native_input_decision(fresh_id, canonical, row.original_owner())
@@ -18970,7 +18988,7 @@ pub(crate) mod tests {
             .admit_current(
                 empty_product.owner(),
                 ProductOrigin::Fresh,
-                empty_product.module_interface().unwrap(),
+                empty_product.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -19008,7 +19026,6 @@ pub(crate) mod tests {
 
         assert!(empty_publication.products()[0]
             .original_native()
-            .unwrap()
             .group(17)
             .is_some());
         crate::declaration_context::assert_completed_nominal_program_support(
@@ -19032,7 +19049,7 @@ pub(crate) mod tests {
             .checked_native_input_decision(
                 empty_id,
                 ArtifactEntry::canonical_artifact_id(
-                    empty_publication.products()[0].module_interface().unwrap(),
+                    empty_publication.products()[0].module_interface(),
                 ),
                 empty_row.original_owner(),
             )
@@ -19082,7 +19099,7 @@ pub(crate) mod tests {
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         let product = full_native_fixture("ExactReceiptIdentity", vec![(7, vec![])], 1);
-        let producer = product.module_interface().unwrap().producer_sha256();
+        let producer = product.module_interface().producer_sha256();
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let other = Arc::new(
             ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
@@ -19219,7 +19236,7 @@ pub(crate) mod tests {
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         let product = full_native_fixture("ProducedReceiptIdentity", vec![(7, vec![])], 1);
-        let canonical = product.module_interface().unwrap();
+        let canonical = product.module_interface();
         let entry = Arc::new(
             ArtifactEntry::original(canonical.producer_sha256(), product.clone()).unwrap(),
         );
@@ -19316,7 +19333,7 @@ pub(crate) mod tests {
             ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         let original = full_native_fixture("Upgrade", vec![(3, vec![])], 7);
-        let canonical = original.module_interface().unwrap();
+        let canonical = original.module_interface();
         let interface = Arc::new(ArtifactEntry::canonical(canonical.clone()));
         let native = Arc::new(
             ArtifactEntry::original(canonical.producer_sha256(), original.clone()).unwrap(),
@@ -19378,7 +19395,7 @@ pub(crate) mod tests {
         .remove(0)
         .product;
         assert_ne!(
-            ArtifactEntry::canonical(other.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(other.module_interface().clone())
                 .descriptor
                 .id,
             issued.roles()[0].interface()
@@ -19387,7 +19404,7 @@ pub(crate) mod tests {
             selection.admit_current(
                 other.owner(),
                 ProductOrigin::Fresh,
-                other.module_interface().unwrap(),
+                other.module_interface(),
                 &operation
             ),
             Err(CertificationError::Mismatch(
@@ -19487,7 +19504,7 @@ pub(crate) mod tests {
         let historical = product(historical);
         assert_eq!(original.module_interface(), historical.module_interface());
         assert_ne!(original.owner(), historical.owner());
-        let canonical = original.module_interface().unwrap();
+        let canonical = original.module_interface();
         let interface = Arc::new(ArtifactEntry::canonical(canonical.clone()));
         let native = Arc::new(
             ArtifactEntry::original(canonical.producer_sha256(), original.clone()).unwrap(),
@@ -20010,7 +20027,7 @@ pub(crate) mod tests {
                         .admit_current(
                             fresh.owner(),
                             ProductOrigin::RetainedCore,
-                            fresh.module_interface().unwrap(),
+                            fresh.module_interface(),
                             &operation,
                         )
                         .unwrap();
@@ -20213,7 +20230,7 @@ pub(crate) mod tests {
                 })
                 .collect::<Vec<_>>();
             let unused_interface = Arc::new(ArtifactEntry::canonical(
-                products[0].product.module_interface().unwrap().clone(),
+                products[0].product.module_interface().clone(),
             ));
             for selected in [None, Some(7), Some(9001)] {
                 for grant_full in [false, true] {
@@ -20386,7 +20403,7 @@ pub(crate) mod tests {
                                 .admit_current(
                                     output.owner(),
                                     ProductOrigin::RetainedCore,
-                                    output.module_interface().unwrap(),
+                                    output.module_interface(),
                                     &operation,
                                 )
                                 .unwrap();
@@ -20656,7 +20673,7 @@ pub(crate) mod tests {
                         vec![
                             entry.clone(),
                             Arc::new(ArtifactEntry::canonical(
-                                product(marker, version).module_interface().unwrap().clone(),
+                                product(marker, version).module_interface().clone(),
                             )),
                         ],
                         &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
@@ -20697,7 +20714,7 @@ pub(crate) mod tests {
             assert!(a_groups.is_disjoint(&b_groups));
             for id in [
                 entry.descriptor.id,
-                ArtifactEntry::canonical(native.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(native.module_interface().clone())
                     .descriptor
                     .id,
             ] {
@@ -20761,7 +20778,7 @@ pub(crate) mod tests {
                 .admit_current(
                     parent_product.owner(),
                     ProductOrigin::RetainedCore,
-                    parent_product.module_interface().unwrap(),
+                    parent_product.module_interface(),
                     &operation,
                 )
                 .unwrap();
@@ -21210,7 +21227,7 @@ pub(crate) mod tests {
             .admit_current(
                 product.owner(),
                 ProductOrigin::RetainedCore,
-                product.module_interface().unwrap(),
+                product.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -21229,7 +21246,7 @@ pub(crate) mod tests {
         assert!(
             matches!(completed.compiler_inputs().role_projection().snapshot_roles()[&original.descriptor.owner],
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { interface }
-                if interface == ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id),
+                if interface == ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id),
             "RetainedCore availability does not select a compiler Original"
         );
         assert_eq!(
@@ -21289,7 +21306,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let input_graph = selected_input.capture_graph_selection();
-        let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+        let canonical_id = ArtifactEntry::canonical(product.module_interface().clone())
             .descriptor
             .id;
         assert_eq!(
@@ -21522,7 +21539,7 @@ pub(crate) mod tests {
                 ArtifactEntry::original(producer.sha256(), output_product.clone()).unwrap(),
             );
             let canonical_support = Arc::new(ArtifactEntry::canonical(
-                support_product.module_interface().unwrap().clone(),
+                support_product.module_interface().clone(),
             ));
             assert!(output_entry.requirements.contains(&support_owner));
             let mut required = BTreeSet::new();
@@ -21775,7 +21792,7 @@ pub(crate) mod tests {
                     .admit_current(
                         output_product.owner(),
                         ProductOrigin::RetainedCore,
-                        output_product.module_interface().unwrap(),
+                        output_product.module_interface(),
                         &operation,
                     )
                     .unwrap();
@@ -21858,7 +21875,7 @@ pub(crate) mod tests {
                     assert!(
                         matches!(completed.compiler_inputs().role_projection().snapshot_roles()[&output_entry.descriptor.owner],
                         CompilerInputRole::InterfaceOnly { interface }
-                            if interface == ArtifactEntry::canonical(output_product.module_interface().unwrap().clone()).descriptor.id),
+                            if interface == ArtifactEntry::canonical(output_product.module_interface().clone()).descriptor.id),
                         "RetainedCore output availability does not grant Original selection"
                     );
                     let mut expected_namespace = input
@@ -21869,7 +21886,7 @@ pub(crate) mod tests {
                         .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
                         .collect::<BTreeSet<_>>();
                     expected_namespace.insert(ArtifactEntry::canonical_artifact_id(
-                        output_product.module_interface().unwrap(),
+                        output_product.module_interface(),
                     ));
                     let completed_graph = completed.issued_artifacts().capture_graph_selection();
                     assert_eq!(
@@ -22030,7 +22047,7 @@ pub(crate) mod tests {
                     dependency.owner().unit.clone(),
                     dependency.owner().module.clone(),
                 ),
-                dependency.module_interface().unwrap().interface_sha256(),
+                dependency.module_interface().interface_sha256(),
             )])),
         );
         let products = recovered_witness_fixtures(&[dependency, fresh]);
@@ -22076,7 +22093,7 @@ pub(crate) mod tests {
                 .admit_current(
                     fresh.owner(),
                     ProductOrigin::RetainedCore,
-                    fresh.module_interface().unwrap(),
+                    fresh.module_interface(),
                     &operation,
                 )
                 .unwrap();
@@ -22320,7 +22337,7 @@ pub(crate) mod tests {
             .admit_current(
                 fresh.owner(),
                 ProductOrigin::RetainedCore,
-                fresh.module_interface().unwrap(),
+                fresh.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -22547,9 +22564,9 @@ pub(crate) mod tests {
             sources.get(&key),
             Some(&(owner.clone(), ProductOrigin::Cached))
         );
-        assert_eq!(original.original_native().unwrap().groups.len(), 2);
-        let selected = original.original_native().unwrap().groups[0]
-            .admitted(original.original_native().unwrap())
+        assert_eq!(original.original_native().groups.len(), 2);
+        let selected = original.original_native().groups[0]
+            .admitted(original.original_native())
             .unwrap();
         available_original_source_map(
             std::slice::from_ref(&original),
@@ -22644,7 +22661,7 @@ pub(crate) mod tests {
         let inventory = crate::artifact_inventory::ArtifactInventory::default();
         let entry = Arc::new(
             crate::artifact_inventory::ArtifactEntry::original(
-                product.module_interface().unwrap().producer_sha256(),
+                product.module_interface().producer_sha256(),
                 product.clone(),
             )
             .unwrap(),
@@ -22698,9 +22715,9 @@ pub(crate) mod tests {
             .cloned()
             .collect::<BTreeSet<_>>();
         for count in 0..=2 {
-            let groups = product.original_native().unwrap().groups[..count]
+            let groups = product.original_native().groups[..count]
                 .iter()
-                .map(|group| group.admitted(product.original_native().unwrap()).unwrap())
+                .map(|group| group.admitted(product.original_native()).unwrap())
                 .collect::<Vec<_>>();
             let overlay = first.overlay(&groups, &operation).unwrap();
             assert_eq!(overlay.groups.len(), count);
@@ -22731,16 +22748,17 @@ pub(crate) mod tests {
             Err(CertificationError::OriginalMembership(reason))
                 if *reason == OriginalMembershipFailure::UnexpectedOwner(other.owner().clone()))
         );
-        let altered = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let altered = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         );
-        assert!(matches!(retained.admit(&basis, &[altered], &operation),
-            Err(CertificationError::OriginalMembership(reason))
-                if *reason == OriginalMembershipFailure::OriginalBytes(product.owner().clone())));
+        assert!(matches!(
+            certify_original_draft_with_validation(altered, &mut PackageInterfaceValidation::default(),),
+            Err(CertificationError::Mismatch("original canonical companion"))
+        ));
         assert!(
             Arc::ptr_eq(
                 &first,
@@ -22777,16 +22795,14 @@ pub(crate) mod tests {
 
     #[test]
     fn retained_original_membership_tracks_changed_input_basis_in_one_operation() {
-        use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
-        };
+        use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, CompilerInputProjection};
 
         let first_product = full_native_fixture("MembershipPrefix", vec![(8, vec![])], 7);
         let added_product = full_native_fixture("Scientific", vec![(26, vec![])], 9);
         let entry = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
             Arc::new(
                 ArtifactEntry::original(
-                    product.module_interface().unwrap().producer_sha256(),
+                    product.module_interface().producer_sha256(),
                     product.clone(),
                 )
                 .unwrap(),
@@ -22851,7 +22867,7 @@ pub(crate) mod tests {
             .unwrap();
         let next_basis = next_metadata.original_source_membership_basis();
         assert!(!first_basis.same_owner(&next_basis));
-        let invalid = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let invalid = crate::recovery_artifacts::OriginalDraft::from_certification(
             added_product.owner().clone(),
             added_product.interface_bytes().to_vec(),
             added_product.product_bytes().to_vec(),
@@ -22859,14 +22875,11 @@ pub(crate) mod tests {
             added_product.certification_bytes().to_vec(),
         );
         assert!(matches!(
-            retained.admit(
-                &next_basis,
-                &[first_product.clone(), invalid.clone()],
-                &operation
+            certify_original_draft_with_validation(
+                invalid.clone(),
+                &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch(
-                "available original native witness"
-            ))
+            Err(CertificationError::Mismatch("original canonical companion"))
         ));
         assert!(
             Arc::ptr_eq(
@@ -22909,25 +22922,19 @@ pub(crate) mod tests {
             Err(CertificationError::OriginalMembership(reason))
                 if *reason == OriginalMembershipFailure::MissingOwner(added_product.owner().clone()))
         );
-        assert!(
-            matches!(retained.admit(&next_basis, &[first_product.clone(), invalid], &operation),
-            Err(CertificationError::OriginalMembership(reason))
-                if *reason == OriginalMembershipFailure::OriginalBytes(added_product.owner().clone()))
-        );
+        assert!(matches!(
+            certify_original_draft_with_validation(invalid, &mut PackageInterfaceValidation::default(),),
+            Err(CertificationError::Mismatch("original canonical companion"))
+        ));
         assert!(Arc::ptr_eq(
             &expanded,
             &retained.admit(&next_basis, &products, &operation).unwrap()
         ));
         let selected = first_product
             .original_native()
-            .unwrap()
             .groups
             .iter()
-            .map(|group| {
-                group
-                    .admitted(first_product.original_native().unwrap())
-                    .unwrap()
-            })
+            .map(|group| group.admitted(first_product.original_native()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             original
@@ -22997,7 +23004,7 @@ pub(crate) mod tests {
         let inventory = crate::artifact_inventory::ArtifactInventory::default();
         let entry = Arc::new(
             crate::artifact_inventory::ArtifactEntry::original(
-                product.module_interface().unwrap().producer_sha256(),
+                product.module_interface().producer_sha256(),
                 product.clone(),
             )
             .unwrap(),
@@ -23088,11 +23095,11 @@ pub(crate) mod tests {
         let new = full_native_fixture("Shared", vec![(3, vec![captured(2)]), (11, vec![])], 9);
         let products = [old.clone(), new.clone()];
         let selected = [
-            old.original_native().unwrap().groups[0]
-                .admitted(old.original_native().unwrap())
+            old.original_native().groups[0]
+                .admitted(old.original_native())
                 .unwrap(),
-            new.original_native().unwrap().groups[0]
-                .admitted(new.original_native().unwrap())
+            new.original_native().groups[0]
+                .admitted(new.original_native())
                 .unwrap(),
         ];
         let mut validation = PackageInterfaceValidation::default();
@@ -23137,7 +23144,7 @@ pub(crate) mod tests {
             .admit_current(
                 new.owner(),
                 ProductOrigin::Fresh,
-                new.module_interface().unwrap(),
+                new.module_interface(),
                 &validation.inventory,
             )
             .unwrap();
@@ -23223,7 +23230,7 @@ pub(crate) mod tests {
             old_selection.clone().admit_current(
                 new.owner(),
                 ProductOrigin::Fresh,
-                new.module_interface().unwrap(),
+                new.module_interface(),
                 &validation.inventory
             ),
             Err(CertificationError::Mismatch(
@@ -23282,7 +23289,7 @@ pub(crate) mod tests {
             .admit_current(
                 new_helper.owner(),
                 ProductOrigin::Fresh,
-                new_helper.module_interface().unwrap(),
+                new_helper.module_interface(),
                 &validation.inventory,
             )
             .unwrap();
@@ -23298,12 +23305,12 @@ pub(crate) mod tests {
             original_ordinal: 3,
             binder: testing::identity("Helper", "entry_3"),
         };
-        let native_group = &original.original_native().unwrap().groups[0];
+        let native_group = &original.original_native().groups[0];
         let admitted = validate_original_group_receipts(
             native_group.group(),
             &[old_receipt.clone()],
             native_group,
-            original.original_native().unwrap(),
+            original.original_native(),
             &sources,
             &BTreeMap::new(),
             &mut validation,
@@ -23336,7 +23343,7 @@ pub(crate) mod tests {
                 native_group.group(),
                 &[wrong],
                 native_group,
-                original.original_native().unwrap(),
+                original.original_native(),
                 &sources,
                 &BTreeMap::new(),
                 &mut validation
@@ -23354,7 +23361,7 @@ pub(crate) mod tests {
                 native_group.group(),
                 &[old_receipt.clone()],
                 native_group,
-                original.original_native().unwrap(),
+                original.original_native(),
                 &missing,
                 &BTreeMap::new(),
                 &mut validation
@@ -23364,17 +23371,17 @@ pub(crate) mod tests {
         let changed_body = full_native_fixture("Consumer", vec![(11, vec![])], 7);
         assert!(matches!(
             validate_original_group_receipts(
-                changed_body.original_native().unwrap().groups[0].group(),
+                changed_body.original_native().groups[0].group(),
                 &[old_receipt],
                 native_group,
-                original.original_native().unwrap(),
+                original.original_native(),
                 &sources,
                 &BTreeMap::new(),
                 &mut validation
             ),
             Err(CertificationError::Mismatch("shared original home groups"))
         ));
-        let canonical = original.module_interface().unwrap();
+        let canonical = original.module_interface();
         assert!(matches_cached_original_reoffer(
             &original,
             original.owner(),
@@ -23412,11 +23419,11 @@ pub(crate) mod tests {
             original.owner(),
             original.product_bytes(),
             original.package_imports_bytes(),
-            different_canonical.module_interface().unwrap()
+            different_canonical.module_interface()
         ));
         let mut selected = vec![admitted.clone()];
         let inherited = native_group
-            .admitted(original.original_native().unwrap())
+            .admitted(original.original_native())
             .unwrap();
         append_original_selection(
             &mut selected,
@@ -23494,7 +23501,7 @@ pub(crate) mod tests {
             .admit_current(
                 &staged,
                 ProductOrigin::RetainedCore,
-                product.module_interface().unwrap(),
+                product.module_interface(),
                 &validation.inventory,
             )
             .unwrap();
@@ -23561,7 +23568,7 @@ pub(crate) mod tests {
             )],
             9,
         );
-        let native = consumer.original_native().unwrap();
+        let native = consumer.original_native();
         let witness = issue_home_certification_with_validation(
             consumer.owner(),
             &native.groups,
@@ -23685,7 +23692,7 @@ pub(crate) mod tests {
             )],
             11,
         );
-        let native = consumer.original_native().unwrap();
+        let native = consumer.original_native();
         let witness = issue_home_certification_with_validation(
             consumer.owner(),
             &native.groups,
@@ -23757,7 +23764,7 @@ pub(crate) mod tests {
             .admit_current(
                 &staged,
                 ProductOrigin::RetainedCore,
-                original.module_interface().unwrap(),
+                original.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -23840,7 +23847,7 @@ pub(crate) mod tests {
     fn authenticated_promotion_convergence_requires_exact_sharing_proof() {
         let original =
             full_native_fixture("PromotedAuthenticated", vec![(3, vec![]), (11, vec![])], 7);
-        let native = original.original_native().unwrap();
+        let native = original.original_native();
         let selected = [native.groups[0].admitted(native).unwrap()];
         let operation = InventoryOperation::new(Default::default());
         let membership =
@@ -24110,7 +24117,7 @@ pub(crate) mod tests {
                 };
                 let historical =
                     full_native_fixture("ProtectedHistory", vec![(11, vec![edge.clone()])], 72);
-                let original = &historical.original_native().unwrap().groups[0];
+                let original = &historical.original_native().groups[0];
                 let receipt = ReceiptImportOwner::Source {
                     unit: product.owner().unit.clone(),
                     module: product.owner().module.clone(),
@@ -24125,7 +24132,7 @@ pub(crate) mod tests {
                     original.group(),
                     &[receipt],
                     original,
-                    historical.original_native().unwrap(),
+                    historical.original_native(),
                     &sources,
                     &BTreeMap::new(),
                     &mut validation,
@@ -24410,7 +24417,7 @@ pub(crate) mod tests {
                     .admit_current(
                         product.owner(),
                         ProductOrigin::Fresh,
-                        product.module_interface().unwrap(),
+                        product.module_interface(),
                         &validation.inventory,
                     )
                     .unwrap();
@@ -25121,7 +25128,7 @@ pub(crate) mod tests {
             .admit_current(
                 consumer.owner(),
                 ProductOrigin::RetainedCore,
-                consumer.module_interface().unwrap(),
+                consumer.module_interface(),
                 &operation,
             )
             .unwrap();
@@ -25138,7 +25145,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let completed = stage.compiler_inputs().as_ref().clone();
-        let canonical = ArtifactEntry::canonical(consumer.module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(consumer.module_interface().clone());
         assert_eq!(
             completed.role_projection().snapshot_roles()[&entry.descriptor.owner],
             CompilerInputRole::InterfaceOnly {
@@ -25456,7 +25463,7 @@ pub(crate) mod tests {
             .admit_current(
                 product.owner(),
                 ProductOrigin::Cached,
-                product.module_interface().unwrap(),
+                product.module_interface(),
                 &validation.inventory,
             )
             .unwrap();
@@ -25549,7 +25556,7 @@ pub(crate) mod tests {
             producer.sha256(),
             Some(BTreeMap::from([(
                 (g.owner().unit.clone(), g.owner().module.clone()),
-                g.module_interface().unwrap().interface_sha256(),
+                g.module_interface().interface_sha256(),
             )])),
         );
         let r = recovered_witness_fixtures(&[r]).remove(0).product;
@@ -25564,7 +25571,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         let g_interface = Arc::new(ArtifactEntry::canonical(
-            g.module_interface().unwrap().clone(),
+            g.module_interface().clone(),
         ));
         let projection =
             CompilerInputProjection::from_issued_entries(&[r_entry.clone(), g_interface]).unwrap();
@@ -25613,8 +25620,8 @@ pub(crate) mod tests {
                 "initial closure transfer: {error:?}; R={:?} G={:?} Rcanonical={:?} Gcanonical={:?}; roles={:?}; receiving_groups={:?}; closure_groups={:?}",
                 r_entry.descriptor.id,
                 g_entry.descriptor.id,
-                ArtifactEntry::canonical_artifact_id(r.module_interface().unwrap()),
-                ArtifactEntry::canonical_artifact_id(g.module_interface().unwrap()),
+                ArtifactEntry::canonical_artifact_id(r.module_interface()),
+                ArtifactEntry::canonical_artifact_id(g.module_interface()),
                 completed.projection().snapshot_roles(),
                 completed.artifacts().capture_graph_selection().native_groups,
                 closure.native_closure().capture_graph_selection().native_groups,
@@ -25694,7 +25701,7 @@ pub(crate) mod tests {
             producer.sha256(),
             Some(BTreeMap::from([(
                 (r.owner().unit.clone(), r.owner().module.clone()),
-                r.module_interface().unwrap().interface_sha256(),
+                r.module_interface().interface_sha256(),
             )])),
         );
         let j = recovered_witness_fixtures(&[j]).remove(0).product;
@@ -25704,7 +25711,7 @@ pub(crate) mod tests {
                 .admit_current(
                     product.owner(),
                     ProductOrigin::Cached,
-                    product.module_interface().unwrap(),
+                    product.module_interface(),
                     &validation.inventory,
                 )
                 .unwrap();
@@ -26098,7 +26105,7 @@ pub(crate) mod tests {
                     .admit_current(
                         product.owner(),
                         ProductOrigin::Cached,
-                        product.module_interface().unwrap(),
+                        product.module_interface(),
                         &validation.inventory,
                     )
                     .unwrap();
@@ -26416,7 +26423,7 @@ pub(crate) mod tests {
                 .admit_current(
                     current.owner(),
                     ProductOrigin::Cached,
-                    current.module_interface().unwrap(),
+                    current.module_interface(),
                     &validation.inventory,
                 )
                 .unwrap();
@@ -27010,7 +27017,7 @@ pub(crate) mod tests {
                             .map(|product| {
                                 (
                                     (product.owner().unit.clone(), product.owner().module.clone()),
-                                    product.module_interface().unwrap().interface_sha256(),
+                                    product.module_interface().interface_sha256(),
                                 )
                             })
                             .collect(),
@@ -27018,7 +27025,7 @@ pub(crate) mod tests {
                 )])
                 .remove(0)
                 .product;
-            assert_eq!(authored.module_interface().unwrap().requirements().len(), 2);
+            assert_eq!(authored.module_interface().requirements().len(), 2);
             let mut products = vec![authored.clone(), schema.clone(), fresh.clone()];
             if later_group == 197 {
                 products.push(scientific.clone());
@@ -27028,7 +27035,7 @@ pub(crate) mod tests {
                 .map(|product| Arc::new(ArtifactEntry::original([1; 32], product.clone()).unwrap()))
                 .collect::<Vec<_>>();
             entries.push(Arc::new(ArtifactEntry::canonical(
-                scientific.module_interface().unwrap().clone(),
+                scientific.module_interface().clone(),
             )));
             let inventory = ArtifactInventory::default();
             let available = inventory
@@ -27160,7 +27167,7 @@ pub(crate) mod tests {
                 .map(|(_, product)| {
                     (
                         (product.owner().unit.clone(), product.owner().module.clone()),
-                        product.module_interface().unwrap().interface_sha256(),
+                        product.module_interface().interface_sha256(),
                     )
                 })
                 .collect();
@@ -27276,7 +27283,7 @@ pub(crate) mod tests {
         let inventory = ArtifactInventory::default();
         let native = Arc::new(ArtifactEntry::original([1; 32], scaffold.clone()).unwrap());
         let canonical = Arc::new(ArtifactEntry::canonical(
-            scaffold.module_interface().unwrap().clone(),
+            scaffold.module_interface().clone(),
         ));
         let entries = vec![native.clone(), canonical];
         let available = inventory
@@ -27366,7 +27373,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 ));
                 entries.push(Arc::new(ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone(),
+                    product.module_interface().clone(),
                 )));
             }
             let available = inventory
@@ -27416,17 +27423,15 @@ pub(crate) mod tests {
         let other = full_native_fixture("OtherBoundGroup", vec![(12, vec![])], 7);
         let mut candidates = original
             .original_native()
-            .unwrap()
             .groups
             .iter()
-            .map(|group| group.admitted(original.original_native().unwrap()).unwrap())
+            .map(|group| group.admitted(original.original_native()).unwrap())
             .chain(
                 other
                     .original_native()
-                    .unwrap()
                     .groups
                     .iter()
-                    .map(|group| group.admitted(other.original_native().unwrap()).unwrap()),
+                    .map(|group| group.admitted(other.original_native()).unwrap()),
             )
             .collect::<Vec<_>>();
         // An available but undemanded duplicate cannot compete with a solved row.
@@ -27504,7 +27509,7 @@ pub(crate) mod tests {
         assert_eq!(owner.groups().len(), 1);
         assert_eq!(
             owner.groups()[0].origin(),
-            original.original_native().unwrap().groups[0].origin(),
+            original.original_native().groups[0].origin(),
             "target admission preserves its original witness origin",
         );
         let (_, selected) = admitted.artifacts().selected_native_binding_rows();
@@ -27698,7 +27703,7 @@ pub(crate) mod tests {
             &interface,
             vec![],
         );
-        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             interface,
             bytes,
@@ -27821,10 +27826,9 @@ pub(crate) mod tests {
         let original = full_native_fixture("FreshSubset", vec![(8, vec![]), (11, vec![])], 7);
         let candidates = original
             .original_native()
-            .unwrap()
             .groups
             .iter()
-            .map(|group| group.admitted(original.original_native().unwrap()).unwrap())
+            .map(|group| group.admitted(original.original_native()).unwrap())
             .collect::<Vec<_>>();
         let mut validation = PackageInterfaceValidation::default();
         let entry = Arc::new(
@@ -27861,10 +27865,10 @@ pub(crate) mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(
             groups[0].origin(),
-            original.original_native().unwrap().groups[0].origin()
+            original.original_native().groups[0].origin()
         );
         assert_eq!(groups[0].group().original_ordinal(), 8);
-        assert_eq!(original.original_native().unwrap().groups.len(), 2);
+        assert_eq!(original.original_native().groups.len(), 2);
         let selected_entries = selected.entries();
         let retained_entry = selected_entries
             .iter()
@@ -27911,13 +27915,10 @@ pub(crate) mod tests {
         assert!(!packet.contains_original(&recaptured));
     }
 
-    fn recovery_graph_original(
-        source: &Path,
-    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    fn recovery_graph_original(source: &Path) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let (graph, originals) = crate::execution_source::test_prepared_graph(source);
         let original = originals.into_iter().next().unwrap();
-        let certificate =
-            encode_home_certification(&original.owner, &[], &BTreeMap::new()).unwrap();
+        let certificate = encode_home_certification(&original.owner, &[], &BTreeMap::new()).unwrap();
         let certificate = bind_home_execution_source(
             &certificate,
             &original.owner,
@@ -27926,17 +27927,17 @@ pub(crate) mod tests {
         )
         .unwrap();
         fixture_finalized_product(
-            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            crate::recovery_artifacts::OriginalDraft::from_certification(
                 original.owner,
                 original.interface,
                 original.product,
                 Vec::new(),
                 certificate,
-            ),
+            )
+            .with_execution_source(graph)
+            .unwrap(),
             [7; 32],
         )
-        .with_execution_source(graph)
-        .unwrap()
     }
 
     #[test]
@@ -27988,13 +27989,12 @@ pub(crate) mod tests {
                 retained[0]
                     .product
                     .module_interface()
-                    .unwrap()
                     .certificate_bytes(),
-                original.module_interface().unwrap().certificate_bytes()
+                original.module_interface().certificate_bytes()
             );
             assert_eq!(
-                retained[0].product.module_interface().unwrap().core_bytes(),
-                original.module_interface().unwrap().core_bytes()
+                retained[0].product.module_interface().core_bytes(),
+                original.module_interface().core_bytes()
             );
             std::fs::write(&path, bytes).unwrap();
             assert!(
@@ -28053,7 +28053,7 @@ pub(crate) mod tests {
         for ((original, recovered), ordinal) in originals.iter().zip(&baseline).zip([7, 11]) {
             assert_eq!(recovered.product.owner(), original.owner());
             assert_eq!(
-                recovered.product.original_native().unwrap().groups[0]
+                recovered.product.original_native().groups[0]
                     .group()
                     .original_ordinal(),
                 ordinal
@@ -28097,8 +28097,8 @@ pub(crate) mod tests {
         for (recovered, prior) in after_refusal.iter().zip(&baseline) {
             assert!(recovered.product.same_durable_artifact(&prior.product));
             assert_eq!(
-                recovered.product.original_native().unwrap().groups,
-                prior.product.original_native().unwrap().groups
+                recovered.product.original_native().groups,
+                prior.product.original_native().groups
             );
         }
     }
@@ -28174,7 +28174,7 @@ pub(crate) mod tests {
                 recovered.product.certification_bytes(),
                 original.certification_bytes()
             );
-            let groups = &recovered.product.original_native().unwrap().groups;
+            let groups = &recovered.product.original_native().groups;
             assert_eq!(groups.len(), usize::from(expected_ordinal.is_some()));
             if let Some(ordinal) = expected_ordinal {
                 assert_eq!(groups[0].group().original_ordinal(), ordinal);
@@ -28331,7 +28331,6 @@ pub(crate) mod tests {
                 module_interface,
                 package_interfaces: fixture
                     .original_native()
-                    .unwrap()
                     .package_interfaces()
                     .clone(),
                 execution_source: None,
@@ -28343,7 +28342,7 @@ pub(crate) mod tests {
             candidate(
                 fixture.owner().clone(),
                 fixture.certification_bytes().to_vec(),
-                fixture.module_interface().unwrap().clone(),
+                fixture.module_interface().clone(),
             ),
             &mut PackageInterfaceValidation::default(),
         )
@@ -28359,8 +28358,8 @@ pub(crate) mod tests {
         assert_eq!(carried.certification_bytes(), fixture.certification_bytes());
         assert!(carried.same_durable_artifact(&cold));
         assert_eq!(
-            carried.original_native().unwrap().groups,
-            cold.original_native().unwrap().groups
+            carried.original_native().groups,
+            cold.original_native().groups
         );
         assert_eq!(
             original_native_requirements(&carried).unwrap(),
@@ -28372,13 +28371,13 @@ pub(crate) mod tests {
             candidate(
                 wrong_owner,
                 fixture.certification_bytes().to_vec(),
-                fixture.module_interface().unwrap().clone()
+                fixture.module_interface().clone()
             ),
             &mut PackageInterfaceValidation::default(),
         )
         .is_err());
         let changed_core =
-            fixture_module_core(fixture.module_interface().unwrap(), b"other-core".to_vec());
+            fixture_module_core(fixture.module_interface(), b"other-core".to_vec());
         assert_eq!(changed_core.interface_bytes(), fixture.interface_bytes());
         assert!(certify_candidate_original_with_validation(
             candidate(
@@ -28395,7 +28394,7 @@ pub(crate) mod tests {
             candidate(
                 fixture.owner().clone(),
                 encode_home_witness(&missing_graph).unwrap(),
-                fixture.module_interface().unwrap().clone()
+                fixture.module_interface().clone()
             ),
             &mut PackageInterfaceValidation::default(),
         )
@@ -28406,7 +28405,7 @@ pub(crate) mod tests {
             candidate(
                 fixture.owner().clone(),
                 changed_seal,
-                fixture.module_interface().unwrap().clone()
+                fixture.module_interface().clone()
             ),
             &mut PackageInterfaceValidation::default(),
         )
@@ -28496,7 +28495,7 @@ pub(crate) mod tests {
             .all(|group| group.origin() == ProductOrigin::Cached));
         assert!(Arc::ptr_eq(
             &groups[0].group,
-            &products[0].original_native().unwrap().groups[0].group
+            &products[0].original_native().groups[0].group
         ));
         assert!(certify_owned_products_with_validation(
             &products,
@@ -28623,47 +28622,46 @@ pub(crate) mod tests {
             [1; 32],
         );
         let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
-        assert_eq!(
-            issued.module_interface().unwrap().producer_sha256(),
-            [1; 32]
-        );
-        assert!(issued.original_native().unwrap().matches_original(&issued));
-        let legacy = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        assert_eq!(issued.module_interface().producer_sha256(), [1; 32]);
+        assert!(issued.original_native().matches_original(&issued));
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
             issued.owner().clone(),
             issued.interface_bytes().to_vec(),
             issued.product_bytes().to_vec(),
             issued.package_imports_bytes().to_vec(),
             issued.certification_bytes().to_vec(),
         );
-        assert!(legacy.original_native().is_none());
-        assert!(
-            legacy
-                .clone()
-                .with_original_native(issued.original_native().unwrap().clone())
-                .is_err(),
-            "identical recaptured bytes cannot borrow another original's witness"
-        );
-        let mut legacy_validation = PackageInterfaceValidation::default();
+        assert!(matches!(
+            certify_original_draft_with_validation(
+                draft.clone(),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("original canonical companion"))
+        ));
+        let mut reconstructed_validation = PackageInterfaceValidation::default();
         let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
-        let expected = inherited_package_witnesses_with_validation(
-            std::slice::from_ref(&legacy),
-            &mut legacy_validation,
+        let reconstructed = certify_original_draft_with_validation(
+            draft
+                .clone()
+                .with_module_interface(issued.module_interface().clone())
+                .unwrap(),
+            &mut reconstructed_validation,
         )
         .unwrap();
-        assert_eq!(
-            HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
-            before + 1
-        );
+        assert!(HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get) > before);
+        let expected = inherited_package_witnesses_with_validation(
+            std::slice::from_ref(&reconstructed),
+            &mut reconstructed_validation,
+        )
+        .unwrap();
         assert_eq!(expected, packages);
-        let legacy_spent = legacy_validation.inventory.work_usage().unwrap().0;
+        let reconstructed_spent = reconstructed_validation.inventory.work_usage().unwrap().0;
         let mut validation = PackageInterfaceValidation::default();
         let inventory = validation.inventory.clone();
         let before = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
-        let selected = inherited_package_witnesses_with_validation(
-            std::slice::from_ref(&issued),
-            &mut validation,
-        )
-        .unwrap();
+        let selected =
+            inherited_package_witnesses_with_validation(std::slice::from_ref(&issued), &mut validation)
+                .unwrap();
         assert_eq!(selected, expected);
         let available = inherited_package_interfaces_with_validation(
             std::slice::from_ref(&issued),
@@ -28710,7 +28708,7 @@ pub(crate) mod tests {
             before
         );
         let spent = inventory.work_usage().unwrap().0;
-        assert!(spent > 0 && spent < legacy_spent);
+        assert!(spent > 0 && spent < reconstructed_spent);
         let repeated = inherited_package_witnesses_with_validation(
             &[issued.clone(), issued.clone()],
             &mut validation,
@@ -28746,10 +28744,7 @@ pub(crate) mod tests {
         let remaining = inventory.work_usage().unwrap().1;
         inventory.charge(remaining).unwrap();
         assert!(matches!(
-            inherited_package_witnesses_with_validation(
-                std::slice::from_ref(&issued),
-                &mut validation,
-            ),
+            inherited_package_witnesses_with_validation(std::slice::from_ref(&issued), &mut validation,),
             Err(CertificationError::Product(
                 tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
             ))
@@ -28763,38 +28758,40 @@ pub(crate) mod tests {
             .unwrap(),
             expected
         );
-        let mut wrong_owner = legacy.owner().clone();
+        let mut wrong_owner = draft.owner().clone();
         wrong_owner.module = "AnotherConsumer".into();
-        let wrong_owner = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let wrong_owner = crate::recovery_artifacts::OriginalDraft::from_certification(
             wrong_owner,
-            legacy.interface_bytes().to_vec(),
-            legacy.product_bytes().to_vec(),
-            legacy.package_imports_bytes().to_vec(),
-            legacy.certification_bytes().to_vec(),
+            draft.interface_bytes().to_vec(),
+            draft.product_bytes().to_vec(),
+            draft.package_imports_bytes().to_vec(),
+            draft.certification_bytes().to_vec(),
         );
-        assert!(matches!(
-            inherited_package_witnesses_with_validation(
-                &[wrong_owner],
+        assert!(wrong_owner
+            .with_module_interface(reconstructed.module_interface().clone())
+            .map_err(CertificationError::CapturedModulePayload)
+            .and_then(|draft| certify_original_draft_with_validation(
+                draft,
                 &mut PackageInterfaceValidation::default(),
-            ),
-            Err(CertificationError::Mismatch(
-                "inherited package product owner"
             ))
-        ));
-        let mut changed = legacy.certification_bytes().to_vec();
+            .is_err());
+        let mut changed = draft.certification_bytes().to_vec();
         changed[0] ^= 1;
-        let changed = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-            legacy.owner().clone(),
-            legacy.interface_bytes().to_vec(),
-            legacy.product_bytes().to_vec(),
-            legacy.package_imports_bytes().to_vec(),
+        let changed = crate::recovery_artifacts::OriginalDraft::from_certification(
+            draft.owner().clone(),
+            draft.interface_bytes().to_vec(),
+            draft.product_bytes().to_vec(),
+            draft.package_imports_bytes().to_vec(),
             changed,
         );
-        assert!(inherited_package_witnesses_with_validation(
-            &[changed],
-            &mut PackageInterfaceValidation::default(),
-        )
-        .is_err());
+        assert!(changed
+            .with_module_interface(reconstructed.module_interface().clone())
+            .map_err(CertificationError::CapturedModulePayload)
+            .and_then(|draft| certify_original_draft_with_validation(
+                draft,
+                &mut PackageInterfaceValidation::default(),
+            ))
+            .is_err());
     }
 
     #[test]
@@ -28832,7 +28829,7 @@ pub(crate) mod tests {
             [1; 32],
         );
         let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
-        assert!(issued.original_native().is_some());
+        assert!(issued.original_native().matches_original(&issued));
 
         // The issued token survives removal of its producer transaction path.
         std::fs::remove_file(&selected).unwrap();
@@ -29150,18 +29147,30 @@ pub(crate) mod tests {
             first_product.interface_bytes(),
             second_product.interface_bytes()
         );
-        let legacy = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
-            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let recertified = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct| {
+            crate::recovery_artifacts::OriginalDraft::from_certification(
                 product.owner().clone(),
                 product.interface_bytes().to_vec(),
                 product.product_bytes().to_vec(),
                 product.package_imports_bytes().to_vec(),
                 product.certification_bytes().to_vec(),
             )
+            .with_module_interface(product.module_interface().clone())
+            .map_err(CertificationError::CapturedModulePayload)
+            .and_then(|draft| {
+                certify_original_draft_with_validation(
+                    draft,
+                    &mut PackageInterfaceValidation::default(),
+                )
+            })
+            .unwrap()
         };
         for products in [
             vec![first_product.clone(), second_product],
-            vec![legacy(&first_product), legacy(&originals[1].product)],
+            vec![
+                recertified(&first_product),
+                recertified(&originals[1].product),
+            ],
         ] {
             // Equal authenticated bytes at two observed locations are one
             // issued selection; the inherited merge keeps the first witness
@@ -29238,21 +29247,20 @@ pub(crate) mod tests {
             packages
         );
         std::fs::write(&first, [0x43]).unwrap();
-        // A legacy certificate without retained custody re-reads the current
-        // file, so its corrupted copy remains a distinct refusal.
-        let legacy_product = legacy(&originals[0].product);
-        assert_eq!(
-            inherited_package_witnesses_with_validation(
-                std::slice::from_ref(&legacy_product),
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap(),
-            packages
-        );
+        // A raw package acquisition authenticates the current file independently
+        // of retained Original custody.
+        let raw_packages = decode_home_witness(first_product.certification_bytes())
+            .unwrap()
+            .packages;
+        PackageInterfaceCustody::capture_verified_packages(
+            &raw_packages,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
         std::fs::write(&first, [0x44]).unwrap();
         assert!(matches!(
-            inherited_package_witnesses_with_validation(
-                std::slice::from_ref(&legacy_product),
+            PackageInterfaceCustody::capture_verified_packages(
+                &raw_packages,
                 &mut PackageInterfaceValidation::default(),
             ),
             Err(CertificationError::CapturedModulePayload(
@@ -29260,18 +29268,15 @@ pub(crate) mod tests {
             ))
         ));
         std::fs::write(&first, [0x43]).unwrap();
-        assert_eq!(
-            inherited_package_witnesses_with_validation(
-                std::slice::from_ref(&legacy_product),
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap(),
-            packages
-        );
+        PackageInterfaceCustody::capture_verified_packages(
+            &raw_packages,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap();
     }
 
     #[test]
-    fn retain_inherited_package_custody_pairs_exact_token_with_legacy_fallbacks() {
+    fn retained_package_tokens_preserve_custody_and_raw_acquisition_refuses_bad_storage() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("External.hi");
         std::fs::write(&path, [0x43]).unwrap();
@@ -29300,14 +29305,6 @@ pub(crate) mod tests {
             [1; 32],
         );
         let issued = recovered_witness_fixtures(&[fixture]).remove(0).product;
-        let legacy = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-            issued.owner().clone(),
-            issued.interface_bytes().to_vec(),
-            issued.product_bytes().to_vec(),
-            issued.package_imports_bytes().to_vec(),
-            issued.certification_bytes().to_vec(),
-        );
-        assert!(legacy.original_native().is_none());
         let owner = ("external-package".to_owned(), "External".to_owned());
         let native = inherited_package_interfaces_with_validation(
             std::slice::from_ref(&issued),
@@ -29316,25 +29313,17 @@ pub(crate) mod tests {
         .unwrap()
         .remove(&owner)
         .unwrap();
-        let legacy = inherited_package_interfaces_with_validation(
-            std::slice::from_ref(&legacy),
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap()
-        .remove(&owner)
-        .unwrap();
-
-        // Native token preferred: retained bytes survive producer removal and
+        // Retained bytes survive producer removal and
         // re-register under the issued logical path without reopening storage.
         std::fs::remove_file(&path).unwrap();
         let mut native_validation = PackageInterfaceValidation::default();
         retain_inherited_package_custody(&native, &mut native_validation).unwrap();
         assert!(verify_package_interface(&mut native_validation, &native.witness).is_ok());
 
-        // Legacy readable copy re-registers through the existing capture path.
+        // Raw package acquisition independently authenticates current storage.
         std::fs::write(&path, [0x43]).unwrap();
-        let mut legacy_validation = PackageInterfaceValidation::default();
-        retain_inherited_package_custody(&legacy, &mut legacy_validation).unwrap();
+        let mut capture_validation = PackageInterfaceValidation::default();
+        PackageInterfaceCustody::capture_verified_packages(&packages, &mut capture_validation).unwrap();
 
         #[cfg(unix)]
         {
@@ -29342,8 +29331,8 @@ pub(crate) mod tests {
 
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             assert!(matches!(
-                retain_inherited_package_custody(
-                    &legacy,
+                PackageInterfaceCustody::capture_verified_packages(
+                    &packages,
                     &mut PackageInterfaceValidation::default()
                 ),
                 Err(CertificationError::CapturedModulePayload(
@@ -29353,19 +29342,19 @@ pub(crate) mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
 
-        // A removed legacy copy is a typed refusal.
+        // A removed raw copy is a typed refusal.
         std::fs::remove_file(&path).unwrap();
         let mut removed_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            retain_inherited_package_custody(&legacy, &mut removed_validation),
+            PackageInterfaceCustody::capture_verified_packages(&packages, &mut removed_validation),
             Err(CertificationError::CapturedModulePayload(_))
         ));
 
-        // A corrupt legacy copy is a typed refusal.
+        // A corrupt raw copy is a typed refusal.
         std::fs::write(&path, [0x44]).unwrap();
         let mut corrupt_validation = PackageInterfaceValidation::default();
         assert!(matches!(
-            retain_inherited_package_custody(&legacy, &mut corrupt_validation),
+            PackageInterfaceCustody::capture_verified_packages(&packages, &mut corrupt_validation),
             Err(CertificationError::CapturedModulePayload(
                 crate::recovery_artifacts::RecoveryArtifactError::DigestMismatch(_)
             ))
@@ -29419,7 +29408,6 @@ pub(crate) mod tests {
         let first_token = originals[0]
             .product
             .original_native()
-            .unwrap()
             .package_interfaces()
             .get(&owner)
             .unwrap()
@@ -29427,7 +29415,6 @@ pub(crate) mod tests {
         let second_token = originals[1]
             .product
             .original_native()
-            .unwrap()
             .package_interfaces()
             .get(&owner)
             .unwrap()
@@ -29450,32 +29437,30 @@ pub(crate) mod tests {
                 if issuer == originals[0].product.owner()
         ));
 
-        let legacy_first = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let draft_first = crate::recovery_artifacts::OriginalDraft::from_certification(
             originals[0].product.owner().clone(),
             originals[0].product.interface_bytes().to_vec(),
             originals[0].product.product_bytes().to_vec(),
             originals[0].product.package_imports_bytes().to_vec(),
             originals[0].product.certification_bytes().to_vec(),
         );
-        let legacy_selected = inherited_package_interfaces_with_validation(
-            &[legacy_first, originals[1].product.clone()],
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap()
-        .remove(&owner)
-        .unwrap();
-        assert!(legacy_selected.token().is_none());
-        assert!(legacy_selected.issuer().is_none());
+        assert!(matches!(
+            certify_original_draft_with_validation(
+                draft_first.clone(),
+                &mut PackageInterfaceValidation::default(),
+            ),
+            Err(CertificationError::Mismatch("original canonical companion"))
+        ));
 
         std::fs::remove_file(&first_path).unwrap();
         retain_inherited_package_custody(&selected, &mut PackageInterfaceValidation::default())
             .unwrap();
         assert!(matches!(
-            retain_inherited_package_custody(
-                &legacy_selected,
+            certify_original_draft_with_validation(
+                draft_first,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::CapturedModulePayload(_))
+            Err(CertificationError::Mismatch("original canonical companion"))
         ));
     }
 
@@ -29530,14 +29515,14 @@ pub(crate) mod tests {
             &interface,
             Vec::new(),
         );
-        let empty = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let empty = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             interface,
             product_bytes,
             package_bytes,
             certification,
         );
-        let legacy_empty = empty.clone();
+        let draft_empty = empty.clone();
         let consumer = fixture_finalized_product(consumer, [1; 32]);
         let empty = fixture_finalized_product(empty, [1; 32]);
         let recovered = recovered_witness_fixtures(&[consumer, empty]);
@@ -29582,15 +29567,11 @@ pub(crate) mod tests {
             ))
         ));
         assert!(matches!(
-            certify_owned_products_in_context_with_validation(
-                &[&legacy_empty],
-                &current,
-                &[consumer, &legacy_empty],
+            certify_original_draft_with_validation(
+                draft_empty,
                 &mut PackageInterfaceValidation::default(),
             ),
-            Err(CertificationError::Mismatch(
-                "home owner downgraded to package"
-            ))
+            Err(CertificationError::Mismatch("original canonical companion"))
         ));
         use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
         let entry = Arc::new(ArtifactEntry::original([1; 32], (*consumer).clone()).unwrap());
@@ -29625,14 +29606,14 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let raw = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let raw = crate::recovery_artifacts::OriginalDraft::from_certification(
             consumer.owner().clone(),
             consumer.interface_bytes().to_vec(),
             consumer.product_bytes().to_vec(),
             consumer.package_imports_bytes().to_vec(),
             consumer.certification_bytes().to_vec(),
         );
-        assert!(raw.original_native().is_none());
+        assert!(raw.module_interface().is_none());
         for missing in [false, true] {
             if missing {
                 std::fs::remove_file(&package_path).unwrap();
@@ -29641,7 +29622,6 @@ pub(crate) mod tests {
             }
             let token = consumer
                 .original_native()
-                .unwrap()
                 .package_interfaces()
                 .get(&(external_unit.into(), "External".into()))
                 .unwrap();
@@ -29698,8 +29678,10 @@ pub(crate) mod tests {
             assert_eq!(binding.original_ordinal, 7);
             assert_eq!(group.product().imports(), &[expected_import.clone()]);
             for error in [
-                original_execution_source_digest_with_validation(
-                    &raw,
+                PackageInterfaceCustody::capture_verified_packages(
+                    &decode_home_witness(raw.certification_bytes())
+                        .unwrap()
+                        .packages,
                     &mut PackageInterfaceValidation::default(),
                 )
                 .unwrap_err(),
@@ -29813,7 +29795,7 @@ pub(crate) mod tests {
             &interface,
             Vec::new(),
         );
-        let empty = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let empty = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             interface,
             product_bytes,
@@ -30162,7 +30144,7 @@ pub(crate) mod tests {
         ciborium::ser::into_writer(&package_seal, &mut packages).unwrap();
         std::fs::write(interface.with_extension("hi.packages"), packages).unwrap();
         let finalized = fixture_finalized_product(
-            crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            crate::recovery_artifacts::OriginalDraft::from_certification(
                 owner.clone(),
                 vec![0x42],
                 std::fs::read(&product).unwrap(),
@@ -30177,35 +30159,26 @@ pub(crate) mod tests {
             finalized.certification_bytes(),
         )
         .unwrap();
-        let canonical = crate::recovery_artifacts::materialize_module_interface(
-            source.path(),
-            finalized.module_interface().unwrap(),
-            &mut PackageInterfaceValidation::default(),
-            crate::recovery_artifacts::MaterializationMode::Durable,
-        )
-        .unwrap();
-        let refs = crate::recovery_artifacts::materialize_recovery_closure(
+        let refs = crate::recovery_artifacts::materialize_certified_products(
             run.path(),
             [1; 32],
-            &[crate::recovery_artifacts::RecoveryArtifactInput {
-                owner: &owner,
-                interface_source: &interface,
-                module_interface: (source.path(), &canonical),
-                product_source: &product,
-            }],
+            std::slice::from_ref(&finalized),
         )
         .unwrap();
         let artifact =
             crate::recovery_artifacts::verify_materialized_ref(run.path(), &refs[0]).unwrap();
-        let owned = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let owned = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             artifact.interface_bytes().to_vec(),
             artifact.product_bytes().to_vec(),
             artifact.package_imports_bytes().to_vec(),
             artifact.certification_bytes().to_vec(),
         )
-        .with_module_interface(finalized.module_interface().unwrap().clone())
+        .with_module_interface(finalized.module_interface().clone())
         .unwrap();
+        let owned =
+            certify_original_draft_with_validation(owned, &mut PackageInterfaceValidation::default())
+                .unwrap();
         assert_eq!(
             certify_owned_products_with_validation(
                 &[&owned],
@@ -30227,16 +30200,18 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .is_err());
-        let corrupt = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let corrupt = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             artifact.interface_bytes().to_vec(),
             vec![0],
             artifact.package_imports_bytes().to_vec(),
             artifact.certification_bytes().to_vec(),
         );
-        assert!(certify_owned_products_with_validation(
-            &[&corrupt],
-            &[],
+        let corrupt = corrupt
+            .with_module_interface(finalized.module_interface().clone())
+            .unwrap();
+        assert!(certify_original_draft_with_validation(
+            corrupt,
             &mut PackageInterfaceValidation::default(),
         )
         .is_err());
@@ -30293,8 +30268,7 @@ pub(crate) mod tests {
         let mut wrong_reference = refs[0].clone();
         wrong_reference.certification_sha256 = [0; 32];
         assert!(
-            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference)
-                .is_err()
+            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference).is_err()
         );
         let mut witness = decode_home_witness(&seal).unwrap();
         witness.owner.skinny_iface_sha256 = [0; 32];
@@ -30310,8 +30284,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(
-            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference)
-                .is_err()
+            crate::recovery_artifacts::verify_materialized_ref(run.path(), &wrong_reference).is_err()
         );
         assert!(crate::recovery_artifacts::verify_materialized_ref(run.path(), &refs[0]).is_ok());
     }
@@ -30645,8 +30618,7 @@ pub(crate) mod tests {
         ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
         let parsed = ParsedModuleProducts::decode(&product_bytes, b"").unwrap();
         let product = parsed.products()[0].clone();
-        let mut roots: Value =
-            ciborium::de::from_reader(empty_package_bundle().as_slice()).unwrap();
+        let mut roots: Value = ciborium::de::from_reader(empty_package_bundle().as_slice()).unwrap();
         let roots = roots.as_array_mut().unwrap()[2].as_array_mut().unwrap()[0]
             .as_array_mut()
             .unwrap()[2]
@@ -30682,17 +30654,15 @@ pub(crate) mod tests {
         let package_path = root.join(format!("{module}.hi.packages"));
         std::fs::write(&interface_path, &product.interface).unwrap();
         std::fs::write(&package_path, &package_bytes).unwrap();
-        let recovery = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let recovery = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             product.interface.clone(),
             product_bytes.clone(),
             package_bytes.clone(),
             encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap(),
         );
-        let recovery = fixture_finalized_product(
-            recovery.with_source_sha256(sha(source_text.as_bytes())),
-            [3; 32],
-        );
+        let recovery =
+            fixture_finalized_product_with_source(recovery, [3; 32], sha(source_text.as_bytes()));
         let accepted = CertifiedModuleReceipt {
             origin: ProductOrigin::Cached,
             unit: owner.unit.clone(),
@@ -30719,7 +30689,7 @@ pub(crate) mod tests {
                 evidence: evidence.into(),
                 target_source: "target".into(),
                 origin: crate::module_candidates::CandidateOrigin::Ordinary,
-                original_module_interface: recovery.module_interface().unwrap().clone(),
+                original_module_interface: recovery.module_interface().clone(),
                 original_execution: None,
                 execution_admitted: false,
             },
@@ -30944,7 +30914,7 @@ pub(crate) mod tests {
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
         let originals = overlapping.recovery_products();
-        let native = originals[0].original_native().unwrap();
+        let native = originals[0].original_native();
         assert!(native.groups.is_empty());
         assert!(native.matches_original(&originals[0]));
         validate_exact_cached_closure(
@@ -31074,17 +31044,19 @@ pub(crate) mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let b = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let b = crate::recovery_artifacts::OriginalDraft::from_certification(
             b.owner().clone(),
             b.interface_bytes().to_vec(),
             b.product_bytes().to_vec(),
             b.package_imports_bytes().to_vec(),
             seal,
         )
-        .with_module_interface(b.module_interface().unwrap().clone())
+        .with_module_interface(b.module_interface().clone())
         .unwrap()
         .with_execution_source(b_graph.clone())
         .unwrap();
+        let b = certify_original_draft_with_validation(b, &mut PackageInterfaceValidation::default())
+            .unwrap();
         let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&{
@@ -31106,10 +31078,8 @@ pub(crate) mod tests {
                     )
                     .unwrap();
                 let projection =
-                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(
-                        &entries,
-                    )
-                    .unwrap();
+                    crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)
+                        .unwrap();
                 crate::declaration_context::issue_fixture_compiler_support(projection, physical)
                     .unwrap()
             })
@@ -31145,14 +31115,11 @@ pub(crate) mod tests {
         validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports)
             .unwrap();
         receipt.modules.push(accepted_b);
-        assert!(context.recovery_products()[0].original_native().is_some());
-        let refused = validate_exact_cached_closure(
-            Some(&candidates),
-            &receipt,
-            &context,
-            &current,
-            &imports,
-        );
+        assert!(context.recovery_products()[0]
+            .original_native()
+            .matches_original(&context.recovery_products()[0]));
+        let refused =
+            validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports);
         assert!(
             matches!(
                 &refused,
@@ -31170,13 +31137,7 @@ pub(crate) mod tests {
             graph: b_graph.clone(),
         });
         assert!(matches!(
-            validate_exact_cached_closure(
-                Some(&candidates),
-                &receipt,
-                &context,
-                &current,
-                &imports
-            ),
+            validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports),
             Err(CertificationError::Mismatch(
                 "cached candidate current source owner"
             ))
@@ -31192,11 +31153,8 @@ pub(crate) mod tests {
             .unwrap();
         receipt.modules.pop();
         // A retained dependency additionally binds B's separately issued graph.
-        let retained = crate::execution_source::test_graph_requiring_original(
-            &graph,
-            b.owner(),
-            b_graph.digest(),
-        );
+        let retained =
+            crate::execution_source::test_graph_requiring_original(&graph, b.owner(), b_graph.digest());
         candidates
             .by_owner
             .get_mut(&a_key)
@@ -31250,10 +31208,8 @@ pub(crate) mod tests {
             .by_owner
             .get_mut(&a_key)
             .unwrap()
-            .original_execution =
-            Some(crate::module_candidates::OriginalCandidateExecution { graph });
-        let empty =
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+            .original_execution = Some(crate::module_candidates::OriginalCandidateExecution { graph });
+        let empty = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
         // B remains offered, but its rejected receipt cannot satisfy A's graph.
         assert!(matches!(
             validate_exact_cached_closure(Some(&candidates), &receipt, &empty, &current, &imports),
@@ -31275,8 +31231,7 @@ pub(crate) mod tests {
             .by_owner
             .get_mut(&a_key)
             .unwrap()
-            .original_execution =
-            Some(crate::module_candidates::OriginalCandidateExecution { graph });
+            .original_execution = Some(crate::module_candidates::OriginalCandidateExecution { graph });
         assert!(validate_exact_cached_closure(
             Some(&candidates),
             &receipt,
@@ -32101,7 +32056,7 @@ pub(crate) mod tests {
             })
             .unwrap();
 
-        let native = prior[0].original_native().unwrap();
+        let native = prior[0].original_native();
         let valid = parsed.products()[0]
             .groups
             .iter()
@@ -32139,7 +32094,7 @@ pub(crate) mod tests {
             Err(CertificationError::OriginalGroupConflict(conflict))
                 if conflict.failure == (OriginalGroupFailure::PromotionImports { ordinal: 11 })
         ));
-        let canonical = prior[0].module_interface().unwrap().clone();
+        let canonical = prior[0].module_interface().clone();
         packet.modules[0].origin = ProductOrigin::RetainedCore;
         packet.modules[0].module_version = None;
         packet.modules[0].dependency_witness_sha256 = sha(canonical.certificate_bytes());
@@ -32353,7 +32308,7 @@ None,
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
-            assert_eq!(current.original_native().unwrap().groups.len(), 2);
+            assert_eq!(current.original_native().groups.len(), 2);
             assert!(issued.retained_core_products.contains_original(current));
             let selected = issued
                 .groups
@@ -32904,7 +32859,7 @@ None,
             .iter()
             .any(|product| product.owner() == prior_module_product.owner()));
         let planned_product = &planned.certified.recovery_products[0];
-        let native = planned_product.original_native().unwrap();
+        let native = planned_product.original_native();
         let historical_group = native
             .groups
             .iter()
@@ -32918,7 +32873,7 @@ None,
                 import,
                 PendingImportOwner::Source { owner, .. } if owner == prior_module_product.owner()
             )));
-        let prior_native = prior_module_product.original_native().unwrap();
+        let prior_native = prior_module_product.original_native();
         assert!(prior_native.groups.iter().any(|group| {
             group.group.original_ordinal() == 7
                 && group.group.binders().iter().any(|binder| {
@@ -32991,7 +32946,7 @@ None,
         ));
         let raw_prior_id = raw_prior.descriptor.id;
         let raw_prior_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
-            raw_prior_product.module_interface().unwrap().clone(),
+            raw_prior_product.module_interface().clone(),
         )
         .descriptor
         .id;
@@ -33077,7 +33032,7 @@ None,
                 unreachable!()
             };
             let canonical = crate::artifact_inventory::ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             )
             .descriptor
             .id;
@@ -33140,7 +33095,7 @@ None,
             unreachable!()
         };
         let expected_canonical = crate::artifact_inventory::ArtifactEntry::canonical(
-            expected_product.module_interface().unwrap().clone(),
+            expected_product.module_interface().clone(),
         )
         .descriptor
         .id;
@@ -34017,7 +33972,7 @@ None,
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
                 if nonempty {
-                    let native = retained.original_native().unwrap();
+                    let native = retained.original_native();
                     assert_eq!(native.groups.len(), 2);
                     for (original, raw) in native.groups.iter().zip(&parsed.products()[0].groups) {
                         assert_eq!(original.owner, *old.owner());
@@ -34280,7 +34235,6 @@ None,
         assert!(graph.eligible_source_replay_root(original.owner()));
         assert!(original
             .original_native()
-            .unwrap()
             .matches_original(original));
         assert_eq!(
             home_execution_source_digest_with_validation(
@@ -34291,14 +34245,14 @@ None,
             .unwrap(),
             Some(graph.digest())
         );
-        let draft = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
             original.owner().clone(),
             original.interface_bytes().to_vec(),
             original.product_bytes().to_vec(),
             original.package_imports_bytes().to_vec(),
             original.certification_bytes().to_vec(),
         )
-        .with_module_interface(original.module_interface().unwrap().clone())
+        .with_module_interface(original.module_interface().clone())
         .unwrap();
         let groups = certified
             .groups
@@ -34312,7 +34266,7 @@ None,
                 draft.clone(),
                 groups.clone(),
                 decode_home_witness(original.certification_bytes()).unwrap(),
-                original.original_native().unwrap().package_interfaces(),
+                original.original_native().package_interfaces(),
                 &mut PackageInterfaceValidation::default()
             )
             .is_err(),
@@ -34322,13 +34276,12 @@ None,
             draft.with_execution_source(Arc::clone(graph)).unwrap(),
             groups,
             witness,
-            original.original_native().unwrap().package_interfaces(),
+            original.original_native().package_interfaces(),
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
         assert!(complete
             .original_native()
-            .unwrap()
             .matches_original(&complete));
         let context = Arc::new(
             baseline
@@ -36649,7 +36602,7 @@ None,
         assert!(native_requirements_from_witness(&cold)
             .artifact_edges
             .is_empty());
-        let nominal = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let nominal = crate::recovery_artifacts::OriginalDraft::from_certification(
             draft.owner().clone(),
             draft.interface_bytes().to_vec(),
             draft.product_bytes().to_vec(),
@@ -36681,7 +36634,7 @@ None,
             original_native_group_imports(product, 7).unwrap(),
             &[reference]
         );
-        let native = product.original_native().expect("physical nominal witness");
+        let native = product.original_native();
         let nominal_groups = native
             .groups
             .iter()
@@ -36812,7 +36765,7 @@ None,
         assert!(native_requirements_from_witness(&cold)
             .artifact_edges
             .is_empty());
-        let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             fixture.interface_bytes().to_vec(),
             fixture.product_bytes().to_vec(),
@@ -36820,24 +36773,13 @@ None,
             encoded,
         );
         assert_eq!(
-            original_interface_requirements(&product).unwrap(),
+            decode_home_witness(product.certification_bytes())
+                .unwrap()
+                .interface_requirements,
             requirements
         );
         let product = fixture_finalized_product(product, [1; 32]);
-        let cold = decode_home_witness(product.certification_bytes()).unwrap();
-        let custody = PackageInterfaceCustody::capture_verified_packages(
-            &cold.packages,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
-        let retained = retain_authenticated_original_native(
-            product,
-            vec![],
-            cold,
-            &custody,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .unwrap();
+        let retained = recovered_witness_fixtures(&[product]).remove(0).product;
         assert_eq!(
             original_interface_requirements(&retained).unwrap(),
             requirements
@@ -36848,14 +36790,14 @@ None,
             .is_empty());
         let mut wrong_owner = witness;
         wrong_owner.owner.module = "AnotherOriginal".into();
-        let wrong = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let wrong = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             fixture.interface_bytes().to_vec(),
             fixture.product_bytes().to_vec(),
             fixture.package_imports_bytes().to_vec(),
             encode_home_witness(&wrong_owner).unwrap(),
         );
-        assert!(original_interface_requirements(&wrong).is_err());
+        assert!(validate_home_certification(wrong.certification_bytes(), wrong.owner()).is_err());
     }
 
     #[test]
