@@ -3202,7 +3202,7 @@ mod authored_tests {
             .groups()
             .find(|row| row.group().owner() == &result_owner)
             .expect("the consumer selects its retained authored implementation");
-        assert_eq!(inherited.binding().artifact(), result_root);
+        assert_eq!(inherited.binding().binding.artifact(), result_root);
         assert!(context
             .artifact_view()
             .capture_graph_selection()
