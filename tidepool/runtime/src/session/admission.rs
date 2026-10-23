@@ -183,7 +183,7 @@ pub struct PrivateExecutionAdmission {
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     state: Arc<parking_lot::Mutex<PrivateExecutionState>>,
-    pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+    pub(super) final_intent: OnceLock<Arc<super::FrozenWorldExecution>>,
 }
 
 struct PrivateExecutionState {

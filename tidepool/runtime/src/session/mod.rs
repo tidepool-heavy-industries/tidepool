@@ -108,7 +108,7 @@ pub use admission::{
     RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
     UnpublishedNotebookScope,
 };
-pub use paired_publication::FinalExecutionIntent;
+pub use paired_publication::FrozenWorldExecution;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
@@ -696,7 +696,7 @@ pub struct DurableWriteBase {
 
 #[derive(Clone)]
 enum PublicationIntent {
-    Final(Arc<FinalExecutionIntent>),
+    Final(Arc<FrozenWorldExecution>),
     HostBindings(BindingPublicationPolicy),
 }
 
@@ -759,7 +759,7 @@ impl CertifiedPublication {
 
 pub enum PublicationAttempt {
     Settled(PublicManifestCommit),
-    Rebase(Arc<FinalExecutionIntent>),
+    Rebase(Arc<FrozenWorldExecution>),
     RestageMetadata(CertifiedPublication),
 }
 

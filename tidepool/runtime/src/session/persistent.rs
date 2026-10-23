@@ -3971,7 +3971,7 @@ impl PersistentSession {
             old.write_ids.clone(),
             old.source_keys.clone(),
             match &old.intent {
-                super::PublicationIntent::Final(intent) => intent.world(),
+                super::PublicationIntent::Final(intent) => Some(intent.world()),
                 _ => None,
             },
         )?;
@@ -3992,7 +3992,7 @@ impl PersistentSession {
             }
         }
         if let super::PublicationIntent::Final(intent) = &old.intent {
-            if intent.world().is_some() && !self.world_execution_base_is_current(intent) {
+            if !self.world_execution_base_is_current(intent) {
                 return Ok(super::PublicationAttempt::Settled(
                     PublicManifestCommit::Refused {
                         error: Box::new(SessionError::WorldCellPublicationBaseStale),
@@ -4008,10 +4008,8 @@ impl PersistentSession {
     /// Exact World premises for installing a final binding/world pair. This is
     /// an observation of the SAME published association and admitted Arcs, not
     /// an issuer: it never reconstructs a compiler world or a public view.
-    fn world_execution_base_is_current(&self, intent: &super::FinalExecutionIntent) -> bool {
-        let Some(world) = intent.world() else {
-            return true;
-        };
+    fn world_execution_base_is_current(&self, intent: &super::FrozenWorldExecution) -> bool {
+        let world = intent.world();
         if !intent.owner_matches(self.admission_owner())
             || !self.scopes.is_live(intent.admitted_scope())
             || !self.scopes.is_live(intent.private_scope())
@@ -4052,14 +4050,12 @@ impl PersistentSession {
         claim: impl FnOnce() -> Option<super::PublicationClaim>,
     ) -> Result<super::PublicationAttempt, SessionError> {
         if let super::PublicationIntent::Final(intent) = &ticket.intent {
-            if let Some(world) = intent.world() {
+            let world = intent.world();
+            {
                 let mut originals = vec![world.original_source.clone()];
                 let mut targets = vec![
                     world.target.clone(),
-                    intent
-                        .retained_private_scope()
-                        .ok_or(SessionError::WorldCellPublicationBaseStale)?
-                        .clone(),
+                    intent.retained_private_scope().clone(),
                 ];
                 if let Some(public) = self
                     .lib
@@ -4110,9 +4106,7 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
         let world_execution = match &ticket.intent {
-            super::PublicationIntent::Final(intent) if intent.world().is_some() => {
-                Some(intent.clone())
-            }
+            super::PublicationIntent::Final(intent) => Some(intent.clone()),
             _ => None,
         };
         if world_execution
@@ -4209,19 +4203,16 @@ impl PersistentSession {
         }
         .map_err(SessionError::InvalidPublicBindingPromotion)?;
         let prepared = match &ticket.intent {
-            super::PublicationIntent::Final(intent) => match intent.world() {
-                Some(world) => self
-                    .bindings
-                    .prepare_world_execution_selection(
-                        &self.scopes,
-                        ticket.private_scope,
-                        ticket.public_scope,
-                        &world.selection,
-                        prepared,
-                    )
-                    .map_err(SessionError::InvalidPublicBindingPromotion)?,
-                None => prepared,
-            },
+            super::PublicationIntent::Final(intent) => self
+                .bindings
+                .prepare_world_execution_selection(
+                    &self.scopes,
+                    ticket.private_scope,
+                    ticket.public_scope,
+                    &intent.world().selection,
+                    prepared,
+                )
+                .map_err(SessionError::InvalidPublicBindingPromotion)?,
             super::PublicationIntent::HostBindings(_) => prepared,
         };
         let declared_names = ticket
@@ -4262,7 +4253,7 @@ impl PersistentSession {
         }
         drop(projection);
         let promoted_world = if let Some(intent) = &world_execution {
-            let world = intent.world().expect("World execution was selected");
+            let world = intent.world();
             let public = self
                 .lib()
                 .tips
@@ -4416,7 +4407,6 @@ impl PersistentSession {
                     .as_ref()
                     .expect("World promotion has its original execution")
                     .world()
-                    .expect("World execution was selected")
                     .private
                     .world
                     .logical_id(),

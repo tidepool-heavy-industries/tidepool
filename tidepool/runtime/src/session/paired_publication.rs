@@ -51,27 +51,39 @@ struct AuthoredWrite {
 /// Each semantic certification owns a causal join reservation; storage retries
 /// retain that identity and its receipt.
 /// The private scope keeps live roots owned until publication or abandonment.
-pub struct FinalExecutionIntent {
+pub struct FrozenWorldExecution {
     owner_stamp: super::OwnerStamp,
     library: uuid::Uuid,
     private_view: super::PublicationViewWitness,
     durable_owner: Option<RecoveryPublicOwner>,
-    _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    _private_scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     admitted_context: Option<Arc<ExactDeclarationContext>>,
     private: PublicVisibilitySnapshot,
     private_base: Option<DeclarationTip>,
-    final_projection: Option<Arc<super::CertifiedDeclarationProjection>>,
-    final_surface: Option<AdmittedDeclarationSurface>,
-    writes: Vec<AuthoredWrite>,
+    declarations: FrozenDeclarations,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
     _completed_values: Vec<super::admission::CertifiedPrivateValueProof>,
-    /// Exact published World basis for a World execution. Finite executions
-    /// have no World intent and never synthesize one.
-    world: Option<WorldExecutionIntent>,
+    world: WorldExecutionIntent,
     pub(super) binding_policy: super::BindingPublicationPolicy,
+}
+
+pub(super) enum FrozenBindingSelection<'a> {
+    Completed,
+    ActivationInput(&'a super::RuntimeActivationPreviewAdmission),
+}
+
+/// Declaration facts are retained together; binding-only execution carries no
+/// declaration projection or surface assembled independently of its writes.
+enum FrozenDeclarations {
+    Bindings,
+    Declarations {
+        writes: Vec<AuthoredWrite>,
+        projection: Option<Arc<super::CertifiedDeclarationProjection>>,
+        surface: AdmittedDeclarationSurface,
+    },
 }
 
 /// The exact published World association and admitted source facts a final
@@ -107,7 +119,7 @@ struct DeclarationHeadReplacement {
 /// Captured causal facts before selecting whether this attempt needs a join.
 struct CapturedDeclarationPublication {
     public: PublicManifestBase,
-    intent: Arc<FinalExecutionIntent>,
+    intent: Arc<FrozenWorldExecution>,
     current_public: Option<DeclarationTip>,
     public_context: Option<Arc<ExactDeclarationContext>>,
     surface: AdmittedDeclarationSurface,
@@ -123,7 +135,7 @@ static_assertions::assert_not_impl_any!(JoinReservation: Clone, Copy);
 pub struct DeclarationPublicationBase {
     pub(super) public: PublicManifestBase,
     reservation: JoinReservation,
-    intent: Arc<FinalExecutionIntent>,
+    intent: Arc<FrozenWorldExecution>,
     current_public: Option<DeclarationTip>,
     public_context: Option<Arc<ExactDeclarationContext>>,
     surface: AdmittedDeclarationSurface,
@@ -453,7 +465,14 @@ pub(super) fn merge_instances(
     Ok(selected)
 }
 
-impl FinalExecutionIntent {
+impl FrozenWorldExecution {
+    fn writes(&self) -> &[AuthoredWrite] {
+        match &self.declarations {
+            FrozenDeclarations::Bindings => &[],
+            FrozenDeclarations::Declarations { writes, .. } => writes,
+        }
+    }
+
     /// Names observed from the exact native identities selected for publication.
     pub fn native_binding_names(&self) -> Vec<String> {
         self.private
@@ -490,12 +509,12 @@ impl FinalExecutionIntent {
     pub(super) fn library(&self) -> uuid::Uuid {
         self.library
     }
-    pub(super) fn retained_private_scope(&self) -> Option<&Arc<super::RuntimeLexicalScopeLease>> {
-        self._private_scope_lease.as_ref()
+    pub(super) fn retained_private_scope(&self) -> &Arc<super::RuntimeLexicalScopeLease> {
+        &self._private_scope_lease
     }
 
-    pub(super) fn world(&self) -> Option<&WorldExecutionIntent> {
-        self.world.as_ref()
+    pub(super) fn world(&self) -> &WorldExecutionIntent {
+        &self.world
     }
     pub(super) fn owner_matches(
         &self,
@@ -506,36 +525,42 @@ impl FinalExecutionIntent {
 }
 
 impl PersistentSession {
-    /// Freeze the execution's final current writes once. Historical binding
-    /// writes shadowed within the same execution do not become final winners.
-    pub fn freeze_execution_intent(
+    /// Freeze the final writes selected by the completed private execution owner.
+    pub fn freeze_private_execution(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        self.freeze_execution_intent_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        self.freeze_private_execution_with_selection(admission, FrozenBindingSelection::Completed)
     }
 
-    pub(super) fn freeze_execution_intent_with_policy(
+    pub(super) fn freeze_private_execution_with_selection(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        selection: FrozenBindingSelection<'_>,
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
+            || admission.session() != self.lib().session_id()
+            || admission.library != self.lib().compile_view_identity
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        if !self.scope_tree().is_live(admission.private_scope()) {
+            return Err(super::SessionTransitionReason::ScopeRevoked.into());
+        }
         let transition = admission.begin_freeze()?;
-        let result = self.freeze_execution_intent_locked_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            policy,
-        );
+        self.reconcile_private_visible_hosts(admission, true)?;
+        let world = self
+            .lib()
+            .tips
+            .get(&admission.private_scope())
+            .and_then(|tip| tip.inspection_world.as_ref())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?
+            .world
+            .clone();
+        let completed = admission.completed_frontier(&world)?;
+        let result = self.freeze_completed_execution(completed, selection);
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -544,212 +569,106 @@ impl PersistentSession {
         result
     }
 
-    /// The caller owns the Freezing exclusion from write selection through
-    /// final sealing. Acceptance and new authored starts cannot enter.
-    pub(super) fn freeze_execution_intent_locked(
+    fn freeze_completed_execution(
         &mut self,
-        admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        self.freeze_execution_intent_locked_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )
-    }
-
-    fn freeze_execution_intent_locked_with_policy(
-        &mut self,
-        admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        let stale_reason = if !Arc::ptr_eq(&admission.owner, self.admission_owner()) {
-            Some("owner")
-        } else if admission.owner_epoch != self.admission_owner().epoch() {
-            Some("epoch")
-        } else if !self.has_lib() {
-            Some("library absent")
-        } else if admission.session() != self.lib().session_id() {
-            Some("session")
-        } else if admission.library != self.lib().compile_view_identity {
-            Some("compile view")
-        } else {
-            None
-        };
-        if let Some(reason) = stale_reason {
-            tracing::debug!(
-                target: "tidepool::session::private_host_mount",
-                %reason,
-                "private execution freeze identity refused"
-            );
-            return Err(SessionError::StaleStagedDeclaration);
+        completed: super::admission::CompletedPrivateFrontier<'_>,
+        selection: FrozenBindingSelection<'_>,
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        let admission = completed.admission();
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
+            || admission.session() != self.lib().session_id()
+            || admission.library != self.lib().compile_view_identity
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
         }
-        if let Some(intent) = admission.final_intent.get() {
-            let world_facts = admission.world_execution_facts();
-            if self
-                .public_visibility_snapshot_in(admission.private_scope())
-                .as_ref()
-                != Some(&intent.private)
-                || intent.library != self.lib().compile_view_identity
-                || !intent.private_view_is_current(self)
-                || intent.world.as_ref().is_none_or(|world| {
-                    let facts = &world_facts;
-                    !Arc::ptr_eq(&world.association, &facts.published)
-                        || !Arc::ptr_eq(&world.source, &facts.source)
-                        || !Arc::ptr_eq(&world.original_source, &facts.original_source)
-                        || !Arc::ptr_eq(&world.target, &facts.public_target)
-                        || self
-                            .lib()
-                            .tips
-                            .get(&admission.private_scope())
-                            .and_then(|tip| tip.inspection_world.as_ref())
-                            .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
-                        || intent.admitted != facts.admitted
-                        || intent.admitted_context != facts.admitted_context
-                })
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            if write_ids.iter().any(|id| {
-                self.bindings()
-                    .get(*id)
-                    .is_none_or(|entry| entry.scope != admission.private_scope())
-            }) {
-                return Err(SessionError::InvalidPublicBindingPromotion(
-                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
-                ));
-            }
-            let mut writes = write_ids
-                .into_iter()
-                .filter(|id| {
-                    intent
-                        .private
-                        .bindings
-                        .iter()
-                        .any(|(_, current)| current == id)
-                })
-                .collect::<Vec<_>>();
-            writes.sort_by_key(|id| id.raw());
-            writes.dedup();
-            let keys = source_keys
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            if writes != intent.write_ids
-                || keys != intent.source_keys
-                || policy != intent.binding_policy
-            {
-                return Err(invalid_at(
-                    &self.lib().root,
-                    "execution final intent is already frozen with different writes",
-                ));
-            }
-            return Ok(intent.clone());
-        }
-        self.reconcile_private_visible_hosts(admission, true)?;
-        let completed_values = admission.completed_values.lock();
+        let private_scope = admission.private_scope();
+        let private_scope_lease = completed.scope_lease().clone();
         let facts = admission.world_execution_facts();
-        let private = self
+        facts
+            .original_source
+            .with_open_target(&private_scope_lease, || ())?;
+        let private_world = self
             .lib()
             .tips
-            .get(&admission.private_scope())
+            .get(&private_scope)
             .and_then(|tip| tip.inspection_world.clone())
             .ok_or(SessionError::WorldCellPublicationBaseStale)?;
         if !self.inspection_world_base_is_current(
-            &private.base,
+            &private_world.base,
             &facts.source,
             &facts.original_source,
-        ) || !private.base.target.matches(&admission.scope_lease)
+        ) || !private_world.base.target.matches(&private_scope_lease)
         {
-            tracing::debug!(
-                target: "tidepool::session::private_host_mount",
-                key_current = self.compile_view_key_in(admission.private_scope()).as_ref()
-                    == Some(&private.base.key),
-                source_current = self.inspection_world_base_is_current(
-                    &private.base,
-                    &facts.source,
-                    &facts.original_source,
-                ),
-                target_current = private.base.target.matches(&admission.scope_lease),
-                "private execution freeze association refused"
-            );
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
         let private_visibility = self
-            .public_visibility_snapshot_in(admission.private_scope())
-            .ok_or(SessionError::DeadScope(admission.private_scope()))?;
-        let host_progress = admission.accepted_host_progress();
-        if let Some(progress) = &host_progress {
-            tracing::debug!(target: "exomonad_harness::timing",
-                checked_execution_bindings = progress.checked_execution_bindings(),
-                host_interface_bindings = progress.host_interface_bindings(),
-                "private host binding progress issued");
+            .public_visibility_snapshot_in(private_scope)
+            .ok_or(super::SessionTransitionReason::ScopeRevoked)?;
+        let completed_values = admission.completed_values.lock();
+        let (write_ids, binding_policy) = match selection {
+            FrozenBindingSelection::Completed => (
+                private_visibility
+                    .bindings
+                    .iter()
+                    .filter_map(|(_, id)| {
+                        self.bindings().get(*id).and_then(|entry| {
+                            (entry.scope == private_scope
+                                && completed_values
+                                    .get(id)
+                                    .is_some_and(|proof| proof.matches(entry)))
+                            .then_some(*id)
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                super::BindingPublicationPolicy::ExactPromotion,
+            ),
+            FrozenBindingSelection::ActivationInput(input) => {
+                if input.source_lease().scope() != private_scope {
+                    return Err(super::SessionTransitionReason::ScopeRevoked.into());
+                }
+                (
+                    vec![input.binding()],
+                    super::BindingPublicationPolicy::ActivationInput,
+                )
+            }
+        };
+        let source_keys = private_visibility.source_instances.clone();
+        if let Some(intent) = admission.final_intent.get() {
+            if intent.private != private_visibility
+                || !intent.private_view_is_current(self)
+                || !Arc::ptr_eq(&intent.world.private, &private_world)
+                || intent.binding_policy != binding_policy
+            {
+                return Err(super::SessionTransitionReason::WrongPhase.into());
+            }
+            return Ok(intent.clone());
         }
-        let progress = admission.publication_progress(&private.world)?;
-        let selection = self
+        let world_selection = self
             .bindings()
             .prepare_world_execution_selection_delta(
                 self.scope_tree(),
-                admission.private_scope(),
+                private_scope,
                 &private_visibility.source_selection,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let world = Some(WorldExecutionIntent {
+        let world = WorldExecutionIntent {
             association: facts.published,
             source: facts.source,
             original_source: facts.original_source,
             target: facts.public_target,
-            private,
-            progress,
-            selection,
-        });
-        let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
-        let intent = self.freeze_execution_intent_from_snapshot(
-            &admitted,
-            admitted_context,
-            admission.private_scope(),
-            write_ids,
-            source_keys,
-            Some(admission.scope_lease.clone()),
-            admission.durable_owner.clone(),
-            &completed_values,
-            world,
-            policy,
-        )?;
-        assert!(
-            admission.final_intent.set(intent.clone()).is_ok(),
-            "exclusive session checkout finalizes an admission once"
-        );
-        Ok(intent)
-    }
-
-    fn freeze_execution_intent_from_snapshot(
-        &mut self,
-        admitted: &PublicVisibilitySnapshot,
-        admitted_context: Option<Arc<ExactDeclarationContext>>,
-        private_scope: ScopeId,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
-        durable_owner: Option<RecoveryPublicOwner>,
-        completed_values: &std::collections::HashMap<
-            SessionVarId,
-            super::admission::CertifiedPrivateValueWrite,
-        >,
-        world: Option<WorldExecutionIntent>,
-        binding_policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+            private: private_world,
+            progress: completed.publication(),
+            selection: world_selection,
+        };
+        let admitted = &facts.admitted;
+        let admitted_context = facts.admitted_context;
+        let durable_owner = admission.durable_owner.clone();
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
         }
-        let private = self
-            .public_visibility_snapshot_in(private_scope)
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let private = private_visibility;
         let lib = self.lib();
         let chain = lib.log.chain_from_root(private.declaration_tip);
         let start = if admitted.declaration_tip == Generation(0) {
@@ -870,18 +789,12 @@ impl PersistentSession {
                 &source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        Ok(Arc::new(FinalExecutionIntent {
+        let intent = Arc::new(FrozenWorldExecution {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             library: lib.compile_view_identity,
-            private_view: match &world {
-                Some(world) => super::PublicationViewWitness::World {
-                    key: world.private.base.key.clone(),
-                    logical: *world.private.world.logical_id(),
-                },
-                None => super::PublicationViewWitness::Finite(
-                    self.compile_view_digest_in(private_scope)
-                        .ok_or(SessionError::StaleStagedDeclaration)?,
-                ),
+            private_view: super::PublicationViewWitness::World {
+                key: world.private.base.key.clone(),
+                logical: *world.private.world.logical_id(),
             },
             durable_owner,
             _private_scope_lease: private_scope_lease,
@@ -889,9 +802,17 @@ impl PersistentSession {
             admitted_context,
             private,
             private_base,
-            final_projection,
-            final_surface: final_declarations.map(|tip| tip.surface),
-            writes,
+            declarations: if writes.is_empty() {
+                FrozenDeclarations::Bindings
+            } else {
+                FrozenDeclarations::Declarations {
+                    writes,
+                    projection: final_projection,
+                    surface: final_declarations
+                        .ok_or(SessionError::StaleStagedDeclaration)?
+                        .surface,
+                }
+            },
             _completed_values: write_ids
                 .iter()
                 .filter_map(|id| completed_values.get(id).map(|proof| proof.proof.clone()))
@@ -901,21 +822,26 @@ impl PersistentSession {
             head_replacements,
             world,
             binding_policy,
-        }))
+        });
+        assert!(
+            admission.final_intent.set(intent.clone()).is_ok(),
+            "exclusive session checkout finalizes an admission once"
+        );
+        Ok(intent)
     }
 
     /// Capture only the latest public merge baseline for a fixed execution.
     pub fn restage_execution_publication(
         &mut self,
         owner: RecoveryPublicOwner,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         self.restage_execution_target(Some(owner), intent)
     }
 
     pub fn restage_ephemeral_execution_publication(
         &mut self,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         self.restage_execution_target(None, intent)
     }
@@ -923,7 +849,7 @@ impl PersistentSession {
     fn restage_execution_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         let base = self.capture_declaration_target(owner, intent)?;
         let declaration_conflict = base.current_public.as_ref().is_some_and(|tip| {
@@ -934,7 +860,7 @@ impl PersistentSession {
                 })
             })
         });
-        if base.intent.writes.is_empty() && !declaration_conflict {
+        if base.intent.writes().is_empty() && !declaration_conflict {
             Ok(ExecutionPublication::Bindings(base.public))
         } else {
             Ok(ExecutionPublication::Declarations(
@@ -947,7 +873,7 @@ impl PersistentSession {
     pub fn restage_declaration_publication(
         &mut self,
         owner: RecoveryPublicOwner,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
         self.restage_declaration_target(Some(owner), intent)
     }
@@ -955,7 +881,7 @@ impl PersistentSession {
     fn restage_declaration_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
         let captured = self.capture_declaration_target(owner, intent)?;
         self.reserve_declaration_target(captured)
@@ -964,7 +890,7 @@ impl PersistentSession {
     fn capture_declaration_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<CapturedDeclarationPublication, SessionError> {
         if !intent.owner_stamp.matches(self.admission_owner())
             || !self.has_lib()
@@ -982,7 +908,7 @@ impl PersistentSession {
             intent.private.scope,
             intent.write_ids.clone(),
             intent.source_keys.clone(),
-            intent.world(),
+            Some(intent.world()),
         )?;
         public.intent = super::PublicationIntent::Final(intent.clone());
         if public.semantic.expected_private != intent.private {
@@ -996,7 +922,7 @@ impl PersistentSession {
             .as_ref()
             .map(|tip| tip.surface.clone())
             .unwrap_or_default();
-        for write in &intent.writes {
+        for write in intent.writes() {
             surface = write.evidence.extend_source_surface(&surface)?;
         }
         Ok(CapturedDeclarationPublication {
@@ -1023,11 +949,7 @@ impl PersistentSession {
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         // World joins resolve only their owned interfaces and declared packages.
-        let includes = if intent.world().is_some() {
-            Vec::new()
-        } else {
-            self.lib().extra_include.clone()
-        };
+        let includes = Vec::new();
         Ok(DeclarationPublicationBase {
             reservation: JoinReservation {
                 generation: reserved,
@@ -1041,30 +963,6 @@ impl PersistentSession {
             session_root: self.lib().root.clone(),
             expected_public_version,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_declaration_publication(
-        &mut self,
-        owner: RecoveryPublicOwner,
-        admitted: &PublicVisibilitySnapshot,
-        private_scope: ScopeId,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<DeclarationPublicationBase, SessionError> {
-        let intent = self.freeze_execution_intent_from_snapshot(
-            admitted,
-            self.lib().current_exact_context_in(admitted.scope),
-            private_scope,
-            write_ids,
-            source_keys,
-            None,
-            Some(owner.clone()),
-            &std::collections::HashMap::new(),
-            None,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )?;
-        self.restage_declaration_publication(owner, intent)
     }
 
     pub fn revalidate_declaration_rejection(
@@ -1155,7 +1053,7 @@ impl DeclarationPublicationBase {
             .as_ref()
             .map(|tip| tip.families.clone())
             .unwrap_or_default();
-        for write in &self.intent.writes {
+        for write in self.intent.writes() {
             exports.retain(|export| !write.retractions.contains(&export.head));
             for introduced in write.evidence.introduced_exports() {
                 exports.retain(|export| {
@@ -1192,19 +1090,26 @@ impl DeclarationPublicationBase {
         {
             return None;
         }
-        let projection = self.intent.final_projection.as_ref()?;
+        let FrozenDeclarations::Declarations {
+            projection: Some(projection),
+            surface,
+            ..
+        } = &self.intent.declarations
+        else {
+            return None;
+        };
         let receipt = projection.receipt();
-        let final_write = self.intent.writes.last()?;
+        let final_write = self.intent.writes().last()?;
         if final_write.generation != self.intent.private.declaration_tip
             || selection.exports != canonical_exports(receipt.exports())
             || selection.instances != *receipt.instances()
             || selection.families != receipt.family_closure()
-            || self.intent.final_surface.as_ref() != Some(&self.surface)
+            || surface != &self.surface
         {
             return None;
         }
         let products = projection.context().recovery_products();
-        if self.intent.writes.iter().any(|write| {
+        if self.intent.writes().iter().any(|write| {
             !products
                 .iter()
                 .any(|product| product.owner() == write.evidence.product().owner())
@@ -1216,7 +1121,7 @@ impl DeclarationPublicationBase {
     pub fn reserved_generation(&self) -> Generation {
         self.reservation.generation
     }
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.intent
     }
 
@@ -1247,7 +1152,7 @@ impl DeclarationPublicationBase {
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let authored = self
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| write.evidence.clone())
             .collect::<Vec<_>>();
@@ -1283,7 +1188,7 @@ impl DeclarationPublicationBase {
             })
         };
         let mut writes = Vec::new();
-        for write in &self.intent.writes {
+        for write in self.intent.writes() {
             writes.push(DeclarationWrite {
                 generation: write.generation.0,
                 module: anchor(&module_owner(&write.evidence))?,
@@ -1306,7 +1211,7 @@ impl DeclarationPublicationBase {
                 .transpose()?,
             private_tip: self
                 .intent
-                .writes
+                .writes()
                 .last()
                 .map(|write| module_owner(&write.evidence))
                 .or_else(|| {
@@ -1359,7 +1264,7 @@ impl AcceptedDeclarationPublication {
     pub fn reserved_generation(&self) -> Generation {
         self.base.reservation.generation
     }
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.base.intent
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
@@ -1409,7 +1314,7 @@ impl AcceptedDeclarationPublication {
                 .collect();
             let mut implementation_refs = base
                 .intent
-                .writes
+                .writes()
                 .iter()
                 .map(|write| write.generation)
                 .collect::<Vec<_>>();
@@ -1423,7 +1328,7 @@ impl AcceptedDeclarationPublication {
                 .as_ref()
                 .map(|tip| tip.turn.workbench_imports.clone())
                 .unwrap_or_default();
-            for write in &base.intent.writes {
+            for write in base.intent.writes() {
                 workbench_imports.extend(&write.turn.workbench_imports);
             }
             let context_root = prepared.root().clone();
@@ -1471,13 +1376,13 @@ impl AcceptedDeclarationPublication {
             .current_public
             .as_ref()
             .map(|tip| tip.turn.clone())
-            .unwrap_or_else(|| base.intent.writes[0].turn.clone());
+            .unwrap_or_else(|| base.intent.writes()[0].turn.clone());
         if base.current_public.is_none() {
             turn.items.clear();
             turn.value_types.clear();
             turn.workbench_imports = super::SourceImports::new();
         }
-        for write in &base.intent.writes {
+        for write in base.intent.writes() {
             turn.items.retain(|item| {
                 !write
                     .retractions
@@ -1505,7 +1410,7 @@ impl AcceptedDeclarationPublication {
             .collect::<Result<Vec<_>, _>>()?;
         let private_owners = base
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| module_owner(&write.evidence))
             .collect::<BTreeSet<_>>();
@@ -1552,7 +1457,7 @@ impl AcceptedDeclarationPublication {
         };
         let source_domain_owners = base
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| write.evidence.product().owner().clone())
             .collect();
@@ -1576,7 +1481,7 @@ impl AcceptedDeclarationPublication {
 }
 
 impl RejectedDeclarationPublication {
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.base.intent
     }
 }
@@ -2183,7 +2088,7 @@ mod tests {
 
     fn ephemeral_binding_stage(
         session: &mut PersistentSession,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> StagedPublicManifest {
         let ExecutionPublication::Bindings(base) = session
             .restage_ephemeral_execution_publication(intent)
@@ -2542,7 +2447,7 @@ mod tests {
         let withdrawn = session
             .freeze_execution_intent(&withdrawal, vec![], vec![])
             .unwrap();
-        assert_eq!(withdrawn.writes[0].retractions.len(), 2);
+        assert_eq!(withdrawn.writes()[0].retractions.len(), 2);
         let withdrawn_proof = accepted(
             session
                 .restage_declaration_publication(owner.clone(), withdrawn)
@@ -2556,9 +2461,9 @@ mod tests {
         let intent = session
             .freeze_execution_intent(&a, vec![value_id], vec![])
             .unwrap();
-        assert_eq!(intent.writes[0].retractions.len(), 1);
+        assert_eq!(intent.writes()[0].retractions.len(), 1);
         assert_eq!(
-            intent.writes[0].retractions[0].namespace,
+            intent.writes()[0].retractions[0].namespace,
             ExportNamespace::Value
         );
         let publication = accepted(
@@ -2615,7 +2520,7 @@ mod tests {
         let intent = session
             .freeze_execution_intent(&a, vec![value_id], vec![])
             .unwrap();
-        assert!(intent.writes.is_empty());
+        assert!(intent.writes().is_empty());
         assert!(matches!(
             session
                 .restage_execution_publication(owner.clone(), intent.clone())
@@ -2978,7 +2883,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(Arc::ptr_eq(
-            &retry.base.intent.writes.last().unwrap().evidence,
+            &retry.base.intent.writes().last().unwrap().evidence,
             &authored_b
         ));
         let generation = retry.base.reservation.generation;
@@ -3547,8 +3452,8 @@ mod tests {
         let intent = session
             .freeze_execution_intent(&a, vec![value_id], vec![])
             .unwrap();
-        assert_eq!(intent.writes.len(), 3);
-        assert_eq!(intent.writes[2].retractions.len(), 2);
+        assert_eq!(intent.writes().len(), 3);
+        assert_eq!(intent.writes()[2].retractions.len(), 2);
         let high_water = session.lib().log.generation();
         let repeated = session
             .freeze_execution_intent(&a, vec![value_id], vec![])
@@ -3719,7 +3624,7 @@ mod tests {
             .all(|reference| *reference < reserved));
         assert!(node.implementation_refs.contains(&b_generation));
         assert_eq!(node.instances.classes.len(), 2);
-        for write in &intent.writes {
+        for write in intent.writes() {
             assert!(Arc::ptr_eq(
                 &session
                     .lib()

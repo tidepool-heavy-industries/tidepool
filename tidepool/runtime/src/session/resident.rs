@@ -4733,17 +4733,6 @@ where
         self.state.adopt_checked_declaration(admission)
     }
 
-    pub fn freeze_execution_intent(
-        &mut self,
-        admission: &super::PrivateExecutionAdmission,
-        writes: Vec<SessionVarId>,
-        sources: Vec<tidepool_codegen::binding_table::SourceLeaseKey>,
-    ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
-        self.settle_dropped_custody();
-        self.state
-            .freeze_execution_intent(admission, writes, sources)
-    }
-
     #[cfg(test)]
     pub(crate) fn start_checked_item_for_test(
         &self,
@@ -4760,50 +4749,22 @@ where
     pub fn freeze_private_execution(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-    ) -> Result<Arc<super::FinalExecutionIntent>, SessionError> {
+    ) -> Result<Arc<super::FrozenWorldExecution>, SessionError> {
         self.settle_dropped_custody();
-        let transition = admission.begin_freeze()?;
-        let scope = admission.private_scope();
-        let snapshot = self
-            .state
-            .public_visibility_snapshot_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
-        let completed = admission.completed_values.lock();
-        let writes = snapshot
-            .bindings
-            .iter()
-            .filter_map(|(_, id)| {
-                self.state.bindings().get(*id).and_then(|entry| {
-                    (entry.scope == scope
-                        && !self.hidden_host_bindings.contains_key(id)
-                        && completed.get(id).is_some_and(|proof| proof.matches(entry)))
-                    .then_some(*id)
-                })
-            })
-            .collect();
-        drop(completed);
-        let result =
-            self.state
-                .freeze_execution_intent_locked(admission, writes, snapshot.source_instances);
-        if result.is_ok() {
-            if let Some(transition) = transition {
-                transition.commit();
-            }
-        }
-        result
+        self.state.freeze_private_execution(admission)
     }
 
     pub fn restage_execution_publication(
         &mut self,
         owner: super::RecoveryPublicOwner,
-        intent: Arc<super::FinalExecutionIntent>,
+        intent: Arc<super::FrozenWorldExecution>,
     ) -> Result<super::ExecutionPublication, SessionError> {
         self.state.restage_execution_publication(owner, intent)
     }
 
     pub fn restage_ephemeral_execution_publication(
         &mut self,
-        intent: Arc<super::FinalExecutionIntent>,
+        intent: Arc<super::FrozenWorldExecution>,
     ) -> Result<super::ExecutionPublication, SessionError> {
         self.settle_dropped_custody();
         self.state.restage_ephemeral_execution_publication(intent)
@@ -4837,15 +4798,9 @@ where
                 binding: input.mounted.binding,
             });
         }
-        let private = self
-            .state
-            .public_visibility_snapshot_in(execution.private_scope())
-            .ok_or(SessionError::DeadScope(execution.private_scope()))?;
-        let intent = self.state.freeze_execution_intent_with_policy(
+        let intent = self.state.freeze_private_execution_with_selection(
             execution,
-            vec![input.mounted.binding],
-            private.source_instances,
-            super::BindingPublicationPolicy::ActivationInput,
+            super::paired_publication::FrozenBindingSelection::ActivationInput(input),
         )?;
         let publication = match execution.durable_owner.clone() {
             Some(owner) => self.state.restage_execution_publication(owner, intent),
