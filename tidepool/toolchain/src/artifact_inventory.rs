@@ -4093,21 +4093,54 @@ impl ArtifactInventory {
             .copied()
             .map(InventoryNodeKey::Group)
             .collect::<Vec<_>>();
-        let (reached, _) =
-            admitted_closure_with_operation(&state, exact_roots.iter().copied(), Some(operation))?;
         if let Some(cursor) = cursor {
-            let previous = &cursor.read_projection(&state).nodes;
-            for node in &reached {
-                if previous.contains(node) {
-                    continue;
+            let (reached, _) = admitted_closure_with_operation(
+                &state,
+                exact_roots.iter().copied(),
+                Some(operation),
+            )?;
+            let mut payloads = physical.lease.payloads.clone();
+            for (id, entry) in &cursor.lease.payloads {
+                if !payloads.contains_key(id) {
+                    payloads.insert(*id, Arc::clone(entry));
                 }
-                let payload = incoming
-                    .get(&node.artifact())
-                    .or_else(|| physical.observed_payload(&node.artifact()))
-                    .ok_or_else(|| failure("target closure lost its actual payload custody"))?;
+            }
+            for (id, entry) in &incoming {
+                payloads.insert(*id, Arc::clone(entry));
+            }
+            let mut required = NativeRequirementCollector::default();
+            native_groups_in_custody(
+                &state,
+                &payloads,
+                &reached,
+                roots.iter().copied().collect(),
+                Some(&mut required),
+                None,
+            )?;
+            let mut previous = NativeRequirementCollector::default();
+            native_groups_in_custody(
+                &state,
+                &cursor.lease.payloads,
+                &cursor.read_projection(&state).nodes,
+                cursor
+                    .roots()
+                    .iter()
+                    .filter_map(|root| match root {
+                        InventoryNodeKey::Group(group) => Some(*group),
+                        InventoryNodeKey::Artifact(_) => None,
+                    })
+                    .collect(),
+                Some(&mut previous),
+                None,
+            )?;
+            // TYPE and private custody retain bytes independently of execution.
+            // Only an exact prior executable binding can authorize its reuse.
+            for requirement in &required.bindings {
+                let payload = &payloads[&requirement.binding.artifact];
                 if payload.descriptor.kind == ArtifactKind::ValueInterface
-                    && !allowed.contains(&payload.descriptor.id)
-                    && !cursor.contains_namespace_artifact(payload.descriptor.id)
+                    && !allowed.contains(&requirement.binding.artifact)
+                    && !cursor.contains_namespace_artifact(requirement.binding.artifact)
+                    && !previous.bindings.contains(requirement)
                 {
                     return Err(failure("target reaches a future value interface"));
                 }
@@ -5626,7 +5659,17 @@ fn native_requirements_for_exact_groups_in_custody(
     )?;
     Ok((
         NativeRequirements {
-            bindings: requirements.bindings.into_iter().collect(),
+            bindings: requirements
+                .bindings
+                .into_iter()
+                .map(|requirement| NativeBindingRequirement {
+                    artifact_id: requirement.binding.artifact,
+                    identity: requirement.identity,
+                    generation: requirement.generation,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         },
         groups,
     ))
@@ -5757,7 +5800,14 @@ fn original_group_retained_binding_in_scope(
 
 #[derive(Default)]
 struct NativeRequirementCollector {
-    bindings: BTreeSet<NativeBindingRequirement>,
+    bindings: BTreeSet<ExactNativeBindingRequirement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ExactNativeBindingRequirement {
+    binding: ArtifactBinding,
+    identity: tidepool_repr::execution_schema::SymbolIdentity,
+    generation: u64,
 }
 
 fn native_groups_in_custody(
@@ -5799,9 +5849,14 @@ fn native_groups_in_custody(
             continue;
         }
         state.graph_visits.fetch_add(1, Ordering::Relaxed);
+        if !owned.contains(&InventoryNodeKey::Group(key)) {
+            return Err(failure("native group outside selected view"));
+        }
         // Payload membership is an issued-view invariant even when only groups
         // are requested; keep these lookups independent of fact collection.
-        let _payload = &payloads[&key.binding.artifact()];
+        let _payload = payloads
+            .get(&key.binding.artifact())
+            .ok_or_else(|| failure("native group lacks payload custody"))?;
         for (target, label) in state.outgoing(InventoryNodeKey::Group(key)) {
             match label {
                 ArtifactDependency::NativeGroup { .. } => {
@@ -5835,16 +5890,29 @@ fn native_groups_in_custody(
                     pending.push((required, Arc::from(child_causes)));
                 }
                 ArtifactDependency::NativeBinding {
+                    dependent_ordinal,
                     generation,
                     namespace,
                     occurrence,
                     record_parent,
                     ..
                 } => {
-                    let descriptor = &payloads[&target.artifact()].descriptor;
+                    if *dependent_ordinal != key.original_ordinal {
+                        return Err(failure("native binding edge has another source ordinal"));
+                    }
+                    let InventoryNodeKey::Artifact(binding) = target else {
+                        return Err(failure("native binding edge lacks artifact target"));
+                    };
+                    if !owned.contains(&target) {
+                        return Err(failure("native binding outside selected view"));
+                    }
+                    let descriptor = &payloads
+                        .get(&binding.artifact)
+                        .ok_or_else(|| failure("native binding lacks payload custody"))?
+                        .descriptor;
                     if let Some(requirements) = requirements.as_deref_mut() {
-                        requirements.bindings.insert(NativeBindingRequirement {
-                            artifact_id: descriptor.id,
+                        requirements.bindings.insert(ExactNativeBindingRequirement {
+                            binding,
                             identity: tidepool_repr::execution_schema::SymbolIdentity {
                                 unit: descriptor.owner.unit.clone(),
                                 module: descriptor.owner.module.clone(),
@@ -14185,34 +14253,54 @@ mod tests {
         .map(|admitted| admitted.artifacts().clone())
         .unwrap();
         assert!(!cursor.artifact_ids().contains(&value.descriptor.id));
+        let private = cursor
+            .retain_custody(fixed.captured_stage().issued_artifacts())
+            .unwrap();
+        assert!(private.artifact_ids().contains(&value.descriptor.id));
+        assert!(!private.contains_namespace_artifact(value.descriptor.id));
+        assert!(private.roots().iter().any(|root| {
+            matches!(root, InventoryNodeKey::Group(group) if group.original_ordinal == 0)
+        }));
+        assert!(
+            !private
+                .binding_dependencies()
+                .iter()
+                .any(|(source, _, edge)| {
+                    private.roots().contains(source)
+                        && matches!(edge, ArtifactDependency::NativeBinding { .. })
+                })
+        );
         let before = inventory.metrics();
         let physical_before = fixed
             .captured_stage()
             .issued_artifacts()
             .capture_graph_selection();
 
-        let refused = {
-            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-            let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
-            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
-                &prepared,
-                &accepted,
-                &validation.inventory,
-            )
-            .unwrap();
-            inventory.select_native_target(
-                fixed.captured_stage().physical_cohort(),
-                observed,
-                None,
-                Some(&cursor),
-                &[],
-                &BTreeMap::new(),
-                &mut validation,
-            )
-        }
-        .unwrap_err();
-        assert!(matches!(refused, CompileError::ExtractFailed(message)
+        for previous in [&cursor, &private] {
+            let refused = {
+                let mut validation =
+                    crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
+                let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                    &prepared,
+                    &accepted,
+                    &validation.inventory,
+                )
+                .unwrap();
+                inventory.select_native_target(
+                    fixed.captured_stage().physical_cohort(),
+                    observed,
+                    None,
+                    Some(previous),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+            }
+            .unwrap_err();
+            assert!(matches!(refused, CompileError::ExtractFailed(message)
             if message == "artifact inventory: target reaches a future value interface"));
+        }
         assert_eq!(
             fixed
                 .captured_stage()
@@ -14248,6 +14336,133 @@ mod tests {
         .unwrap();
         assert!(next.artifact_ids().contains(&value.descriptor.id));
         assert_eq!(next.selected_native_groups().len(), 1);
+        assert!(!next.contains_namespace_artifact(value.descriptor.id));
+        let previous_requirement = |view: &ArtifactView| {
+            let mut edges =
+                view.binding_dependencies()
+                    .into_iter()
+                    .filter_map(|(_, target, edge)| match (target, edge) {
+                        (
+                            InventoryNodeKey::Artifact(binding),
+                            ArtifactDependency::NativeBinding {
+                                generation: 9,
+                                namespace,
+                                occurrence,
+                                record_parent: None,
+                                ..
+                            },
+                        ) if binding.artifact == value.descriptor.id
+                            && namespace == "value"
+                            && occurrence == "value" =>
+                        {
+                            Some(binding)
+                        }
+                        _ => None,
+                    });
+            let binding = edges
+                .next()
+                .expect("the executable group requires the value");
+            assert!(edges.all(|other| other == binding));
+            binding
+        };
+        let historical_binding = previous_requirement(&next);
+        let repeated = {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
+            inventory.select_native_target(
+                fixed.captured_stage().physical_cohort(),
+                observed,
+                None,
+                Some(&next),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+        }
+        .expect("an exact prior executable dependency survives outside the namespace");
+        assert_eq!(
+            previous_requirement(repeated.artifacts()),
+            historical_binding
+        );
+
+        let other_entries = vec![
+            consumer.clone(),
+            value.clone(),
+            Arc::new(entry_in_unit("fixture", "DifferentValueScope", Vec::new())),
+        ];
+        let other_available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                other_entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let other_selection = bound_selection_for_entries(&other_available, &[consumer.clone()]);
+        let other = inventory
+            .bind_segment(
+                &other_available,
+                other_entries,
+                &other_selection,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+        let other_cursor = {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
+            inventory.select_native_target(
+                other.captured_stage().physical_cohort(),
+                observed,
+                None,
+                Some(&inventory.empty_view()),
+                &[value.clone()],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+        }
+        .unwrap();
+        assert!(
+            !other_cursor
+                .artifacts()
+                .contains_namespace_artifact(value.descriptor.id)
+        );
+        assert_ne!(
+            previous_requirement(other_cursor.artifacts()),
+            historical_binding
+        );
+        let mismatch = {
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
+            let observed = crate::certified_products::AuthenticatedTargetImports::issue(
+                &prepared,
+                &accepted,
+                &validation.inventory,
+            )
+            .unwrap();
+            inventory.select_native_target(
+                fixed.captured_stage().physical_cohort(),
+                observed,
+                None,
+                Some(other_cursor.artifacts()),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+        }
+        .unwrap_err();
+        assert!(matches!(mismatch, CompileError::ExtractFailed(message)
+            if message == "artifact inventory: target reaches a future value interface"));
     }
 
     #[test]
