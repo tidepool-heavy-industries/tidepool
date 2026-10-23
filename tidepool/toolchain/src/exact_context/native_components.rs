@@ -443,8 +443,11 @@ pub(super) mod tests {
         let refusal = inventory
             .context_for_expected_snapshot(crossed.root(), &crossed)
             .unwrap_err();
-        assert!(matches!(refusal, crate::CompileError::ExtractFailed(detail)
-            if detail.contains("package selected edge changed its exact occurrence")));
+        assert!(
+            matches!(&refusal, crate::CompileError::ExtractFailed(detail)
+            if detail.contains("package selected edge changed its exact occurrence")),
+            "crossed package receipt refusal: {refusal:?}"
+        );
 
         // Bytes remain on disk and in the acquisition's retained cache. Omitting
         // the explicit requested reference cannot borrow either as permission.
