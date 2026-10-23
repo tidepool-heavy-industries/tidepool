@@ -3424,7 +3424,7 @@ fn compile_cell_program_admitted_inner(
 ) -> Result<(CellCheck, SettledCellProgram), CellCheckFailure> {
     let cancellation = crate::CompilerTransactionCancellation::new();
     let settlement = std::cell::RefCell::new(settlement);
-    let source = admission.source_lease();
+    let source = admission.compiler_preparation_source();
     let outcome = source.with_source_compiler_transaction(
         tidepool_toolchain::artifacts::CompileWorkload::Foreground,
         cancellation,

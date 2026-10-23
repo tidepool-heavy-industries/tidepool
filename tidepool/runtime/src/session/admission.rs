@@ -3770,6 +3770,17 @@ impl RuntimeCellAdmission {
         }
     }
 
+    /// The source owner captured for this compiler preparation. World requests
+    /// retain their original source independently of the target placement lease.
+    pub(super) fn compiler_preparation_source(&self) -> Arc<RuntimeOriginalSource> {
+        match &self.compiler_basis {
+            RuntimeCellCompilerBasis::World {
+                original_source, ..
+            } => original_source.clone(),
+            RuntimeCellCompilerBasis::Finite(_) => self._retained_scope.original_source().clone(),
+        }
+    }
+
     pub(super) fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
         match &self.compiler_basis {
             RuntimeCellCompilerBasis::World {
