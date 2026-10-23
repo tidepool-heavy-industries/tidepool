@@ -863,7 +863,6 @@ mod tests {
 
     #[test]
     fn inherited_and_local_capture_preserves_originals_refuses_shadow_and_released_owner() {
-        use tidepool_codegen::scope::ScopeId;
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
         use tidepool_runtime::session::{ModuleEnv, SessionLib, SessionRunContext};
         let root = tempfile::tempdir().unwrap();
@@ -883,19 +882,39 @@ mod tests {
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             Some(lib),
         );
-        tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(
-                ScopeId::ROOT,
-                &[
-                    "data Inherited = Inherited Int",
-                    "data Withheld = Withheld Int",
-                ],
-                settlement,
+        let parent_source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let parent_scope = parent_source.scope();
+        let mut parent_context = selection_context();
+        parent_context.placement.lexical_scope = parent_scope;
+        session
+            .set_run_context(SessionRunContext {
+                lexical_scope: parent_scope,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let defined = session
+            .with_source_compiler_transaction(
+                parent_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.define_scoped_in(
+                        parent_scope,
+                        &[
+                            "data Inherited = Inherited Int",
+                            "data Withheld = Withheld Int",
+                        ],
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        assert!(defined.close().resources_retired());
+        defined.into_outcome().action.unwrap();
         let surface = session
-            .exact_exports_in(ScopeId::ROOT, &["Inherited", "Withheld"])
+            .exact_exports_in(parent_scope, &["Inherited", "Withheld"])
             .unwrap();
         let original = surface
             .declarations()
@@ -905,14 +924,24 @@ mod tests {
             .unwrap()
             .head
             .clone();
-        let facade = tidepool_testing::with_settlement(|settlement| {
-            session.materialize_facade(
-                &surface,
-                &session.compile_view_in(ScopeId::ROOT).unwrap(),
-                settlement,
+        let materialized = session
+            .with_source_compiler_transaction(
+                parent_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.materialize_facade(
+                        &surface,
+                        &session.compile_view_in(parent_scope).unwrap(),
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        assert!(materialized.close().resources_retired());
+        let facade = materialized.into_outcome().action.unwrap();
         let ceiling = session
             .declaration_generation_high_water()
             .unwrap()
@@ -924,19 +953,20 @@ mod tests {
         }]);
         capture_facade_unknown_end_control(
             &mut session,
-            &selection_context(),
+            &parent_context,
             &local_provenance,
             effects.include_paths(),
             true,
         );
         capture_facade_unknown_end_control(
             &mut session,
-            &selection_context(),
+            &parent_context,
             &tidepool_runtime::session::ProgramProvenance::default(),
             effects.include_paths(),
             false,
         );
         drop(session);
+        drop(parent_source);
         let child_id = tidepool_repr::SessionId(18);
         let mut child_lib = SessionLib::open(
             child_id,
@@ -961,13 +991,18 @@ mod tests {
         session
             .initialize_captured_declaration_high_water(ceiling)
             .unwrap();
-        let scope = ScopeId::ROOT;
+        let child_source = session.mint_notebook_scope_with_lease(None).unwrap();
+        let scope = child_source.scope();
         let mut context = selection_context();
         context.placement.session = child_id;
+        context.placement.lexical_scope = scope;
         context.source_imports = crate::ActorSourceImports::from_exact_facades([&facade, &facade]);
         session
             .set_actor_execution(
-                SessionRunContext::ROOT,
+                SessionRunContext {
+                    lexical_scope: scope,
+                    ..SessionRunContext::ROOT
+                },
                 EffectRunPolicy::HandleOrSuspend,
                 LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             )
@@ -1019,16 +1054,26 @@ mod tests {
             effects.include_paths(),
             false,
         );
-        let selected = tidepool_testing::with_settlement(|settlement| {
-            super::materialize_entry_facades(
-                &session,
-                &inherited,
-                &context,
-                effects.include_paths(),
-                settlement,
+        let materialized = session
+            .with_source_compiler_transaction(
+                child_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    super::materialize_entry_facades(
+                        session,
+                        &inherited,
+                        &context,
+                        effects.include_paths(),
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        assert!(materialized.close().resources_retired());
+        let selected = materialized.into_outcome().action.unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(
             selected[0].projection().unwrap().receipt().exports().len(),
@@ -1038,10 +1083,20 @@ mod tests {
             selected[0].projection().unwrap().receipt().exports()[0].head,
             original
         );
-        let local_generation = tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(scope, &["data Local = Local Int"], settlement)
-        })
-        .unwrap();
+        let defined = session
+            .with_source_compiler_transaction(
+                child_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.define_scoped_in(scope, &["data Local = Local Int"], settlement)
+                },
+            )
+            .unwrap();
+        assert!(defined.close().resources_retired());
+        let local_generation = defined.into_outcome().action.unwrap();
         let local = session
             .exact_exports_in(scope, &["Local"])
             .unwrap()
@@ -1058,16 +1113,26 @@ mod tests {
                 name: local.occurrence.clone(),
             },
         ]);
-        let selected = tidepool_testing::with_settlement(|settlement| {
-            super::materialize_entry_facades(
-                &session,
-                &mixed,
-                &context,
-                effects.include_paths(),
-                settlement,
+        let materialized = session
+            .with_source_compiler_transaction(
+                child_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    super::materialize_entry_facades(
+                        session,
+                        &mixed,
+                        &context,
+                        effects.include_paths(),
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        assert!(materialized.close().resources_retired());
+        let selected = materialized.into_outcome().action.unwrap();
         let actual = selected
             .iter()
             .flat_map(|facade| {
@@ -1200,7 +1265,10 @@ mod tests {
             )
             .unwrap();
         assert!(refused.close().resources_retired());
-        assert!(refused.into_outcome().action.is_err());
+        assert!(matches!(
+            refused.into_outcome().action,
+            Err(tidepool_runtime::session::SessionError::InitialNotebookFacadesChanged)
+        ));
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
             requests_before_repeat
@@ -1434,10 +1502,24 @@ mod tests {
         assert_eq!(result.to_json(), serde_json::json!(42));
         assert_eq!(item.prefix().snapshot().compiler_prefix().next_item(), 1);
 
-        tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(scope, &["data Inherited = Inherited Bool"], settlement)
-        })
-        .unwrap();
+        let defined = session
+            .with_source_compiler_transaction(
+                child_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.define_scoped_in(
+                        scope,
+                        &["data Inherited = Inherited Bool"],
+                        settlement,
+                    )
+                },
+            )
+            .unwrap();
+        assert!(defined.close().resources_retired());
+        defined.into_outcome().action.unwrap();
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(
                 &session,
@@ -1448,19 +1530,40 @@ mod tests {
             )),
             Err(super::ActorStartCaptureError::ShadowDrift { .. })
         ));
-        let shadow = tidepool_testing::with_settlement(|settlement| {
-            session.materialize_facade(
-                &session.exact_exports_in(scope, &["Inherited"]).unwrap(),
-                &session.compile_view_in(scope).unwrap(),
-                settlement,
+        let materialized = session
+            .with_source_compiler_transaction(
+                child_source.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, settlement| {
+                    session.materialize_facade(
+                        &session.exact_exports_in(scope, &["Inherited"]).unwrap(),
+                        &session.compile_view_in(scope).unwrap(),
+                        settlement,
+                    )
+                },
             )
-        })
-        .unwrap();
+            .unwrap();
+        assert!(materialized.close().resources_retired());
+        let shadow = materialized.into_outcome().action.unwrap();
         let mut ambiguous = descendant.clone();
-        ambiguous.placement.lexical_scope = scope;
+        let ambiguity_source = grandchild.mint_notebook_scope_with_lease(None).unwrap();
+        let ambiguity_scope = ambiguity_source.scope();
+        assert!(matches!(
+            grandchild.exact_exports_in(ambiguity_scope, &["Inherited"]),
+            Err(tidepool_runtime::session::ExactExportError::UnknownExport { .. })
+        ));
+        ambiguous.placement.lexical_scope = ambiguity_scope;
         ambiguous.source_imports =
             crate::ActorSourceImports::from_exact_facades([&facade, &shadow]);
-        grandchild.set_run_context(SessionRunContext::ROOT).unwrap();
+        grandchild
+            .set_run_context(SessionRunContext {
+                lexical_scope: ambiguity_scope,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(
                 &grandchild,

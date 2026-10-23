@@ -33817,30 +33817,33 @@ pub(crate) mod request_tests {
         }
     }
 
-    #[test]
-    fn request_annotations_survive_actor_compile_view() {
-        use tidepool_runtime::session::RequestCompileAnnotations;
-        use tidepool_toolchain::declaration_join::RequestHelperRecipe;
-        let (session, context, source, inputs, _root) = activation_input_fixture(|_| {});
-        let evidence = inputs[0].type_evidence().clone();
-        let signatures = evidence.request_type_signatures().unwrap().clone();
-        let view = session
-            .compile_view_in(context.placement.lexical_scope)
-            .unwrap();
-        for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
-            let annotations = RequestCompileAnnotations::new(evidence.clone(), helper).unwrap();
-            assert!(Arc::ptr_eq(annotations.evidence(), &evidence));
-            let actor = context
-                .compile_view_with_inputs(view.clone(), annotations.into())
+    #[tokio::test]
+    async fn request_annotations_survive_actor_compile_view() {
+        with_test_compiler_owner(|_| async {
+            use tidepool_runtime::session::RequestCompileAnnotations;
+            use tidepool_toolchain::declaration_join::RequestHelperRecipe;
+            let (session, context, source, inputs, _root) = activation_input_fixture(|_| {});
+            let evidence = inputs[0].type_evidence().clone();
+            let signatures = evidence.request_type_signatures().unwrap().clone();
+            let view = session
+                .compile_view_in(context.placement.lexical_scope)
                 .unwrap();
-            let admitted = actor.exact_compile_context().unwrap();
-            let annotations = admitted.request_annotations().unwrap();
-            assert!(Arc::ptr_eq(annotations.signatures(), &signatures));
-            assert_eq!(annotations.helper_recipe(), helper);
-        }
-        let mut missing = source;
-        missing.request_helper_recipe = RequestHelperRecipe::ActorReply;
-        assert!(missing.request_annotations().is_err());
+            for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
+                let annotations = RequestCompileAnnotations::new(evidence.clone(), helper).unwrap();
+                assert!(Arc::ptr_eq(annotations.evidence(), &evidence));
+                let actor = context
+                    .compile_view_with_inputs(view.clone(), annotations.into())
+                    .unwrap();
+                let admitted = actor.exact_compile_context().unwrap();
+                let annotations = admitted.request_annotations().unwrap();
+                assert!(Arc::ptr_eq(annotations.signatures(), &signatures));
+                assert_eq!(annotations.helper_recipe(), helper);
+            }
+            let mut missing = source;
+            missing.request_helper_recipe = RequestHelperRecipe::ActorReply;
+            assert!(missing.request_annotations().is_err());
+        })
+        .await;
     }
 
     #[tokio::test]
