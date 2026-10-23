@@ -5774,10 +5774,12 @@ mod tests {
                 view.injected_module_names(),
             )
             .unwrap();
-            crate::session::world_cell_test_support::plan_state_fixture_specification_for(
-                &mut resident.state,
-                execution.clone(),
+            let public_target = execution.world_execution_facts().public_target;
+            crate::session::world_cell_test_support::plan_fixture_specification_for(
+                resident,
+                &public_target,
                 crate::session::world_cell_test_support::world_recipe(&specification),
+                execution.clone(),
             )
             .map_err(|error| match error {
                 crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Compile(
