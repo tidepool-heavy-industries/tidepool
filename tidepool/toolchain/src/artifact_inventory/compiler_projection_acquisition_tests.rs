@@ -200,7 +200,10 @@ fn assert_narrowing_keeps_selected_acquisition(
         .for_source_owners(&BTreeSet::from([owner.clone()]))
         .unwrap();
     assert!(Arc::ptr_eq(
-        original.compiler_roles().original_acquisition(owner).unwrap(),
+        original
+            .compiler_roles()
+            .original_acquisition(owner)
+            .unwrap(),
         expected,
     ));
     assert_same_native_decision(source, &original, owner);
@@ -222,7 +225,10 @@ fn assert_same_native_decision(
         actual.compiler_roles().native_decision(owner),
     ) {
         (InputNativeDecision::UnissuedPolicy, InputNativeDecision::UnissuedPolicy) => {}
-        (InputNativeDecision::IssuedChoices(expected), InputNativeDecision::IssuedChoices(actual)) => {
+        (
+            InputNativeDecision::IssuedChoices(expected),
+            InputNativeDecision::IssuedChoices(actual),
+        ) => {
             assert_eq!(actual, expected);
         }
         _ => panic!("a whole-row operation changed whether a native choice was issued"),
@@ -238,10 +244,16 @@ fn assert_whole_row_precedence(
         // Equal Original policy chooses Receiving, including when the other
         // completed acquisition was retained first as transport custody.
         let receiving = receiving.retain_custody(incoming.artifacts()).unwrap();
-        let expected = receiving.compiler_roles().original_acquisition(owner).unwrap();
+        let expected = receiving
+            .compiler_roles()
+            .original_acquisition(owner)
+            .unwrap();
         let appended = receiving.append_program_fragment(incoming).unwrap().support;
         assert!(Arc::ptr_eq(
-            appended.compiler_roles().original_acquisition(owner).unwrap(),
+            appended
+                .compiler_roles()
+                .original_acquisition(owner)
+                .unwrap(),
             expected,
         ));
         assert_same_native_decision(&receiving, &appended, owner);
@@ -249,8 +261,14 @@ fn assert_whole_row_precedence(
         let types = receiving.for_source_owners(&BTreeSet::new()).unwrap();
         let appended = types.append_program_fragment(incoming).unwrap().support;
         assert!(Arc::ptr_eq(
-            appended.compiler_roles().original_acquisition(owner).unwrap(),
-            incoming.compiler_roles().original_acquisition(owner).unwrap(),
+            appended
+                .compiler_roles()
+                .original_acquisition(owner)
+                .unwrap(),
+            incoming
+                .compiler_roles()
+                .original_acquisition(owner)
+                .unwrap(),
         ));
         assert_same_native_decision(incoming, &appended, owner);
     }

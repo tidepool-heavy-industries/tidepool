@@ -1491,7 +1491,6 @@ fn nested_publication_digest_cannot_change_recovered_source_or_native_selection(
     );
 }
 
-
 impl ExactDeclarationContext {
     /// Continue an actual completed compilation with its selected acquisition
     /// crossed against equal-fact transport custody. This helper asserts the
@@ -1506,10 +1505,16 @@ impl ExactDeclarationContext {
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) {
         let assert_acquisition = |support: &crate::artifact_inventory::CompilerSourceSupport| {
-            assert!(Arc::ptr_eq(
-                support.compiler_roles().original_acquisition(owner).unwrap(),
-                expected,
-            ), "an equal-fact custody acquisition replaced the selected compiler owner");
+            assert!(
+                Arc::ptr_eq(
+                    support
+                        .compiler_roles()
+                        .original_acquisition(owner)
+                        .unwrap(),
+                    expected,
+                ),
+                "an equal-fact custody acquisition replaced the selected compiler owner"
+            );
         };
         let context = self
             .published_context_for_root(owner, expected.descriptor.id)
@@ -1538,10 +1543,12 @@ impl ExactDeclarationContext {
             .unwrap();
         assert_acquisition(&extended);
         assert_acquisition(&extended.publication_birth_support(owner).unwrap());
-        let context = Arc::new(context
-            .rebuild(|facts| facts.compiler_support = extended)
-            .finish()
-            .unwrap());
+        let context = Arc::new(
+            context
+                .rebuild(|facts| facts.compiler_support = extended)
+                .finish()
+                .unwrap(),
+        );
 
         // Exercise the same retained input owner used by compiler World
         // continuations, including its actual native-selection consumer.
@@ -1549,10 +1556,32 @@ impl ExactDeclarationContext {
             .capture_world_primary_inputs(context.toolchain_identity_sha256())
             .unwrap();
         assert_acquisition(world.inputs().compiler_source_support());
+        let additions = incoming
+            .compiler_roles()
+            .keys()
+            .filter(|owner| !context.compiler_roles().keys().any(|held| held == *owner))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !additions.is_empty(),
+            "the real completed source cohort adds new World roles"
+        );
         let continued = world.advance_program_support(&context, incoming).unwrap();
+        assert!(
+            additions
+                .iter()
+                .all(|owner| continued.changed_owners.contains(owner)),
+            "the continuation must actually install the nonempty source delta"
+        );
         assert_acquisition(continued.primary.context().compiler_source_support());
         assert_acquisition(continued.primary.inputs().compiler_source_support());
-        assert_acquisition(&continued.primary.context().compiler_source_support()
-            .publication_birth_support(owner).unwrap());
+        assert_acquisition(
+            &continued
+                .primary
+                .context()
+                .compiler_source_support()
+                .publication_birth_support(owner)
+                .unwrap(),
+        );
     }
 }
