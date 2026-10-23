@@ -255,16 +255,22 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             !type_only_owners.is_empty(),
             "this fixture must exercise canonical dependencies without native products"
         );
+        let selection = original_context.snapshot().graph_selection().unwrap();
         let incomplete =
-            tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
-                durable.path(),
-                &references,
-                &companions,
-                &[],
-                Vec::new(),
-            );
+            tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition::new(durable.path())
+                .capture_bound(
+                    &references,
+                    &companions,
+                    &[],
+                    &[],
+                    &original_context.artifact_view().descriptors(),
+                    &selection.bindings,
+                    &original_context.artifact_view().binding_dependencies(),
+                );
         match incomplete {
-            Err(CompileError::ArtifactInventory(error)) => match error.failure {
+            Err(tidepool_toolchain::declaration_join::RecoveryInventoryError::Certification(
+                CompileError::ArtifactInventory(error),
+            )) => match error.failure {
                 ArtifactInventoryFailure::MissingDependency {
                     required,
                     dependency: ArtifactDependency::Interface,
@@ -272,7 +278,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                 } => assert!(type_only_owners.contains(&(required.unit, required.module))),
                 other => panic!("expected omitted type-only interface refusal, got {other:?}"),
             },
-            other => panic!("expected incomplete recovery closure refusal, got {other:?}"),
+            Err(other) => panic!("expected incomplete recovery closure refusal, got {other:?}"),
+            Ok(_) => panic!("incomplete canonical closure cannot authorize exact acquisition"),
         }
         assert_original_durability(
             durable.path(),
