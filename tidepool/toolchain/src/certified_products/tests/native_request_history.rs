@@ -288,7 +288,7 @@ fn replay_native_transport_history(
     } = history;
     let (same_root, overlap, shared_carrier, reverse, duplicate) =
         (*same_root, *overlap, *shared_carrier, *reverse, *duplicate);
-    eprintln!("native transport history: {history:?}");
+    tracing::debug!(?history, "native transport history");
     assert!(
         !same_root || overlap,
         "one root has one authored dependency"
@@ -1322,9 +1322,245 @@ fn generated_private_transport_histories_preserve_issued_graphs() {
         coverage.borrow_mut().completed += 1;
         Ok(())
     });
-    eprintln!(
-        "native transport campaign configured_cases={cases} coverage={:?}",
-        coverage.borrow()
-    );
+    tracing::debug!(configured_cases = cases, coverage = ?coverage.borrow(), "native transport campaign");
     result.unwrap();
+}
+
+#[test]
+#[ignore = "requires the declared rooted resident compiler"]
+fn actual_source_handoff_preserves_sealed_native_dependency() {
+    use crate::artifact_inventory::ArtifactPayload;
+    use crate::artifacts::test_support::{
+        prepare_source_publication_entry_fixture, ExactSourceFixture,
+    };
+
+    // One actual sealed publication and one actual inspection establish source
+    // authority. Generated graph histories above never construct source receipts.
+    let publication_fixture = prepare_source_publication_entry_fixture().unwrap();
+    let root = &publication_fixture.root;
+    let helper = &publication_fixture.helper;
+    let publication = publication_fixture
+        .entry
+        .products()
+        .published_source_original_selection("native-source-handoff", &root.descriptor.owner)
+        .unwrap();
+    let source = "module Consumer where\nimport qualified SourceOriginalSupport\nprobe :: Int\nprobe = SourceOriginalSupport.second\n__tidepool_inspect_0 = probe\n";
+    let execution = ExactSourceFixture::inspect(
+        Some(Arc::new(ExactCompileContext::new(Arc::clone(
+            publication.context(),
+        )))),
+        source,
+        "probe",
+    )
+    .unwrap();
+    assert_eq!(execution.admissions().len(), 1);
+    assert_eq!(execution.receipt_paths().len(), 1);
+    let admission = &execution.admissions()[0];
+    admission.validate_request(execution.request()).unwrap();
+    assert_eq!(admission.witness().source_path(), execution.source_path());
+    assert!(admission
+        .compiler_dependencies()
+        .adjacency()
+        .values()
+        .any(|imports| imports.contains(&root.descriptor.owner)));
+    let root_key = NativeGroupKey {
+        artifact: root.descriptor.id,
+        original_ordinal: publication_fixture.root_ordinals[1],
+    };
+    let ArtifactPayload::Original(root_product) = &root.payload else {
+        unreachable!()
+    };
+    let ArtifactPayload::Original(helper_product) = &helper.payload else {
+        unreachable!()
+    };
+    let helper_ordinal = helper
+        .native_group_ordinals
+        .iter()
+        .copied()
+        .find(|ordinal| {
+            original_native_group_definitions(helper_product, *ordinal)
+                .unwrap()
+                .export_contracts()
+                .any(|contract| {
+                    let contract = contract.unwrap();
+                    contract.identity.unit == helper.descriptor.owner.unit
+                        && contract.identity.module == helper.descriptor.owner.module
+                        && contract.identity.occurrence == "second"
+                })
+        })
+        .unwrap();
+    // The authored body independently names Helper.second; neither recovery nor
+    // target admission supplies the expected dependency topology.
+    assert!(
+        original_native_group_definitions(root_product, root_key.original_ordinal)
+            .unwrap()
+            .globals()
+            .iter()
+            .any(
+                |global| global.identity.unit == helper.descriptor.owner.unit
+                    && global.identity.module == helper.descriptor.owner.module
+                    && global.identity.occurrence == "second"
+            )
+    );
+    let inputs = execution.request().compiler_inputs();
+    let availability = inputs.native_availability(root_key.artifact).unwrap();
+    let dependency = availability
+        .dependency_support(root_key, root_product.owner())
+        .unwrap();
+    let root_groups = dependency.groups().collect::<BTreeSet<_>>();
+    assert_eq!(root_groups.len(), 1);
+    let root_group = *root_groups.first().unwrap();
+    let offer = dependency.offer_for_group(root_group).unwrap().clone();
+    let issued = offer.issued_group_carriers().unwrap();
+    let helper_groups = issued
+        .keys()
+        .copied()
+        .filter(|group| {
+            group.binding.artifact() == helper.descriptor.id
+                && group.original_ordinal == helper_ordinal
+        })
+        .collect::<Vec<_>>();
+    let [helper_group] = helper_groups.as_slice() else {
+        panic!("one actual Helper.second issuance")
+    };
+    let expected = BTreeMap::from([
+        (root_group, issued[&root_group]),
+        (*helper_group, issued[helper_group]),
+    ]);
+    let expected_edge = (
+        ArtifactBindingNode::Group(root_group),
+        ArtifactBindingNode::Group(*helper_group),
+        ArtifactDependency::NativeGroup {
+            dependent_ordinal: root_key.original_ordinal,
+            required_ordinal: helper_ordinal,
+        },
+    );
+    assert!(offer
+        .custody_snapshot()
+        .binding_dependencies()
+        .unwrap()
+        .contains(&expected_edge));
+    let role_roots = inputs
+        .projection()
+        .roles()
+        .into_iter()
+        .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+        .collect();
+    let no_demand = inputs
+        .compiler_source_support()
+        .select_support_roots(role_roots)
+        .unwrap();
+    assert!(no_demand.artifacts().selected_native_groups().is_empty());
+    assert!(no_demand.same_selected_acquisitions(inputs.compiler_source_support()));
+    let private = OriginalCompilerInputs::from_issued_support(&no_demand);
+    assert!(
+        private
+            .for_program_continuation(
+                no_demand.artifacts(),
+                execution.admissions(),
+                &(source.to_owned() + "-- changed\n"),
+            )
+            .is_err(),
+        "a successful receipt does not authenticate different source bytes"
+    );
+    let graph = no_demand.artifacts().capture_graph_selection();
+    let edges = no_demand.artifacts().binding_dependencies();
+    let (graph, edges): (ArtifactGraphSelection, Vec<_>) =
+        serde_json::from_slice(&serde_json::to_vec(&(graph, edges)).unwrap()).unwrap();
+    // Recovery restores exact graph facts while this history retains the live
+    // selected rows and native offer; it does not reissue authority from data.
+    let fresh = ArtifactInventory::default();
+    let recovered = fresh
+        .recover_selection(
+            &fresh.empty_view(),
+            no_demand.artifacts().entries(),
+            &graph,
+            &edges,
+        )
+        .unwrap();
+    assert_eq!(recovered.capture_graph_selection(), graph);
+    assert_eq!(recovered.binding_dependencies(), edges);
+    let scratch = tempfile::tempdir().unwrap();
+    for (index, support) in [no_demand.artifacts(), &recovered].into_iter().enumerate() {
+        let carried = private
+            .for_program_continuation(support, execution.admissions(), execution.source())
+            .unwrap();
+        assert!(carried
+            .compiler_source_support()
+            .same_selected_acquisitions(&no_demand));
+        assert!(carried
+            .native_offers()
+            .iter()
+            .any(|candidate| candidate.same_issuance(&offer)));
+        assert!(carried
+            .issued_artifacts()
+            .selected_native_groups()
+            .is_empty());
+        let public = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .admit_producer(
+                    CanonicalProducerIdentity::from_producer_bytes(
+                        &publication_fixture.producer_bytes,
+                    )
+                    .sha256(),
+                )
+                .unwrap(),
+        );
+        let next = ExactCompileContext::new(public)
+            .prepare_compilation_with_private_input(
+                &scratch.path().join(format!("next-{index}")),
+                &publication_fixture.producer_bytes,
+                None,
+                Some(carried),
+            )
+            .unwrap();
+        assert!(next
+            .compiler_inputs()
+            .artifacts()
+            .selected_native_groups()
+            .is_empty());
+        let mut validation = PackageInterfaceValidation::default();
+        let selection = CertifiedSourceSelection::from_compiler_inputs(
+            next.compiler_inputs(),
+            &validation.inventory,
+        )
+        .unwrap();
+        let view = next.compiler_inputs().artifacts();
+        let stage = view
+            .inventory()
+            .bind_segment(view, vec![], &selection, &mut validation)
+            .unwrap();
+        let observations = source_target_observations(&[(root_product, root_key.original_ordinal)]);
+        let prepared = prepared_target_fixture(&observations);
+        let observed =
+            AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                .unwrap();
+        let admitted = view
+            .inventory()
+            .select_native_target(
+                stage.captured_stage().physical_cohort(),
+                observed,
+                None,
+                Some(view),
+                &[],
+                &BTreeMap::new(),
+                &mut validation,
+            )
+            .unwrap();
+        assert_eq!(
+            admitted.resolve().unwrap().groups(),
+            &expected.keys().copied().collect()
+        );
+        assert!(admitted
+            .artifacts()
+            .binding_dependencies()
+            .contains(&expected_edge));
+        assert!(next
+            .compiler_inputs()
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .any(|candidate| candidate.same_issuance(&offer)));
+    }
 }
