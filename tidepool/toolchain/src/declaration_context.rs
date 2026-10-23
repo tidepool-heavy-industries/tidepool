@@ -21092,18 +21092,27 @@ mod tests {
             .products()
             .published_source_original_selection("first-revision", &root)
             .unwrap();
-        let equivalent = fixture
+        let repeated = fixture
+            .entry
+            .products()
+            .published_source_original_selection("first-revision", &root)
+            .unwrap();
+        let other_revision = fixture
             .entry
             .products()
             .published_source_original_selection("other-revision", &root)
             .unwrap();
         let first = first.context().compiler_input_projection().snapshot_roles()[&root].clone();
-        let equivalent = equivalent
+        let repeated = repeated
             .context()
             .compiler_input_projection()
             .snapshot_roles()[&root]
             .clone();
-        let repeated = first.clone();
+        let other_revision = other_revision
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[&root]
+            .clone();
         let incoming = CompilerInputRole::InterfaceOnly {
             interface: fixture
                 .entry
@@ -21172,9 +21181,12 @@ mod tests {
         };
         let first = write_conflict(first);
         let repeated = write_conflict(repeated);
-        let equivalent = write_conflict(equivalent);
+        let other_revision = write_conflict(other_revision);
         assert_eq!(first, repeated);
-        assert_eq!(first, equivalent);
+        assert_ne!(
+            first, other_revision,
+            "source revision is publication policy"
+        );
     }
 
     #[test]
@@ -21505,15 +21517,20 @@ mod tests {
                 imports: vec![]
             }]
         );
+        let roles = selection
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[&root].original(), Some(fixture.helper.descriptor.id));
         assert!(
             selection
                 .context()
                 .artifact_view()
-                .descriptors()
+                .selected_native_groups()
                 .iter()
-                .all(|row| row.owner.module != "PublicationTarget"
-                    && row.owner != fixture.root.descriptor.owner),
-            "private target and unrelated available originals are excluded"
+                .all(|group| group.binding.artifact() == fixture.helper.descriptor.id),
+            "retained custody does not select the private target or unrelated native bodies"
         );
         let interface = selection
             .context()
@@ -21569,15 +21586,27 @@ mod tests {
         let published = fields[9].as_array().unwrap();
         assert_eq!(published.len(), 1);
         let row = published[0].as_array().unwrap();
-        let originals = selection.context().recovery_products();
-        assert_eq!(originals.len(), 1);
+        let roles = selection
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[&root].original(), Some(fixture.helper.descriptor.id));
+        let entry = selection
+            .context()
+            .artifact_view()
+            .observed_payload(&roles[&root].original().unwrap())
+            .expect("the selected published role retains its original bytes");
+        let ArtifactPayload::Original(original) = &entry.payload else {
+            panic!("the published role selects an original product")
+        };
         assert_eq!(
             row[..4],
             [
                 text(&root.unit),
                 text(&root.module),
-                text(hex(&originals[0].owner().skinny_iface_sha256)),
-                text(hex(&originals[0].owner().product_sha256))
+                text(hex(&original.owner().skinny_iface_sha256)),
+                text(hex(&original.owner().product_sha256))
             ]
         );
         assert_eq!(row[4], text("revision"));
@@ -21795,11 +21824,15 @@ mod tests {
             .products()
             .published_source_original_selection("revision", &root)
             .unwrap();
-        let consumer = crate::certified_products::tests::original_groups_fixture(
+        let consumer = crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+            &root.unit,
             "InlineConsumer",
             vec![(7, vec![])],
             1,
             &BTreeMap::new(),
+            vec![0x42],
+            &BTreeMap::new(),
+            &[],
         );
         let consumer = crate::certified_products::fixture_source_finalized_product(
             consumer,
