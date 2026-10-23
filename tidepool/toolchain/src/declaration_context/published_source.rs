@@ -23,6 +23,55 @@ impl PublishedSourceOriginalSelection {
     pub fn public_root(&self) -> &ExactModuleIdentity {
         &self.public_root
     }
+
+    fn selects_target(
+        &self,
+        lexical: &BTreeSet<ExactModuleIdentity>,
+        groups: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+    ) -> Result<bool, CompileError> {
+        let birth = self
+            .context
+            .compiler_source_support()
+            .publication_birth_support(&self.public_root)?;
+        let root_original = birth
+            .projection()
+            .snapshot_roles()
+            .get(&self.public_root)
+            .and_then(CompilerInputRole::original)
+            .ok_or_else(|| failure("publication birth lacks its selected original root"))?;
+        if !lexical.contains(&self.public_root)
+            && !groups
+                .iter()
+                .any(|group| group.binding.artifact() == root_original)
+        {
+            return Ok(false);
+        }
+        // The receiving context may hold other issuers as DATA. Only the
+        // immutable birth's exact groups grant this publication's permission,
+        // including native children absent from its compiler Original roles.
+        let CompilerInputRole::PublishedSourceOriginal { selection, .. } =
+            &self.context.compiler_input_projection().snapshot_roles()[&self.public_root]
+        else {
+            return Err(failure("publication lacks its issued native selection"));
+        };
+        let issued = selection.graph_selection();
+        let originals = birth
+            .projection()
+            .snapshot_roles()
+            .values()
+            .filter_map(CompilerInputRole::original)
+            .chain(
+                issued
+                    .native_groups
+                    .iter()
+                    .map(|group| group.binding.artifact()),
+            )
+            .collect::<BTreeSet<_>>();
+        Ok(groups
+            .iter()
+            .filter(|group| originals.contains(&group.binding.artifact()))
+            .all(|group| birth.artifacts().contains_issued_native_group(*group)))
+    }
 }
 
 pub(crate) struct PublishedOriginalEndorsement {
@@ -491,31 +540,12 @@ impl ExactDeclarationContext {
             }
         }
         timing.advance("filter_exact_issuers");
-        let selected = publications
-            .into_iter()
-            .filter(|selection| {
-                let issuer = selection.context.artifact_view();
-                let roles = selection.context.compiler_input_roles();
-                let originals = roles
-                    .iter()
-                    .filter_map(CompilerInputRole::original)
-                    .collect::<BTreeSet<_>>();
-                let root_original = roles
-                    .iter()
-                    .find(|role| role.is_published_source_original())
-                    .and_then(CompilerInputRole::original);
-                let native_root = root_original.is_some_and(|original| {
-                    groups
-                        .iter()
-                        .any(|group| group.binding.artifact() == original)
-                });
-                (lexical.contains(selection.public_root()) || native_root)
-                    && groups
-                        .iter()
-                        .filter(|group| originals.contains(&group.binding.artifact()))
-                        .all(|group| issuer.contains_issued_native_group(*group))
-            })
-            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity(publications.len());
+        for publication in publications {
+            if publication.selects_target(&lexical, groups)? {
+                selected.push(publication);
+            }
+        }
         timing.advance("assemble_selection");
         tracing::debug!(
             target: "exomonad_harness::timing",

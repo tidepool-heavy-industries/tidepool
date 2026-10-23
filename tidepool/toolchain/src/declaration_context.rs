@@ -22417,6 +22417,74 @@ mod tests {
         let view = context.artifact_view();
         let graph = view.capture_graph_selection();
         let assert_publication = |actuals: &[Arc<PublishedSourceOriginalSelection>]| {
+            assert_eq!(actuals.len(), 1);
+            let actual = actuals[0].context();
+            let expected = current_publication.context();
+            let actual_facts = actual.snapshot();
+            let expected_facts = expected.snapshot();
+            let choices = |facts: &crate::exact_context::ExactContextSnapshot| {
+                facts
+                    .input_decisions
+                    .iter()
+                    .map(|(owner, decision)| (owner.clone(), decision.groups.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                choices(&actual_facts),
+                choices(&expected_facts),
+                "cold publication preserves current input choices"
+            );
+            let actual_graph = actual_facts.graph_selection().unwrap();
+            let expected_graph = expected_facts.graph_selection().unwrap();
+            assert_eq!(
+                actual_graph.roots, expected_graph.roots,
+                "cold publication preserves exact roots"
+            );
+            assert_eq!(
+                actual_graph.custody_roots, expected_graph.custody_roots,
+                "cold publication preserves exact custody seeds"
+            );
+            assert_eq!(
+                actual_graph.namespace, expected_graph.namespace,
+                "cold publication preserves the compiler namespace"
+            );
+            assert_eq!(
+                actual_graph.native_groups, expected_graph.native_groups,
+                "cold publication preserves retained group bindings"
+            );
+            assert_eq!(
+                actual.semantic_sha256(),
+                expected.semantic_sha256(),
+                "cold publication preserves semantic observations"
+            );
+            let actual_support = actual.compiler_source_support();
+            let expected_support = expected.compiler_source_support();
+            assert!(
+                actual_support.projection() == expected_support.projection(),
+                "cold publication preserves its acquired compiler projection"
+            );
+            assert!(
+                actual_support.artifacts() == expected_support.artifacts(),
+                "cold publication preserves acquired artifact facts"
+            );
+            assert_eq!(
+                actual_support.native_fact_owner().commitment(),
+                expected_support.native_fact_owner().commitment(),
+                "cold publication preserves its native fact owner"
+            );
+            assert!(
+                actual_support.acquired_native_closures()
+                    == expected_support.acquired_native_closures(),
+                "cold publication preserves completed native code facts"
+            );
+            assert!(
+                actual_support.native_availability() == expected_support.native_availability(),
+                "cold publication preserves live native availability"
+            );
+            assert!(
+                actual_support == expected_support,
+                "cold publication preserves admitted compiler rows and offers"
+            );
             assert_eq!(actuals, std::slice::from_ref(&current_publication));
         };
         let assert_consumer = |acquired: &Arc<ExactDeclarationContext>| {
