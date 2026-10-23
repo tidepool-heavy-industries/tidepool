@@ -4868,6 +4868,64 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             source_scope: Default::default(),
             template_imports: None,
         });
+        if !dependency_in_roles {
+            let owner = &entries[0].descriptor.owner;
+            let initial = context
+                .capture_world_primary_compiler_inputs(producer.sha256())
+                .unwrap();
+            assert_eq!(
+                initial
+                    .native_selection
+                    .candidates
+                    .require_unique(owner)
+                    .unwrap(),
+                None
+            );
+            assert!(initial
+                .native_availability(entries[0].descriptor.id)
+                .unwrap()
+                .permits(7));
+            let types = complete
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners([owner.clone()])
+                .unwrap();
+            let type_context = Arc::new(context.clone().rebuild(|facts| {
+                facts.compiler_support = types;
+            }));
+            let advanced = initial.with_type_interfaces(&[type_context]).unwrap();
+            assert_eq!(advanced.changed_owners, vec![owner.clone()]);
+            let cold = advanced
+                .context
+                .capture_world_primary_compiler_inputs(producer.sha256())
+                .unwrap();
+            assert_eq!(
+                advanced.inputs.native_selection.candidates.0,
+                cold.native_selection.candidates.0
+            );
+            assert_eq!(
+                advanced.inputs.native_selection.availability,
+                cold.native_selection.availability
+            );
+            assert_eq!(
+                advanced
+                    .inputs
+                    .native_selection
+                    .candidates
+                    .require_unique(owner)
+                    .unwrap(),
+                Some(entries[0].descriptor.id),
+                "the new TYPE role exposes only its already issued exact native child"
+            );
+            assert_eq!(
+                NativeCompilerTransport::lower_metadata(&advanced.inputs)
+                    .unwrap()
+                    .entries,
+                NativeCompilerTransport::lower_metadata(&cold)
+                    .unwrap()
+                    .entries
+            );
+        }
         let candidates = crate::module_candidates::CandidateSet {
             manifest_path: PathBuf::from("availability-only-does-not-read-manifest"),
             by_owner: BTreeMap::new(),

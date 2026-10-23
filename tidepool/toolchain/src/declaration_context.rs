@@ -4869,7 +4869,25 @@ impl RequestCompilerInputs {
         let mut facts = primary.owner.facts.clone();
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        let native_selection = self.native_selection.retain_acquisitions(&support)?;
+        // A newly visible TYPE owner can make an already retained native child
+        // eligible as a direct candidate. Unrelated type additions preserve the
+        // existing index and permission rows without rewalking native closures.
+        let changed_native_owners = changed_owners.iter().collect::<BTreeSet<_>>();
+        let native_selection = if support
+            .native_availability()
+            .rows()
+            .any(|row| changed_native_owners.contains(&row.original.descriptor.owner))
+        {
+            NativeInputSelection::receive(
+                support.projection(),
+                &metadata,
+                support.artifacts(),
+                support.native_availability(),
+                support.native_offers(),
+            )?
+        } else {
+            self.native_selection.retain_acquisitions(&support)?
+        };
         let inputs = Arc::new(Self {
             source_support: Arc::new(support),
             metadata,
@@ -9348,10 +9366,10 @@ impl CompilerArtifactMetadata {
     }
 }
 
-/// Borrowed issued facts needed by output certification. This view performs no
-/// input selection, physical materialization or authority issuance. The
-/// source support is owned so a demanded world owner can carry its projected
-/// support without referring back to the cold issuer.
+/// Borrowed issued facts needed by output certification. Finite inputs require
+/// unambiguous native selection when consumed; demanded inputs retain their
+/// already selected map. The owned source support lets a demanded World carry
+/// its projection without referring back to the cold issuer.
 #[derive(Clone)]
 pub(crate) struct ProductCompilerInputs<'a> {
     source_support: Arc<crate::artifact_inventory::CompilerSourceSupport>,
