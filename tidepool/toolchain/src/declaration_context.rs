@@ -159,10 +159,9 @@ impl SelectedTypeInterfaces {
             .get_or_init(|| self.materialization_context().semantic_sha256())
     }
     pub fn same_authenticated_interfaces(&self, other: &Self) -> bool {
-        std::ptr::eq(self, other)
-            || (self == other
-                && self.support.artifacts().binding_dependencies()
-                    == other.support.artifacts().binding_dependencies())
+        // TYPE issuance closes every canonical requirement into selected rows.
+        // Their scoped bindings own the immutable edges as well as payloads.
+        std::ptr::eq(self, other) || self == other
     }
     pub fn select(
         &self,
@@ -18874,6 +18873,155 @@ mod tests {
             }
             proptest::prop_assert!(phases.iter().all(|count| *count > 0));
             eprintln!("original acquisition history: fresh={} delta={} all_held={}", phases[0], phases[1], phases[2]);
+        }
+    }
+
+    #[test]
+    fn selected_type_interfaces_preserve_exact_edges_across_warm_and_cold_selection() {
+        use crate::certified_products::tests::original_groups_fixture;
+        use crate::certified_products::{fixture_finalized_product, fixture_module_interface};
+        let signature = crate::checked_cell::fixture_checked_signature(&{
+            let value = Value::Array(vec![
+                text("TPCHECKEDSIGNATURE2"),
+                text("request-reply"),
+                text("input type"),
+                Value::Bytes(vec![1]),
+                Value::Array(vec![Value::Array(vec![
+                    text("fixture"),
+                    text("TypeRoot"),
+                    text("type"),
+                    text("Input"),
+                ])]),
+            ]);
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&value, &mut bytes).unwrap();
+            bytes
+        })
+        .unwrap();
+        let mut selected = Vec::new();
+        let mut canonical_child = None;
+        for version in [1, 2] {
+            let product = fixture_finalized_product(
+                original_groups_fixture("TypeChild", vec![(7, vec![])], version, &BTreeMap::new()),
+                [2; 32],
+            );
+            let child = product.module_interface().unwrap().clone();
+            if let Some(previous) = &canonical_child {
+                assert_eq!(previous, &child);
+            }
+            canonical_child = Some(child.clone());
+            let root = fixture_module_interface(
+                [2; 32],
+                "fixture",
+                "TypeRoot",
+                BTreeMap::from([(
+                    ("fixture".into(), "TypeChild".into()),
+                    child.interface_sha256(),
+                )]),
+            );
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit(
+                    &inventory.empty_view(),
+                    vec![
+                        ArtifactEntry::canonical(root),
+                        ArtifactEntry::original([2; 32], product).unwrap(),
+                    ],
+                )
+                .unwrap();
+            let projection = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+            let context =
+                ExactDeclarationContext::from_authenticated_interfaces([2; 32], &view, projection)
+                    .unwrap();
+            let types = context
+                .select_original_type_interfaces(&[], &[&signature])
+                .unwrap();
+            let repeated = context
+                .select_original_type_interfaces(&[], &[&signature])
+                .unwrap();
+            assert!(types.same_authenticated_interfaces(&types));
+            assert!(types.same_authenticated_interfaces(&repeated));
+            assert!(types
+                .support
+                .projection()
+                .roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(types
+                .support
+                .artifacts()
+                .selected_native_groups()
+                .is_empty());
+            assert!(types.support.native_offers().is_empty());
+
+            let artifacts = types.support.artifacts();
+            let directory = tempfile::tempdir().unwrap();
+            let mut validation = PackageInterfaceValidation::default();
+            let references = artifacts
+                .entries()
+                .iter()
+                .map(|entry| {
+                    let ArtifactPayload::Canonical(interface) = &entry.payload else {
+                        panic!("TYPE owner retains only canonical payloads")
+                    };
+                    recovery_artifacts::materialize_module_interface(
+                        directory.path(),
+                        interface,
+                        &mut validation,
+                        MaterializationMode::Durable,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let selection = artifacts.capture_graph_selection();
+            let recovered = RecoveredArtifactInventory::capture_bound(
+                directory.path(),
+                &[],
+                &references,
+                &[],
+                &[],
+                &artifacts.descriptors(),
+                &selection.bindings,
+                &artifacts.binding_dependencies(),
+            )
+            .unwrap();
+            let cold_context = recovered
+                .context_with_graph_selection(
+                    &selection,
+                    &types.support.projection().roles(),
+                    vec![],
+                )
+                .unwrap();
+            let cold = cold_context
+                .select_original_type_interfaces(&[], &[&signature])
+                .unwrap();
+            assert!(types.same_authenticated_interfaces(&cold));
+            assert!(cold.same_authenticated_interfaces(&types));
+            assert_eq!(types.semantic_sha256(), cold.semantic_sha256());
+            selected.push((types, cold));
+        }
+        let (left, cold_left) = &selected[0];
+        let (right, cold_right) = &selected[1];
+        assert_eq!(
+            left.support.projection(),
+            right.support.projection(),
+            "the selected TYPE role payload IDs are identical"
+        );
+        assert_eq!(
+            left.support.artifacts().entries(),
+            right.support.artifacts().entries(),
+            "no payload or native-body difference can explain refusal"
+        );
+        assert_ne!(
+            left.support.artifacts().binding_dependencies(),
+            right.support.artifacts().binding_dependencies(),
+            "the canonical root retains its actual canonical child binding"
+        );
+        for first in [left, cold_left] {
+            for second in [right, cold_right] {
+                assert!(!first.same_authenticated_interfaces(second));
+                assert!(!second.same_authenticated_interfaces(first));
+            }
         }
     }
 
