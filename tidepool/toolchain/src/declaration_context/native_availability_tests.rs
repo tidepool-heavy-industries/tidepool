@@ -6812,6 +6812,13 @@ pub(crate) fn assert_selected_authored_private_inputs(
             certificate.product().owner(),
             group.original_ordinal,
         ));
+        assert!(
+            crate::certified_products::original_native_group_definitions(
+                certificate.product(),
+                group.original_ordinal,
+            )
+            .is_some()
+        );
     }
     let absent_ordinal = authored_groups
         .iter()
@@ -6820,11 +6827,26 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .unwrap()
         .checked_add(1)
         .unwrap();
-    assert!(!available.has_native_group_support(
-        authored_root,
-        certificate.product().owner(),
-        absent_ordinal,
-    ));
+    // Full native permission does not assert that an ordinal has a body.
+    // Authenticate body membership and issued candidates independently.
+    assert!(
+        crate::certified_products::original_native_group_definitions(
+            certificate.product(),
+            absent_ordinal,
+        )
+        .is_none()
+    );
+    assert!(available
+        .native_group_candidates(
+            crate::artifact_inventory::NativeGroupKey {
+                artifact: authored_root,
+                original_ordinal: absent_ordinal,
+            },
+            certificate.product().owner(),
+        )
+        .unwrap()
+        .bindings()
+        .is_empty());
     assert_exact_offer(&native_context, "full-authored-exact-offer", true);
     // Source-role demotion preserves the issuer's complete native group graph
     // as custody. A later private offer must keep that graph without restoring
