@@ -1044,7 +1044,7 @@ fn recorded_compiler_row_codec_refuses_foreign_group_and_ordinal() {
     let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(
         serde_json::json!({"binding": {"artifact": vec![2u8; 32], "selection": vec![3u8; 32]}, "original_ordinal": 7}),
     ).unwrap();
-    for (original, ordinal) in [(ArtifactId([4; 32]), 7), (ArtifactId([2; 32]), 8)] {
+    for (original, ordinal) in [(ArtifactId([4; 32]), 7u32), (ArtifactId([2; 32]), 8)] {
         let row = RecordedCompilerRow::Original {
             interface: ArtifactId([1; 32]),
             original,
@@ -1457,6 +1457,56 @@ fn recorded_row_codec_refuses_type_choices_and_duplicate_ordinals() {
             Err(SnapshotError::Malformed(_))
         ));
     }
+}
+
+// These codec records have no acquired payloads and issue no native permission.
+fn availability_wire_snapshot(
+    mode: NativeTransportMode,
+    reachable: Option<Vec<ArtifactBindingNode>>,
+) -> ExactContextSnapshot {
+    let original = ArtifactId([1; 32]);
+    let offer = NativeOfferSnapshotFacts {
+        original,
+        interface: ArtifactId([2; 32]),
+        owner: ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "AvailabilityWire".into(),
+        },
+        body: NativeOfferSnapshotBody::Empty(
+            crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(
+                ExactSelectionSnapshot::default(),
+            )),
+        ),
+    };
+    let offer_id = offer.identity().unwrap();
+    let contributions = reachable
+        .into_iter()
+        .map(|nodes| {
+            let contribution = NativeContributionSnapshotFacts {
+                offer: offer_id,
+                reachable: nodes.into_iter().collect(),
+            };
+            (contribution.identity().unwrap(), contribution)
+        })
+        .collect();
+    let mut snapshot = ExactContextSnapshot::empty();
+    snapshot.offers.insert(offer_id, offer);
+    snapshot.native_availability.insert(
+        original,
+        NativeAvailabilitySnapshotFacts {
+            original,
+            owner: tidepool_repr::execution_schema::CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "AvailabilityWire".into(),
+                module_version: tidepool_repr::execution_schema::ModuleVersion([3; 32]),
+                skinny_iface_sha256: [4; 32],
+                product_sha256: [5; 32],
+            },
+            mode,
+            contributions,
+        },
+    );
+    snapshot
 }
 
 #[test]
