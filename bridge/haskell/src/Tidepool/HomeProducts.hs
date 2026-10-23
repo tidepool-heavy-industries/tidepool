@@ -75,7 +75,7 @@ import GHC.Unit.Types (unitString, unitIdString)
 import GHC.Utils.Outputable (ppr, renderWithContext, defaultSDocContext)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), forkExactContext, hydrateExactScope, withExactHomeInstances
-  , exactInterfaceSummary, HydratedExactInterfaces, hydratedExactInterfaces )
+  , exactInterfaceSummary, HydratedExactInterfaces, hydratedExactInterfaces, hydratedInterfaceProduct )
 import Tidepool.CompileInputPolicy (pluginInputIssues)
 import Tidepool.FamilyConsistency (validateEnvironmentFamilies)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv, scopeRetainedModuleGraph)
@@ -199,14 +199,13 @@ captureCanonicalOriginalInputs producer closure sources = do
     metadata <- captureCanonicalMetadata Nothing proof
     let captured = capturedCanonicalMetadataProof metadata
         (artifact,path,packageSha) = canonicalInterfaceInput captured
-        ownerKey = (exactUnit artifact,exactModule artifact)
-    (selectedArtifact,home) <- maybe (throwIO CandidateCoreHomeMissing) pure
-      (Map.lookup ownerKey selected)
+    (_,home) <- either (const (throwIO CandidateCoreHomeMissing)) pure
+      (hydratedInterfaceProduct closure artifact)
     let iface = hm_iface home
         owner = mi_module iface
     unless (isSourceOriginal (canonicalOrigin captured)
         && canonicalProofMatchesOwner producer (originalOwnerKey owner) captured
-        && artifact == selectedArtifact && mi_hsc_src iface == HsSrcFile)
+        && mi_hsc_src iface == HsSrcFile)
       (throwIO CandidateOriginalOwnerMismatch)
     unless (all (\(required,seal) -> Map.lookup required seals == Just seal)
         (Map.toAscList (canonicalRequirements captured)))
