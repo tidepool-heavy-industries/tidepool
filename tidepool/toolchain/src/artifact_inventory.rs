@@ -2387,7 +2387,7 @@ impl ArtifactEntry {
     fn adopt_facts(&self, facts: ArtifactFactsHandle) -> Self {
         let payload = match (&self.payload, &facts) {
             (ArtifactPayload::Original(product), ArtifactFactsHandle::Original(owner)) => {
-                ArtifactPayload::Original(product.clone().with_facts(Arc::clone(owner)))
+                ArtifactPayload::Original(product.clone().adopt_fact_owner(Arc::clone(owner)))
             }
             (ArtifactPayload::Canonical(interface), ArtifactFactsHandle::Canonical(owner)) => {
                 ArtifactPayload::Canonical(interface.clone().with_facts(Arc::clone(owner)))
@@ -2534,12 +2534,7 @@ impl ArtifactEntry {
     ) -> Result<Self, CompileError> {
         #[cfg(test)]
         ORIGINAL_ENTRY_CONSTRUCTION_CALLS.with(|calls| calls.set(calls.get() + 1));
-        let product =
-            crate::certified_products::finalize_original_for_inventory(product, validation)
-                .map_err(|error| failure(&format!("original facts: {error}")))?;
-        let canonical = product
-            .module_interface()
-            .ok_or_else(|| failure("native product lacks its canonical finalized module"))?;
+        let canonical = product.module_interface();
         if canonical.producer_sha256() != producer {
             return Err(failure("native product has another canonical producer"));
         }
@@ -2558,13 +2553,11 @@ impl ArtifactEntry {
         let descriptor = Self::original_descriptor(producer, &product);
         Ok(Self {
             descriptor,
-            facts: ArtifactFactsHandle::Original(Arc::clone(
-                product.facts().expect("finalized original"),
-            )),
+            facts: ArtifactFactsHandle::Original(Arc::clone(product.facts())),
             payload: ArtifactPayload::Original(product.clone()),
             requirements,
             interface_seals,
-            native: product.original_native().cloned(),
+            native: Some(Arc::clone(product.original_native())),
         })
     }
     fn original_descriptor(
@@ -2998,10 +2991,12 @@ impl InventoryState {
             if Arc::ptr_eq(interface.facts(), canonical) {
                 entry
             } else {
-                let product = product.clone().with_canonical_facts(Arc::clone(canonical));
-                Arc::new(entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(
-                    product.facts().unwrap(),
-                ))))
+                let product = product
+                    .clone()
+                    .adopt_fact_owner(product.facts().adopt_canonical_owner(Arc::clone(canonical)));
+                Arc::new(
+                    entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(product.facts()))),
+                )
             }
         } else {
             entry

@@ -5241,7 +5241,7 @@ pub(crate) struct SourceEvidenceAdmission<'a> {
 }
 
 enum SourceEvidenceCompletion<'a> {
-    Ordinary(cache::CompletedSourceEvidence),
+    Ordinary(Arc<cache::CompletedSourceEvidence>),
     Exact(crate::declaration_context::ExactProductAdmission<'a>),
 }
 
@@ -5266,6 +5266,13 @@ impl<'a> SourceEvidenceAdmission<'a> {
         match &self.completion {
             SourceEvidenceCompletion::Ordinary(completed) => completed,
             SourceEvidenceCompletion::Exact(exact) => exact.source().evidence().as_ref(),
+        }
+    }
+
+    pub(crate) fn shared_completed(&self) -> Arc<cache::CompletedSourceEvidence> {
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(completed) => Arc::clone(completed),
+            SourceEvidenceCompletion::Exact(exact) => Arc::clone(exact.source().evidence()),
         }
     }
 
@@ -5371,7 +5378,7 @@ impl<'a> ParsedSourceEvidence<'a> {
             input_path: input,
             target_source: source,
             inventory: self.2,
-            completion: SourceEvidenceCompletion::Ordinary(completed),
+            completion: SourceEvidenceCompletion::Ordinary(Arc::new(completed)),
         })
     }
 
@@ -5388,7 +5395,7 @@ impl<'a> ParsedSourceEvidence<'a> {
             input_path: input,
             target_source: source,
             inventory,
-            completion: SourceEvidenceCompletion::Ordinary(completed),
+            completion: SourceEvidenceCompletion::Ordinary(Arc::new(completed)),
         })
     }
 
