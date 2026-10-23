@@ -9751,12 +9751,6 @@ where
                 SessionError::from(super::SessionTransitionReason::ScopeRevoked).into(),
             ));
         }
-        if let Some(checked) = &seed.checked {
-            checked
-                .validate_reentry(&self.state, seed.lexical_scope)
-                .map_err(ResidentError::from)
-                .map_err(ResidentResumeError::Rejected)?;
-        }
         if let ResumeObservation::ToolPresentation = observation {
             match &mut seed.obligation {
                 HoleObligation::Plain(original)
@@ -9789,11 +9783,24 @@ where
         // re-declaration here (`bind` is only used for materialization
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
+        let checked = seed.checked.clone();
+        if let Some(checked) = &checked {
+            checked
+                .begin_reentry(&self.state, seed.lexical_scope)
+                .map_err(ResidentError::from)
+                .map_err(ResidentResumeError::Rejected)?;
+        }
         self.reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
             .map_err(|error| {
                 if self.state.parked_ids().contains(&frame_id) {
+                    if let Some(checked) = &checked {
+                        checked.rejected_reentry();
+                    }
                     ResidentResumeError::Rejected(error)
                 } else {
+                    if let Some(checked) = &checked {
+                        checked.fail();
+                    }
                     ResidentResumeError::Consumed(error)
                 }
             })
@@ -10078,6 +10085,14 @@ where
     fn reconcile_failed_reentry(&mut self, cont_id: &str, frame_id: ContinuationId) {
         let still_parked = self.state.parked_ids().contains(&frame_id);
         if !still_parked {
+            if let Some(checked) = self
+                .parked
+                .iter()
+                .find(|entry| entry.name == cont_id)
+                .and_then(|entry| entry.seed.checked.as_ref())
+            {
+                checked.fail();
+            }
             self.parked.retain(|entry| entry.name != cont_id);
             if let Some(observer) = &self.continuation_observer {
                 observer(ResidentContinuationEvent::Retired(cont_id.to_owned()));
