@@ -3,6 +3,12 @@
 Status: root investigation, not an accepted implementation expansion.
 Observed at de968 and trace-enabled b493. G2 remains unqualified.
 
+The 2026-10-23 review against `1de912c683` confirms that the relevant ordering
+and reference construction are still present. This is source evidence, not a
+fresh reproduction. The purge candidate `33ae06028c` must first compile and run
+the joined controls; its current Haskell compile repairs do not establish that
+this runtime failure is resolved.
+
 ## Counterexample
 
 The real resident history captures `historyValue0 = 23`, authors
@@ -21,9 +27,33 @@ Source and event locations:
 `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/b493-world-projection-events.json`.
 The underlying compiler.jsonl lines 9964 and 10260 preserve the raw observations.
 The native declaration dependency is exposed without its captured-value generation
-or a remaining exact Original use. The precise GHC transformation that erased the
-use is not yet independently captured; inlining/alias propagation is supported by
-the source path, not established solely by these counters.
+or a remaining exact Original use. These counters do not establish whether the
+association was absent before optimization or whether optimization erased a use
+whose association was originally available. Inlining/alias propagation is one
+source-supported explanation, not a confirmed cause.
+
+## Next discriminating observation
+
+Rerun the actual published-capture history on the repaired joined worker. If it
+still fails, retain bounded, correlated observations at the existing compiler
+phases: before simplification, after simplification, and after tidy. For the
+relevant free identifiers, record the actual GHC Name identity, native-authored
+classification, and exact `referenceForName` result. Include the owning module
+and fresh/reused compilation route. Use opt-in structured tracing; observing
+references must not perform native acquisition or change compiler inputs.
+
+- Association missing before simplification: trace the actual admitted
+  `nativeOriginalInputs` and World import/Original association. Repair that
+  propagation before changing optimization.
+- Association present initially, then absent with a changed free-identifier set:
+  locate the transformation and evaluate the producer-owned opaque boundary
+  below. GHC may legitimately erase an ordinary Haskell alias; the harness must
+  preserve its required native boundary or carry its exact provenance.
+- Association survives through tidy: inspect projection and retained-generation
+  admission; the empty-reference explanation no longer fits that run.
+
+The diagnostic does not authorize acquisition of dead uses, matching by rendered
+names, or choosing a historical owner from a broader inventory.
 
 ## Ownership and ordering
 

@@ -3,9 +3,10 @@
 Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `831d96eea1`: 32 requested consumers stopped on a
-GHC compile error; zero tests ran. Repair candidate `65e2eb4ae0` is queued for
-the same joined compile and focused execution. The previous `2de0e83ee2` pin
+Last settled validation pin: `65e2eb4ae0`: 32 requested consumers stopped on two
+GHC compile errors; zero tests ran. Repair candidate `33ae06028c` is queued for
+the same joined compile and focused execution, including the two restored World
+regression tests. The previous `2de0e83ee2` pin
 compiled 17 consumers and executed nine tests: five passed and four failed.
 These are bounded review checkpoints, not a release.
 
@@ -68,10 +69,10 @@ Remaining closeout work:
 - Execute the four repaired ownership controls. The joined materialization
   bypass now checks actual issuance, with shared-owner and competing-owner cases;
   the other repairs distinguish root permission and compiler roles from custody.
-- Finish independent review of the last scaffold retirement and restore two
-  still-useful real-compiler regression contracts through World preparation:
-  qualified equality under the custom Prelude, and authored versus imported
-  missing-record warnings. Do not restore the deleted finite entry point.
+- Execute the independently reviewed scaffold retirement and two restored
+  real-compiler World regression contracts: qualified equality under the custom
+  Prelude, and authored versus imported missing-record warnings. Both are
+  integrated through `33ae06028c`; the finite entry point remains deleted.
 - Execute the changed controls and current production paths before claiming
   migration completion. Source integration alone is insufficient.
 
@@ -111,6 +112,14 @@ Each repaired join receives another independent bounded adversarial review.
 
 ## Evidence and pending checks
 
+- At **`65e2eb4ae0`**, the **32-consumer compile failed** on two undefined
+  `scaffold` variables; **zero tests executed**. The earlier decoder and layout
+  blockers are repaired. Both new failures came from a broad text substitution
+  changing consumers of still-present local `imports` producers. `f6ef9e337f`
+  restores those graph/receipt edges. A bounded audit of the original replacement
+  found exactly these two unintended sites and the one intended normalization
+  rename; no authority factory or missing producer is required. `33ae06028c`
+  adds the two independently reviewed World coverage replacements to that repair.
 - At **`831d96eea1`**, the **32-consumer compile failed** at the first Haskell
   error: activation-preview parsing still called a local signature-decoder alias
   deleted with the old cell branch. **Zero tests executed.** Independent review
