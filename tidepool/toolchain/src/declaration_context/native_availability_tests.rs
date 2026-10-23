@@ -6852,29 +6852,26 @@ pub(crate) fn assert_selected_authored_private_inputs(
     // as custody. A later private offer must keep that graph without restoring
     // lexical visibility or selecting executable groups in the captured context.
     let mut captured = native_context.clone();
+    let permissions = captured
+        .compiler_source_support()
+        .native_availability()
+        .snapshot_facts()
+        .unwrap();
     let support = captured
         .compiler_source_support()
-        .selected_interfaces()
-        .unwrap()
-        .support_for_owners(
-            captured
+        .source_support(
+            &captured
                 .compiler_input_projection()
                 .snapshot_roles()
                 .keys()
                 .cloned()
                 .collect(),
         )
-        .unwrap()
-        .retain_custody(captured.artifact_view())
-        .unwrap()
-        .retain_offers(
-            captured
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )
         .unwrap();
+    assert_eq!(
+        support.native_availability().snapshot_facts().unwrap(),
+        permissions
+    );
     captured = captured.rebuild(|facts| facts.compiler_support = support);
     assert!(captured
         .owner
