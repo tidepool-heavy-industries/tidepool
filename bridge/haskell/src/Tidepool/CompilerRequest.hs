@@ -8,7 +8,8 @@ module Tidepool.CompilerRequest
   ( BoundCompilerRequest, withBoundCompilerRequest, withBoundCompilerRequestWithNativeDemand, boundWorkerRequest
   , boundAdmittedOperation, boundTurnTemplates, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
-  , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
+  , inspectBoundCheckedEnvironment, extractBoundDeclarationBinders
+  , withBoundExactInterfaceTransaction, cellSegmentRequest
   , runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation, commitPreparedWorldDependencies
   , prepareWorldCell
   , standardAuxiliaryRoots, writePreparedArtifacts, YieldSiteDelivery(..), writePreparedSidecars
@@ -92,6 +93,7 @@ import Tidepool.PreparedRecovery
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.ExtractRequest
+import Tidepool.Introspection (InspectionWork, InspectionResult, runInspectionGhc)
 import Tidepool.GhcPipeline
 import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 import Tidepool.Session
@@ -124,7 +126,7 @@ import GHC.Unit.Types (stringToUnit)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Utils.Outputable (ppr)
 import Tidepool.Binders
-  ( BoundBinder(..), CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), ExpressionLiftPlan(..)
+  ( ExportItem, extractBindersNamedGhc, BoundBinder(..), CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), ExpressionLiftPlan(..)
   , PreparedTypedSegmentSource(..), TurnOut(..), renderAskJson
   , StmtBinders(..), TurnKind(..) )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder, encodeTypedSegmentPlan)
@@ -467,6 +469,24 @@ compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ execu
   route <- preparedCompletionFor native completed
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
     executor (completedCompilerGuard completed) Nothing route authority,preparedSegmentCaptures result)
+
+-- Production helpers expose their actual checked input or parsed source.
+-- The generic Ghc runner stays private to this request owner.
+inspectBoundCheckedEnvironment :: BoundCompilerRequest -> InspectionWork
+  -> CheckedEnvironmentResult -> [InspectionRequest] -> IO [InspectionResult]
+inspectBoundCheckedEnvironment request work checked inspections = do
+  case boundAdmittedOperation request of
+    AdmittedInspection _ -> pure ()
+    _ -> throwIO CheckedPurposeMismatch
+  runBoundGhc request $ runInspectionGhc work (crHscEnv checked)
+    (crTargetTcGblEnv checked) (crTargetRdrEnv checked) (crInspectionProbes checked) inspections
+
+extractBoundDeclarationBinders :: BoundCompilerRequest -> FilePath -> String -> IO [ExportItem]
+extractBoundDeclarationBinders request path owner = do
+  case boundAdmittedOperation request of
+    AdmittedTurn _ -> pure ()
+    _ -> throwIO CheckedPurposeMismatch
+  runBoundGhc request (extractBindersNamedGhc path (optionIncludes (boundWorkerRequest request)) owner)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
 runBoundGhc (BoundCompilerRequest scope _ _ admitted _ executor _ _) operation = do

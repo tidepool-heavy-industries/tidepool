@@ -45,8 +45,7 @@ import Tidepool.ImportAdmission
   ( checkedItemImportRendering, checkedItemOriginalRendering, checkedItemValueRendering
   , checkedItemImportNamespaces, appendCompletedProgramImports )
 import Tidepool.Binders
-  ( extractBindersNamedGhc
-  , classifyWithFlags, exportItemName, templateParserFlags
+  ( classifyWithFlags, exportItemName, templateParserFlags
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
   , renderCellCheckSource, renderCellCheckSourceWithImports, locatedImportsRendering, locatedImportNamespaces
   , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
@@ -129,7 +128,7 @@ import Tidepool.ExtractRequest
   , WorldQueryRequest(..), WorldCellPlanRequest(..)
   )
 import Tidepool.Introspection
-  ( encodeInspectionResults, runInspectionGhc, withInspectionWork
+  ( encodeInspectionResults, withInspectionWork
   , inspectionCompilationWork )
 import Tidepool.InspectionRunner
   ( runInspectionRequests )
@@ -427,11 +426,7 @@ runInspectionMode bound request = do
           inspectionCompilationWork work
           compileBoundRequest bound CheckedEnvironment Set.empty purpose scope path
 
-        inspect successful requests = runBoundGhc bound $ runInspectionGhc work
-          (crHscEnv successful)
-          (crTargetTcGblEnv successful)
-          (crTargetRdrEnv successful)
-          (crInspectionProbes successful) requests
+        inspect = inspectBoundCheckedEnvironment bound work
     bytes <- encodeInspectionResults <$> runInspectionRequests request compile inspect
     BS.writeFile out bytes
   either throwIO (const (pure [])) res
@@ -588,7 +583,7 @@ runTurnMode bound request = do
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule parserFlags outDir lastAttempt spliced
-        items <- timePhase timing "declaration_binders" $ runBoundGhc bound (extractBindersNamedGhc modulePath (optionIncludes args) modName)
+        items <- timePhase timing "declaration_binders" $ extractBoundDeclarationBinders bound modulePath modName
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)

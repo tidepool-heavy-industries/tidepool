@@ -132,7 +132,7 @@ worldRequestBoundaries = do
     (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
       actual <- runBoundWorldQuery request
       unless (actual == expected) (fail "missing scope hold lost its typed unavailable response")
-      generic <- try (runBoundGhc request (pure ())) :: IO (Either SomeException ())
+      generic <- try (void (extractBoundDeclarationBinders request "/unavailable/NoTurn.hs" "NoTurn")) :: IO (Either SomeException ())
       case generic of
         Left failure | Just CheckedPurposeMismatch <- fromException failure -> pure ()
         Left failure -> throwIO failure
@@ -560,7 +560,7 @@ completedRequestHistories = do
   unless (isSuccess result) (fail "completed compiler histories failed")
 
 runHistory :: [Int] -> IO ()
-runHistory history = withRequestFixture $ \_ request work -> do
+runHistory history = withRequestFixture $ \scope request work -> do
   first <- compileA request work
   projectA "__result" first
   let step :: Int -> IO ()
@@ -578,7 +578,7 @@ runHistory history = withRequestFixture $ \_ request work -> do
             Left failure | Just _ <- sourceFailureDiagnostics failure -> pure ()
             Left failure -> throwIO failure
             Right _ -> fail "independent invalid Haskell fixture unexpectedly compiled"
-        2 -> runBoundGhc request $ do
+        2 -> scopedRunGhc scope $ do
           package <- findModule (mkModuleName "Data.Maybe") Nothing
           info <- getModuleInfo package
           unless (maybe False (any ((== "fromMaybe") . getOccString) . modInfoExports) info) $
@@ -592,7 +592,7 @@ completedRequestCancellation :: IO ()
 completedRequestCancellation = withRequestFixture $ \scope request work -> do
   first <- compileA request work
   originals <- newPreparedOriginalInterfaceArtifacts (preparedCompilationResult first) work
-  cancelled <- try (runBoundGhc request (liftIO (throwIO ThreadKilled))) :: IO (Either SomeException ())
+  cancelled <- try (scopedRunGhc scope (liftIO (throwIO ThreadKilled))) :: IO (Either SomeException ())
   requireCancellation cancelled
   unless (hasIntResultLiteral 41 (prBinds (pprPipelineResult (preparedCompilationResult first)))) $
     fail "cancellation changed previously completed compiler facts"
