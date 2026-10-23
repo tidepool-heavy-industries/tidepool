@@ -425,7 +425,7 @@ checkSourceBorrowCancellation scratch = forM_ ["source-cancel","source-partial"]
     -- prevent any retry or terminal frame after either partial wire history.
     finished <- timeout 10000000 (waitForProcess child)
     unless (case finished of Just (ExitFailure _) -> True; _ -> False)
-      (fail ("SOURCE cancellation/partial frame did not retire within safeguard: " ++ mode))
+      (fail ("SOURCE cancellation/partial frame did not retire within safeguard: " ++ BSC.unpack mode))
     emitted <- BS.hGet output 1
     unless (BS.null emitted) (fail "poisoned SOURCE borrow wrote retry or terminal bytes")
 
