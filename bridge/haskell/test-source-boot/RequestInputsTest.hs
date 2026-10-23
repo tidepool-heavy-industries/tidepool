@@ -4,10 +4,13 @@
 
 module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
-import Tidepool.RequestCompletion (finishCompletion)
+import Tidepool.RequestCompletion (finishCompletion, captureCompletion)
+import Tidepool.WorkerServer (runWorkerLoop, WorkerResponse(..), requireNativeDemandOwner)
+import Tidepool.DependencyPlan (newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis, frozenDependencyGenerations)
+import Tidepool.Identity (nameSymbolIdentity)
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try, finally, mask)
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, readMVar, threadDelay)
+import Control.Concurrent (forkIO, forkFinally, killThread, newEmptyMVar, putMVar, takeMVar, readMVar, threadDelay)
 import Control.Monad ((>=>), foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
@@ -28,12 +31,12 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
 import System.FilePath ((</>), takeDirectory, makeRelative, takeExtension)
-import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdin, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt(..), CUInt(..))
 import System.Posix.Types (Fd(..))
-import System.Posix.IO (fdToHandle, closeFd)
+import System.Posix.IO (fdToHandle, closeFd, createPipe)
 import System.Posix.Process (getProcessID)
 import System.Process (CreateProcess(..), StdStream(CreatePipe), callProcess, proc, waitForProcess, withCreateProcess)
 import System.Exit (ExitCode(ExitSuccess))
@@ -106,7 +109,7 @@ import Tidepool.ExactScope
   , worldInputsSources, worldSourceDomainSha256
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
-  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
+  , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
 import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
@@ -1841,6 +1844,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           | name <- "CanonicalPartialConsumer" : facadeNames]
     unless (all (/= Nothing) selectedReferences && Set.size (Set.fromList selectedReferences) == 3)
       (fail "reexport fixture omitted distinct defining/facade Original associations")
+    sourceBasisConcurrency facts (prHscEnv (pprPipelineResult original))
     unless (all (\root -> all (\name -> not (Map.member (name ++ ".hs") (worldSourceFiles root))) names)
         (worldSourceRoots (worldInputsSources facts)))
       (fail "source-less World import fixture accidentally captured producer sources")
@@ -2115,6 +2119,120 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
                 (directory </> ("stage-" ++ show ordinal) </> "module-products.cbor")
             mapM_ (commitPreparedWorldDependencies request) completed
             pure (Right (Map.unionsWith (++) rows))
+
+-- Reuse the genuine compiled HMI Names and admitted World associations. The
+-- framed peer supplies observations only; it cannot issue executable products.
+sourceBasisConcurrency :: WorldInputFacts -> HscEnv -> IO ()
+sourceBasisConcurrency facts environment = do
+  uses <- forM [("CanonicalPartial","partial"),("CanonicalPartialConsumer","usePartial")] $ \(owner,occurrence) -> do
+    home <- maybe (fail "SOURCE concurrency fixture lost its actual HMI") pure
+      (lookupHpt (hsc_HPT environment) (mkModuleName owner))
+    identifier <- case [identifier | identifier <- typeEnvIds (md_types (hm_details home))
+      , occNameString (nameOccName (varName identifier)) == occurrence] of
+      [identifier] -> pure identifier
+      _ -> fail "SOURCE concurrency fixture lacks one genuine exported Id"
+    symbol <- maybe (fail "SOURCE concurrency Id has no defining owner") pure
+      (nameSymbolIdentity "value" (varName identifier))
+    reference <- maybe (fail "SOURCE concurrency Id lacks its admitted World Original") pure
+      (nameModule_maybe (varName identifier) >>= worldOriginalReferenceFor facts)
+    pure (symbol,reference)
+  let expected = Map.fromList (zip (map fst uses) [1,2])
+      symbolTerm (SymbolIdentity unit owner namespace occurrence parent) = TList
+        [TString unit,TString owner,TString namespace,TString occurrence,maybe TNull TString parent]
+      generations = [(symbolTerm symbol,generation) | (symbol,generation) <- Map.toList expected]
+      header = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
+        <> worldInputsIdentityBytes facts <> worldInputsCompilerIdentityBytes facts <> little 8 (999999999999999999 :: Integer)
+      little count value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..count-1 :: Int]]
+      frame bytes = little 4 (BS.length bytes) <> bytes
+      exact handle count = do
+        bytes <- BS.hGet handle count
+        unless (BS.length bytes == count) (fail "truncated SOURCE concurrency frame")
+        pure bytes
+      readFrame handle = do
+        bytes <- exact handle 4
+        let count = sum [fromIntegral byte * 256 ^ power | (power,byte) <- zip [0..3 :: Int] (BS.unpack bytes)]
+        unless (count <= 16777216) (fail "unbounded SOURCE concurrency frame")
+        exact handle count
+      encode = toStrictByteString . encodeTerm
+      peer input output = do
+        BS.hPut input (BS.singleton 1)
+        hFlush input
+        ack <- exact output 1
+        unless (ack == BS.singleton 1) (fail "SOURCE concurrency lost BEGIN")
+        BS.hPut input (BS.singleton 6 <> header <> frame "." <> little 4 (0 :: Int))
+        hFlush input
+        observed <- forM [1,2 :: Int] $ \number -> do
+          event <- exact output 161
+          unless (event == BS.singleton 4 <> header <> little 8 (0 :: Int) <> little 8 number)
+            (fail "SOURCE concurrency lost serialized request/stage/sequence")
+          payload <- readFrame output
+          query <- worldFixtureTerm payload
+          (coordinate,identity,binding) <- case query of
+            TList [TString "TPDEPENDENCYQUERY1",TInt 0,TList [coordinate@(TList [_,_,_,binding,identity])]] ->
+              pure (coordinate,identity,binding)
+            _ -> fail "SOURCE concurrency sent duplicate or non-SOURCE uses"
+          generation <- maybe (fail "SOURCE concurrency queried a foreign Id") pure (lookup identity generations)
+          -- Use the actual selected Original binding as this controlled peer's
+          -- retained observation. Full row validation remains DependencyPlan's.
+          let terminal = case binding of
+                TList [artifact,scope] -> TList [TList [artifact,scope,TInt 0],TInt 0,binding,identity,TInt (fromIntegral generation)]
+                _ -> error "SOURCE concurrency lost the actual binding shape"
+              reply = encode (TList [TString "TPDEPENDENCYREPLY1",TInt 0,TList [TList [coordinate,TList [],TList [terminal]]]])
+          BS.hPut input (BS.singleton 5 <> BS.drop 1 event <> BS.singleton 0 <> frame reply)
+          hFlush input
+          pure identity
+        unless (sort observed == sort (map fst generations))
+          (fail "SOURCE basis lost a distinct row or queried one duplicate twice")
+        terminalTag <- exact output 1
+        code <- exact output 4
+        report <- readFrame output
+        diagnostic <- readFrame output
+        unless (terminalTag == BS.singleton 0 && code == little 4 (0 :: Int)
+            && "success" `BS.isInfixOf` report && BS.null diagnostic)
+          (fail "SOURCE concurrency did not complete its actual handler")
+        BS.hPut input (BS.singleton 0)
+        hFlush input
+        ended <- exact output 1
+        unless (ended == BS.singleton 1) (fail "SOURCE concurrency lost END")
+        hClose input
+      handler _ native _ _ = captureCompletion $ do
+        exchange <- maybe (fail "SOURCE concurrency lost its active exchange") pure native
+        requireNativeDemandOwner exchange (BS.replicate 32 2) (worldInputsIdentityBytes facts) (worldInputsCompilerIdentityBytes facts)
+        basis <- newCompilerDependencyBasis exchange 0
+        start <- newEmptyMVar
+        let selected = [head uses,last uses,head uses]
+            launch use = do
+              done <- newEmptyMVar
+              thread <- forkFinally (readMVar start >> captureSourceDependencies basis [use]) (putMVar done)
+              pure (thread,done)
+        bracket (mapM launch selected) (mapM_ (killThread . fst)) $ \tasks -> do
+          putMVar start ()
+          forM_ tasks $ \(_,done) -> takeMVar done >>= either throwIO pure
+        frozen <- freezeDependencyBasis basis
+        actual <- frozenDependencyGenerations frozen
+        unless (actual == expected) (fail "concurrent SOURCE basis lost its issued row union")
+        -- Duplicates after freeze stay memo hits and must not emit frame3.
+        captureSourceDependencies basis uses
+        pure (DiagnosticResponse [])
+      channels = do
+        (workerInput,peerInput) <- createPipe >>= \(readFd,writeFd) -> (,) <$> fdToHandle readFd <*> fdToHandle writeFd
+        (peerOutput,workerOutput) <- createPipe >>= \(readFd,writeFd) -> (,) <$> fdToHandle readFd <*> fdToHandle writeFd
+        pure (workerInput,peerInput,peerOutput,workerOutput)
+      close handle = void (try (hClose handle) :: IO (Either IOException ()))
+  completed <- timeout 10000000 $
+    bracket channels (\(a,b,c,d) -> mapM_ close [a,b,c,d]) $ \(workerInput,peerInput,peerOutput,workerOutput) ->
+      bracket ((,) <$> hDuplicate stdin <*> hDuplicate stdout)
+        (\(savedInput,savedOutput) -> do
+          hDuplicateTo savedInput stdin
+          hDuplicateTo savedOutput stdout
+          mapM_ hClose [savedInput,savedOutput]) $ \_ -> do
+        hDuplicateTo workerInput stdin
+        hDuplicateTo workerOutput stdout
+        done <- newEmptyMVar
+        bracket (forkFinally (peer peerInput peerOutput) (putMVar done)) killThread $ \_ -> do
+          runWorkerLoop (\transaction -> transaction handler)
+          takeMVar done >>= either throwIO pure
+  unless (completed == Just ()) (fail "SOURCE basis concurrency exceeded its control safeguard")
 
 worldCellAdmissionParse :: IO ()
 worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer profile contextParcel _scopePath -> do
