@@ -3,7 +3,7 @@ use crate::cell_plan::WorldCellAdmissionSubject;
 use crate::checked_cell::{CheckedPlannedCellSlot, ProducedValueTypeInterfaces};
 use crate::compiler_world::{
     CapturedCompilerSourceRoot, CapturedCompilerSources, CheckedWorldCellProgram, CompilerWorld,
-    CompilerWorldBindings, CompilerWorldCellOperand, CompilerWorldLexicalSurface,
+    CompilerWorldCellOperand, CompilerWorldLexicalSurface, VisibleWorldBindings,
     WorldCellOperandExposure, WorldSourceSelection,
 };
 use crate::linked_native::{
@@ -862,7 +862,7 @@ fn open_world_with_primary_and_module(
     let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
     let inputs = ModuleCandidateOffer::compiler_world_inputs(
         primary,
-        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+        VisibleWorldBindings::from_published_bindings(0, std::iter::empty())?,
         sources,
         CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
     )?;
