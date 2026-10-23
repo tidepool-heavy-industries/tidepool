@@ -14174,9 +14174,9 @@ mod tests {
     }
 
     #[test]
-    fn target_refuses_future_type_without_mutating_completed_physical_output() {
+    fn historical_input_target_requires_prior_exact_native_value_permission() {
         use crate::certified_products::PendingImportOwner;
-        let inventory = ArtifactInventory::default();
+        let producer_inventory = ArtifactInventory::default();
         let interface = crate::certified_products::fixture_module_interface(
             [2; 32],
             "fixture",
@@ -14214,22 +14214,143 @@ mod tests {
             &BTreeMap::new(),
         ));
         let entries = vec![consumer.clone(), value.clone()];
-        let available = inventory
+        let available = producer_inventory
             .admit_shared_with_demand(
-                &inventory.empty_view(),
+                &producer_inventory.empty_view(),
                 entries.clone(),
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let current = bound_selection_for_entries(&available, &[consumer.clone()]);
-        let fixed = inventory
+        let current = bound_selection_for_entries(&available, &entries);
+        let physical = producer_inventory
             .bind_segment(
                 &available,
                 entries,
                 &current,
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
-            .unwrap();
+            .expect("the full physical issuer selects the retained value's TYPE carrier");
+
+        // Carry the completed Original into a later request. Native dependency
+        // custody is historical; this is not a produced-item prefix projection.
+        assert!(!consumer.requirements.contains(&value.descriptor.owner));
+        let receiving =
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+        let carry = |physical: &BoundArtifactSelection| {
+            let source = physical
+                .captured_stage()
+                .compiler_inputs()
+                .compiler_source_support();
+            let full = receiving
+                .clone()
+                .extend_issued_compiler_support(source)
+                .unwrap();
+            let full = full.capture_world_primary_inputs([2; 32]).unwrap();
+            assert!(full
+                .inputs()
+                .artifacts()
+                .contains_namespace_artifact(value.descriptor.id));
+            let support = source
+                .source_support(&BTreeSet::from([consumer.descriptor.owner.clone()]))
+                .expect("the actual Original's TYPE closure excludes the captured value");
+            assert!(support
+                .compiler_roles()
+                .get(&value.descriptor.owner)
+                .is_none());
+            let narrow = receiving
+                .clone()
+                .extend_issued_compiler_support(&support)
+                .unwrap();
+            let narrow = narrow.capture_world_primary_inputs([2; 32]).unwrap();
+            let inventory = narrow.inputs().artifacts().inventory();
+            assert!(Arc::ptr_eq(
+                &inventory.0,
+                &full.inputs().artifacts().inventory().0
+            ));
+            let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+            let selection =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+                    narrow.inputs(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            assert!(selection
+                .continuation_input(&consumer.descriptor.owner)
+                .unwrap()
+                .is_some());
+            let carried = inventory
+                .bind_segment(
+                    narrow.inputs().artifacts(),
+                    Vec::new(),
+                    &selection,
+                    &mut validation,
+                )
+                .expect(
+                    "an empty output carries the existing Input Original without new Full issuance",
+                );
+            assert!(carried.captured_stage().producer_certificates().is_empty());
+            assert!(source.same_selected_acquisitions(full.inputs().compiler_source_support()));
+            assert!(support.same_selected_acquisitions(narrow.inputs().compiler_source_support()));
+            assert!(support.same_selected_acquisitions(
+                carried
+                    .captured_stage()
+                    .compiler_inputs()
+                    .compiler_source_support()
+            ));
+            let required_binding = |support: &CompilerSourceSupport| {
+                let InputNativeDecision::IssuedChoices(groups) = support
+                    .compiler_roles()
+                    .native_decision(&consumer.descriptor.owner)
+                else {
+                    panic!("the completed issuer retains its exact group choices");
+                };
+                let offer = support
+                    .native_offers()
+                    .iter()
+                    .find(|offer| offer.original() == consumer.descriptor.id)
+                    .unwrap();
+                let state = offer.custody_lease().inventory.0.lock().unwrap();
+                let mut bindings = state
+                    .outgoing(InventoryNodeKey::Group(groups[&1]))
+                    .filter_map(|(target, edge)| match (target, edge) {
+                        (
+                            InventoryNodeKey::Artifact(binding),
+                            ArtifactDependency::NativeBinding { generation: 9, .. },
+                        ) => Some(binding),
+                        _ => None,
+                    });
+                let binding = bindings
+                    .next()
+                    .expect("the actual issued group has its value dependency");
+                assert!(bindings.next().is_none());
+                binding
+            };
+            let expected = required_binding(source);
+            assert_eq!(
+                required_binding(full.inputs().compiler_source_support()),
+                expected
+            );
+            assert_eq!(
+                required_binding(narrow.inputs().compiler_source_support()),
+                expected
+            );
+            assert_eq!(
+                required_binding(
+                    carried
+                        .captured_stage()
+                        .compiler_inputs()
+                        .compiler_source_support()
+                ),
+                expected
+            );
+            (carried, full.inputs().artifacts().clone())
+        };
+        let (fixed, visible_cursor) = carry(&physical);
+        let inventory = fixed
+            .captured_stage()
+            .issued_artifacts()
+            .inventory()
+            .clone();
 
         let cursor = {
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
@@ -14252,24 +14373,22 @@ mod tests {
         }
         .map(|admitted| admitted.artifacts().clone())
         .unwrap();
-        assert!(!cursor.artifact_ids().contains(&value.descriptor.id));
+        assert!(!cursor.contains_namespace_artifact(value.descriptor.id));
         let private = cursor
-            .retain_custody(fixed.captured_stage().issued_artifacts())
+            .retain_custody(physical.captured_stage().issued_artifacts())
             .unwrap();
         assert!(private.artifact_ids().contains(&value.descriptor.id));
         assert!(!private.contains_namespace_artifact(value.descriptor.id));
         assert!(private.roots().iter().any(|root| {
             matches!(root, InventoryNodeKey::Group(group) if group.original_ordinal == 0)
         }));
-        assert!(
-            !private
-                .binding_dependencies()
-                .iter()
-                .any(|(source, _, edge)| {
-                    private.roots().contains(source)
-                        && matches!(edge, ArtifactDependency::NativeBinding { .. })
-                })
-        );
+        assert!(!private
+            .binding_dependencies()
+            .iter()
+            .any(|(source, _, edge)| {
+                private.roots().contains(source)
+                    && matches!(edge, ArtifactDependency::NativeBinding { .. })
+            }));
         let before = inventory.metrics();
         let physical_before = fixed
             .captured_stage()
@@ -14326,8 +14445,8 @@ mod tests {
                 fixed.captured_stage().physical_cohort(),
                 observed,
                 None,
-                Some(&cursor),
-                &[value.clone()],
+                Some(&visible_cursor),
+                &[],
                 &BTreeMap::new(),
                 &mut validation,
             )
@@ -14396,22 +14515,27 @@ mod tests {
             value.clone(),
             Arc::new(entry_in_unit("fixture", "DifferentValueScope", Vec::new())),
         ];
-        let other_available = inventory
+        let other_available = producer_inventory
             .admit_shared_with_demand(
-                &inventory.empty_view(),
+                &producer_inventory.empty_view(),
                 other_entries.clone(),
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let other_selection = bound_selection_for_entries(&other_available, &[consumer.clone()]);
-        let other = inventory
+        let other_selection = bound_selection_for_entries(&other_available, &other_entries);
+        let other_physical = producer_inventory
             .bind_segment(
                 &other_available,
                 other_entries,
                 &other_selection,
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             )
-            .unwrap();
+            .expect("the second full physical issuer selects its actual TYPE carrier");
+        let (other, other_visible_cursor) = carry(&other_physical);
+        assert!(Arc::ptr_eq(
+            &inventory.0,
+            &other.captured_stage().issued_artifacts().inventory().0
+        ));
         let other_cursor = {
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let (prepared, accepted) = source_target_data(&[(&consumer, 1)]);
@@ -14425,18 +14549,16 @@ mod tests {
                 other.captured_stage().physical_cohort(),
                 observed,
                 None,
-                Some(&inventory.empty_view()),
-                &[value.clone()],
+                Some(&other_visible_cursor),
+                &[],
                 &BTreeMap::new(),
                 &mut validation,
             )
         }
         .unwrap();
-        assert!(
-            !other_cursor
-                .artifacts()
-                .contains_namespace_artifact(value.descriptor.id)
-        );
+        assert!(!other_cursor
+            .artifacts()
+            .contains_namespace_artifact(value.descriptor.id));
         assert_ne!(
             previous_requirement(other_cursor.artifacts()),
             historical_binding
