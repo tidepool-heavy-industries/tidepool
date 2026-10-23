@@ -16,7 +16,8 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BoundValue};
 mod closed;
 pub(super) use closed::{
     ClosedInstantiationPlan, ClosedNativeDefinition, ClosedPackageDefinition,
-    NativeInstallationSources, NativeInstantiation, NativeInstantiationPlan, ResolvedNativeCapture,
+    NativeInstallationSources, NativeInstantiation, NativeInstantiationPlan, RetainedNativeOrigin,
+    RetainedNativeRequirement,
 };
 
 use super::binding_table::BindingIndex;

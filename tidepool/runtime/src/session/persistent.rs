@@ -77,18 +77,23 @@ impl InstalledCertifiedTurn {
     }
 }
 
-/// Runtime provenance is optional only for genuinely closed/bootstrap values.
-/// A missing binding is distinct from an existing value without compiler metadata.
+/// Observe existing binding provenance without inferring executable authority
+/// from missing metadata. A missing binding remains a distinct result.
 pub(super) enum BindingRuntimeOrigin<'a> {
     Program(&'a Arc<super::resident::ProgramProvenance>),
-    Closed,
+    WithoutProgramProvenance,
 }
 
 pub(crate) struct ResolvedNativeTurn {
     instantiation: super::prepared::NativeInstantiation,
     sources: super::prepared::NativeInstallationSources,
-    captures: BTreeMap<(SymbolIdentity, u64), super::prepared::ResolvedNativeCapture>,
+    inputs: ResolvedNativeInputs,
     snapshot: tidepool_codegen::binding_table::BindingScopeSnapshot,
+}
+
+enum ResolvedNativeInputs {
+    Scoped(super::admission::ScopedResolvedInputs),
+    Closed,
 }
 
 impl ResolvedNativeTurn {
@@ -96,8 +101,14 @@ impl ResolvedNativeTurn {
         self.instantiation.shares_plan(plan)
     }
 
-    pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
-        self.captures.values().map(|capture| capture.id)
+    pub(super) fn retained_provenance(
+        &self,
+    ) -> impl Iterator<Item = &Arc<super::resident::ProgramProvenance>> {
+        self.instantiation.retained_values().map(|value| {
+            value
+                .provenance()
+                .expect("scoped native resolution retained actual provenance")
+        })
     }
 }
 
@@ -109,7 +120,7 @@ impl PersistentSession {
         self.bindings.get(id)?;
         Some(match self.binding_provenance.get(&id.raw()) {
             Some(provenance) => BindingRuntimeOrigin::Program(provenance),
-            None => BindingRuntimeOrigin::Closed,
+            None => BindingRuntimeOrigin::WithoutProgramProvenance,
         })
     }
 
@@ -119,7 +130,7 @@ impl PersistentSession {
     ) -> Option<&Arc<super::resident::ProgramProvenance>> {
         match self.binding_runtime_origin(SessionVarId::from_extract(id))? {
             BindingRuntimeOrigin::Program(provenance) => Some(provenance),
-            BindingRuntimeOrigin::Closed => None,
+            BindingRuntimeOrigin::WithoutProgramProvenance => None,
         }
     }
 
@@ -860,43 +871,21 @@ impl PersistentSession {
             .bindings
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let instantiation = self.instantiate_native_plan_in(scope, &plan, selection)?;
-        let scoped = self.scoped_prepared_bindings_in(scope);
-        let mut captures = BTreeMap::new();
-        for requirement in instantiation.retained_requirements() {
-            let key = (requirement.identity().clone(), requirement.generation());
-            if captures.contains_key(&key) {
-                continue;
-            }
-            let entry = scoped
-                .get(&(
-                    requirement.identity(),
-                    SessionModule::val(Generation(requirement.generation())),
-                ))
-                .ok_or_else(|| PreparedRuntimeError::MissingRetainedCertifiedOwner {
-                    identity: requirement.identity().clone(),
-                    generation: requirement.generation(),
-                })?;
-            let sources = self
-                .binding_provenance
-                .get(&entry.id.raw())
-                .map(|owner| owner.source_custody())
-                .ok_or(PreparedRuntimeError::MissingRetainedSource { id: entry.id })?;
-            captures.insert(
-                key,
-                super::prepared::ResolvedNativeCapture {
-                    id: entry.id,
-                    identity: entry.value.identity.clone(),
-                    generation: entry.module.gen.0,
-                    handle: entry.value.handle,
-                    sources,
-                },
-            );
-        }
+        let super::turn::TurnPurpose::Execution { execution, prefix } = certification.purpose()
+        else {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        };
+        let inputs = prefix
+            .scoped_inputs_for(self, execution)
+            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        let instantiation =
+            self.instantiate_native_plan_in(scope, &plan, selection, |requirement| {
+                inputs.resolve_native_requirement(execution.item(), requirement)
+            })?;
         Ok(ResolvedNativeTurn {
             instantiation,
             sources,
-            captures,
+            inputs: ResolvedNativeInputs::Scoped(inputs),
             snapshot,
         })
     }
@@ -906,6 +895,10 @@ impl PersistentSession {
         scope: ScopeId,
         plan: &Arc<super::prepared::NativeInstantiationPlan>,
         selection: tidepool_codegen::prepared_program::NativeDomainSelection,
+        retained: impl FnMut(
+            &super::prepared::RetainedNativeRequirement,
+        )
+            -> Result<Arc<super::admission::ScopedResolvedValue>, PreparedRuntimeError>,
     ) -> Result<super::prepared::NativeInstantiation, PreparedRuntimeError> {
         let Self {
             bindings,
@@ -914,17 +907,21 @@ impl PersistentSession {
             ..
         } = self;
         Self::settle_native_domain_retirements(bindings, machine.as_mut());
-        plan.instantiate(selection, |request, selected| {
-            let permit = bindings
-                .native_slot_permit_in(scopes, scope, request)
-                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-            let witness = match machine.as_mut() {
-                Some(engine) => engine.lookup_world_native_slot(&permit, selected)?,
-                None if selected.is_none() => None,
-                None => return Err(PreparedRuntimeError::SourceScopeAdmission),
-            };
-            Ok((permit, witness))
-        })
+        plan.instantiate(
+            selection,
+            |request, selected| {
+                let permit = bindings
+                    .native_slot_permit_in(scopes, scope, request)
+                    .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+                let witness = match machine.as_mut() {
+                    Some(engine) => engine.lookup_world_native_slot(&permit, selected)?,
+                    None if selected.is_none() => None,
+                    None => return Err(PreparedRuntimeError::SourceScopeAdmission),
+                };
+                Ok((permit, witness))
+            },
+            retained,
+        )
     }
 
     fn settle_native_domain_retirements(
@@ -954,6 +951,11 @@ impl PersistentSession {
         {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
         }
+        if let ResolvedNativeInputs::Scoped(inputs) = &resolved.inputs {
+            inputs
+                .validate_live(self)
+                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+        }
         let plan = resolved.instantiation.plan();
         let admitted_metadata = self.stage_install_metadata(
             Some(metadata),
@@ -979,7 +981,6 @@ impl PersistentSession {
             &self.bindings,
             &self.scopes,
             scope,
-            &resolved.captures,
         )?;
         self.finish_certified_turn_in(scope, bootstrap, staged, admitted_metadata)
     }
@@ -1033,11 +1034,14 @@ impl PersistentSession {
             .bindings
             .scope_snapshot(&self.scopes, scope)
             .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
-        let instantiation = self.instantiate_native_plan_in(scope, plan.native(), selection)?;
+        let instantiation =
+            self.instantiate_native_plan_in(scope, plan.native(), selection, |_| {
+                Err(PreparedRuntimeError::CertifiedTargetOwners)
+            })?;
         Ok(ResolvedNativeTurn {
             instantiation,
             sources: super::prepared::NativeInstallationSources::closed(plan, origin),
-            captures: BTreeMap::new(),
+            inputs: ResolvedNativeInputs::Closed,
             snapshot,
         })
     }
@@ -7639,7 +7643,6 @@ mod checkpoint_scope_tests {
                             &session.bindings,
                             &session.scopes,
                             b,
-                            &resolved.captures,
                         )
                         .unwrap();
                     assert!(

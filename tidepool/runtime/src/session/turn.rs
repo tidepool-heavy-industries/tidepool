@@ -3611,7 +3611,7 @@ fn prepare_cell_program_admitted_inner(
         .admitted_retained_imports()
         .map_err(finite_failure)?
     {
-        command.retained_generation(extract_identity(identity), *generation);
+        command.retained_generation(extract_identity(identity), generation);
     }
     drop(setup_span);
     let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")

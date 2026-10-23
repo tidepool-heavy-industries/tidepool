@@ -8293,10 +8293,7 @@ where
             .instantiate(&self.display_owners);
         let mut retained = Vec::new();
         if let NativeTurnAdmission::Native(resolved) = &admission.resolved {
-            retained = resolved
-                .retained_ids()
-                .filter_map(|id| self.state.binding_provenance(id.raw()))
-                .collect();
+            retained = resolved.retained_provenance().collect();
         }
         {
             let provenance = Arc::make_mut(&mut provenance);
