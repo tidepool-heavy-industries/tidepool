@@ -11,7 +11,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
 use tidepool_toolchain::compiler_world::PrivateCompilerProgress;
 use tidepool_toolchain::declaration_join::{
-    AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin, DeclarationExport,
+    AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedPublicationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactModuleIdentity, ExportIdentity,
     ExportNamespace, InstanceInventory, JoinDecision, JoinRejection, ModuleSnapshot,
     PublicationComposition, RejectedJoin, ReservedJoin,
@@ -1268,7 +1268,7 @@ impl DeclarationPublicationBase {
             .unwrap_or_else(ExactDeclarationContext::empty)
             .admit_authored_publication(&authored, &self.surface)?;
         let scratch = Arc::new(tempfile::tempdir()?);
-        let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
+        let join_inputs = context.publication_join_inputs(Arc::clone(&scratch), &self.surface)?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
             let artifact = join_inputs.interface(identity).ok_or_else(|| {
                 invalid(
@@ -1328,24 +1328,20 @@ impl DeclarationPublicationBase {
             expected_exports: selection.exports,
             expected_instances: selection.instances,
         };
-        match tidepool_toolchain::declaration_join::certify_declaration_join(
+        match tidepool_toolchain::declaration_join::certify_publication_join(
             input,
             join_inputs,
             &self.includes,
             &self.session_root,
             settlement,
         )? {
-            CertifiedDeclarationJoin::Accepted(receipt) => {
-                let composition =
-                    context.with_joined_publication(&Arc::new(receipt), &self.surface)?;
-                Ok(CertifiedDeclarationPublication::Accepted(
-                    AcceptedDeclarationPublication {
-                        base: self,
-                        receipt: PublicationEvidence::NewJoin(composition),
-                    },
-                ))
-            }
-            CertifiedDeclarationJoin::Rejected(receipt) => Ok(
+            CertifiedPublicationJoin::Accepted(composition) => Ok(
+                CertifiedDeclarationPublication::Accepted(AcceptedDeclarationPublication {
+                    base: self,
+                    receipt: PublicationEvidence::NewJoin(composition),
+                }),
+            ),
+            CertifiedPublicationJoin::Rejected(receipt) => Ok(
                 CertifiedDeclarationPublication::Rejected(RejectedDeclarationPublication {
                     base: self,
                     receipt,
@@ -3230,7 +3226,9 @@ mod tests {
             .admit_authored_publication(std::slice::from_ref(&authored), &surface)
             .unwrap();
         let scratch = Arc::new(tempfile::tempdir().unwrap());
-        let join_inputs = context.declaration_join_inputs(scratch.clone()).unwrap();
+        let join_inputs = context
+            .publication_join_inputs(scratch.clone(), &surface)
+            .unwrap();
         let original = join_inputs
             .interface(&ExactModuleIdentity {
                 unit: authored.product().owner().unit.clone(),
@@ -3250,9 +3248,9 @@ mod tests {
             .head
             .occurrence
             .push_str("Missing");
-        let CertifiedDeclarationJoin::Rejected(receipt) =
+        let CertifiedPublicationJoin::Rejected(receipt) =
             tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::declaration_join::certify_declaration_join(
+                tidepool_toolchain::declaration_join::certify_publication_join(
                     tidepool_toolchain::declaration_join::DeclarationJoinSpec {
                         expected_public_version: input.expected_public_version,
                         public_module: input.public_module,

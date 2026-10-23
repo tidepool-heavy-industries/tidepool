@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tidepool_repr::Generation;
 use tidepool_toolchain::declaration_join::{
-    certify_declaration_join, AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedDeclarationJoin,
+    certify_publication_join, AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedPublicationJoin,
     DeclarationExport, DeclarationJoinSpec, ExactDeclarationContext, ExactModuleIdentity,
     ExportIdentity, InstanceInventory, ModuleSnapshot, PublicationComposition, ReservedJoin,
 };
@@ -193,7 +193,7 @@ pub(super) fn issue_projection(
     let digest = hash.finalize().to_hex().to_string();
     let module = format!("Tidepool.Actor.Surface.H{digest}");
     let scratch = Arc::new(tempfile::tempdir()?);
-    let join_inputs = context.declaration_join_inputs(Arc::clone(&scratch))?;
+    let join_inputs = context.publication_join_inputs(Arc::clone(&scratch), surface)?;
     let original = join_inputs
         .interface(original_tip)
         .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -216,17 +216,17 @@ pub(super) fn issue_projection(
         expected_exports: exports,
         expected_instances: instances.clone(),
     };
-    let receipt = match certify_declaration_join(input, join_inputs, includes, root, settlement)? {
-        CertifiedDeclarationJoin::Accepted(receipt) => Arc::new(receipt),
-        CertifiedDeclarationJoin::Rejected(rejected) => {
-            return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
-                format!(
-                    "declaration projection rejected: {:?}",
-                    rejected.outcome().decision
-                ),
-            )))
-        }
-    };
-    let composition = context.with_joined_publication(&receipt, surface)?;
+    let composition =
+        match certify_publication_join(input, join_inputs, includes, root, settlement)? {
+            CertifiedPublicationJoin::Accepted(composition) => composition,
+            CertifiedPublicationJoin::Rejected(rejected) => {
+                return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                    format!(
+                        "declaration projection rejected: {:?}",
+                        rejected.outcome().decision
+                    ),
+                )))
+            }
+        };
     Ok(Arc::new(CertifiedDeclarationProjection { composition }))
 }
