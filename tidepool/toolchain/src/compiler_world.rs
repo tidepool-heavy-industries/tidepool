@@ -9,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
-use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
+use tidepool_extract_cmd::{
+    CompilerResponseRejection, InspectionNamespace, InspectionScope, StructuredInspection,
+};
 
 use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
@@ -1289,7 +1291,7 @@ impl WorldRealizationObservation {
             .as_ref()
             .is_some_and(|actual| !reference.matches_location(actual))
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         Ok(Self {
             reference,
@@ -4091,7 +4093,7 @@ fn world_acquisition_outcome(
     root: &str,
 ) -> Result<WorldAcquisitionOutcome, CompileError> {
     use tidepool_extract_cmd::EnsureExactInputsOutcome as O;
-    match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
+    match O::decode(&run.output.stdout).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))? {
         O::Ready {
             world,
             realization,
@@ -4106,7 +4108,7 @@ fn world_acquisition_outcome(
         O::Rejected(reason) => Err(source_failure(format!(
             "compiler refused world acquisition: {reason:?}"
         ))),
-        _ => Err(world_response_error(true)),
+        _ => Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch)),
     }
 }
 
@@ -4271,10 +4273,10 @@ fn ensure_world(
             let (acquisition, files) = cold_world_acquisition(restoration)?;
             match submit(acquisition, files)? {
                 WorldAcquisitionOutcome::Ready(ready) => ready,
-                WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+                WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch)),
             }
         }
-        WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+        WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch)),
     };
     crate::host_work::record_host_work(
         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
@@ -4383,7 +4385,7 @@ pub fn query_scope(
     provenance: &crate::inspection::ScopeProvenance,
 ) -> Result<ScopedWorldQueryResult, CompileError> {
     if provenance.scope != crate::inspection::NameScope::Current {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     scoped_world_action(|| {
         let bytes = query_world_transport(
@@ -4634,14 +4636,14 @@ pub(crate) enum WorldCellStageIdentity {
 impl WorldCellStageIdentity {
     pub(crate) fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         let ciborium::value::Value::Array(fields) = value else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         match fields.first().map(answer_text).transpose()? {
             Some("exec") if fields.len() == 2 => {
                 let typed_digest = answer_text(&fields[1])?;
                 let digest = crate::execution_source::parse_digest(typed_digest)?;
                 if world_hex(&digest) != typed_digest {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 Ok(Self::Executable {
                     typed_digest: typed_digest.to_owned(),
@@ -4659,7 +4661,7 @@ impl WorldCellStageIdentity {
                     Self::Prologue { ordinal, owner }
                 })
             }
-            _ => Err(world_response_error(false)),
+            _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
         }
     }
 
@@ -5738,7 +5740,7 @@ fn world_output_manifest(
     inventory: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<BTreeMap<PathBuf, [u8; 32]>, CompileError> {
     let ciborium::value::Value::Array(entries) = value else {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     };
     inventory
         .charge_value_copies(value, 1)
@@ -5748,9 +5750,9 @@ fn world_output_manifest(
         crate::host_work::checkpoint()?;
         let entry = answer_array(entry, 2)?;
         let path = PathBuf::from(answer_text(&entry[0])?);
-        relative_source_path(&path).map_err(|_| world_response_error(false))?;
+        relative_source_path(&path).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
         if files.insert(path, answer_hash(&entry[1])?).is_some() {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         }
     }
     Ok(files)
@@ -5767,7 +5769,7 @@ fn world_output_symbol(
         ciborium::value::Value::Array(v) if v.len() == 2 && answer_u64(&v[0])? == 1 => {
             Some(answer_text(&v[1])?.to_owned())
         }
-        _ => return Err(world_response_error(false)),
+        _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
     };
     Ok(tidepool_repr::execution_schema::SymbolIdentity {
         unit: answer_text(&fields[0])?.to_owned(),
@@ -5795,7 +5797,7 @@ fn validate_world_native_entry_observation(
         || !bounded(&symbol.occurrence)
         || symbol.occurrence != typed_item.entry()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     Ok(())
 }
@@ -5812,18 +5814,18 @@ pub enum WorldCellRuntimeInputOrigin {
 impl WorldCellRuntimeInputOrigin {
     fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         let ciborium::value::Value::Array(fields) = value else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         match fields.as_slice() {
             [tag] if answer_u64(tag)? == 0 => Ok(Self::BaseWorld),
             [tag, producer, consumer] if answer_u64(tag)? == 1 => Ok(Self::PriorStage {
                 producer: usize::try_from(answer_u64(producer)?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
                 consumer: usize::try_from(answer_u64(consumer)?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
             }),
             [tag] if answer_u64(tag)? == 2 => Ok(Self::CellOperand),
-            _ => Err(world_response_error(false)),
+            _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
         }
     }
 }
@@ -5909,7 +5911,7 @@ impl DependencyTerminalReference {
         let origin = match answer_u64(&fields[0])? {
             0 => DependencyTerminalOrigin::SourceDefinition,
             1 => DependencyTerminalOrigin::NativeOriginal,
-            _ => return Err(world_response_error(false)),
+            _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
         };
         let decode_binding = |value: &ciborium::value::Value| {
             let fields = answer_array(value, 2)?;
@@ -5951,10 +5953,10 @@ impl DependencyTerminalReference {
                     ArtifactSelectionId(answer_hash(&demander[1])?),
                 ),
                 original_ordinal: u32::try_from(answer_u64(&demander[2])?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
             },
             global_index: u32::try_from(answer_u64(&fields[3])?)
-                .map_err(|_| world_response_error(false))?,
+                .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
             binding: decode_binding(&fields[4])?,
             identity: decode_identity(&fields[5])?,
             generation: answer_u64(&fields[6])?,
@@ -6063,30 +6065,30 @@ fn admit_world_stage_inputs(
                     .bindings
                     .entries
                     .get(&input.occurrence)
-                    .ok_or_else(|| world_response_error(true))?;
+                    .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 if !input.matches(
                     &actual.symbol,
                     actual.session_var,
                     actual.defining_scope,
                     actual.row.owner().gen.0,
                 ) {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 let observed = cid::Cid::try_from(input.seal.as_slice())
-                    .map_err(|_| world_response_error(false))?;
+                    .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
                 let expected = world
                     .restoration
                     .bindings
                     .facts()
                     .get(&input.occurrence)
-                    .ok_or_else(|| world_response_error(true))?;
+                    .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 if observed != expected.4 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 WorldCellRuntimeInputSource::BaseWorld(Arc::clone(&actual.row))
             }
             WorldCellRuntimeInputOrigin::CellOperand => {
-                let operand = plan.operand().ok_or_else(|| world_response_error(true))?;
+                let operand = plan.operand().ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 let alias = match operand.exposure() {
                     WorldCellOperandExposure::Input => "input",
                     WorldCellOperandExposure::SessionInput => "sessionInput",
@@ -6099,12 +6101,12 @@ fn admit_world_stage_inputs(
                         operand.generation(),
                     )
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 let observed = cid::Cid::try_from(input.seal.as_slice())
-                    .map_err(|_| world_response_error(false))?;
+                    .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
                 if observed != *operand.row_fact_cid() {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 WorldCellRuntimeInputSource::CellOperand(Arc::clone(operand.checked_row()))
             }
@@ -6125,7 +6127,7 @@ fn admit_world_stage_inputs(
                 std::collections::btree_map::Entry::Occupied(old)
                     if !old.get().same_world_type_row(row) =>
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -6163,11 +6165,11 @@ fn validate_world_prior_input(
         consumer: consumer_ordinal,
     } = input.origin
     else {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     };
     let executable = producer
         .executable()
-        .ok_or_else(|| world_response_error(true))?;
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
     if producer.index() != ordinal
         || consumer.ordinals().first() != Some(&consumer_ordinal)
         || producer.stage().index() >= consumer.index()
@@ -6176,13 +6178,13 @@ fn validate_world_prior_input(
         || input.defining_scope != defining_scope
         || input.generation != producer.generation()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     let binder = executable
         .binders()
         .iter()
         .find(|binder| binder.name() == input.occurrence)
-        .ok_or_else(|| world_response_error(true))?;
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
     // The reserved ID was checked by the binder decoder. Compare the exact
     // reserved Val owner too; native/interface admission still consumes the
     // same captured bytes through the existing product issuer.
@@ -6196,13 +6198,13 @@ fn validate_world_prior_input(
         || input.symbol.occurrence != binder.name()
         || input.symbol.record_parent.is_some()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     let interface = captured_files
         .get(&PathBuf::from(format!("item-{ordinal}/value.hi")))
-        .ok_or_else(|| world_response_error(true))?;
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
     if input.seal.as_slice() != interface.sha256() {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     Ok(())
 }
@@ -6236,7 +6238,7 @@ fn admit_world_preparation_response(
         || answer_hash(&fields[2])? != plan_digest
         || answer_hash(&fields[3])? != *reservation.admission_digest()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     let outcome = answer_array(&fields[4], 2)?;
     if answer_text(&outcome[0])? == "rejected" {
@@ -6245,17 +6247,17 @@ fn admit_world_preparation_response(
             || !answer_array(&fields[7], 0)?.is_empty()
             || !answer_array(&fields[8], 0)?.is_empty()
         {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         }
         return Ok(Err(match answer_u64(&outcome[1])? {
             0 => WorldQueryRejection::Unsupported,
             1 => WorldQueryRejection::Unavailable,
             2 => WorldQueryRejection::Corrupt,
-            _ => return Err(world_response_error(false)),
+            _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
         }));
     }
     if answer_text(&outcome[0])? != "prepared" {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     validation
         .inventory
@@ -6326,7 +6328,7 @@ fn admit_world_preparation_response(
         if answer_u64(&completed[0])? != index as u64
             || answer_u64(&completed[1])? != world_cell_generation(slot)
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         let item_path = PathBuf::from(format!("item-{index}/world-item.cbor"));
         let item_bytes = crate::certified_products::read_bounded_with_operation(
@@ -6340,7 +6342,7 @@ fn admit_world_preparation_response(
             .charge(item_bytes.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         if world_digest(&item_bytes) != answer_hash(&completed[2])? {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         let item = validation
             .inventory
@@ -6362,7 +6364,7 @@ fn admit_world_preparation_response(
             || answer_hash(&observed[source_index])?
                 != world_digest(plan.items()[index].source().as_bytes())
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         let kind = if original {
             validation
@@ -6370,7 +6372,7 @@ fn admit_world_preparation_response(
                 .charge_value_copies(&observed[7], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             if answer_text(&observed[0])? != "TPCWORIGINAL1" {
-                return Err(world_response_error(false));
+                return Err(world_response_error(CompilerResponseRejection::Malformed));
             }
             let fields = answer_array(&observed[7], 5)?;
             let expected_kind = match slot {
@@ -6380,12 +6382,12 @@ fn admit_world_preparation_response(
             let owner = stage
                 .identity()
                 .original_owner()
-                .ok_or_else(|| world_response_error(true))?;
+                .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
             if answer_text(&fields[0])? != expected_kind
                 || answer_text(&fields[1])? != owner.unit
                 || answer_text(&fields[2])? != owner.module
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
             let original = WorldOriginalItemProof {
                 owner: owner.clone(),
@@ -6400,14 +6402,14 @@ fn admit_world_preparation_response(
         } else {
             let &(segment_index, item_index) = by_ordinal
                 .get(&index)
-                .ok_or_else(|| world_response_error(true))?;
+                .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
             let segment = &segments[segment_index];
             let typed_item = &segment.items()[item_index];
             if answer_text(&observed[0])? != "TPCWITEM2"
                 || answer_text(&observed[6])? != segment.digest()
                 || answer_text(&observed[8])? != typed_item.entry()
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
             validation
                 .inventory
@@ -6422,7 +6424,7 @@ fn admit_world_preparation_response(
                 .charge_value_copies(&observed[10], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             let native_ordinal = u32::try_from(answer_u64(&observed[10])?)
-                .map_err(|_| world_response_error(false))?;
+                .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
             // Field 11 is the two-list `[binders, signatures]`. Binder order and
             // identity must match the reservation, and each signature must name
             // this typed item's entry and ordered capture.
@@ -6434,7 +6436,7 @@ fn admit_world_preparation_response(
             let expected_bindings = reservation
                 .expected_bindings()
                 .get(index)
-                .ok_or_else(|| world_response_error(true))?;
+                .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
             let binders =
                 crate::checked_cell::decode_world_item_binders(&evidence[0], expected_bindings)?;
             let captures = typed_item.body().captures();
@@ -6455,7 +6457,7 @@ fn admit_world_preparation_response(
                 .count()
                 != 1
             {
-                return Err(world_response_error(false));
+                return Err(world_response_error(CompilerResponseRejection::Malformed));
             }
             for (path, digest) in &manifest {
                 validation
@@ -6508,10 +6510,10 @@ fn admit_world_preparation_response(
             if let WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } = input.origin() {
                 let produced = item_proofs
                     .get(producer)
-                    .ok_or_else(|| world_response_error(true))?;
+                    .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 let captured = stages_by_ordinal
                     .get(consumer)
-                    .ok_or_else(|| world_response_error(true))?;
+                    .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 validate_world_prior_input(
                     &input.reference,
                     produced,
@@ -6542,7 +6544,7 @@ fn admit_world_preparation_response(
                 std::collections::btree_map::Entry::Occupied(old)
                     if !old.get().same_world_type_row(row) =>
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -6604,10 +6606,10 @@ fn decode_world_stages(
 ) -> Result<Vec<DecodedWorldCellStage>, CompileError> {
     use crate::checked_cell::CheckedPlannedCellSlot as Slot;
     let ciborium::value::Value::Array(rows) = value else {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     };
     if rows.len() > slots.len() {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     operation
         .charge_value_copies(value, 1)
@@ -6620,25 +6622,25 @@ fn decode_world_stages(
         let fields = answer_array(row, 5)?;
         let identity = WorldCellStageIdentity::decode(&fields[0])?;
         let ciborium::value::Value::Array(raw_ordinals) = &fields[1] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         if raw_ordinals.is_empty() || raw_ordinals.len() > slots.len().saturating_sub(next) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         let ordinals = raw_ordinals
             .iter()
             .map(|value| {
-                usize::try_from(answer_u64(value)?).map_err(|_| world_response_error(false))
+                usize::try_from(answer_u64(value)?).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))
             })
             .collect::<Result<Vec<_>, _>>()?;
         if ordinals.iter().copied().ne(next..next + ordinals.len()) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         match &identity {
             WorldCellStageIdentity::Executable { typed_digest } => {
                 let segment = segments
                     .get(next_segment)
-                    .ok_or_else(|| world_response_error(true))?;
+                    .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
                 if typed_digest != segment.digest()
                     || segment
                         .items()
@@ -6646,14 +6648,14 @@ fn decode_world_stages(
                         .map(|item| item.ordinal())
                         .ne(ordinals.iter().copied())
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 next_segment += 1;
             }
             WorldCellStageIdentity::Declaration { ordinal, owner }
             | WorldCellStageIdentity::Prologue { ordinal, owner } => {
                 if ordinals.len() != 1 || *ordinal != next as u64 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
                 let generation = match (slots.get(next), &identity) {
                     (
@@ -6664,13 +6666,13 @@ fn decode_world_stages(
                         Some(Slot::Prologue { declaration }),
                         WorldCellStageIdentity::Prologue { .. },
                     ) => *declaration,
-                    _ => return Err(world_response_error(true)),
+                    _ => return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch)),
                 };
                 let expected =
                     tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
                         .module_name();
                 if owner.unit != "main" || owner.module != expected {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
                 }
             }
         }
@@ -6681,10 +6683,10 @@ fn decode_world_stages(
          -> Result<WorldStageFileRef, CompileError> {
             let fields = answer_array(value, 2)?;
             let relative = PathBuf::from(answer_text(&fields[0])?);
-            relative_source_path(&relative).map_err(|_| world_response_error(false))?;
+            relative_source_path(&relative).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
             let sha256 = answer_hash(&fields[1])?;
             if relative != namespace.join(expected) || manifest.get(&relative) != Some(&sha256) {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
             Ok(WorldStageFileRef { relative, sha256 })
         };
@@ -6694,7 +6696,7 @@ fn decode_world_stages(
             certified_products: decode_ref(&bundle[2], "certified-products.cbor")?,
         };
         let ciborium::value::Value::Array(raw_inputs) = &fields[3] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         operation
             .reserve::<WorldInputRef>(raw_inputs.len())
@@ -6707,10 +6709,10 @@ fn decode_world_stages(
         if selected_inputs.windows(2).any(|pair| {
             pair[0].origin == pair[1].origin && pair[0].occurrence == pair[1].occurrence
         }) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         let ciborium::value::Value::Array(raw_terminals) = &fields[4] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         operation
             .reserve::<DependencyTerminalReference>(raw_terminals.len())
@@ -6724,7 +6726,7 @@ fn decode_world_stages(
             .windows(2)
             .any(|pair| pair[0] == pair[1])
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
         }
         next += ordinals.len();
         stages.push(DecodedWorldCellStage {
@@ -6737,7 +6739,7 @@ fn decode_world_stages(
         });
     }
     if next != slots.len() || next_segment != segments.len() {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     Ok(stages)
 }
@@ -6749,9 +6751,9 @@ fn capture_world_output(
     files: &mut BTreeMap<PathBuf, WorldOutputFile>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<(), CompileError> {
-    relative_source_path(&relative).map_err(|_| world_response_error(false))?;
+    relative_source_path(&relative).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
     if files.contains_key(&relative) {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     validation
         .inventory
@@ -6773,7 +6775,7 @@ fn capture_world_output(
         .charge(bytes.len().checked_mul(2).ok_or_else(source_size_failure)?)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     if world_digest(&bytes) != digest {
-        return Err(world_response_error(true));
+        return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
     }
     validation
         .record_captured_bytes(&path, &bytes)
@@ -6829,16 +6831,16 @@ fn query_world_transport(
     });
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
-    let file = std::fs::File::open(&output).map_err(|_| world_response_error(false))?;
+    let file = std::fs::File::open(&output).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
     let allowance = capture_allowance()?;
     if file.metadata()?.len() > allowance {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     use std::io::Read;
     let mut bytes = Vec::new();
     crate::host_work::read_to_end(&mut file.take(allowance.saturating_add(1)), &mut bytes)?;
     if bytes.len() as u64 > allowance {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     tracing::debug!(
         reply_bytes = bytes.len(),
@@ -6848,15 +6850,8 @@ fn query_world_transport(
     Ok(bytes)
 }
 
-fn world_response_error(provenance: bool) -> CompileError {
-    use tidepool_extract_cmd::CompilerResponseRejection as R;
-    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response(
-        if provenance {
-            R::ProvenanceMismatch
-        } else {
-            R::Malformed
-        },
-    ))
+fn world_response_error(reason: CompilerResponseRejection) -> CompileError {
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response(reason))
 }
 
 fn world_answer_decode_error(
@@ -6879,39 +6874,39 @@ fn answer_array(
 ) -> Result<&[ciborium::value::Value], CompileError> {
     match value {
         ciborium::value::Value::Array(v) if v.len() == count => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_text(value: &ciborium::value::Value) -> Result<&str, CompileError> {
     match value {
         ciborium::value::Value::Text(v) => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_u64(value: &ciborium::value::Value) -> Result<u64, CompileError> {
     match value {
         ciborium::value::Value::Integer(v) => {
-            u64::try_from(*v).map_err(|_| world_response_error(false))
+            u64::try_from(*v).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))
         }
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_blob(value: &ciborium::value::Value) -> Result<&[u8], CompileError> {
     match value {
         ciborium::value::Value::Bytes(v) => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_hash(value: &ciborium::value::Value) -> Result<[u8; 32], CompileError> {
     answer_blob(value)?
         .try_into()
-        .map_err(|_| world_response_error(false))
+        .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))
 }
 fn answer_cbor(bytes: &[u8]) -> Result<ciborium::value::Value, CompileError> {
     let mut input = std::io::Cursor::new(bytes);
-    let value = ciborium::de::from_reader(&mut input).map_err(|_| world_response_error(false))?;
+    let value = ciborium::de::from_reader(&mut input).map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?;
     if input.position() != bytes.len() as u64 {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     Ok(value)
 }
@@ -6933,14 +6928,14 @@ fn authenticate_module_receipt(
                 || (matches!(receipt_use, ModuleReceiptUse::Requested)
                     && sources.selected_sources.contains_key(&receipt.module))
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
         }
         origin @ WorldModuleOrigin::Home { path, .. } => {
             if relative_source_path(Path::new(path)).is_err()
                 || sources.selected_sources.get(&receipt.module) != Some(origin)
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
         }
     }
@@ -7001,7 +6996,7 @@ fn decode_world_answer(
                 || absence.source_domain != *sources.seal()
                 || absence.package_profile != *profile
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(CompilerResponseRejection::ProvenanceMismatch));
             }
         }
         WorldAnswer::Rejected(_) => {}
@@ -7034,8 +7029,8 @@ mod answer_tests {
     #[test]
     fn response_rejections_preserve_typed_cause_and_uncertain_settlement() {
         use tidepool_extract_cmd::CompilerResponseRejection as R;
-        for (provenance, expected) in [(false, R::Malformed), (true, R::ProvenanceMismatch)] {
-            let CompileError::CompilerEndpoint(error) = world_response_error(provenance) else {
+        for expected in [R::Malformed, R::ProvenanceMismatch] {
+            let CompileError::CompilerEndpoint(error) = world_response_error(expected) else {
                 panic!("response refusal must retain endpoint cause");
             };
             assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
