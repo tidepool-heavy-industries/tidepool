@@ -10976,21 +10976,18 @@ mod tests {
 #[cfg(test)]
 mod compiler_packet_replay {
     //! Manual compiler-only qualification of a privately retained host-carrier offer.
-    //! Source and recipe hashes are diagnostic inputs. The parser, runtime admission,
-    //! compiler endpoint and product issuers create every new authority below.
+    //! Source and recipe hashes are diagnostic inputs. The ordinary compiler
+    //! frontdoor reissues products without creating runtime execution admission.
 
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
-    use tidepool_codegen::scope::ScopeId;
     use tidepool_toolchain::checked_cell::CellRecipe;
 
-    use super::{compile_cell_program_admitted, TemplateSelector, TurnTemplate};
-    use crate::session::{
-        HostBindingType, ModuleEnv, PersistentSession, ResidentSession, RuntimeCompileInputs,
-        SessionLib,
+    use super::{
+        run_turn, HostBindingAuthority, TemplateSelector, TurnRequest, TurnResult, TurnTemplate,
     };
 
     #[derive(Deserialize)]
@@ -11052,19 +11049,6 @@ mod compiler_packet_replay {
         value_generation_before_reservation: u64,
     }
 
-    #[derive(Clone)]
-    struct NoExecutionOutput;
-
-    impl crate::session::OutputSink for NoExecutionOutput {
-        fn drain(&self) -> Vec<String> {
-            Vec::new()
-        }
-
-        fn snapshot(&self) -> Vec<String> {
-            Vec::new()
-        }
-    }
-
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -11075,7 +11059,7 @@ mod compiler_packet_replay {
     /// ordinary qualification path.
     #[test]
     #[ignore = "requires a private authenticated source capsule and a matched compiler"]
-    fn retained_command_job_carrier_reissues_compiler_products_without_execution() {
+    fn retained_command_job_recipe_reissues_ordinary_compiler_products_without_execution() {
         tidepool_testing::eval_harness::require_extract();
         let manifest = std::env::var_os("TIDEPOOL_HOST_CARRIER_REPLAY_INPUTS").unwrap();
         let manifest_bytes = std::fs::read(manifest).unwrap();
@@ -11123,60 +11107,69 @@ mod compiler_packet_replay {
         assert_eq!(plan.items().len(), 1);
         assert_eq!(plan.items()[0].binders(), ["job1"]);
         let root = tempfile::tempdir().unwrap();
-        let library = SessionLib::open(
-            tidepool_repr::SessionId(202),
-            root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(inputs.include.clone());
-        let state = PersistentSession::new(Some(library), 1024 * 1024);
-        let mut session =
-            ResidentSession::from_persistent_for_test(frunk::HNil, NoExecutionOutput, state);
-        session.set_val_gen(tidepool_repr::Generation(
-            inputs.value_generation_before_reservation,
-        ));
-        let admission = session
-            .admit_host_carrier_cell_in(
-                ScopeId::ROOT,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                Sha256::digest(&manifest_bytes).into(),
-                inputs.include.clone(),
-                "job1".into(),
-                HostBindingType::COMMAND_JOB,
-                Some(RuntimeCompileInputs::new(None, Vec::new()).unwrap()),
+        let generation = inputs
+            .value_generation_before_reservation
+            .checked_add(1)
+            .unwrap();
+        let includes = inputs
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: specification.cell_source(),
+                    templates: &templates,
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
             )
-            .unwrap();
-        assert_eq!(
-            admission.host_carrier(),
-            Some(("job1", HostBindingType::COMMAND_JOB))
-        );
-        let view = admission.view().unwrap();
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
         })
-        .unwrap();
-        assert_eq!(checked.items.len(), 1);
-        assert_eq!(program.items().len(), 1);
-        let item = &program.items()[0];
-        let native = item
-            .native()
-            .expect("new Haskell products passed Rust native admission");
-        let certificate = native.value_interface_certificate().unwrap();
+        .unwrap()
+        else {
+            panic!("the retained command recipe must compile its actual binding");
+        };
+        let [binding] = bound.as_slice() else {
+            panic!("the actual compiler must return exactly job1");
+        };
+        assert_eq!(binding.name, "job1");
         assert_eq!(
-            certificate.owner(),
-            tidepool_repr::SessionModule::val(view.next_value_generation())
+            binding.module,
+            tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation)).module_name()
         );
-        assert_eq!(native.item(), item.checked_item());
-        assert_eq!(native.generation(), view.next_value_generation().0);
-        native
-            .validate_runtime_admission(item.checked_item().admission_digest(), admission.digest())
-            .unwrap();
-        assert!(!item.native_products().unwrap().recovery_products.is_empty());
-        assert!(!certificate.bytes_owned().is_empty());
-        assert!(session.current_binding_in(ScopeId::ROOT, "job1").is_none());
-        assert_eq!(session.parked_count(), 0);
+        assert!(matches!(
+            binding.host_authority,
+            Some(HostBindingAuthority::CommandJob)
+        ));
+        let products = compiled
+            .certification
+            .as_ref()
+            .expect("new ordinary compiler products");
+        assert!(
+            products.checked_execution().is_none(),
+            "metadata qualification does not create a checked runtime execution owner"
+        );
+        assert!(products
+            .original_output
+            .as_ref()
+            .expect("actual selecting output owner")
+            .linked_native_target()
+            .is_some());
+        assert!(!products.recovery_products.is_empty());
+        assert!(products
+            .recovery_products
+            .iter()
+            .any(|product| product.owner().module == binding.module));
     }
 }
