@@ -70,6 +70,8 @@ fn complete_native_transition(
 pub mod registry;
 pub mod render;
 pub mod resident;
+#[cfg(test)]
+pub(in crate::session) use resident::world_cell_test_support;
 pub use resident::{
     CompiledActivationRenderer, RendererAccess, RendererProductionFailure, SharedActivationRenderer,
 };

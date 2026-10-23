@@ -11877,8 +11877,7 @@ mod authored_publication_tests {
             .unwrap(),
         );
         let admission =
-            plan_fixture_cell_for(&mut resident, &original, &recipe, source, execution.clone())
-                .unwrap();
+            plan_fixture_cell_for(&mut resident, &recipe, source, execution.clone()).unwrap();
         let prepared = original
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
@@ -12850,7 +12849,6 @@ mod authored_publication_tests {
         .unwrap();
         let admission = crate::session::world_cell_test_support::plan_fixture_specification_for(
             &mut original,
-            &source,
             crate::session::world_cell_test_support::world_recipe(&specification),
             execution,
         )
@@ -14230,7 +14228,6 @@ mod authored_publication_tests {
         .unwrap();
         let admission = crate::session::world_cell_test_support::plan_fixture_specification_for(
             &mut session,
-            &public_source,
             crate::session::world_cell_test_support::world_recipe(&specification),
             private,
         )

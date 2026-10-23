@@ -4677,7 +4677,7 @@ where
                     next_context.source_imports = crate::ActorSourceImports::default();
                     retained
                 } else {
-                    Self::adopt_initial_actor_facades(session, context)?;
+                    adopt_initial_actor_facades(session, context)?;
                     session
                         .adopt_initial_notebook_scope_with_source(
                             context.placement.lexical_scope,
@@ -12641,6 +12641,23 @@ where
     }
 }
 
+fn adopt_initial_actor_facades<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+) -> Result<(), ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let facades = context.source_imports.declaration_projections()?;
+    if !facades.is_empty() {
+        session
+            .adopt_initial_notebook_facades(context.placement.lexical_scope, facades)
+            .map_err(ResidentError::Session)?;
+    }
+    Ok(())
+}
+
 impl<H, O> ResidentActorRunner<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -12721,7 +12738,7 @@ where
         use crate::kernel::lifecycle::resident::PublicOwnerPublicationFailure;
         self.access
             .with_machine(context, move |session, context, _| {
-                Self::adopt_initial_actor_facades(session, context)?;
+                adopt_initial_actor_facades(session, context)?;
                 let publication = session
                     .initialize_durable_public_scope_with_readiness(
                         owner,
@@ -12827,25 +12844,12 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, |session, context, _| {
-                Self::adopt_initial_actor_facades(session, context)?;
+                adopt_initial_actor_facades(session, context)?;
                 context
                     .source_dependency()
                     .adopt_final_scope(session, context.placement.lexical_scope)
             })
             .await
-    }
-
-    fn adopt_initial_actor_facades(
-        session: &mut ResidentSession<H, O>,
-        context: &crate::ActorSessionContext,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        let facades = context.source_imports.declaration_projections()?;
-        if !facades.is_empty() {
-            session
-                .adopt_initial_notebook_facades(context.placement.lexical_scope, facades)
-                .map_err(ResidentError::Session)?;
-        }
-        Ok(())
     }
 
     /// Transfer only the journal-certified durable predecessor to this exact

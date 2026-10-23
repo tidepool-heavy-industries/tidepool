@@ -1651,14 +1651,7 @@ where
             scenario,
             &format!("{label}.parse"),
             None,
-            |resident| {
-                plan_fixture_specification_for(
-                    resident,
-                    &public_source,
-                    specification,
-                    execution.clone(),
-                )
-            },
+            |resident| plan_fixture_specification_for(resident, specification, execution.clone()),
         )
         .map_err(|error| match error {
             crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Compile(error)) => {

@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::session::{
-    resident_cell_check_template, resident_workbench_templates, turn, SourceImports,
+    resident_cell_check_template, resident_workbench_templates, turn, PrivateExecutionAdmission,
+    RuntimeCellAdmission, RuntimeLexicalScopeLease, RuntimeOriginalSource, SourceImports,
+    WorldInspectionError,
 };
 
 /// The same owned source bytes and includes supply the admission and compiler.
@@ -177,7 +179,13 @@ pub(in crate::session) fn bootstrap_state_world_for(
         .unwrap();
     assert!(settled.close().resources_retired());
     let completed = crate::session::finish_admitted_compiler_world(settled).unwrap();
-    assert!(state.install_inspection_world_if_current(&completed, &recipe.reference, &original));
+    assert!(state.install_compiler_world_association_if_current(
+        &completed.association,
+        &completed.custody,
+        &completed.cancellation,
+        &recipe.reference,
+        &original
+    ));
     completed.world().clone()
 }
 
@@ -354,7 +362,6 @@ pub(in crate::session) fn fixture_cell_recipe(
 
 pub(in crate::session) fn plan_fixture_cell_for<H, O>(
     resident: &mut ResidentSession<H, O>,
-    source_owner: &Arc<crate::session::RuntimeLexicalScopeLease>,
     recipe: &InputRecipe,
     source: &str,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
@@ -364,12 +371,11 @@ where
     O: OutputSink + Sync,
 {
     let specification = fixture_cell_recipe(recipe, source, &SourceImports::new());
-    plan_fixture_specification_for(resident, source_owner, specification, execution)
+    plan_fixture_specification_for(resident, specification, execution)
 }
 
 pub(in crate::session) fn plan_fixture_specification_for<H, O>(
     resident: &mut ResidentSession<H, O>,
-    source_owner: &Arc<crate::session::RuntimeLexicalScopeLease>,
     specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
     execution: Arc<crate::session::PrivateExecutionAdmission>,
 ) -> Result<Arc<crate::session::RuntimeCellAdmission>, crate::session::WorldInspectionError>
@@ -377,7 +383,9 @@ where
     H: crate::DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let original = source_owner.original_source().clone();
+    let original = execution
+        .original_source()
+        .map_err(crate::RuntimeError::from)?;
     let preparation = source_action_with_original(resident, original.clone(), |resident, _| {
         resident.prepare_private_execution(execution.clone(), None)
     })
@@ -420,9 +428,8 @@ where
     O: OutputSink + Sync,
 {
     let original = source_owner.original_source().clone();
-    let admission =
-        plan_fixture_cell_for(resident, source_owner, recipe, source, execution.clone())
-            .expect("plan the cell through its actual World");
+    let admission = plan_fixture_cell_for(resident, recipe, source, execution.clone())
+        .expect("plan the cell through its actual World");
     let settled = original
         .with_source_compiler_transaction(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,

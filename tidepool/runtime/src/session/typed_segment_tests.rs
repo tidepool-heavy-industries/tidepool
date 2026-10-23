@@ -374,13 +374,9 @@ fn execute_semantic_cell(
                     .map(|template| (template.kind.wire_name().to_owned(), template.source))
                     .collect();
         }
-        let admission = plan_fixture_specification_for(
-            resident,
-            public_source,
-            Arc::new(specification),
-            execution.clone(),
-        )
-        .map_err(semantic_plan_error)?;
+        let admission =
+            plan_fixture_specification_for(resident, Arc::new(specification), execution.clone())
+                .map_err(semantic_plan_error)?;
         let plan = admission
             .world_reservation()
             .expect("ordinary semantic cell has a real World reservation")
@@ -1510,13 +1506,9 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
             include_str!("fixtures/typed-segment-checked-resume.hs"),
             &SourceImports::new(),
         );
-        let admission = plan_fixture_specification_for(
-            &mut session.resident,
-            &session.public_source,
-            specification,
-            execution.clone(),
-        )
-        .unwrap();
+        let admission =
+            plan_fixture_specification_for(&mut session.resident, specification, execution.clone())
+                .unwrap();
         let prepared = original
             .with_source_compiler_transaction(
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,

@@ -34,8 +34,7 @@ fn compile_single(
     turn::CellCheck,
     Arc<crate::session::RuntimeCheckedItemAdmission>,
 ) {
-    let admission =
-        plan_fixture_cell_for(resident, source, recipe, text, execution.clone()).unwrap();
+    let admission = plan_fixture_cell_for(resident, recipe, text, execution.clone()).unwrap();
     let original = source.original_source().clone();
     let settled = original
         .with_source_compiler_transaction(

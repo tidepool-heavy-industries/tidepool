@@ -1769,7 +1769,6 @@ fn paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode() {
     let unrelated = begin_ephemeral_execution(&mut resident, &source);
     let planned = plan_fixture_cell_for(
         &mut resident,
-        &source,
         &recipe,
         "unrelated :: Int\nunrelated = 704",
         unrelated.clone(),

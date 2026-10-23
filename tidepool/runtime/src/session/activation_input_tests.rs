@@ -1117,7 +1117,7 @@ fn plan_fixture_cell(
     execution: Arc<crate::session::PrivateExecutionAdmission>,
 ) -> Arc<crate::session::RuntimeCellAdmission> {
     let original = resident.public_source.clone();
-    plan_fixture_cell_for(&mut resident.resident, &original, recipe, source, execution)
+    plan_fixture_cell_for(&mut resident.resident, recipe, source, execution)
         .expect("plan fixture through its actual World")
 }
 
