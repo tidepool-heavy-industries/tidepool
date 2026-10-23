@@ -4665,6 +4665,13 @@ pub(crate) fn retain_projection_inputs(
         .map(|node| &node.owner)
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
+    let selected_originals = context
+        .compiler_input_projection()
+        .snapshot_roles()
+        .iter()
+        .filter(|(_, role)| role.original().is_some())
+        .map(|(owner, _)| owner.clone())
+        .collect();
     for projection in projections {
         let owner = crate::declaration_join::ExactModuleIdentity {
             unit: projection.reserved().unit.clone(),
@@ -4680,11 +4687,16 @@ pub(crate) fn retain_projection_inputs(
                 "captured projection lacks one exact selected initial interface",
             ));
         }
-        context.clone().extend(
-            &[],
-            std::slice::from_ref(projection),
-            context.lexical_graph().to_vec(),
-        )?;
+        if context.toolchain_identity_sha256() != projection.toolchain_identity_sha256() {
+            return Err(failure(
+                "captured projection belongs to another compiler producer",
+            ));
+        }
+        // Check the owning merge policy, including published-source policy and
+        // exact native decisions. Retaining a projection does not compose its
+        // SOURCE scope or change the receiving context's lexical permissions.
+        let incoming = projection.publication_compiler_support(&selected_originals)?;
+        context.compiler_source_support().merge(&incoming)?;
     }
     Ok(projections.to_vec())
 }

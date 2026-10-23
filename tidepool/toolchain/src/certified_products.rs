@@ -20247,7 +20247,6 @@ pub(crate) mod tests {
             issue_fixture_compiler_support, ExactCompileContext, ExactDeclarationContext,
             NativeTransportMode,
         };
-        use crate::CompileError;
         let producer_bytes = b"two-input-request-obligations";
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let product = |module: &str, version, groups| {
@@ -22257,7 +22256,6 @@ pub(crate) mod tests {
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
         };
-        use crate::CompileError;
         let producer_bytes = b"request-obligation-history";
         let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
         let product = |module: &str, version, groups| {
@@ -25166,11 +25164,10 @@ pub(crate) mod tests {
     ) {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactPayload,
-            CanonicalProducerIdentity, CompilerInputRole, NativeArtifactDemand,
+            CanonicalProducerIdentity, CompilerInputRole,
         };
         use crate::declaration_context::{
             ExactCompileContext, ExactDeclarationContext, NativeTransportMode,
-            OriginalCompilerInputs,
         };
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
@@ -33490,7 +33487,7 @@ None,
     }
 
     fn exact_current_original_history(nonempty: bool) {
-        use crate::artifact_inventory::{ArtifactInventory, CanonicalProducerIdentity};
+        use crate::artifact_inventory::CanonicalProducerIdentity;
         use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
         use crate::execution_source::{
             CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,

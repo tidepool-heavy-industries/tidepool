@@ -1322,7 +1322,7 @@ mod tests {
 
     #[test]
     fn authored_interface_context_retains_type_only_source_closure() {
-        use crate::artifact_inventory::{ArtifactInventory, ArtifactKind};
+        use crate::artifact_inventory::ArtifactKind;
         use crate::certified_products::fixture_module_interface;
 
         let root = module("Authored");

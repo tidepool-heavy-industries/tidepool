@@ -407,7 +407,6 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             .certify_original_closure(&closure)
             .unwrap();
     let private = OriginalCompilerInputs::from_issued_support(&published);
-    let view = private.issued_artifacts().clone();
     let public = Arc::new(
         ExactDeclarationContext::from_authenticated_interfaces(
             producer,

@@ -70,7 +70,8 @@ proptest! {
         prop_assert_eq!(&held, &recomputed);
         let duplicate = empty.replace(vec![row.clone(), reordered]).unwrap_err();
         prop_assert!(matches!(duplicate, crate::CompileError::LexicalGraph(cause)
-            if matches!(*cause, LexicalGraphError::DuplicateOwner { .. })));
+            if matches!(*cause, LexicalGraphError::DuplicateOwner { .. })),
+            "raw duplicate owners must refuse");
 
         let mut changed = row.clone();
         changed.imports.push(ExactModuleIdentity { unit: "other".into(), module: "NewDependency".into() });
@@ -83,7 +84,7 @@ proptest! {
             prop_assert!(matches!(error, crate::CompileError::LexicalGraph(cause)
                 if *cause == LexicalGraphError::ConflictingAdjacency {
                     owner: owner.clone(), previous: expected, incoming,
-                }));
+                }), "conflicting adjacency must retain both exact rows");
             prop_assert_eq!(selected.get(&owner).unwrap().owner.clone(), owner.clone());
         }
     }
