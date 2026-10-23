@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 mod restore;
 pub(crate) use restore::restore_acquired_native_closures;
+mod occurrence;
+use occurrence::CheckedNativeSlot;
+pub(crate) use occurrence::{NativeAcquiredOccurrence, NativeOccurrencePlan, NativePackageChoice};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -47,22 +50,99 @@ pub struct NativePackageReceiptFacts {
     pub stage_id: [u8; 32],
     pub occurrences: Vec<NativePackageOccurrenceFacts>,
 }
-/// Existing immutable compiler manifest plus only its actually selected proof
-/// projection. Restored proof has no operation or fresh capture authority.
+/// Authenticated selected receipt rows retain their exact acquired products.
+/// This owner grants no operation or fresh capture authority.
 #[derive(Debug)]
 pub(crate) struct NativePackageReceipt {
-    pub(crate) manifest: Option<Arc<PackageLinks>>,
-    pub(crate) facts: Arc<NativePackageReceiptFacts>,
-    rows: BTreeMap<u32, usize>,
+    facts: Arc<NativePackageReceiptFacts>,
+    rows: BTreeMap<u32, Arc<AcquiredPackageRow>>,
+}
+#[derive(Debug)]
+struct AcquiredPackageRow {
+    index: usize,
+    product: Arc<CertifiedPackageCodeProduct>,
+    values: Arc<[ValueId]>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct AcquiredPackageOccurrence {
+    receipt: Arc<NativePackageReceipt>,
+    occurrence: u32,
+}
+/// A selected row retains its actual acquisition and immutable receipt facts;
+/// unrelated products in the receipt are not retained by executable code.
+#[derive(Clone, Debug)]
+struct AcquiredPackageGrant {
+    receipt: Arc<NativePackageReceiptFacts>,
+    row: Arc<AcquiredPackageRow>,
+}
+impl AcquiredPackageGrant {
+    fn row(&self) -> &NativePackageOccurrenceFacts {
+        &self.receipt.occurrences[self.row.index]
+    }
+    fn stage_id(&self) -> &[u8; 32] {
+        &self.receipt.stage_id
+    }
+    fn index(&self) -> u32 {
+        self.row().occurrence
+    }
+    fn product(&self) -> &Arc<CertifiedPackageCodeProduct> {
+        &self.row.product
+    }
+    fn occurrence(&self) -> NativeOccurrenceId {
+        NativeOccurrenceId::Package {
+            stage_id: *self.stage_id(),
+            occurrence: self.index(),
+        }
+    }
+}
+impl AcquiredPackageOccurrence {
+    fn row(&self) -> &NativePackageOccurrenceFacts {
+        self.receipt
+            .row(self.occurrence)
+            .expect("acquired package row")
+    }
+    pub(crate) fn occurrence(&self) -> NativeOccurrenceId {
+        NativeOccurrenceId::Package {
+            stage_id: self.receipt.facts.stage_id,
+            occurrence: self.occurrence,
+        }
+    }
+    fn product(&self) -> &Arc<CertifiedPackageCodeProduct> {
+        &self.receipt.rows[&self.occurrence].product
+    }
+    fn into_grant(self) -> AcquiredPackageGrant {
+        AcquiredPackageGrant {
+            receipt: Arc::clone(&self.receipt.facts),
+            row: Arc::clone(&self.receipt.rows[&self.occurrence]),
+        }
+    }
+    fn children(&self) -> impl ExactSizeIterator<Item = (Self, ValueId)> + '_ {
+        self.row()
+            .children
+            .iter()
+            .zip(self.receipt.rows[&self.occurrence].values.iter())
+            .map(|(occurrence, value)| {
+                (
+                    Self {
+                        receipt: Arc::clone(&self.receipt),
+                        occurrence: *occurrence,
+                    },
+                    *value,
+                )
+            })
+    }
 }
 impl NativePackageReceipt {
-    fn from_facts(
+    fn acquire_rows(
         facts: Arc<NativePackageReceiptFacts>,
-        manifest: Option<Arc<PackageLinks>>,
+        products: &BTreeMap<u32, Arc<CertifiedPackageCodeProduct>>,
         operation: &InventoryOperation,
     ) -> Result<Arc<Self>, CompileError> {
         operation
-            .reserve::<(u32, usize)>(facts.occurrences.len())
+            .reserve::<(u32, Arc<AcquiredPackageRow>)>(facts.occurrences.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        operation
+            .reserve::<AcquiredPackageRow>(facts.occurrences.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         if facts
             .occurrences
@@ -71,12 +151,32 @@ impl NativePackageReceipt {
         {
             return Err(refusal("noncanonical package receipt occurrence order"));
         }
-        let rows = facts
+        let mut rows = facts
             .occurrences
             .iter()
             .enumerate()
-            .map(|(index, row)| (row.occurrence, index))
-            .collect::<BTreeMap<_, _>>();
+            .map(|(index, row)| {
+                let product = products
+                    .get(&row.occurrence)
+                    .filter(|product| product.artifact_id() == row.product)
+                    .ok_or_else(|| {
+                        refusal("selected package product has no exact acquired reference")
+                    })?;
+                if row.children.len() != product.code().globals().len() {
+                    return Err(refusal(
+                        "package receipt changed its exact ordered slot count",
+                    ));
+                }
+                Ok((
+                    row.occurrence,
+                    Arc::new(AcquiredPackageRow {
+                        index,
+                        product: Arc::clone(product),
+                        values: Arc::from([]),
+                    }),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         if facts
             .occurrences
             .iter()
@@ -84,16 +184,63 @@ impl NativePackageReceipt {
         {
             return Err(refusal("package receipt omits a selected child occurrence"));
         }
-        Ok(Arc::new(Self {
-            manifest,
-            facts,
-            rows,
-        }))
+        for row in &facts.occurrences {
+            crate::host_work::checkpoint()?;
+            operation
+                .reserve::<ValueId>(row.children.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let mut values = Vec::new();
+            for (slot, child) in row.children.iter().enumerate() {
+                operation
+                    .charge(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                values.push(resolve_package_import(
+                    &rows[&row.occurrence].product,
+                    slot,
+                    &rows[child].product,
+                )?);
+            }
+            Arc::get_mut(rows.get_mut(&row.occurrence).expect("acquired package row"))
+                .expect("package receipt has not lent rows")
+                .values = values.into();
+        }
+        Ok(Arc::new(Self { facts, rows }))
     }
     fn row(&self, occurrence: u32) -> Option<&NativePackageOccurrenceFacts> {
         self.rows
             .get(&occurrence)
-            .map(|index| &self.facts.occurrences[*index])
+            .map(|row| &self.facts.occurrences[row.index])
+    }
+    pub(crate) fn occurrence(
+        self: &Arc<Self>,
+        occurrence: u32,
+    ) -> Option<AcquiredPackageOccurrence> {
+        self.rows
+            .contains_key(&occurrence)
+            .then(|| AcquiredPackageOccurrence {
+                receipt: Arc::clone(self),
+                occurrence,
+            })
+    }
+    fn acquire_recorded(
+        facts: Arc<NativePackageReceiptFacts>,
+        products: &BTreeMap<ArtifactId, Arc<CertifiedPackageCodeProduct>>,
+        operation: &InventoryOperation,
+    ) -> Result<Arc<Self>, CompileError> {
+        operation
+            .reserve::<(u32, Arc<CertifiedPackageCodeProduct>)>(facts.occurrences.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let selected = facts
+            .occurrences
+            .iter()
+            .map(|row| {
+                let product = products
+                    .get(&row.product)
+                    .ok_or_else(|| refusal("recorded package acquisition is absent"))?;
+                Ok((row.occurrence, Arc::clone(product)))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
+        Self::acquire_rows(facts, &selected, operation)
     }
     pub(crate) fn issue(
         manifest: Arc<PackageLinks>,
@@ -134,33 +281,15 @@ impl NativePackageReceipt {
                 children: row.imports().iter().map(|link| link.occurrence()).collect(),
             });
         }
-        Self::from_facts(
+        Self::acquire_rows(
             Arc::new(NativePackageReceiptFacts {
                 stage_id: *manifest.stage_id(),
                 occurrences,
             }),
-            Some(manifest),
+            products,
             operation,
         )
     }
-}
-#[derive(Clone, Debug)]
-pub(crate) enum NativeAcquisition {
-    Home {
-        grant: crate::certified_products::AcquiredHomeCodeGrant,
-    },
-    Package {
-        product: Arc<CertifiedPackageCodeProduct>,
-        receipt: Arc<NativePackageReceipt>,
-        occurrence: u32,
-    },
-}
-#[derive(Clone, Debug)]
-pub(crate) struct NativeAcquiredOccurrence {
-    pub(crate) occurrence: NativeOccurrenceId,
-    pub(crate) code: NativeCodeRef,
-    pub(crate) acquisition: NativeAcquisition,
-    pub(crate) imports: Arc<[NativeGrantSelector]>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,7 +317,7 @@ pub struct AcquiredNativeClosure {
     identity: [u8; 32],
 }
 impl AcquiredNativeClosure {
-    pub(crate) fn issue(
+    pub(crate) fn from_occurrences(
         occurrences: Vec<NativeAcquiredOccurrence>,
         mut artifacts: ArtifactView,
         operation: &InventoryOperation,
@@ -200,219 +329,65 @@ impl AcquiredNativeClosure {
         let mut receipts = BTreeMap::<[u8; 32], BTreeMap<u32, NativePackageOccurrenceFacts>>::new();
         for node in occurrences {
             crate::host_work::checkpoint()?;
-            match (&node.occurrence, &node.acquisition, node.code.body()) {
-                (
-                    NativeOccurrenceId::Home(binding),
-                    NativeAcquisition::Home { grant },
-                    NativeCodeBody::Home(code),
-                ) => {
-                    let product = grant.product();
-                    let expected = CertifiedGroupCode::admit(
-                        product.owner().clone(),
-                        product.group().clone(),
-                    )?;
-                    if *binding != grant.binding()
-                        || binding.original_ordinal != product.group().original_ordinal()
-                        || &expected != code
-                    {
-                        return Err(refusal("HOME code differs from its exact acquired product"));
-                    }
-                    artifacts = artifacts.retain_custody(grant.artifacts())?;
-                }
-                (
-                    NativeOccurrenceId::Package {
-                        stage_id,
-                        occurrence,
-                    },
-                    NativeAcquisition::Package {
-                        product,
-                        receipt,
-                        occurrence: selected,
-                    },
-                    NativeCodeBody::Package(code),
-                ) => {
-                    if selected != occurrence
-                        || stage_id != &receipt.facts.stage_id
-                        || product.code() != code
-                    {
-                        return Err(refusal("package code differs from its acquired occurrence"));
-                    }
-                    let row = receipt
-                        .row(*occurrence)
-                        .ok_or_else(|| refusal("selected package receipt row is absent"))?;
-                    if row.product != product.artifact_id() {
-                        return Err(refusal("package receipt changed its exact product"));
-                    }
-                    if row.children.len() != product.code().globals().len() {
-                        return Err(refusal(
-                            "package receipt changed its exact ordered slot count",
-                        ));
-                    }
-                    receipts
-                        .entry(*stage_id)
-                        .or_default()
-                        .insert(*occurrence, row.clone());
-                }
-                _ => return Err(refusal("code body and acquired occurrence kinds differ")),
+            if let Some(grant) = node.home_grant() {
+                artifacts = artifacts.retain_custody(grant.artifacts())?;
             }
-            if nodes.insert(node.occurrence, Arc::new(node)).is_some() {
+            if let Some(grant) = node.package_grant() {
+                let row = grant.row();
+                if let Some(previous) = receipts
+                    .entry(*grant.stage_id())
+                    .or_default()
+                    .insert(grant.index(), row.clone())
+                {
+                    if previous != *row {
+                        return Err(refusal("package occurrence receipt collision"));
+                    }
+                }
+            }
+            if nodes.insert(node.occurrence(), Arc::new(node)).is_some() {
                 return Err(refusal("duplicate exact acquired occurrence"));
             }
         }
+        // Local occurrence constructors close their grant/body/slot correlation.
+        // Joining intact occurrences still checks that every exact selected
+        // child is present with the same immutable linked code.
         for node in nodes.values() {
-            let imports = node.code.imports().collect::<Vec<_>>();
-            if imports.len() != node.imports.len() {
-                return Err(refusal("acquired occurrence slot count differs"));
-            }
-            if let NativeAcquisition::Home { grant } = &node.acquisition {
-                if grant.imports().len() != imports.len() {
-                    return Err(refusal("HOME grant slot count differs"));
-                }
-                for (slot, ((edge, selector), actual)) in imports
-                    .iter()
-                    .zip(node.imports.iter())
-                    .zip(grant.imports())
-                    .enumerate()
+            for (edge, slot) in node.code().imports().zip(node.slots()) {
+                crate::host_work::checkpoint()?;
+                operation
+                    .charge(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                if let (
+                    NativeCodeImport::Code { code, .. },
+                    CheckedNativeSlot::Code { occurrence, .. },
+                ) = (edge, slot)
                 {
-                    use crate::certified_products::SelectedNativeImport;
-                    let valid = match (edge, selector, actual) {
-                        (
-                            NativeCodeImport::Code { value, .. },
-                            NativeGrantSelector::Code(NativeOccurrenceId::Home(selected)),
-                            SelectedNativeImport::Source {
-                                binding,
-                                value: expected,
-                            },
-                        ) => selected == binding && value == expected,
-                        (
-                            NativeCodeImport::Code { value, .. },
-                            NativeGrantSelector::Code(selected),
-                            SelectedNativeImport::Package {
-                                identity,
-                                interface_digest,
-                            },
-                        ) => {
-                            let child = nodes
-                                .get(selected)
-                                .ok_or_else(|| refusal("HOME package grant is absent"))?;
-                            let NativeAcquisition::Package { product, .. } = &child.acquisition
-                            else {
-                                return Err(refusal("HOME package grant changed kind"));
-                            };
-                            let definitions = grant.product().group().definitions();
-                            let global = &definitions.globals()[slot];
-                            identity == &global.identity
-                                && resolve_package_export(
-                                    product,
-                                    global,
-                                    definitions,
-                                    interface_digest,
-                                )? == *value
-                        }
-                        (
-                            NativeCodeImport::Retained(requirement),
-                            NativeGrantSelector::Retained { binding: selected },
-                            SelectedNativeImport::Retained {
-                                binding,
-                                identity,
-                                generation,
-                            },
-                        ) => {
-                            selected == binding
-                                && requirement.identity() == identity
-                                && requirement.generation() == *generation
-                        }
-                        _ => false,
-                    };
-                    if !valid {
-                        return Err(refusal(
-                            "linked slot differs from its exact acquired HOME grant",
-                        ));
+                    let child = nodes
+                        .get(occurrence)
+                        .ok_or_else(|| refusal("acquired child occurrence is absent"))?;
+                    if child.code() != &code {
+                        return Err(refusal("acquired child changed its linked code"));
                     }
-                }
-            }
-            for (index, (edge, grant)) in imports.iter().zip(node.imports.iter()).enumerate() {
-                match (edge, grant) {
-                    (
-                        NativeCodeImport::Code { code, value },
-                        NativeGrantSelector::Code(occurrence),
-                    ) => {
-                        let child = nodes
-                            .get(occurrence)
-                            .ok_or_else(|| refusal("acquired child occurrence is absent"))?;
-                        if child.code != *code {
-                            return Err(refusal("acquired child changed its linked code"));
-                        }
-                        if let NativeAcquisition::Package {
-                            product,
-                            receipt,
-                            occurrence,
-                            ..
-                        } = &node.acquisition
-                        {
-                            let row = receipt
-                                .row(*occurrence)
-                                .ok_or_else(|| refusal("selected package receipt row is absent"))?;
-                            if row.children.len() != product.code().globals().len()
-                                || row.children.len() != imports.len()
-                            {
-                                return Err(refusal(
-                                    "package receipt changed its exact ordered slot count",
-                                ));
-                            }
-                            let NativeAcquisition::Package {
-                                product: child_product,
-                                ..
-                            } = &child.acquisition
-                            else {
-                                return Err(refusal("package child has a nonpackage grant"));
-                            };
-                            if resolve_package_import(product, index, child_product)? != *value {
-                                return Err(refusal(
-                                    "package child changed its exact certified slot obligation",
-                                ));
-                            }
-                            let expected = row
-                                .children
-                                .get(index)
-                                .copied()
-                                .ok_or_else(|| refusal("package receipt child is absent"))?;
-                            if child.occurrence
-                                != (NativeOccurrenceId::Package {
-                                    stage_id: receipt.facts.stage_id,
-                                    occurrence: expected,
-                                })
-                            {
-                                return Err(refusal(
-                                    "package selected edge changed its exact occurrence",
-                                ));
-                            }
-                        }
-                    }
-                    (
-                        NativeCodeImport::Retained(requirement),
-                        NativeGrantSelector::Retained { binding },
-                    ) => {
-                        if requirement.type_artifact() != Some(&binding.artifact.0) {
-                            return Err(refusal(
-                                "retained requirement changed its acquired type owner",
-                            ));
-                        }
-                    }
-                    _ => return Err(refusal("acquired occurrence changed an import kind")),
                 }
             }
         }
+        operation
+            .reserve::<NativeOccurrenceFacts>(nodes.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut occurrence_facts = Vec::new();
+        for node in nodes.values() {
+            operation
+                .reserve::<NativeGrantSelector>(node.slots().len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            occurrence_facts.push(NativeOccurrenceFacts {
+                occurrence: node.occurrence(),
+                code: node.code().location(),
+                imports: node.selectors(),
+            });
+        }
         let recorded = Arc::new(NativeAcquiredClosureFacts {
             version: 1,
-            occurrences: nodes
-                .values()
-                .map(|node| NativeOccurrenceFacts {
-                    occurrence: node.occurrence,
-                    code: node.code.location(),
-                    imports: Arc::clone(&node.imports),
-                })
-                .collect(),
+            occurrences: occurrence_facts,
             package_receipts: receipts
                 .into_iter()
                 .map(|(stage_id, rows)| {
@@ -507,7 +482,7 @@ impl AcquiredNativeCode {
         &self.owner.occurrences[&self.occurrence]
     }
     pub fn code(&self) -> &NativeCodeRef {
-        &self.node().code
+        self.node().code()
     }
     pub fn occurrence(&self) -> NativeOccurrenceId {
         self.occurrence
@@ -516,56 +491,33 @@ impl AcquiredNativeCode {
         &self.owner
     }
     pub fn grant(&self) -> NativeCodeGrant<'_> {
-        match (&self.occurrence, &self.node().acquisition) {
-            (NativeOccurrenceId::Home(binding), NativeAcquisition::Home { grant }) => {
-                NativeCodeGrant::Home {
-                    binding: *binding,
-                    product: grant.product(),
-                    current: self
-                        .sources
-                        .as_ref()
-                        .and_then(|sources| sources.get(binding)),
-                }
-            }
-            (
-                _,
-                NativeAcquisition::Package {
-                    product,
-                    receipt,
-                    occurrence,
-                },
-            ) => NativeCodeGrant::Package {
-                product,
-                stage_id: &receipt.facts.stage_id,
-                occurrence: *occurrence,
-            },
-            _ => unreachable!("issued occurrence kind"),
-        }
+        let current = match self.occurrence {
+            NativeOccurrenceId::Home(binding) => self
+                .sources
+                .as_ref()
+                .and_then(|sources| sources.get(&binding)),
+            NativeOccurrenceId::Package { .. } => None,
+        };
+        self.node().grant(current)
     }
     pub fn imports(&self) -> impl ExactSizeIterator<Item = AcquiredNativeImport> + '_ {
-        self.code()
-            .imports()
-            .zip(self.node().imports.iter())
-            .map(|(edge, selector)| match (edge, selector) {
-                (NativeCodeImport::Code { value, .. }, NativeGrantSelector::Code(occurrence)) => {
-                    AcquiredNativeImport::Code {
-                        acquired: Self {
-                            owner: Arc::clone(&self.owner),
-                            occurrence: *occurrence,
-                            sources: self.sources.clone(),
-                        },
-                        value,
-                    }
-                }
-                (
-                    NativeCodeImport::Retained(requirement),
-                    NativeGrantSelector::Retained { binding },
-                ) => AcquiredNativeImport::Retained {
-                    requirement,
-                    binding: *binding,
+        self.node().slots().iter().map(|slot| match slot {
+            CheckedNativeSlot::Code { occurrence, value } => AcquiredNativeImport::Code {
+                acquired: Self {
+                    owner: Arc::clone(&self.owner),
+                    occurrence: *occurrence,
+                    sources: self.sources.clone(),
                 },
-                _ => unreachable!("issued paired acquisition slots"),
-            })
+                value: *value,
+            },
+            CheckedNativeSlot::Retained {
+                requirement,
+                binding,
+            } => AcquiredNativeImport::Retained {
+                requirement: requirement.clone(),
+                binding: *binding,
+            },
+        })
     }
     pub(crate) fn reborrow(&self, sources: &Arc<NativeTargetSources>) -> Self {
         Self {
@@ -583,10 +535,7 @@ impl AcquiredNativeCode {
                 continue;
             }
             let node = &self.owner.occurrences[&occurrence];
-            pending.extend(node.imports.iter().filter_map(|selector| match selector {
-                NativeGrantSelector::Code(occurrence) => Some(*occurrence),
-                _ => None,
-            }));
+            pending.extend(node.children());
             result.push(node.as_ref().clone());
         }
         result

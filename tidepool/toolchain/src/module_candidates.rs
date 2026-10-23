@@ -4201,7 +4201,7 @@ pub(crate) mod tests {
         record.module_interface = Some(
             crate::recovery_artifacts::materialize_module_interface(
                 producer_dir,
-                original.module_interface().unwrap(),
+                original.module_interface(),
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
                 crate::recovery_artifacts::MaterializationMode::Durable,
             )
@@ -4223,27 +4223,22 @@ pub(crate) mod tests {
         record: &Record,
     ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
         let owner = computed_owner(record);
-        let original = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let original = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             record.interface.clone(),
             record.products.clone(),
             record.package_imports.clone(),
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap(),
-        )
-        .with_source_sha256(parse_sha(&record.source_sha256).unwrap());
-        let product = crate::certified_products::fixture_finalized_product(
+        );
+        crate::certified_products::fixture_finalized_product_with_source(
             original,
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                 &record.endpoint,
             )
             .sha256(),
-        );
-        crate::certified_products::finalize_original_for_inventory(
-            product,
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+            parse_sha(&record.source_sha256).unwrap(),
         )
-        .unwrap()
     }
 
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
@@ -4760,7 +4755,7 @@ pub(crate) mod tests {
         use crate::execution_source::{
             CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
         };
-        use crate::recovery_artifacts::CertifiedRecoveryProduct;
+        use crate::recovery_artifacts::OriginalDraft;
         let root = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let mut a = candidate_fixture(root.path(), "A");
@@ -4783,22 +4778,25 @@ pub(crate) mod tests {
             (b.unit.clone(), b.module.clone()),
             owners[1].skinny_iface_sha256,
         )]);
-        let fresh_a = CertifiedRecoveryProduct::from_certification(
+        let draft_a = OriginalDraft::from_certification(
             owners[0].clone(),
             a.interface.clone(),
             a.products.clone(),
             a.package_imports.clone(),
             crate::certified_products::encode_home_certification(&owners[0], &[], &BTreeMap::new())
                 .unwrap(),
-        )
-        .with_source_sha256(parse_sha(&a.source_sha256).unwrap());
-        let finalized_a = crate::certified_products::fixture_finalized_product_with_requirements(
-            fresh_a,
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&a.endpoint)
-                .sha256(),
-            Some(canonical_requirements.clone()),
         );
-        let canonical_a = finalized_a.module_interface().unwrap().clone();
+        let finalized_a =
+            crate::certified_products::fixture_finalized_product_with_requirements_and_source(
+                draft_a,
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &a.endpoint,
+                )
+                .sha256(),
+                Some(canonical_requirements.clone()),
+                parse_sha(&a.source_sha256).unwrap(),
+            );
+        let canonical_a = finalized_a.module_interface().clone();
         assert_eq!(canonical_a.requirements(), &canonical_requirements);
         assert_eq!(
             canonical_a.source_sha256(),
@@ -4861,15 +4859,19 @@ pub(crate) mod tests {
             a.module_interface_proof.as_ref().unwrap(),
         )
         .unwrap();
-        let original = CertifiedRecoveryProduct::from_certification(
+        let original = OriginalDraft::from_certification(
             owners[1].clone(),
             b.interface.clone(),
             b.products.clone(),
             b.package_imports.clone(),
             b.original_certification.clone(),
         )
-        .with_source_sha256(parse_sha(&b.source_sha256).unwrap())
         .with_module_interface(b.module_interface_proof.as_ref().unwrap().clone())
+        .unwrap();
+        let original = crate::certified_products::certify_original_draft_with_validation(
+            original,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
         .unwrap();
         let context =
             ExactCandidateContext::new(BTreeSet::from([("u".into(), "B".into())]), BTreeSet::new())
@@ -5134,26 +5136,27 @@ pub(crate) mod tests {
         let independent = candidate_fixture(sources.path(), "B");
         let beyond_limit = candidate_fixture(sources.path(), "C");
         let owner = computed_owner(&dependent);
-        let fresh = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner.clone(),
             dependent.interface.clone(),
             dependent.products.clone(),
             dependent.package_imports.clone(),
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
                 .unwrap(),
-        )
-        .with_source_sha256(parse_sha(&dependent.source_sha256).unwrap());
+        );
         let missing_requirement =
             BTreeMap::from([(("u".to_owned(), "Missing".to_owned()), [0x55; 32])]);
-        let finalized = crate::certified_products::fixture_finalized_product_with_requirements(
-            fresh,
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &dependent.endpoint,
-            )
-            .sha256(),
-            Some(missing_requirement),
-        );
-        let canonical = finalized.module_interface().unwrap().clone();
+        let finalized =
+            crate::certified_products::fixture_finalized_product_with_requirements_and_source(
+                draft,
+                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                    &dependent.endpoint,
+                )
+                .sha256(),
+                Some(missing_requirement),
+                parse_sha(&dependent.source_sha256).unwrap(),
+            );
+        let canonical = finalized.module_interface().clone();
         dependent.module_interface = Some(
             crate::recovery_artifacts::materialize_module_interface(
                 fixture_record_dir(sources.path()).parent().unwrap(),
@@ -5376,7 +5379,7 @@ pub(crate) mod tests {
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
         let original = finalized_candidate_fixture(&record);
         record.original_certification = original.certification_bytes().to_vec();
-        record.module_interface_proof = original.module_interface().cloned();
+        record.module_interface_proof = Some(original.module_interface().clone());
         let original_version = version_hash(&record);
         store_fixture(cache.path(), &record, "original");
         unsafe {
@@ -5582,7 +5585,7 @@ pub(crate) mod tests {
             });
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
         let original = finalized_candidate_fixture(&record);
-        let canonical = original.module_interface().unwrap();
+        let canonical = original.module_interface();
         record.module_interface = Some(
             crate::recovery_artifacts::materialize_module_interface(
                 scratch.path(),
@@ -6100,18 +6103,17 @@ pub(crate) mod tests {
     }
 
     fn prepare_query_fixture(record: &Record) -> PreparedPublication<'_> {
-        let certified = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
             computed_owner(record),
             record.interface.clone(),
             record.products.clone(),
             record.package_imports.clone(),
             record.original_certification.clone(),
         )
-        .with_source_sha256(parse_sha(&record.source_sha256).unwrap())
         .with_module_interface(record.module_interface_proof.as_ref().unwrap().clone())
         .unwrap();
-        let certified = crate::certified_products::finalize_original_for_inventory(
-            certified,
+        let certified = crate::certified_products::certify_original_draft_with_validation(
+            draft,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();

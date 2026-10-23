@@ -1,0 +1,2 @@
+error[E0603]: struct `OriginalDraft` is private
+ --> tests/compile_fail/original_draft_is_private.rs:1:45

@@ -1,0 +1,2 @@
+error[E0599]: no method named `with_source_sha256` found for struct `CertifiedRecoveryProduct` in the current scope
+ --> tests/compile_fail/certified_product_has_no_digest_admission.rs:3:21

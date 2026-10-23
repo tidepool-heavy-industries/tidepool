@@ -3517,13 +3517,9 @@ mod authored_tests {
             )
             .unwrap();
             let chosen = *groups.iter().next().unwrap();
-            let original = crate::certified_products::finalize_original_for_inventory(
-                certificate.product().clone(),
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap();
+            let original = certificate.product();
             let definitions = crate::certified_products::original_native_group_definitions(
-                &original,
+                original,
                 chosen.original_ordinal,
             )
             .unwrap();
@@ -3852,8 +3848,7 @@ mod authored_tests {
                 imports: vec![owner],
             },
         ];
-        let live =
-            ExactDeclarationContext::new(&[], &[Arc::new(accepted.clone())], lexical).unwrap();
+        let live = ExactDeclarationContext::new(&[], &[Arc::new(accepted.clone())], lexical).unwrap();
         assert!(hidden_ids
             .iter()
             .all(|id| live.artifact_view().artifact_ids().contains(id)));
@@ -3872,9 +3867,9 @@ mod authored_tests {
             expected_targets
         );
 
-        assert!(live_edges.iter().all(
-            |(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface
-        ));
+        assert!(live_edges
+            .iter()
+            .all(|(_, to, kind)| !hidden_ids.contains(to) && *kind == ArtifactDependency::Interface));
         for root in original_graph.roots.iter().filter(|node| {
             matches!(
                 node,

@@ -80,33 +80,27 @@ pub struct RecoveryJoinRef {
     pub package_imports_sha256: [u8; 32],
 }
 
-pub struct RecoveryArtifactInput<'a> {
-    pub owner: &'a CachedHomeOwner,
-    pub interface_source: &'a Path,
-    pub product_source: &'a Path,
-    pub module_interface: (&'a Path, &'a RecoveryModuleInterfaceRef),
-}
-
-/// Exact original module bytes and Rust-admitted ownership, retained across a
-/// temporary worker directory's lifetime. Only compiler certification creates
-/// this bundle; materialization rechecks every member before publication.
+/// A complete authenticated original. Pending bytes remain in `OriginalDraft`.
 #[derive(Clone, Debug)]
 pub struct CertifiedRecoveryProduct {
-    state: OriginalState,
-    source_sha256: Option<[u8; 32]>,
-    module_interface: Option<crate::certified_products::CertifiedModuleInterface>,
+    facts: Arc<OriginalFacts>,
+    admission: OriginalAdmission,
+    module_interface: crate::certified_products::CertifiedModuleInterface,
 }
 
+/// Admission is provenance of this acquired input, not immutable artifact identity.
 #[derive(Clone, Debug)]
-enum OriginalState {
-    Draft(OriginalDraft),
-    Complete(Arc<OriginalFacts>),
+enum OriginalAdmission {
+    Recovered,
+    Fresh(crate::certified_products::OriginalSourceAdmission),
 }
 
-/// Incomplete construction remains private and cannot enter an inventory.
+/// Pending certification is private to the product issuers and cannot be admitted.
 #[derive(Clone, Debug)]
-struct OriginalDraft {
+pub(crate) struct OriginalDraft {
     bytes: Arc<OriginalBytes>,
+    source_admission: Option<crate::certified_products::OriginalSourceAdmission>,
+    module_interface: Option<crate::certified_products::CertifiedModuleInterface>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,136 +160,142 @@ impl OriginalFacts {
             .record_metadata_differences(&other.canonical, fields);
     }
 }
-impl std::ops::Deref for CertifiedRecoveryProduct {
-    type Target = OriginalBytes;
-    fn deref(&self) -> &OriginalBytes {
-        match &self.state {
-            OriginalState::Draft(draft) => &draft.bytes,
-            OriginalState::Complete(facts) => &facts.bytes,
+impl OriginalFacts {
+    pub(crate) fn canonical(&self) -> &Arc<crate::certified_products::CanonicalFacts> {
+        &self.canonical
+    }
+    pub(crate) fn native(&self) -> &Arc<crate::certified_products::OriginalNativeWitness> {
+        &self.native
+    }
+    pub(crate) fn adopt_canonical_owner(
+        self: &Arc<Self>,
+        canonical: Arc<crate::certified_products::CanonicalFacts>,
+    ) -> Arc<Self> {
+        assert_eq!(
+            self.canonical, canonical,
+            "interning cannot change canonical facts"
+        );
+        if Arc::ptr_eq(&self.canonical, &canonical) {
+            return Arc::clone(self);
         }
+        Arc::new(Self {
+            bytes: Arc::clone(&self.bytes),
+            canonical,
+            native: Arc::clone(&self.native),
+        })
     }
 }
 
-// The native witness is a derived immutable fact, not another product identity.
+impl std::ops::Deref for CertifiedRecoveryProduct {
+    type Target = OriginalBytes;
+    fn deref(&self) -> &OriginalBytes {
+        &self.facts.bytes
+    }
+}
+impl std::ops::Deref for OriginalDraft {
+    type Target = OriginalBytes;
+    fn deref(&self) -> &OriginalBytes {
+        &self.bytes
+    }
+}
 impl PartialEq for CertifiedRecoveryProduct {
     fn eq(&self, other: &Self) -> bool {
-        self.source_sha256 == other.source_sha256 && self.same_durable_artifact(other)
+        self.source_sha256() == other.source_sha256() && self.same_durable_artifact(other)
     }
 }
 impl Eq for CertifiedRecoveryProduct {}
 
 impl CertifiedRecoveryProduct {
-    /// Inventory identity compares durable seals and payloads. The fresh source
-    /// witness remains separate admission authority and is never recovered or
-    /// promoted by reusing an already retained inventory entry.
     pub(crate) fn same_durable_artifact(&self, other: &Self) -> bool {
-        match (&self.state, &other.state) {
-            (OriginalState::Complete(left), OriginalState::Complete(right)) => {
-                Arc::ptr_eq(left, right) || left == right
-            }
-            _ => **self == **other && self.module_interface == other.module_interface,
-        }
+        Arc::ptr_eq(&self.facts, &other.facts) || self.facts == other.facts
+    }
+    pub(crate) fn facts(&self) -> &Arc<OriginalFacts> {
+        &self.facts
     }
 
-    pub(crate) fn facts(&self) -> Option<&Arc<OriginalFacts>> {
-        match &self.state {
-            OriginalState::Complete(facts) => Some(facts),
-            OriginalState::Draft(_) => None,
-        }
-    }
-    pub(crate) fn with_facts(mut self, facts: Arc<OriginalFacts>) -> Self {
+    /// Intern equal immutable facts while preserving this acquisition's inputs.
+    pub(crate) fn adopt_fact_owner(mut self, facts: Arc<OriginalFacts>) -> Self {
+        assert_eq!(self.facts, facts, "interning cannot replace original facts");
         self.module_interface = self
             .module_interface
-            .map(|interface| interface.with_facts(Arc::clone(&facts.canonical)));
-        self.state = OriginalState::Complete(facts);
+            .with_facts(Arc::clone(&facts.canonical));
+        self.facts = facts;
         self
     }
 
-    pub(crate) fn with_canonical_facts(
-        self,
-        canonical: Arc<crate::certified_products::CanonicalFacts>,
-    ) -> Self {
-        let facts = self.facts().expect("complete original owner");
-        if Arc::ptr_eq(&facts.canonical, &canonical) {
-            return self;
+    /// The certifier supplies the actual completed observation for this owner.
+    pub(crate) fn from_source_admission(
+        mut product: Self,
+        admission: crate::certified_products::OriginalSourceAdmission,
+    ) -> Result<Self, RecoveryArtifactError> {
+        if !admission.matches(&product.owner, &product.module_interface) {
+            return Err(RecoveryArtifactError::InvalidReference);
         }
-        let normalized = Arc::new(OriginalFacts {
-            bytes: Arc::clone(&facts.bytes),
-            canonical,
-            native: Arc::clone(&facts.native),
-        });
-        self.with_facts(normalized)
+        product.admission = OriginalAdmission::Fresh(admission);
+        Ok(product)
+    }
+    /// Reuse of an acquired input preserves actual admission and transport owners.
+    /// Immutable fact equality and derived witness allocation are irrelevant here.
+    pub(crate) fn same_admission_and_transport(&self, other: &Self) -> bool {
+        let same_admission = match (&self.admission, &other.admission) {
+            (OriginalAdmission::Recovered, OriginalAdmission::Recovered) => true,
+            (OriginalAdmission::Fresh(left), OriginalAdmission::Fresh(right)) => {
+                Arc::ptr_eq(left.evidence(), right.evidence())
+            }
+            _ => false,
+        };
+        same_admission
+            && match (
+                self.module_interface.catalog_input_custody(),
+                other.module_interface.catalog_input_custody(),
+            ) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(&left, &right),
+                _ => false,
+            }
     }
 
-    pub(crate) fn from_certification(
-        owner: CachedHomeOwner,
-        interface_bytes: Vec<u8>,
-        product_bytes: Vec<u8>,
-        package_imports_bytes: Vec<u8>,
-        certification_bytes: Vec<u8>,
-    ) -> Self {
-        Self {
-            state: OriginalState::Draft(OriginalDraft {
-                bytes: Arc::new(OriginalBytes {
-                    owner,
-                    interface_bytes: interface_bytes.into(),
-                    product_bytes: product_bytes.into(),
-                    package_imports_bytes: package_imports_bytes.into(),
-                    certification_bytes: certification_bytes.into(),
-                    execution_source: None,
-                }),
-            }),
-            source_sha256: None,
-            module_interface: None,
+    pub(crate) fn source_admission(&self) -> Option<&Arc<crate::cache::CompletedSourceEvidence>> {
+        match &self.admission {
+            OriginalAdmission::Recovered => None,
+            OriginalAdmission::Fresh(admission) => Some(admission.evidence()),
         }
     }
-
-    pub(crate) fn from_finalized_certification(
-        owner: CachedHomeOwner,
-        product_bytes: Vec<u8>,
-        certification_bytes: Vec<u8>,
-        binding: crate::certified_products::ValidatedModuleBinding,
-    ) -> Self {
-        let interface = binding.into_interface();
-        Self {
-            state: OriginalState::Draft(OriginalDraft {
-                bytes: Arc::new(OriginalBytes {
-                    owner,
-                    interface_bytes: interface.interface_anchor(),
-                    product_bytes: product_bytes.into(),
-                    package_imports_bytes: interface.package_imports_anchor(),
-                    certification_bytes: certification_bytes.into(),
-                    execution_source: None,
-                }),
-            }),
-            source_sha256: None,
-            module_interface: Some(interface),
-        }
-    }
-
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
-
     pub fn source_sha256(&self) -> Option<[u8; 32]> {
-        self.source_sha256
+        match &self.admission {
+            OriginalAdmission::Recovered => None,
+            OriginalAdmission::Fresh(admission) => Some(admission.source_sha256()),
+        }
     }
-
     pub fn interface_bytes(&self) -> &[u8] {
         &self.interface_bytes
     }
-
     pub fn product_bytes(&self) -> &[u8] {
         &self.product_bytes
     }
-
     pub(crate) fn package_imports_bytes(&self) -> &[u8] {
         &self.package_imports_bytes
     }
     pub(crate) fn certification_bytes(&self) -> &[u8] {
         &self.certification_bytes
     }
-
+    pub(crate) fn module_interface(&self) -> &crate::certified_products::CertifiedModuleInterface {
+        &self.module_interface
+    }
+    pub(crate) fn original_native(&self) -> &Arc<crate::certified_products::OriginalNativeWitness> {
+        &self.facts.native
+    }
+    pub(crate) fn original_byte_anchors(&self) -> [&Arc<[u8]>; 4] {
+        self.facts.bytes.anchors()
+    }
+    pub(crate) fn execution_source(
+        &self,
+    ) -> Option<&Arc<crate::execution_source::CertifiedExecutionSourceGraph>> {
+        self.execution_source.as_ref()
+    }
     pub(crate) fn merge_catalog_input_custody(
         &self,
         other: &Self,
@@ -305,29 +305,121 @@ impl CertifiedRecoveryProduct {
                 "native custody requires identical durable certified inputs".into(),
             ));
         }
-        // Fresh source admission evidence belongs to the receiving view. Equal
-        // durable originals may arrive with another witness or with none.
         let mut merged = self.clone();
-        if let (Some(first), Some(second)) = (&self.module_interface, &other.module_interface) {
-            merged.module_interface = Some(first.merge_catalog_input_custody(second)?);
-        }
+        merged.module_interface = self
+            .module_interface
+            .merge_catalog_input_custody(&other.module_interface)?;
         Ok(merged)
     }
-
     #[cfg(test)]
     pub(crate) fn without_catalog_input_custody(mut self) -> Self {
-        self.module_interface = self
-            .module_interface
-            .map(|interface| interface.without_catalog_input_custody());
+        self.module_interface = self.module_interface.without_catalog_input_custody();
         self
     }
+}
 
+impl OriginalBytes {
+    pub(crate) fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+    fn anchors(&self) -> [&Arc<[u8]>; 4] {
+        [
+            &self.interface_bytes,
+            &self.product_bytes,
+            &self.package_imports_bytes,
+            &self.certification_bytes,
+        ]
+    }
+}
+
+impl OriginalDraft {
+    pub(crate) fn from_certification(
+        owner: CachedHomeOwner,
+        interface_bytes: Vec<u8>,
+        product_bytes: Vec<u8>,
+        package_imports_bytes: Vec<u8>,
+        certification_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            bytes: Arc::new(OriginalBytes {
+                owner,
+                interface_bytes: interface_bytes.into(),
+                product_bytes: product_bytes.into(),
+                package_imports_bytes: package_imports_bytes.into(),
+                certification_bytes: certification_bytes.into(),
+                execution_source: None,
+            }),
+            source_admission: None,
+            module_interface: None,
+        }
+    }
+    pub(crate) fn from_finalized_certification(
+        owner: CachedHomeOwner,
+        product_bytes: Vec<u8>,
+        certification_bytes: Vec<u8>,
+        binding: crate::certified_products::ValidatedModuleBinding,
+    ) -> Self {
+        let interface = binding.into_interface();
+        Self {
+            bytes: Arc::new(OriginalBytes {
+                owner,
+                interface_bytes: interface.interface_anchor(),
+                product_bytes: product_bytes.into(),
+                package_imports_bytes: interface.package_imports_anchor(),
+                certification_bytes: certification_bytes.into(),
+                execution_source: None,
+            }),
+            source_admission: None,
+            module_interface: Some(interface),
+        }
+    }
+    pub(crate) fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+    pub(crate) fn source_sha256(&self) -> Option<[u8; 32]> {
+        self.source_admission
+            .as_ref()
+            .map(|admission| admission.source_sha256())
+    }
+    pub(crate) fn interface_bytes(&self) -> &[u8] {
+        &self.interface_bytes
+    }
+    pub(crate) fn product_bytes(&self) -> &[u8] {
+        &self.product_bytes
+    }
+    pub(crate) fn package_imports_bytes(&self) -> &[u8] {
+        &self.package_imports_bytes
+    }
+    pub(crate) fn certification_bytes(&self) -> &[u8] {
+        &self.certification_bytes
+    }
     pub(crate) fn module_interface(
         &self,
     ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
         self.module_interface.as_ref()
     }
-
+    pub(crate) fn original_byte_anchors(&self) -> [&Arc<[u8]>; 4] {
+        self.bytes.anchors()
+    }
+    pub(crate) fn execution_source(
+        &self,
+    ) -> Option<&Arc<crate::execution_source::CertifiedExecutionSourceGraph>> {
+        self.execution_source.as_ref()
+    }
+    pub(crate) fn with_source_admission(
+        mut self,
+        admission: crate::certified_products::OriginalSourceAdmission,
+    ) -> Result<Self, RecoveryArtifactError> {
+        let canonical = self
+            .module_interface
+            .as_ref()
+            .ok_or(RecoveryArtifactError::InvalidReference)?;
+        if !admission.matches(&self.owner, canonical) {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        self.source_admission = Some(admission);
+        Ok(self)
+    }
     pub(crate) fn with_module_interface(
         self,
         interface: crate::certified_products::CertifiedModuleInterface,
@@ -354,70 +446,12 @@ impl CertifiedRecoveryProduct {
         .map_err(|error| {
             recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
         })?;
-        let OriginalState::Draft(draft) = &mut self.state else {
-            return Err(RecoveryArtifactError::InvalidReference);
-        };
-        let bytes = Arc::make_mut(&mut draft.bytes);
+        let bytes = Arc::make_mut(&mut self.bytes);
         bytes.interface_bytes = interface.interface_anchor();
         bytes.package_imports_bytes = interface.package_imports_anchor();
         self.module_interface = Some(interface);
         Ok(self)
     }
-
-    pub(crate) fn original_byte_anchors(&self) -> [&Arc<[u8]>; 4] {
-        [
-            &self.interface_bytes,
-            &self.product_bytes,
-            &self.package_imports_bytes,
-            &self.certification_bytes,
-        ]
-    }
-
-    pub(crate) fn original_native(
-        &self,
-    ) -> Option<&Arc<crate::certified_products::OriginalNativeWitness>> {
-        match &self.state {
-            OriginalState::Complete(facts) => Some(&facts.native),
-            OriginalState::Draft(_) => None,
-        }
-    }
-
-    pub(crate) fn with_original_native(
-        mut self,
-        witness: Arc<crate::certified_products::OriginalNativeWitness>,
-    ) -> Result<Self, RecoveryArtifactError> {
-        if !witness.matches_original(&self)
-            || witness.execution_source_digest()
-                != self.execution_source().map(|graph| graph.digest())
-        {
-            return Err(RecoveryArtifactError::InvalidReference);
-        }
-        let canonical = self
-            .module_interface
-            .as_ref()
-            .ok_or(RecoveryArtifactError::InvalidReference)?;
-        let OriginalState::Draft(draft) = self.state else {
-            return Err(RecoveryArtifactError::InvalidReference);
-        };
-        self.state = OriginalState::Complete(Arc::new(OriginalFacts {
-            bytes: draft.bytes,
-            canonical: Arc::clone(canonical.facts()),
-            native: witness,
-        }));
-        Ok(self)
-    }
-
-    pub(crate) fn with_source_sha256(mut self, source_sha256: [u8; 32]) -> Self {
-        self.source_sha256 = Some(source_sha256);
-        self
-    }
-
-    pub(crate) fn execution_source(
-        &self,
-    ) -> Option<&Arc<crate::execution_source::CertifiedExecutionSourceGraph>> {
-        self.execution_source.as_ref()
-    }
-
     #[cfg(test)]
     pub(crate) fn with_execution_source(
         self,
@@ -428,7 +462,6 @@ impl CertifiedRecoveryProduct {
             &mut PackageInterfaceValidation::default(),
         )
     }
-
     pub(crate) fn with_execution_source_with_validation(
         mut self,
         graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
@@ -437,8 +470,10 @@ impl CertifiedRecoveryProduct {
         if !graph.eligible_source_replay_root(&self.owner) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        let sealed = crate::certified_products::original_execution_source_digest_with_validation(
-            &self, validation,
+        let sealed = crate::certified_products::home_execution_source_digest_with_validation(
+            self.certification_bytes(),
+            self.owner(),
+            validation,
         )
         .map_err(|error| {
             recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
@@ -446,22 +481,35 @@ impl CertifiedRecoveryProduct {
         if sealed != Some(graph.digest()) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        match &mut self.state {
-            OriginalState::Draft(draft) => {
-                Arc::make_mut(&mut draft.bytes).execution_source = Some(graph)
-            }
-            OriginalState::Complete(facts) => {
-                // This is authenticated semantic completion, retaining native byte anchors.
-                let mut bytes = (*facts.bytes).clone();
-                bytes.execution_source = Some(graph);
-                self.state = OriginalState::Complete(Arc::new(OriginalFacts {
-                    bytes: Arc::new(bytes),
-                    canonical: Arc::clone(&facts.canonical),
-                    native: Arc::clone(&facts.native),
-                }));
-            }
-        }
+        Arc::make_mut(&mut self.bytes).execution_source = Some(graph);
         Ok(self)
+    }
+    pub(crate) fn finish(
+        self,
+        native: Arc<crate::certified_products::OriginalNativeWitness>,
+    ) -> Result<CertifiedRecoveryProduct, RecoveryArtifactError> {
+        if !native.matches_original_bytes(&self.owner, self.bytes.anchors())
+            || native.execution_source_digest()
+                != self.execution_source().map(|graph| graph.digest())
+        {
+            return Err(RecoveryArtifactError::InvalidReference);
+        }
+        let module_interface = self
+            .module_interface
+            .ok_or(RecoveryArtifactError::InvalidReference)?;
+        let facts = Arc::new(OriginalFacts {
+            bytes: self.bytes,
+            canonical: Arc::clone(module_interface.facts()),
+            native,
+        });
+        Ok(CertifiedRecoveryProduct {
+            facts,
+            admission: match self.source_admission {
+                Some(admission) => OriginalAdmission::Fresh(admission),
+                None => OriginalAdmission::Recovered,
+            },
+            module_interface,
+        })
     }
 }
 
@@ -785,10 +833,7 @@ impl VerifiedRecoveryArtifact {
     pub(crate) fn into_original(
         self,
     ) -> Result<
-        (
-            CertifiedRecoveryProduct,
-            crate::certified_products::HomeCertification,
-        ),
+        (OriginalDraft, crate::certified_products::HomeCertification),
         crate::certified_products::CertificationError,
     > {
         let owner = self.certification.owner().clone();
@@ -807,19 +852,14 @@ impl VerifiedRecoveryArtifact {
             }
         }
         let (certificate_bytes, witness) = self.certification.into_parts();
-        let mut product = CertifiedRecoveryProduct::from_finalized_certification(
+        let mut product = OriginalDraft::from_finalized_certification(
             owner,
             self.product_bytes,
             certificate_bytes,
             binding,
         );
         if let Some(graph) = self.execution_source {
-            let OriginalState::Draft(draft) = &mut product.state else {
-                return Err(crate::certified_products::CertificationError::Mismatch(
-                    "recovery original completion",
-                ));
-            };
-            Arc::make_mut(&mut draft.bytes).execution_source = Some(graph);
+            Arc::make_mut(&mut product.bytes).execution_source = Some(graph);
         }
         Ok((product, witness))
     }
@@ -2967,11 +3007,9 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
             let package_imports_path = package_sidecar_path(&interface_path);
             product
                 .module_interface()
-                .ok_or(RecoveryArtifactError::InvalidReference)?
                 .validate_package_interfaces(validation)?;
             product
                 .original_native()
-                .ok_or(RecoveryArtifactError::InvalidReference)?
                 .validate_package_interfaces(validation)
                 .map_err(|error| {
                     recovery_validation_error(
@@ -3016,9 +3054,7 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
                     certified_owners_path(&validation.digest(&product.certification_bytes)),
                 ));
             }
-            let interface = product
-                .module_interface()
-                .ok_or(RecoveryArtifactError::InvalidReference)?;
+            let interface = product.module_interface();
             interfaces.push(ValidatedModuleInterface::admit(interface, validation)?);
             crate::host_work::checkpoint()?;
         }
@@ -3170,7 +3206,6 @@ impl<'a, 'validation> ValidatedCertifiedProducts<'a, 'validation> {
                 product_path,
                 package_interfaces: product
                     .original_native()
-                    .ok_or(RecoveryArtifactError::InvalidReference)?
                     .package_interfaces()
                     .materialize(recovery_root, mode, validation)
                     .map_err(|error| {
@@ -3210,71 +3245,6 @@ pub(crate) fn materialize_certified_products_with_validation(
         ValidatedCertifiedProducts::admit(toolchain_identity_sha256, products, validation)?
             .materialize(recovery_root, mode)?
             .products,
-    )
-}
-
-/// Read captured path inputs into owned bundles, then use the same immutable
-/// validation and publication path as compiler-certified products.
-pub fn materialize_recovery_closure(
-    recovery_root: &Path,
-    toolchain_identity_sha256: [u8; 32],
-    artifacts: &[RecoveryArtifactInput<'_>],
-) -> Result<Vec<RecoveryArtifactRef>, RecoveryArtifactError> {
-    let mut validation = PackageInterfaceValidation::default();
-    let mut products = Vec::with_capacity(artifacts.len());
-    for artifact in artifacts {
-        let owner = artifact.owner;
-        if owner.unit.is_empty() || owner.module.is_empty() {
-            return Err(RecoveryArtifactError::InvalidReference);
-        }
-        let interface_bytes = read_checked(
-            artifact.interface_source,
-            &owner.skinny_iface_sha256,
-            PACKAGE_INTERFACE_LIMIT,
-            &mut validation,
-        )?;
-        let product_bytes = read_checked(
-            artifact.product_source,
-            &owner.product_sha256,
-            validation.inventory.limits().max_module_bytes as u64,
-            &mut validation,
-        )?;
-        let package_imports_bytes = read_package_imports(
-            &package_sidecar_path(artifact.interface_source),
-            None,
-            &owner.unit,
-            &owner.module,
-            &owner.skinny_iface_sha256,
-            &mut validation,
-        )?;
-        let certification_bytes = read_certification(
-            &certification_sidecar_path(artifact.interface_source),
-            None,
-            owner,
-            &mut validation,
-        )?;
-        let module_interface = recover_module_interface(
-            artifact.module_interface.0,
-            artifact.module_interface.1,
-            &mut validation,
-        )?;
-        products.push(
-            CertifiedRecoveryProduct::from_certification(
-                owner.clone(),
-                interface_bytes,
-                product_bytes,
-                package_imports_bytes,
-                certification_bytes.into_parts().0,
-            )
-            .with_module_interface_with_validation(module_interface, &mut validation)?,
-        );
-    }
-    materialize_certified_products_with_validation(
-        recovery_root,
-        toolchain_identity_sha256,
-        &products,
-        &mut validation,
-        MaterializationMode::Durable,
     )
 }
 
@@ -4092,51 +4062,10 @@ mod tests {
     fn same_native_owner_preserves_distinct_source_context_certificates() {
         let source = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
-        let (first_graph, owners) = crate::execution_source::test_graph(source.path());
+        let (first_graph, originals) = crate::execution_source::test_prepared_graph(source.path());
         let second_graph = crate::execution_source::test_graph_with_large_origin(&first_graph, 80);
         assert_ne!(first_graph.digest(), second_graph.digest());
-        let owner = &owners[0];
-        let packages = package_witness(
-            &owner.unit,
-            &owner.module,
-            &owner.skinny_iface_sha256,
-            vec![],
-        );
-        let canonical = crate::certified_products::fixture_interface_bytes(
-            [7; 32],
-            &owner.unit,
-            &owner.module,
-            b"iface".to_vec(),
-            packages.clone(),
-        );
-        let seal = crate::certified_products::encode_home_certification_with_module(
-            owner,
-            &[],
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            Sha256::digest(canonical.certificate_bytes()).into(),
-        )
-        .unwrap();
-        let products = [first_graph, second_graph].map(|graph| {
-            let certification = crate::certified_products::bind_home_execution_source(
-                &seal,
-                owner,
-                graph.digest(),
-                &mut PackageInterfaceValidation::default(),
-            )
-            .unwrap();
-            CertifiedRecoveryProduct::from_certification(
-                owner.clone(),
-                b"iface".to_vec(),
-                b"product".to_vec(),
-                packages.clone(),
-                certification,
-            )
-            .with_module_interface(canonical.clone())
-            .unwrap()
-            .with_execution_source(graph)
-            .unwrap()
-        });
+        let products = [first_graph, second_graph].map(|graph| graph_product(&originals[0], graph));
         assert_eq!(products[0].owner(), products[1].owner());
         assert_ne!(
             products[0].certification_bytes(),
@@ -4191,43 +4120,17 @@ mod tests {
     fn execution_source_sidecar_is_shared_and_verified_once() {
         let source = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
-        let (graph, owners) =
-            crate::execution_source::test_graph_with_distinct_interfaces(source.path());
-        let mut validation = PackageInterfaceValidation::default();
-        let products = owners[..2]
+        let (graph, originals) =
+            crate::execution_source::test_prepared_graph_with_interfaces(source.path(), |module| {
+                format!("{module} iface").into_bytes()
+            });
+        let owners = originals
             .iter()
-            .map(|owner| {
-                let seal = crate::certified_products::encode_home_certification(
-                    owner,
-                    &[],
-                    &BTreeMap::new(),
-                )
-                .unwrap();
-                let seal = crate::certified_products::bind_home_execution_source(
-                    &seal,
-                    owner,
-                    graph.digest(),
-                    &mut validation,
-                )
-                .unwrap();
-                crate::certified_products::fixture_finalized_product(
-                    CertifiedRecoveryProduct::from_certification(
-                        owner.clone(),
-                        format!("{} iface", owner.module).into_bytes(),
-                        b"product".to_vec(),
-                        package_witness(
-                            &owner.unit,
-                            &owner.module,
-                            &owner.skinny_iface_sha256,
-                            vec![],
-                        ),
-                        seal,
-                    ),
-                    [7; 32],
-                )
-                .with_execution_source(graph.clone())
-                .unwrap()
-            })
+            .map(|original| original.owner.clone())
+            .collect::<Vec<_>>();
+        let products = originals[..2]
+            .iter()
+            .map(|original| graph_product(original, Arc::clone(&graph)))
             .collect::<Vec<_>>();
         let mut materialization = PackageInterfaceValidation::default();
         let references = materialize_certified_products_with_validation(
@@ -5041,59 +4944,129 @@ mod tests {
         iface_sha256
     }
 
-    fn fixture_module_reference(
-        interface: &Path,
-        owner: &CachedHomeOwner,
-    ) -> RecoveryModuleInterfaceRef {
-        let bytes = fs::read(interface).unwrap();
-        let packages = fs::read(package_sidecar_path(interface))
-            .ok()
-            .filter(|bytes| {
-                validate_package_imports(
-                    bytes,
-                    &owner.unit,
-                    &owner.module,
-                    &owner.skinny_iface_sha256,
-                    interface,
-                )
-                .is_ok()
-            })
-            .unwrap_or_else(|| {
-                package_witness(
-                    &owner.unit,
-                    &owner.module,
-                    &owner.skinny_iface_sha256,
-                    Vec::new(),
-                )
-            });
-        let proof = crate::certified_products::fixture_interface_bytes(
+    fn materialization_product(
+        module: &str,
+        version: u8,
+        interface: &[u8],
+        literal: &[u8],
+    ) -> CertifiedRecoveryProduct {
+        crate::certified_products::fixture_finalized_product(
+            crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
+                "home",
+                module,
+                vec![(7, vec![])],
+                version,
+                &BTreeMap::new(),
+                interface.to_vec(),
+                &BTreeMap::new(),
+                literal,
+            ),
             [1; 32],
+        )
+    }
+
+    fn graph_product(
+        original: &crate::execution_source::PreparedExecutionSourceOriginal,
+        graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
+    ) -> CertifiedRecoveryProduct {
+        let owner = &original.owner;
+        let packages = package_witness(
             &owner.unit,
             &owner.module,
-            bytes,
-            packages,
+            &owner.skinny_iface_sha256,
+            vec![],
         );
-        materialize_module_interface(
-            interface.parent().unwrap(),
-            &proof,
+        let canonical = crate::certified_products::fixture_interface_bytes(
+            [7; 32],
+            &owner.unit,
+            &owner.module,
+            original.interface.clone(),
+            packages.clone(),
+        );
+        let seal = crate::certified_products::encode_home_certification_with_module(
+            owner,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Sha256::digest(canonical.certificate_bytes()).into(),
+        )
+        .unwrap();
+        let seal = crate::certified_products::bind_home_execution_source(
+            &seal,
+            owner,
+            graph.digest(),
             &mut PackageInterfaceValidation::default(),
-            MaterializationMode::Durable,
+        )
+        .unwrap();
+        let draft = OriginalDraft::from_certification(
+            owner.clone(),
+            original.interface.clone(),
+            original.product.clone(),
+            packages,
+            seal,
+        )
+        .with_module_interface(canonical)
+        .unwrap()
+        .with_execution_source(graph)
+        .unwrap();
+        crate::certified_products::certify_original_draft_with_validation(
+            draft,
+            &mut PackageInterfaceValidation::default(),
         )
         .unwrap()
     }
 
-    fn write_certification(interface: &Path, owner: &CachedHomeOwner) -> Vec<u8> {
-        let canonical = fixture_module_reference(interface, owner);
-        let bytes = crate::certified_products::encode_home_certification_with_module(
-            owner,
+    fn package_materialization_product(package: &Path) -> CertifiedRecoveryProduct {
+        let interface = b"iface".to_vec();
+        let product = tidepool_test_data::prepared_encode::encode_module_products(&[
+            tidepool_repr::execution_schema::RawModuleProduct {
+                unit: "home".into(),
+                module: "A".into(),
+                interface: interface.clone(),
+                groups: vec![],
+            },
+        ]);
+        let owner = CachedHomeOwner {
+            unit: "home".into(),
+            module: "A".into(),
+            module_version: ModuleVersion([3; 32]),
+            skinny_iface_sha256: Sha256::digest(&interface).into(),
+            product_sha256: Sha256::digest(&product).into(),
+        };
+        let packages = package_witness(
+            &owner.unit,
+            &owner.module,
+            &owner.skinny_iface_sha256,
+            vec![[
+                "base-unit".into(),
+                "Data.Base".into(),
+                package.display().to_string(),
+                hex(&Sha256::digest(fs::read(package).unwrap()).into()),
+            ]],
+        );
+        let canonical = crate::certified_products::fixture_interface_bytes(
+            [1; 32],
+            &owner.unit,
+            &owner.module,
+            interface.clone(),
+            packages.clone(),
+        );
+        let seal = crate::certified_products::encode_home_certification_with_module(
+            &owner,
             &[],
-            &std::collections::BTreeMap::new(),
-            &std::collections::BTreeMap::new(),
-            canonical.certificate_sha256,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Sha256::digest(canonical.certificate_bytes()).into(),
         )
         .unwrap();
-        fs::write(certification_sidecar_path(interface), &bytes).unwrap();
-        bytes
+        let draft = OriginalDraft::from_certification(owner, interface, product, packages, seal)
+            .with_module_interface(canonical)
+            .unwrap();
+        crate::certified_products::certify_original_draft_with_validation(
+            draft,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -5152,30 +5125,8 @@ mod tests {
     #[test]
     fn materialized_pair_is_confined_and_checksum_verified() {
         let run = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("A.hi");
-        let product = source.path().join("products.cbor");
-        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"iface");
-        fs::write(&product, b"product").unwrap();
-        let owner = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: iface_sha256,
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        write_certification(&iface, &owner);
-        let refs = materialize_recovery_closure(
-            run.path(),
-            [1; 32],
-            &[RecoveryArtifactInput {
-                owner: &owner,
-                interface_source: &iface,
-                module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-                product_source: &product,
-            }],
-        )
-        .unwrap();
+        let product = materialization_product("A", 3, b"iface", b"product");
+        let refs = materialize_certified_products(run.path(), [1; 32], &[product]).unwrap();
         let verified = verify_materialized_ref(run.path(), &refs[0]).unwrap();
         assert_eq!(verified.interface_bytes, b"iface");
         assert!(!verified.package_imports_bytes.is_empty());
@@ -5250,157 +5201,93 @@ mod tests {
     #[test]
     fn same_interface_bytes_keep_distinct_home_owner_certificates() {
         let run = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("A.hi");
-        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"same iface");
-        let first_product = source.path().join("first.products.cbor");
-        let second_product = source.path().join("second.products.cbor");
-        fs::write(&first_product, b"first product").unwrap();
-        fs::write(&second_product, b"second product").unwrap();
-        let first = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: iface_sha256,
-            product_sha256: Sha256::digest(b"first product").into(),
-        };
-        let second = CachedHomeOwner {
-            module_version: ModuleVersion([4; 32]),
-            ..first.clone()
-        };
-        let third = CachedHomeOwner {
-            product_sha256: Sha256::digest(b"second product").into(),
-            ..first.clone()
-        };
+        let products = [
+            materialization_product("A", 3, b"same iface", b"first product"),
+            materialization_product("A", 4, b"same iface", b"first product"),
+            materialization_product("A", 3, b"same iface", b"second product"),
+        ];
+        let first = products[0].owner();
         assert_ne!(
-            home_interface_path(&first),
+            home_interface_path(first),
             home_interface_path(&CachedHomeOwner {
                 unit: "other-home".into(),
                 ..first.clone()
             })
         );
         assert_ne!(
-            home_interface_path(&first),
+            home_interface_path(first),
             home_interface_path(&CachedHomeOwner {
                 module: "Other".into(),
                 ..first.clone()
             })
         );
-        let first_certification = write_certification(&iface, &first);
-        fs::write(certification_sidecar_path(&iface), &first_certification).unwrap();
-        let first_ref = materialize_recovery_closure(
-            run.path(),
-            [1; 32],
-            &[RecoveryArtifactInput {
-                owner: &first,
-                interface_source: &iface,
-                module_interface: (source.path(), &fixture_module_reference(&iface, &first)),
-                product_source: &first_product,
-            }],
-        )
-        .unwrap()
-        .remove(0);
-        assert!(verify_materialized_ref(run.path(), &first_ref).is_ok());
-
-        let second_certification = write_certification(&iface, &second);
-        fs::write(certification_sidecar_path(&iface), &second_certification).unwrap();
-        let second_ref = materialize_recovery_closure(
-            run.path(),
-            [1; 32],
-            &[RecoveryArtifactInput {
-                owner: &second,
-                interface_source: &iface,
-                module_interface: (source.path(), &fixture_module_reference(&iface, &second)),
-                product_source: &first_product,
-            }],
-        )
-        .unwrap()
-        .remove(0);
-        assert!(verify_materialized_ref(run.path(), &second_ref).is_ok());
-        assert_ne!(first_ref.interface_path, second_ref.interface_path);
-        assert_ne!(first_ref.certification_path, second_ref.certification_path);
-        assert_eq!(
-            verify_materialized_ref(run.path(), &first_ref)
+        assert_eq!(products[0].product_bytes(), products[1].product_bytes());
+        assert_ne!(products[0].product_bytes(), products[2].product_bytes());
+        let references = products.each_ref().map(|product| {
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(product))
                 .unwrap()
-                .certification_bytes(),
-            first_certification
+                .remove(0)
+        });
+        assert_ne!(references[0].interface_path, references[1].interface_path);
+        assert_ne!(
+            references[0].certification_path,
+            references[1].certification_path
         );
-
-        write_certification(&iface, &third);
-        let third_ref = materialize_recovery_closure(
-            run.path(),
-            [1; 32],
-            &[RecoveryArtifactInput {
-                owner: &third,
-                interface_source: &iface,
-                module_interface: (source.path(), &fixture_module_reference(&iface, &third)),
-                product_source: &second_product,
-            }],
-        )
-        .unwrap()
-        .remove(0);
-        assert!(verify_materialized_ref(run.path(), &third_ref).is_ok());
-        assert_ne!(first_ref.interface_path, third_ref.interface_path);
-        assert!(verify_materialized_ref(run.path(), &first_ref).is_ok());
-        assert!(verify_materialized_ref(run.path(), &second_ref).is_ok());
+        assert_ne!(references[0].interface_path, references[2].interface_path);
+        for (reference, product) in references.iter().zip(&products) {
+            let verified = verify_materialized_ref(run.path(), reference).unwrap();
+            assert_eq!(
+                verified.certification_bytes(),
+                product.certification_bytes()
+            );
+            assert_eq!(verified.product_bytes(), product.product_bytes());
+        }
     }
 
     #[test]
     fn conflicting_witness_cannot_replace_an_existing_owner_reference() {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("A.hi");
-        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"same iface");
-        let product = source.path().join("A.products.cbor");
-        fs::write(&product, b"same product").unwrap();
-        let owner = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: iface_sha256,
-            product_sha256: Sha256::digest(b"same product").into(),
-        };
-        write_certification(&iface, &owner);
-        let input = [RecoveryArtifactInput {
-            owner: &owner,
-            interface_source: &iface,
-            module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-            product_source: &product,
-        }];
-        let first = materialize_recovery_closure(run.path(), [1; 32], &input)
-            .unwrap()
-            .remove(0);
+        let product = materialization_product("A", 3, b"same iface", b"same product");
+        let first =
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product))
+                .unwrap()
+                .remove(0);
         let original = verify_materialized_ref(run.path(), &first).unwrap();
         assert_eq!(
-            materialize_recovery_closure(run.path(), [1; 32], &input)
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product))
                 .unwrap()
                 .remove(0),
             first
         );
-
-        let package_iface = source.path().join("base.hi");
-        fs::write(&package_iface, b"package interface").unwrap();
-        let package_sha256: [u8; 32] = Sha256::digest(b"package interface").into();
-        fs::write(
-            package_sidecar_path(&iface),
-            package_witness(
-                "home",
-                "A",
-                &iface_sha256,
-                vec![[
-                    "base-unit".into(),
-                    "Data.Base".into(),
-                    package_iface.display().to_string(),
-                    hex(&package_sha256),
-                ]],
-            ),
-        )
-        .unwrap();
-        assert!(materialize_recovery_closure(run.path(), [1; 32], &input).is_err());
+        let package = source.path().join("base.hi");
+        fs::write(&package, b"package interface").unwrap();
+        let changed = package_witness(
+            "home",
+            "A",
+            &product.owner().skinny_iface_sha256,
+            vec![[
+                "base-unit".into(),
+                "Data.Base".into(),
+                package.display().to_string(),
+                hex(&Sha256::digest(b"package interface").into()),
+            ]],
+        );
+        let draft = OriginalDraft::from_certification(
+            product.owner().clone(),
+            product.interface_bytes().to_vec(),
+            product.product_bytes().to_vec(),
+            changed,
+            product.certification_bytes().to_vec(),
+        );
+        assert!(matches!(
+            draft.with_module_interface(product.module_interface().clone()),
+            Err(RecoveryArtifactError::InvalidReference)
+        ));
         let retained = verify_materialized_ref(run.path(), &first).unwrap();
         assert_eq!(
-            retained.package_imports_bytes,
-            original.package_imports_bytes
+            retained.package_imports_bytes(),
+            original.package_imports_bytes()
         );
         assert_eq!(
             retained.certification_bytes(),
@@ -5445,54 +5332,20 @@ mod tests {
     #[test]
     fn materialization_rejects_redirected_artifact_directory_before_writing() {
         use std::os::unix::fs::symlink;
-
         let run = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
         symlink(outside.path(), run.path().join("artifacts")).unwrap();
-
-        let iface = source.path().join("A.hi");
-        let iface_sha256 = write_interface_and_sidecar(&iface, "home", "A", b"iface");
-        let product_path = source.path().join("A.products.cbor");
-        fs::write(&product_path, b"product").unwrap();
-        let owner = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: iface_sha256,
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        let certification = write_certification(&iface, &owner);
-        let product = CertifiedRecoveryProduct::from_certification(
-            owner.clone(),
-            b"iface".to_vec(),
-            b"product".to_vec(),
-            fs::read(package_sidecar_path(&iface)).unwrap(),
-            certification,
-        );
+        let product = materialization_product("A", 3, b"iface", b"product");
         assert!(matches!(
-            materialize_certified_products(run.path(), [1; 32], &[product]),
-            Err(RecoveryArtifactError::InvalidReference)
-        ));
-        assert!(matches!(
-            materialize_recovery_closure(
-                run.path(),
-                [1; 32],
-                &[RecoveryArtifactInput {
-                    owner: &owner,
-                    interface_source: &iface,
-                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-                    product_source: &product_path,
-                }],
-            ),
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product)),
             Err(RecoveryArtifactError::InvalidReference)
         ));
         let interface = CertifiedJoinedInterface::from_certification(
             [1; 32],
             "home".into(),
             "A".into(),
-            fs::read(&iface).unwrap(),
-            fs::read(package_sidecar_path(&iface)).unwrap(),
+            product.interface_bytes().to_vec(),
+            product.package_imports_bytes().to_vec(),
         )
         .unwrap();
         assert!(matches!(
@@ -5506,73 +5359,74 @@ mod tests {
     fn package_sidecar_binds_owner_and_selected_package_bytes() {
         let run = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("A.hi");
-        fs::write(&iface, b"iface").unwrap();
-        let iface_sha256: [u8; 32] = Sha256::digest(b"iface").into();
-        let package_iface = source.path().join("base.hi");
-        fs::write(&package_iface, b"package interface").unwrap();
-        let package_sha256: [u8; 32] = Sha256::digest(b"package interface").into();
-        let package_root = [
-            "base-unit".to_owned(),
-            "Data.Base".to_owned(),
-            package_iface.display().to_string(),
-            hex(&package_sha256),
-        ];
-        fs::write(
-            package_sidecar_path(&iface),
-            package_witness("home", "A", &iface_sha256, vec![package_root]),
-        )
-        .unwrap();
-        let product = source.path().join("products.cbor");
-        fs::write(&product, b"product").unwrap();
-        let owner = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: iface_sha256,
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        let certification = write_certification(&iface, &owner);
-        let input = [RecoveryArtifactInput {
-            owner: &owner,
-            interface_source: &iface,
-            module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-            product_source: &product,
-        }];
-        let refs = materialize_recovery_closure(run.path(), [1; 32], &input).unwrap();
-        assert!(verify_materialized_ref(run.path(), &refs[0]).is_ok());
-
-        fs::remove_file(certification_sidecar_path(&iface)).unwrap();
+        let package = source.path().join("base.hi");
+        fs::write(&package, b"package interface").unwrap();
+        let product = package_materialization_product(&package);
+        let reference =
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product))
+                .unwrap()
+                .remove(0);
+        let verified = verify_materialized_ref(run.path(), &reference).unwrap();
+        fs::remove_file(&verified.certification_path).unwrap();
         assert!(matches!(
-            materialize_recovery_closure(run.path(), [1; 32], &input),
+            verify_materialized_ref(run.path(), &reference),
             Err(RecoveryArtifactError::CertifiedOwnersUnavailable(_))
         ));
-        let mut wrong_owner = owner.clone();
+        fs::write(&verified.certification_path, product.certification_bytes()).unwrap();
+
+        let mut wrong_owner = product.owner().clone();
         wrong_owner.module_version = ModuleVersion([9; 32]);
-        write_certification(&iface, &wrong_owner);
+        let wrong = crate::certified_products::encode_home_certification_with_module(
+            &wrong_owner,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Sha256::digest(product.module_interface().certificate_bytes()).into(),
+        )
+        .unwrap();
+        let mut substituted = reference.clone();
+        substituted.certification_sha256 = Sha256::digest(&wrong).into();
+        substituted.certification_path = certified_owners_path(&substituted.certification_sha256);
+        fs::write(run.path().join(&substituted.certification_path), wrong).unwrap();
         assert!(matches!(
-            materialize_recovery_closure(run.path(), [1; 32], &input),
+            verify_materialized_ref(run.path(), &substituted),
             Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
         ));
-        fs::write(certification_sidecar_path(&iface), &certification).unwrap();
+        let malformed = product
+            .certification_bytes()
+            .iter()
+            .copied()
+            .chain([0])
+            .collect::<Vec<_>>();
+        substituted.certification_sha256 = Sha256::digest(&malformed).into();
+        substituted.certification_path = certified_owners_path(&substituted.certification_sha256);
+        fs::write(run.path().join(&substituted.certification_path), malformed).unwrap();
+        assert!(matches!(
+            verify_materialized_ref(run.path(), &substituted),
+            Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
+        ));
 
+        // Captured complete products own their package bytes independently of later source changes.
+        fs::write(&package, b"changed issuing package interface").unwrap();
+        assert_eq!(
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product))
+                .unwrap()
+                .remove(0),
+            reference
+        );
+        let copied = &reference
+            .module_interface
+            .as_ref()
+            .unwrap()
+            .package_interfaces[0]
+            .path;
         fs::write(
-            &source.path().join("A.hi.owners"),
-            certification.iter().copied().chain([0]).collect::<Vec<_>>(),
+            run.path().join(copied),
+            b"changed retained package interface",
         )
         .unwrap();
         assert!(matches!(
-            materialize_recovery_closure(run.path(), [1; 32], &input),
-            Err(RecoveryArtifactError::InvalidCertifiedOwners(_))
-        ));
-
-        fs::write(&package_iface, b"changed package interface").unwrap();
-        assert!(matches!(
-            verify_materialized_ref(run.path(), &refs[0]),
-            Err(RecoveryArtifactError::DigestMismatch(_))
-        ));
-        assert!(matches!(
-            materialize_recovery_closure(run.path(), [1; 32], &input),
+            verify_materialized_ref(run.path(), &reference),
             Err(RecoveryArtifactError::DigestMismatch(_))
         ));
     }
@@ -5580,49 +5434,37 @@ mod tests {
     #[test]
     fn missing_or_wrong_owner_package_sidecar_cannot_be_recovered() {
         let run = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
-        let iface = source.path().join("A.hi");
-        fs::write(&iface, b"iface").unwrap();
-        let product = source.path().join("products.cbor");
-        fs::write(&product, b"product").unwrap();
-        let owner = CachedHomeOwner {
-            unit: "home".into(),
-            module: "A".into(),
-            module_version: ModuleVersion([3; 32]),
-            skinny_iface_sha256: Sha256::digest(b"iface").into(),
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        write_certification(&iface, &owner);
+        let product = materialization_product("A", 3, b"iface", b"product");
+        let reference =
+            materialize_certified_products(run.path(), [1; 32], std::slice::from_ref(&product))
+                .unwrap()
+                .remove(0);
+        let sidecar = run.path().join(&reference.package_imports_path);
+        fs::remove_file(&sidecar).unwrap();
         assert!(matches!(
-            materialize_recovery_closure(
+            verify_materialized_ref_with_module_interface(
                 run.path(),
-                [1; 32],
-                &[RecoveryArtifactInput {
-                    owner: &owner,
-                    interface_source: &iface,
-                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-                    product_source: &product,
-                }]
+                &reference,
+                product.module_interface(),
+                &mut PackageInterfaceValidation::default()
             ),
             Err(RecoveryArtifactError::Unavailable(_))
         ));
-
-        let wrong_owner: [u8; 32] = owner.skinny_iface_sha256;
-        fs::write(
-            package_sidecar_path(&iface),
-            package_witness("other-unit", "A", &wrong_owner, Vec::new()),
-        )
-        .unwrap();
+        let wrong = package_witness(
+            "other-unit",
+            "A",
+            &product.owner().skinny_iface_sha256,
+            vec![],
+        );
+        fs::write(&sidecar, &wrong).unwrap();
+        let mut changed = reference.clone();
+        changed.package_imports_sha256 = Sha256::digest(&wrong).into();
         assert!(matches!(
-            materialize_recovery_closure(
+            verify_materialized_ref_with_module_interface(
                 run.path(),
-                [1; 32],
-                &[RecoveryArtifactInput {
-                    owner: &owner,
-                    interface_source: &iface,
-                    module_interface: (source.path(), &fixture_module_reference(&iface, &owner)),
-                    product_source: &product,
-                }]
+                &changed,
+                product.module_interface(),
+                &mut PackageInterfaceValidation::default()
             ),
             Err(RecoveryArtifactError::InvalidPackageImports(_))
         ));

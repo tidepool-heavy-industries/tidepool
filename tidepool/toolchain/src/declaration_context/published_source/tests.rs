@@ -637,7 +637,7 @@ fn assert_sparse_partial_transport(context: &ExactDeclarationContext, original: 
 }
 
 fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
-    use crate::artifact_inventory::{ArtifactBindingNode, IssuedNativeOffer};
+    use crate::artifact_inventory::ArtifactBindingNode;
     let producer = [2; 32];
     let child_interface = crate::certified_products::fixture_module_interface(
         producer,
@@ -784,9 +784,19 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     target.clone(),
                 ])
                 .unwrap();
-                let old =
-                    IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
-                        .unwrap();
+                let historical = issue_fixture_compiler_support(
+                    CompilerInputProjection::from_issued_entries(&[
+                        native.clone(),
+                        children[1 - selected].clone(),
+                        target.clone(),
+                    ])
+                    .unwrap(),
+                    views[1 - selected].clone(),
+                )
+                .unwrap();
+                let old = historical
+                    .issue_native_offer(&native.descriptor.owner, None)
+                    .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),

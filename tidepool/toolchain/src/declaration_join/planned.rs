@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn authored_certification_preserves_historical_canonical_custody() {
         use crate::artifact_inventory::{
-            ArtifactEntry, ArtifactInventory, CompilerInputProjection, IssuedNativeOffer,
+            ArtifactEntry, ArtifactInventory, CompilerInputProjection,
         };
         use crate::certified_products::{
             fixture_finalized_product,
@@ -854,7 +854,14 @@ mod tests {
         let old_view = inventory
             .admit_shared(&inventory.empty_view(), vec![old_entry.clone()])
             .unwrap();
-        let offer = IssuedNativeOffer::issue(old_entry.descriptor.id, &old_view, None).unwrap();
+        let old_issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[old_entry.clone()]).unwrap(),
+            old_view.clone(),
+        )
+        .unwrap();
+        let offer = old_issuer
+            .issue_native_offer(&old_entry.descriptor.owner, None)
+            .unwrap();
         let current_entry = Arc::new(ArtifactEntry::original([1; 32], current.clone()).unwrap());
         let current_view = inventory
             .admit_shared(&inventory.empty_view(), vec![current_entry.clone()])
@@ -892,17 +899,20 @@ mod tests {
         )
         .unwrap();
         let products = [current, authored.clone()];
-        let issued = CompilerInputProjection::from_issued_entries(
-            &compiled
-                .entries()
-                .into_iter()
-                .filter(|entry| {
-                    matches!(
-                        &entry.payload,
-                        crate::artifact_inventory::ArtifactPayload::Original(_)
-                    )
-                })
-                .collect::<Vec<_>>(),
+        let compiled_originals = compiled
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.payload,
+                    crate::artifact_inventory::ArtifactPayload::Original(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let issued = CompilerInputProjection::from_issued_entries(&compiled_originals).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            issued.clone(),
+            compiled.clone(),
         )
         .unwrap();
         let selection =
@@ -914,27 +924,22 @@ mod tests {
             .unwrap();
         let originals = selection.selected_original_closure(&compiled).unwrap();
         let original_graph = originals.native_closure().capture_graph_selection();
-        let available = issued
-            .roles()
+        let available = compiled_originals
             .iter()
-            .filter_map(|role| role.original())
-            .map(|original| {
+            .map(|entry| {
                 let proof =
                     crate::artifact_inventory::NativeOriginalRequirement::from_selected_view(
-                        original, &compiled,
+                        entry.descriptor.id,
+                        &compiled,
                     )
                     .unwrap()
                     .unwrap();
-                IssuedNativeOffer::issue(original, &compiled, Some(proof)).unwrap()
+                issuer
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .unwrap()
             })
             .collect::<Vec<_>>();
-        let support = crate::declaration_context::recover_fixture_compiler_support(
-            issued.clone(),
-            compiled.clone(),
-            [],
-        )
-        .unwrap();
-        let narrowed = support
+        let narrowed = issuer
             .select_support_roots(issued.roles().iter().map(|role| role.interface()).collect())
             .unwrap()
             .finalize_namespace()
@@ -1498,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_closure_reuses_owned_witnesses_and_validates_uncaptured_products() {
+    fn authored_closure_reuses_complete_witnesses_and_rejects_corrupt_drafts() {
         use crate::certified_products::{
             fixture_finalized_product,
             tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
@@ -1513,13 +1518,7 @@ mod tests {
         };
         let packages = BTreeMap::new();
         let b = fixture_finalized_product(
-            original_groups_fixture_with_interface(
-                "B",
-                vec![(7, vec![])],
-                7,
-                &packages,
-                vec![0x42],
-            ),
+            original_groups_fixture_with_interface("B", vec![(7, vec![])], 7, &packages, vec![0x42]),
             [1; 32],
         );
         let a = fixture_finalized_product(
@@ -1532,13 +1531,12 @@ mod tests {
             ),
             [1; 32],
         );
-        let legacy = vec![a, b];
-        assert!(legacy
+        let certified = vec![a, b];
+        assert!(certified
             .iter()
-            .all(|product| product.module_interface().is_some()
-                && product.original_native().is_none()));
+            .all(|product| product.original_native().matches_original(product)));
         let cold_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
-        let recovered = recovered_witness_fixtures(&legacy);
+        let recovered = recovered_witness_fixtures(&certified);
         assert!(
             ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > cold_before,
             "cold recovery authenticates the uncaptured original bytes"
@@ -1649,8 +1647,7 @@ mod tests {
             (owner.clone(), vec![b_owner.clone()]),
             (b_owner.clone(), vec![]),
         ]);
-        let mut imported_validation =
-            crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let mut imported_validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let imported = ValidatedAuthoredClosure::admit(
             &originals,
             [1; 32],
@@ -1736,13 +1733,7 @@ mod tests {
             "repeated custody cannot issue duplicate compiler roles"
         );
         let wrong_version = fixture_finalized_product(
-            original_groups_fixture_with_interface(
-                "B",
-                vec![(7, vec![])],
-                8,
-                &packages,
-                vec![0x42],
-            ),
+            original_groups_fixture_with_interface("B", vec![(7, vec![])], 8, &packages, vec![0x42]),
             [1; 32],
         );
         let wrong_version = recovered_witness_fixtures(&[wrong_version])
@@ -1754,29 +1745,39 @@ mod tests {
         );
         assert!(admit(&[products[0].clone(), wrong_version]).is_err());
         let cold_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
-        let finalized = issued_originals(&legacy).unwrap();
-        assert_eq!(finalized.products().len(), legacy.len());
+        let finalized = issued_originals(&certified).unwrap();
+        assert_eq!(finalized.products().len(), certified.len());
         assert!(finalized
             .products()
             .iter()
-            .all(|product| product.original_native().is_some()));
-        assert!(
-            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > cold_before,
-            "inventory admission authenticates uncaptured original bytes"
+            .all(|product| product.original_native().matches_original(product)));
+        assert_eq!(
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+            cold_before,
+            "inventory reuses the already complete Original owner",
         );
-        let original = &legacy[1];
+        let original = &certified[1];
         let mut changed_bytes = original.product_bytes().to_vec();
         changed_bytes.push(0);
-        let changed = CertifiedRecoveryProduct::from_certification(
+        let changed = crate::recovery_artifacts::OriginalDraft::from_certification(
             original.owner().clone(),
             original.interface_bytes().to_vec(),
             changed_bytes,
             original.package_imports_bytes().to_vec(),
             original.certification_bytes().to_vec(),
         )
-        .with_module_interface(original.module_interface().unwrap().clone())
+        .with_module_interface(original.module_interface().clone())
         .unwrap();
-        assert!(issued_originals(&[legacy[0].clone(), changed]).is_err());
+        assert!(
+            matches!(
+                crate::certified_products::certify_original_draft_with_validation(
+                    changed,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                ),
+                Err(crate::certified_products::CertificationError::Mismatch(_))
+            ),
+            "corrupted raw bytes refuse before a completed Original can be selected"
+        );
     }
 
     #[test]
@@ -1842,7 +1843,7 @@ mod tests {
             &interface,
             Vec::new(),
         );
-        let empty = CertifiedRecoveryProduct::from_certification(
+        let empty = crate::recovery_artifacts::OriginalDraft::from_certification(
             empty_owner,
             interface,
             product_bytes,

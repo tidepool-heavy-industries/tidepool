@@ -1078,6 +1078,9 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        'recovery_record_is_not_certified_product': (),
+        'certified_product_has_no_digest_admission': (),
+        'original_draft_is_private': (),
         "checked_cell_request_digest_is_issued": (),
         "retained_context_is_not_completed_execution": (),
         "original_execution_census_is_private": (),
@@ -1998,6 +2001,14 @@ tidepool_buildscript_run(
                 'artifact_inventory::tests::ordinary_publication_and_display_preserve_the_actual_sealed_issuer',
                 'certified_products::tests::publication_request_history::generated_publication_support_and_recovery_preserve_issuer_selection',
             ]
+            toolchain_source_admission_cases = [
+                'artifact_inventory::compiler_projection::acquisition_tests::authored_promotion_preserves_actual_offered_acquisition',
+                'artifact_inventory::tests::bound_projection_rebinding_preserves_issuing_none_override',
+                'artifact_inventory::tests::independent_native_admission_does_not_inherit_global_source_witness',
+                'artifact_inventory::tests::source_witness_histories_follow_selected_issuer',
+                'artifact_inventory::tests::native_inventory_reuse_preserves_each_owners_source_admission_witness',
+                'artifact_inventory::tests::artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads',
+            ]
             toolchain_existing_resident_cases = [
                 'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground',
                 'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof',
@@ -2010,6 +2021,7 @@ tidepool_buildscript_run(
             toolchain_resident_cases = (
                 toolchain_existing_resident_cases + toolchain_output_context_cases
                 + toolchain_output_evidence_cases + toolchain_retained_proof_cases
+                + toolchain_source_admission_cases
             )
             unit_extra += '\n    case_compiler_modes = {' + ", ".join(
                 json.dumps(case) + ': "owned-resident"' for case in toolchain_resident_cases

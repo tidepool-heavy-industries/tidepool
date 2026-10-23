@@ -133,7 +133,7 @@ impl Catalog {
             .iter()
             .map(|product| {
                 Arc::new(ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone(),
+                    product.module_interface().clone(),
                 ))
             })
             .collect();
@@ -3327,7 +3327,7 @@ fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
             .position(|window| window == marker.as_bytes())
             .unwrap();
         bytes[offset] ^= 1;
-        let corrupt = CertifiedRecoveryProduct::from_certification(
+        let corrupt = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             bytes,
@@ -3335,15 +3335,11 @@ fn selected_demand_keeps_authentication_of_needed_and_unused_original_bytes() {
             product.certification_bytes().to_vec(),
         );
         let corrupt = corrupt
-            .with_module_interface(product.module_interface().unwrap().clone())
+            .with_module_interface(product.module_interface().clone())
             .unwrap();
-        let mut changed = originals.clone();
-        changed[node] = &corrupt;
         assert!(matches!(
-            crate::certified_products::certify_owned_products_in_context_with_validation(
-                &changed,
-                &[],
-                &changed,
+            crate::certified_products::certify_original_draft_with_validation(
+                corrupt,
                 &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             ),
             Err(crate::certified_products::CertificationError::Mismatch(

@@ -42,16 +42,23 @@ fn context_for(
         .with_canonical_interfaces(canonical, BTreeSet::new())
 }
 
-fn original_product(record: &Record) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
-    crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+fn original_draft(record: &Record) -> crate::recovery_artifacts::OriginalDraft {
+    crate::recovery_artifacts::OriginalDraft::from_certification(
         computed_owner(record),
         record.interface.clone(),
         record.products.clone(),
         record.package_imports.clone(),
         record.original_certification.clone(),
     )
-    .with_source_sha256(parse_sha(&record.source_sha256).unwrap())
     .with_module_interface(record.module_interface_proof.as_ref().unwrap().clone())
+    .unwrap()
+}
+
+fn original_product(record: &Record) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+    crate::certified_products::certify_original_draft_with_validation(
+        original_draft(record),
+        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+    )
     .unwrap()
 }
 
@@ -208,15 +215,19 @@ fn protected_catalog_availability_preserves_receiving_interface_only_selection()
     // perturbing one field at its enforcing canonical/native binding boundary.
     let product = &selected.contextual_native_availability[0];
     let reconstruct = |certification, packages| {
-        crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+        let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             product.product_bytes().to_vec(),
             packages,
             certification,
         )
-        .with_source_sha256(canonical.source_sha256())
         .with_module_interface(canonical.clone())
+        .map_err(crate::certified_products::CertificationError::CapturedModulePayload)?;
+        crate::certified_products::certify_original_draft_with_validation(
+            draft,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
     };
     let valid = reconstruct(
         product.certification_bytes().to_vec(),
@@ -358,7 +369,7 @@ fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts(
         let key = (record.unit.clone(), record.module.clone());
         let canonical = record.module_interface_proof.as_ref().unwrap().clone();
         let producer = canonical.producer_sha256();
-        let base_product = original_product(&record);
+        let base_draft = original_draft(&record);
         let required = |canonical| {
             ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
                 .with_originals(vec![original_product(&record)])
@@ -371,26 +382,25 @@ fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts(
         let context = match variant {
             0 => required(canonical.clone()),
             1 => required(
-                crate::certified_products::fixture_finalized_product(
-                    base_product.clone().with_source_sha256([0x53; 32]),
+                crate::certified_products::fixture_finalized_product_with_source(
+                    base_draft.clone(),
                     producer,
+                    [0x53; 32],
                 )
                 .module_interface()
-                .unwrap()
                 .clone(),
             ),
             2 => required(
                 crate::certified_products::fixture_finalized_product(
-                    base_product.clone(),
+                    base_draft.clone(),
                     [0xa7; 32],
                 )
                 .module_interface()
-                .unwrap()
                 .clone(),
             ),
             3 => required(
                 crate::certified_products::fixture_finalized_product_with_requirements(
-                    base_product.clone(),
+                    base_draft.clone(),
                     producer,
                     Some(BTreeMap::from([(
                         ("u".into(), "Dependency".into()),
@@ -398,7 +408,6 @@ fn generated_protected_native_refusals_match_complete_canonical_and_owner_facts(
                     )])),
                 )
                 .module_interface()
-                .unwrap()
                 .clone(),
             ),
             4 => required(crate::certified_products::fixture_module_core(
@@ -455,8 +464,8 @@ fn protected_original_owner_version_must_match_the_selected_candidate() {
     let canonical = record.module_interface_proof.as_ref().unwrap().clone();
     let mut wrong_owner = computed_owner(&record);
     wrong_owner.module_version.0[0] ^= 1;
-    let wrong_original = crate::certified_products::fixture_finalized_product(
-        crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+    let wrong_original = crate::certified_products::fixture_finalized_product_with_source(
+        crate::recovery_artifacts::OriginalDraft::from_certification(
             wrong_owner.clone(),
             record.interface.clone(),
             record.products.clone(),
@@ -467,11 +476,11 @@ fn protected_original_owner_version_must_match_the_selected_candidate() {
                 &BTreeMap::new(),
             )
             .unwrap(),
-        )
-        .with_source_sha256(parse_sha(&record.source_sha256).unwrap()),
+        ),
         canonical.producer_sha256(),
+        parse_sha(&record.source_sha256).unwrap(),
     );
-    assert_eq!(wrong_original.module_interface(), Some(&canonical));
+    assert_eq!(wrong_original.module_interface(), &canonical);
     let context = ExactCandidateContext::new(BTreeSet::from([key.clone()]), BTreeSet::new())
         .with_originals(vec![wrong_original])
         .with_canonical_interfaces(BTreeMap::from([(key, canonical)]), BTreeSet::new());
@@ -634,7 +643,7 @@ fn protected_native_closure_issues_missing_type_dependencies_privately() {
     let required = super::tests::candidate_fixture(sources.path(), "TypeSupport");
     let required_key = (required.unit.clone(), required.module.clone());
     let canonical = crate::certified_products::fixture_finalized_product_with_requirements(
-        original_product(&dependent),
+        original_draft(&dependent),
         dependent
             .module_interface_proof
             .as_ref()
@@ -646,11 +655,11 @@ fn protected_native_closure_issues_missing_type_dependencies_privately() {
         )])),
     );
     dependent.original_certification = canonical.certification_bytes().to_vec();
-    dependent.module_interface_proof = canonical.module_interface().cloned();
+    dependent.module_interface_proof = Some(canonical.module_interface().clone());
     dependent.module_interface = Some(
         crate::recovery_artifacts::materialize_module_interface(
             sources.path(),
-            canonical.module_interface().unwrap(),
+            canonical.module_interface(),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             crate::recovery_artifacts::MaterializationMode::Durable,
         )

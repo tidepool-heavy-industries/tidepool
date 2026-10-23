@@ -118,6 +118,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/staged_world_acceptance_tests.rs',
     })),
     ('tidepool-toolchain', frozenset({
+        'tidepool/toolchain/src/artifact_inventory/compiler_projection_acquisition_tests.rs',
         'tidepool/toolchain/src/artifact_inventory/view_read_properties.rs',
         'tidepool/toolchain/src/artifacts/tests/private_package_input_history.rs',
         'tidepool/toolchain/src/cache/source_manifest_properties.rs',
