@@ -15,7 +15,8 @@ import qualified Data.ByteString as BS
 import Data.Word (Word64)
 import GHC (Module, ModSummary)
 import GHC.Fingerprint.Type (Fingerprint)
-import GHC.Unit.Module (ModuleName)
+import GHC.Unit.Module (ModuleName, moduleName, moduleNameString, moduleUnit)
+import GHC.Unit.Types (unitString)
 import GHC.Types.PkgQual (PkgQual, RawPkgQual)
 import Tidepool.ArtifactBytes (ArtifactBytes)
 import Tidepool.CheckedCell (NativeParsedModule)
@@ -45,7 +46,12 @@ data ImportAdmissionContext
 -- captured source and incarnation remain independently bound throughout the
 -- transitions; a matching number alone is never an admission proof.
 data ImportAttempt = ImportAttempt Word64 (Maybe String) Module FilePath Fingerprint
-  deriving (Eq, Show)
+  deriving (Eq)
+
+instance Show ImportAttempt where
+  show (ImportAttempt request incarnation root path fingerprint) =
+    "ImportAttempt " ++ show
+      (request, incarnation, (unitString (moduleUnit root), moduleNameString (moduleName root)), path, fingerprint)
 
 data ScopedImportAdmission = ScopedImportAdmission
   CapturedImportAdmission ImportAdmissionContext ImportAttempt
