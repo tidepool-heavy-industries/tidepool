@@ -10839,6 +10839,101 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
         }
     }
     assert_eq!(histories, 24);
+
+    let source = published.compiler_source_support();
+    let unissued_support = recover_fixture_compiler_support(
+        source.projection().clone(),
+        source.artifacts().clone(),
+        source.native_offers().iter().cloned(),
+    )
+    .unwrap()
+    .retain_normalized_availability(source.native_availability())
+    .unwrap();
+    let unissued = published
+        .clone()
+        .rebuild(|facts| facts.compiler_support = unissued_support)
+        .finish()
+        .unwrap();
+    let recorded = encoded_fixture_snapshot(&unissued);
+    assert!(matches!(
+        recorded_native_choices(recorded.snapshot()).get(&entry.descriptor.owner),
+        Some(crate::exact_context::RecordedNativeChoices::Unissued)
+    ));
+    let graph = recorded.snapshot().graph_selection().unwrap();
+    let view = unissued.artifact_view();
+    let inventory = RecoveredArtifactInventory {
+        producer: producer.sha256(),
+        entries: view
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, entry))
+            .collect(),
+        recorded_inventory: true,
+        bindings: graph.bindings.iter().copied().collect(),
+        binding_edges: recorded.snapshot().binding_dependencies().unwrap(),
+        interfaces: view.interface_dependencies(),
+    };
+    let cold_unissued = inventory
+        .context_for_expected_snapshot(recorded.root(), &recorded)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let wider_custody = view
+        .inventory()
+        .admit_shared_with_demand(
+            view,
+            vec![fresh_entry.clone()],
+            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+        )
+        .unwrap();
+    let wider_support = cold_unissued
+        .compiler_source_support()
+        .retain_offers(source.native_offers().iter().cloned())
+        .unwrap()
+        .retain_custody(&wider_custody)
+        .unwrap();
+    assert!(wider_support
+        .artifacts()
+        .artifact_ids()
+        .contains(&fresh_entry.descriptor.id));
+    assert!(wider_support.native_offers().iter().any(|offer| {
+        source
+            .native_offers()
+            .iter()
+            .any(|issued| offer.same_issuance(issued))
+    }));
+    let cold_unissued_with_wider_custody = cold_unissued
+        .clone()
+        .rebuild(|facts| facts.compiler_support = wider_support)
+        .finish()
+        .unwrap();
+    let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface());
+    for context in [unissued, cold_unissued, cold_unissued_with_wider_custody] {
+        assert_eq!(
+            recorded_native_choices(&context.snapshot()),
+            recorded_native_choices(recorded.snapshot()),
+            "Unissued must survive acquisition and wider custody without becoming issued-empty"
+        );
+        assert!(matches!(
+            recorded_native_choices(&context.snapshot()).get(&entry.descriptor.owner),
+            Some(crate::exact_context::RecordedNativeChoices::Unissued)
+        ));
+        assert_eq!(
+            context
+                .compiler_source_support()
+                .native_availability()
+                .issued_row(entry.descriptor.id)
+                .unwrap()
+                .mode,
+            NativeTransportMode::Full
+        );
+        assert!(matches!(
+            context
+                .compiler_source_support()
+                .checked_native_input_decision(entry.descriptor.id, canonical, native.owner()),
+            Err(crate::certified_products::InputDecisionRefusal::MissingDecision)
+        ));
+    }
 }
 
 #[test]
