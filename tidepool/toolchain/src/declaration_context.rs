@@ -36,6 +36,7 @@ pub use execution_evidence::{
 mod published_source;
 mod source_admission;
 mod source_dependency;
+pub(crate) use source_dependency::SourceDependencyBasis;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;
@@ -45,7 +46,6 @@ pub(crate) use source_admission::{
 pub use source_admission::{
     SourceAdmissionBoundary, SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
 };
-pub(crate) use source_dependency::SourceDependencyBasis;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExactImportWitnessRefusal {
@@ -13202,7 +13202,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
             "control reaches actual second-stage authentication"
         );
         match (observation, result) {
-            (Observation::Unchanged, Ok(_)) => {}
+            (Observation::Unchanged, Ok(prepared)) => prepared.assert_world_cursor_controls(program),
             (Observation::ChangedSource | Observation::ChangedImport,
                 Err(CompileError::CompilerEvidence(error))) if matches!(error.as_ref(),
                     crate::certified_products::CertificationError::Mismatch("same-program source original changed")) => {}
@@ -13212,6 +13212,161 @@ pub(crate) fn assert_world_repeated_source_refusals(
             (observation, Ok(_)) => panic!("{observation:?}: altered source was admitted"),
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_world_program_cursor_refusals(
+    program: &Arc<crate::compiler_world::CheckedWorldCellProgram>,
+    outputs: &[(usize, crate::artifacts::ProgramNativeOutput)],
+) {
+    let cursor_error = |error: CompileError| match error {
+        CompileError::CompilerEvidence(error) => match *error {
+            crate::certified_products::CertificationError::WorldProgramCursor(error) => error,
+            other => panic!("expected cursor refusal, got {other:?}"),
+        },
+        other => panic!("expected cursor refusal, got {other:?}"),
+    };
+    assert!(matches!(
+        cursor_error(
+            WorldProgramContinuation::begin(program)
+                .complete(program)
+                .unwrap_err()
+        ),
+        WorldProgramCursorFailure::IncompleteProgram {
+            expected: 3,
+            actual: 0
+        }
+    ));
+    let mut validation =
+        PackageInterfaceValidation::with_inventory(Arc::clone(&program.validation().inventory));
+    let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+        program,
+        &mut validation,
+    )
+    .unwrap();
+    let first_produced = produced.for_segment(0..1).unwrap();
+    let PendingWorldStage::Executable(empty) = WorldProgramContinuation::begin(program)
+        .open_next(program, &first_produced, &mut validation, &mut |_| {})
+        .unwrap()
+    else {
+        panic!("mixed history starts with an actual executable stage")
+    };
+    let Err(error) = empty.seal() else {
+        panic!("unsealed executable advanced")
+    };
+    assert!(matches!(
+        cursor_error(error),
+        WorldProgramCursorFailure::IncompleteStage {
+            stage: 0,
+            expected: 1,
+            actual: 0
+        }
+    ));
+    let PendingWorldStage::Executable(mut first) = WorldProgramContinuation::begin(program)
+        .open_next(program, &first_produced, &mut validation, &mut |_| {})
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let output = |ordinal| {
+        outputs
+            .iter()
+            .find(|(index, _)| *index == ordinal)
+            .unwrap()
+            .1
+            .clone()
+    };
+    let context = Arc::clone(first.segment.continuation.primary.context());
+    let wrong = first
+        .admit_item(program, output(4), &first_produced)
+        .unwrap_err();
+    assert!(matches!(
+        cursor_error(wrong),
+        WorldProgramCursorFailure::WrongItemOutput { stage: 0, item: 0 }
+    ));
+    assert!(first.items.is_empty());
+    assert!(Arc::ptr_eq(
+        &context,
+        first.segment.continuation.primary.context()
+    ));
+    first
+        .admit_item(program, output(0), &first_produced)
+        .unwrap();
+    let replay = first
+        .admit_item(program, output(0), &first_produced)
+        .unwrap_err();
+    assert!(matches!(
+        cursor_error(replay),
+        WorldProgramCursorFailure::IncompleteStage {
+            stage: 0,
+            expected: 1,
+            actual: 2
+        }
+    ));
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.segment.continuation.next_stage, 0);
+    let (continuation, _) = first.seal().unwrap();
+    let native_prefix = Arc::clone(continuation.native_prefix.as_ref().unwrap());
+    assert!(Arc::ptr_eq(
+        &native_prefix,
+        output(0).sealed_products_shared().unwrap()
+    ));
+    let original_produced = produced.for_segment(1..1).unwrap();
+    let PendingWorldStage::Original(original) = continuation
+        .open_next(program, &original_produced, &mut validation, &mut |_| {})
+        .unwrap()
+    else {
+        panic!("mixed history has its actual middle declaration")
+    };
+    let (continuation, _) = original.seal(program, &original_produced).unwrap();
+    assert_eq!(continuation.next_stage, 2);
+    assert!(
+        Arc::ptr_eq(&native_prefix, continuation.native_prefix.as_ref().unwrap()),
+        "SOURCE-only declaration advancement retains the preceding exact native owner"
+    );
+    let last_produced = produced.for_segment(2..5).unwrap();
+    let PendingWorldStage::Executable(mut last) = continuation
+        .open_next(program, &last_produced, &mut validation, &mut |_| {})
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    last.admit_item(program, output(2), &last_produced).unwrap();
+    let completed_context = Arc::clone(last.segment.continuation.primary.context());
+    let completed_native = Arc::clone(last.segment.continuation.native_prefix.as_ref().unwrap());
+    let cancellation = tidepool_extract_cmd::CompilerTransactionCancellation::new();
+    let refused = tidepool_extract_cmd::with_compiler_transaction_cancellable(
+        cancellation.clone(),
+        |_| {},
+        || {
+            cancellation.cancel();
+            last.admit_item(program, output(3), &last_produced)
+        },
+    );
+    assert!(
+        matches!(refused.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
+    );
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.segment.continuation.next_stage, 2);
+    assert!(Arc::ptr_eq(
+        &completed_context,
+        last.segment.continuation.primary.context()
+    ));
+    assert!(Arc::ptr_eq(
+        &completed_native,
+        last.segment.continuation.native_prefix.as_ref().unwrap()
+    ));
+    let Err(error) = last.seal() else {
+        panic!("cancelled partial stage published future outputs")
+    };
+    assert!(matches!(
+        cursor_error(error),
+        WorldProgramCursorFailure::IncompleteStage {
+            stage: 2,
+            expected: 3,
+            actual: 1
+        }
+    ));
 }
 
 impl<'a> DecodedWorldSourceReceipt<'a> {
@@ -24284,9 +24439,7 @@ mod tests {
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap();
         let mut source_packet: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let Value::Array(fields) = &mut source_packet else {
-            unreachable!()
-        };
+        let Value::Array(fields) = &mut source_packet else { unreachable!() };
         fields[1] = Value::Integer(0u64.into());
         let mut source_bytes = Vec::new();
         ciborium::ser::into_writer(&source_packet, &mut source_bytes).unwrap();
