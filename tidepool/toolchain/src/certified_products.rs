@@ -1967,6 +1967,7 @@ impl CertifiedSegmentOriginals {
         let original_inputs = cursor
             .advance_compiler_prefix(self.captured_stage(), produced, &validation.inventory)
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        source_selection.compiler_rows = original_inputs.compiler_source_support().carry_selected_compiler_rows();
         let products = CertifiedProducts {
             issued: Some(IssuedCompilerProducts {
                 prefix: original_inputs,
