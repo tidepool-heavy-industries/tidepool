@@ -10101,7 +10101,7 @@ impl<'a> ExactProductAdmission<'a> {
                         self.facts
                             .compiler
                             .native_selection
-                            .availability
+                            .availability()
                             .rows()
                             .map(|row| &row.original),
                     ),
