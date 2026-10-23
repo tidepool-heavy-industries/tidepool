@@ -1774,10 +1774,7 @@ impl TurnPurpose {
                 "prepared item differs from its original reservation".into(),
             ));
         }
-        execution.validate_runtime_admission(
-            admission.digest(),
-            admission.prefix().admission().digest(),
-        )?;
+        execution.validate_runtime_admission(admission.prefix().admission().digest())?;
         Ok(Self::Execution {
             execution,
             prefix: admission.prefix().clone(),
@@ -8017,11 +8014,10 @@ mod tests {
                 .checked_execution()
                 .unwrap();
             proof
-                .validate_runtime_admission(reservation.digest(), protected.admission().digest())
+                .validate_runtime_admission(protected.admission().digest())
                 .unwrap();
-            // Original cell targets carry cell admission; later runtime recipes
-            // carry item admission. Corrupt both to refuse either issuing family.
-            assert!(proof.validate_runtime_admission([0; 32], [0; 32]).is_err());
+            // The captured target remains bound to its original cell admission.
+            assert!(proof.validate_runtime_admission([0; 32]).is_err());
             proof
                 .validate_settled_native_bindings(snapshot.settled_native_bindings())
                 .unwrap();

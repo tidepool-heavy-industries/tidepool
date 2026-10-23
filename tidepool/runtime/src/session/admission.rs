@@ -2749,11 +2749,8 @@ impl RuntimeCheckedPrefix {
             );
             return Err(reason.into());
         }
-        let reservation = state
-            .reservation()
-            .expect("checked reservation preflighted");
         execution
-            .validate_runtime_admission(reservation.digest, self.admission.digest())
+            .validate_runtime_admission(self.admission.digest())
             .map_err(|error| {
                 tracing::debug!(
                     target: "tidepool::session::private_host_mount",
@@ -3950,7 +3947,7 @@ impl PersistentSession {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
+        execution.validate_runtime_admission(prefix.admission.digest())?;
         state
             .snapshot()
             .scoped_inputs

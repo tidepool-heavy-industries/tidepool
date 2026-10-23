@@ -1063,7 +1063,6 @@ impl std::fmt::Debug for CellProgram {
     }
 }
 
-
 #[derive(Debug)]
 pub struct CellProgramItem {
     pub(crate) context: CellProgramItemContext,
@@ -2948,12 +2947,6 @@ impl CheckedSettledValues {
     }
 }
 
-#[derive(Clone, Debug)]
-enum CheckedExecutionAdmission {
-    RuntimeItem([u8; 32]),
-    CellProgram([u8; 32]),
-}
-
 /// A checked recipe and its exact prepared target, issued together by the
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
@@ -2968,7 +2961,7 @@ pub struct ExactCompiledItem {
     generation: u64,
     bound_binders: Vec<Value>,
     observation_name: Option<String>,
-    admission: CheckedExecutionAdmission,
+    admission: [u8; 32],
     settled_values: CheckedSettledValues,
     typed_entry: Option<SealedTypedEntry>,
     source_originals: Vec<Arc<crate::artifacts::PublishedSourceOriginalSelection>>,
@@ -3132,128 +3125,12 @@ impl PartialEq for CheckedTypedEntry {
 }
 impl Eq for CheckedTypedEntry {}
 
-fn validate_item_receipt(
-    fields: &[Value],
-    request: &str,
-    admission_digest: [u8; 32],
-    receipt_digest: [u8; 32],
-    index: usize,
-    source: &str,
-    is_program: bool,
-) -> Result<(), CompileError> {
-    if string(&fields[0])? != "TPEXACTITEM"
-        || string(&fields[1])? != if is_program { "2" } else { "1" }
-        || string(&fields[2])? != request
-        || string(&fields[3])? != hex(&admission_digest)
-        || string(&fields[4])?
-            != hex(&if is_program {
-                admission_digest
-            } else {
-                receipt_digest
-            })
-        || fields[5] != Value::Integer((index as u64).into())
-        || string(&fields[6])? != hash(source.as_bytes())
-        || string(&fields[7])? != "tidepool-checked-recipe-2"
-    {
-        return Err(failure(
-            "checked-item recipe receipt differs from its same compiler offer",
-        ));
-    }
-    Ok(())
-}
 fn typed_entry_failure() -> CompileError {
     CompileError::CompilerEvidence(Box::new(
         crate::certified_products::CertificationError::Mismatch("typed native entry"),
     ))
 }
-fn typed_entry_identity(
-    value: &Value,
-) -> Result<tidepool_repr::execution_schema::SymbolIdentity, CompileError> {
-    let fields = row(value, 3)?;
-    let unit = string(&fields[0])?;
-    let module = string(&fields[1])?;
-    let occurrence = string(&fields[2])?;
-    if [unit, module, occurrence]
-        .iter()
-        .any(|value| value.is_empty() || value.len() > 65536)
-    {
-        return Err(failure("typed native identity is incomplete"));
-    }
-    Ok(tidepool_repr::execution_schema::SymbolIdentity {
-        unit: unit.into(),
-        module: module.into(),
-        namespace: "value".into(),
-        occurrence: occurrence.into(),
-        record_parent: None,
-    })
-}
 impl CheckedTypedEntry {
-    fn matches_receipt(&self, proof: &[Value]) -> Result<bool, CompileError> {
-        Ok(string(&proof[0])? == self.plan_digest
-            && typed_entry_identity(&proof[1])? == self.origin
-            && typed_entry_identity(&proof[2])? == self.entry
-            && proof[3] == Value::Integer(self.original_ordinal.into()))
-    }
-    /// Issued once before inventory admission from the same request, normalized
-    /// plan, exact source admission and authenticated original product census.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn issue_program_item(
-        directory: &Path,
-        request: &str,
-        admission_digest: [u8; 32],
-        plans: &[CheckedTypedSegmentPlan],
-        index: usize,
-        source: &str,
-        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
-        owner: &crate::declaration_join::ExactModuleIdentity,
-        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
-        producer: [u8; 32],
-    ) -> Result<Self, CompileError> {
-        let receipt = decode(&read(directory.join("checked-item.cbor"), 4 << 20)?)?;
-        let fields = row(&receipt, 9)?;
-        validate_item_receipt(
-            fields,
-            request,
-            admission_digest,
-            admission_digest,
-            index,
-            source,
-            true,
-        )?;
-        let (plan, item) = plans
-            .iter()
-            .find_map(|plan| {
-                plan.items
-                    .iter()
-                    .find(|item| item.ordinal == index)
-                    .map(|item| (plan, item))
-            })
-            .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
-        let proof = row(&fields[8], 4)?;
-        let origin = typed_entry_identity(&proof[1])?;
-        let entry = typed_entry_identity(&proof[2])?;
-        let original_ordinal = match proof[3] {
-            Value::Integer(value) => u32::try_from(value).map_err(failure)?,
-            _ => return Err(failure("typed native original ordinal is not integer")),
-        };
-        if string(&proof[0])? != plan.digest
-            || origin.occurrence != plan.root
-            || entry.occurrence != item.entry
-        {
-            return Err(typed_entry_failure());
-        }
-        Self::from_original_entry(
-            plan.digest.clone(),
-            origin,
-            entry,
-            original_ordinal,
-            target,
-            owner,
-            products,
-            producer,
-        )
-    }
-
     pub(crate) fn issue_world_item(
         program: &crate::compiler_world::CheckedWorldCellProgram,
         ordinal: usize,
@@ -3463,16 +3340,8 @@ impl ExactCompiledItem {
     pub fn target_owned(&self) -> Arc<tidepool_repr::execution_schema::PreparedProgram> {
         self.target.clone()
     }
-    pub fn validate_runtime_admission(
-        &self,
-        item_digest: [u8; 32],
-        cell_digest: [u8; 32],
-    ) -> Result<(), CompileError> {
-        let valid = match self.admission {
-            CheckedExecutionAdmission::RuntimeItem(digest) => digest == item_digest,
-            CheckedExecutionAdmission::CellProgram(digest) => digest == cell_digest,
-        };
-        if !valid {
+    pub fn validate_runtime_admission(&self, cell_digest: [u8; 32]) -> Result<(), CompileError> {
+        if self.admission != cell_digest {
             return Err(failure(
                 "compiled item has another protected runtime admission",
             ));
@@ -4091,11 +3960,8 @@ impl ExactCheckedItem {
 #[derive(Clone, Debug)]
 pub(crate) struct CheckedItemOffer {
     pub(crate) item: ExactCheckedItem,
-    pub(crate) prefix: ExactCompiledPrefix,
-    pub(crate) runtime_prefix_digest: [u8; 32],
     pub(crate) generation: u64,
     pub(crate) observation_name: Option<String>,
-    pub(crate) is_program: bool,
     pub(crate) settled_values: CheckedSettledValues,
 }
 
@@ -4119,7 +3985,6 @@ impl CheckedItemOffer {
             || output.item.index != self.item.index
             || output.generation != self.generation
             || output.observation_name != self.observation_name
-            || output.is_program != self.is_program
         {
             return Err(failure("prepared item differs from its checked offer"));
         }
@@ -4160,11 +4025,7 @@ impl CheckedItemOffer {
             generation: self.generation,
             bound_binders,
             observation_name: self.observation_name.clone(),
-            admission: if self.is_program {
-                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-            } else {
-                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
-            },
+            admission: self.item.admission_digest(),
             settled_values: self.settled_values.clone(),
             typed_entry,
             source_originals,
@@ -4181,7 +4042,6 @@ pub(crate) struct PreparedCheckedItemOutput {
     item: ExactCheckedItem,
     generation: u64,
     observation_name: Option<String>,
-    is_program: bool,
     original_execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -4193,26 +4053,19 @@ pub(crate) struct PreparedCheckedItemOutput {
     has_interface: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PreparedItemOrigin<'a> {
-    Finite(&'a str),
-    World(&'a crate::compiler_world::CheckedWorldCellProgram),
-}
-
 impl PreparedCheckedItemOutput {
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         target = "exomonad_harness::timing", name = "products.checked_item.capture",
         level = "debug", skip_all,
-        fields(inclusive = true, ordinal = item.index, generation, is_program)
+        fields(inclusive = true, ordinal = item.index, generation)
     )]
     pub(crate) fn capture(
         item: &ExactCheckedItem,
         generation: u64,
         observation_name: Option<&str>,
-        is_program: bool,
         output: &crate::artifacts::ProgramNativeOutput,
-        origin: PreparedItemOrigin<'_>,
+        program: &crate::compiler_world::CheckedWorldCellProgram,
     ) -> Result<Self, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "products.checked_item.capture",
@@ -4221,39 +4074,17 @@ impl PreparedCheckedItemOutput {
         let sealed = output.sealed_products()?;
         let original_execution = Arc::clone(sealed.original_execution()?);
         let program_entry = sealed.typed_entry();
-        let root = output.directory();
         let source = output.source();
         let target = output.target();
-        let receipt = match origin {
-            PreparedItemOrigin::Finite(request) => {
-                let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
-                let fields = row(&receipt, if is_program { 9 } else { 8 })?;
-                timing.advance("validate_item_receipt");
-                validate_item_receipt(
-                    fields,
-                    request,
-                    item.admission_digest(),
-                    item.cell.receipt_digest,
-                    item.index,
-                    source,
-                    is_program,
-                )?;
-                Some(receipt)
-            }
-            PreparedItemOrigin::World(program) => {
-                if !is_program
-                    || !matches!(&item.cell.specification,
-                    CheckedCellSpecification::World { program: owner, .. }
-                        if std::ptr::eq(owner.as_ref(), program))
-                {
-                    return Err(failure("World item differs from its captured output owner"));
-                }
-                None
-            }
-        };
+        if !matches!(&item.cell.specification,
+            CheckedCellSpecification::World { program: owner, .. }
+                if std::ptr::eq(owner.as_ref(), program))
+        {
+            return Err(failure("World item differs from its captured output owner"));
+        }
         timing.advance("validate_typed_entry");
         let item_index = item.index;
-        let typed_entry = if is_program {
+        let typed_entry = {
             let issued =
                 program_entry.ok_or_else(|| failure("typed native entry was not admitted"))?;
             let (plan, item) = item
@@ -4267,10 +4098,6 @@ impl PreparedCheckedItemOutput {
                         .map(|item| (plan, item))
                 })
                 .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
-            let proof = receipt
-                .as_ref()
-                .map(|receipt| row(row(receipt, 9)?.get(8).ok_or_else(typed_entry_failure)?, 4))
-                .transpose()?;
             // The entry issuer already authenticated its original owner and
             // native membership. Consume that exact target proof; a complete
             // instance environment is required for display, not item execution.
@@ -4278,19 +4105,10 @@ impl PreparedCheckedItemOutput {
                 || issued.plan_digest != plan.digest
                 || issued.origin.occurrence != plan.root
                 || issued.entry.occurrence != item.entry
-                || match proof {
-                    Some(proof) => !issued.matches_receipt(proof)?,
-                    None => false,
-                }
             {
                 return Err(typed_entry_failure());
             }
             Some(issued.clone())
-        } else {
-            if program_entry.is_some() {
-                return Err(failure("ordinary item was given typed program authority"));
-            }
-            None
         };
         timing.advance("turn_read_decode");
         let turn = decode(output.turn_bytes())?;
@@ -4314,7 +4132,7 @@ impl PreparedCheckedItemOutput {
                 let authenticated_sites = crate::artifacts::yield_sites_metadata_digest(
                     &crate::turn_observations::decode_turn_yield_sites(&fields[3])?,
                 )?;
-                if let PreparedItemOrigin::World(program) = origin {
+                {
                     let expected = program
                         .reservation()
                         .items()
@@ -4382,7 +4200,6 @@ impl PreparedCheckedItemOutput {
             item: item.clone(),
             generation,
             observation_name: observation_name.map(str::to_owned),
-            is_program,
             target: target.clone(),
             table,
             warnings,
@@ -5452,92 +5269,29 @@ mod tests {
             required_generation: None,
         }];
         let target = Arc::new(testing::prepare(wire).unwrap());
-        let plans = vec![CheckedTypedSegmentPlan {
-            digest: hex(&[2; 32]),
-            root: "authored_origin".into(),
-            items: vec![CheckedTypedSegmentItem {
-                ordinal: 0,
-                entry: "entry_8".into(),
-                generation: 1,
-                body: CheckedTypedSegmentBody::Let {
-                    marker: "marker".into(),
-                    captures: vec![],
-                },
-            }],
-        }];
-        let request = hex(&[3; 32]);
-        let admission = [4; 32];
-        let source = "authored fixture source";
-        let directory = tempfile::tempdir().unwrap();
-        let identity =
-            |occurrence: &str| array([text("fixture"), text("Authored"), text(occurrence)]);
-        let receipt = array([
-            text("TPEXACTITEM"),
-            text("2"),
-            text(&request),
-            text(hex(&admission)),
-            text(hex(&admission)),
-            Value::Integer(0.into()),
-            text(hash(source.as_bytes())),
-            text("tidepool-checked-recipe-2"),
-            array([
-                text(&plans[0].digest),
-                identity(&plans[0].root),
-                identity("entry_8"),
-                Value::Integer(8.into()),
-            ]),
-        ]);
-        let mut receipt_bytes = Vec::new();
-        ciborium::ser::into_writer(&receipt, &mut receipt_bytes).unwrap();
-        std::fs::write(directory.path().join("checked-item.cbor"), receipt_bytes).unwrap();
-        let entry = CheckedTypedEntry::issue_program_item(
-            directory.path(),
-            &request,
-            admission,
-            &plans,
-            0,
-            source,
-            &target,
-            &crate::declaration_join::ExactModuleIdentity {
-                unit: "fixture".into(),
-                module: "Authored".into(),
-            },
-            &products,
-            [1; 32],
-        )
-        .unwrap();
-        let authored_entry = CheckedTypedEntry::issue_program_item(
-            directory.path(),
-            &request,
-            admission,
-            &plans,
-            0,
-            source,
-            &authored_target,
-            &crate::declaration_join::ExactModuleIdentity {
-                unit: "fixture".into(),
-                module: "Authored".into(),
-            },
-            &products,
-            [1; 32],
-        )
-        .unwrap();
-        let changed_entry = CheckedTypedEntry::issue_program_item(
-            directory.path(),
-            &request,
-            admission,
-            &plans,
-            0,
-            source,
-            &changed_target,
-            &crate::declaration_join::ExactModuleIdentity {
-                unit: "fixture".into(),
-                module: "Authored".into(),
-            },
-            &products,
-            [1; 32],
-        )
-        .unwrap();
+        let plan_digest = hex(&[2; 32]);
+        let origin = testing::identity("Authored", "authored_origin");
+        let entry_identity = testing::identity("Authored", "entry_8");
+        let owner = crate::declaration_join::ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "Authored".into(),
+        };
+        let issue = |target| {
+            CheckedTypedEntry::from_original_entry(
+                plan_digest.clone(),
+                origin.clone(),
+                entry_identity.clone(),
+                8,
+                target,
+                &owner,
+                &products,
+                [1; 32],
+            )
+            .unwrap()
+        };
+        let entry = issue(&target);
+        let authored_entry = issue(&authored_target);
+        let changed_entry = issue(&changed_target);
         for (module, ordinal) in [("WrongOwner", 8), ("Authored", 12), ("Authored", 99)] {
             let wrong_owner = crate::declaration_join::ExactModuleIdentity {
                 unit: "fixture".into(),
@@ -5545,7 +5299,7 @@ mod tests {
             };
             assert!(
                 CheckedTypedEntry::from_original_entry(
-                    plans[0].digest.clone(),
+                    plan_digest.clone(),
                     entry.origin.clone(),
                     entry.entry.clone(),
                     ordinal,

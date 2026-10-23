@@ -819,11 +819,8 @@ impl PreparedCellProgram {
             };
             let native = checked_cell::CheckedItemOffer {
                 item: item.clone(),
-                prefix: completed.clone(),
-                runtime_prefix_digest: cell.admission_digest(),
                 generation,
                 observation_name: observation,
-                is_program: true,
                 settled_values: completed.prepared_value_selection()?,
             }
             .seal_prepared(
@@ -1097,9 +1094,8 @@ fn prepare_world_cell_program_inner(
                     &checked.item(index)?,
                     generation,
                     observation,
-                    true,
                     &output,
-                    checked_cell::PreparedItemOrigin::World(&program),
+                    &program,
                 )?;
                 Some(PreparedProgramNativeItem { output, checked })
             }
