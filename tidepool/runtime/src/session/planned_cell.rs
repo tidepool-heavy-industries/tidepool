@@ -113,36 +113,6 @@ impl RuntimeCellPlanReservation {
     pub fn items(&self) -> &[RuntimePlannedCellItem] {
         &self.items
     }
-    pub fn compiler_specification(
-        &self,
-    ) -> tidepool_toolchain::checked_cell::CheckedPlannedCellSpecification {
-        use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Checked;
-        let slots = self
-            .items
-            .iter()
-            .map(|item| match &item.slot {
-                RuntimePlannedCellSlot::Prologue { declaration } => Checked::Prologue {
-                    declaration: declaration.0,
-                },
-                RuntimePlannedCellSlot::Declaration { declaration } => Checked::Declaration {
-                    declaration: declaration.0,
-                },
-                RuntimePlannedCellSlot::Bind { value } => Checked::Bind { value: value.0 },
-                RuntimePlannedCellSlot::Expression {
-                    capture,
-                    observation_name,
-                } => Checked::Expression {
-                    capture: capture.0,
-                    observation_name: observation_name.clone(),
-                },
-            })
-            .collect();
-        tidepool_toolchain::checked_cell::CheckedPlannedCellSpecification {
-            parsed_plan: self.plan.clone(),
-            reservation_digest: self.digest,
-            slots,
-        }
-    }
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }

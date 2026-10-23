@@ -341,11 +341,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                     && global.identity.occurrence == "describe"
             }));
         let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
-        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
-            immutable_program.basis()
-        else {
-            panic!("runtime quoter preparation must retain its actual World producer");
-        };
+        let output = immutable_program.world_program();
         let producer = *output.producer_sha256();
         let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             durable.path(),

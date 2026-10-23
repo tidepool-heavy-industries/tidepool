@@ -834,15 +834,6 @@ pub enum CheckedPlannedCellSlot {
     },
 }
 
-/// An untrusted ordered offer recipe. Only a final same-offer worker receipt
-/// can promote these reservations into an `ExactCheckedCell`.
-#[derive(Clone, Debug)]
-pub struct CheckedPlannedCellSpecification {
-    pub parsed_plan: Arc<crate::cell_plan::ParsedCellPlan>,
-    pub reservation_digest: [u8; 32],
-    pub slots: Vec<CheckedPlannedCellSlot>,
-}
-
 pub(crate) fn decode_world_typed_segment_plans(
     value: &Value,
     reservation: &crate::cell_plan::CompilerWorldCellReservation,
@@ -1056,33 +1047,9 @@ fn decode_typed_segment_plan_facts(
 #[derive(Debug)]
 pub struct CellProgram {
     pub(crate) checked: Arc<ExactCheckedCell>,
-    pub(crate) basis: CellProgramBacking,
+    pub(crate) world: Arc<crate::compiler_world::CheckedWorldCellProgram>,
     pub(crate) slots: Vec<CheckedPlannedCellSlot>,
     pub(crate) items: Vec<CellProgramItem>,
-}
-
-/// Physical plan owner of an executable program. World evidence retains the
-/// checked output that issued its reservation and item successor descriptions.
-pub(crate) enum CellProgramBacking {
-    Finite(Arc<crate::cell_plan::ParsedCellPlan>),
-    World(Arc<crate::compiler_world::CheckedWorldCellProgram>),
-}
-
-impl std::fmt::Debug for CellProgramBacking {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Finite(plan) => formatter.debug_tuple("Finite").field(plan).finish(),
-            Self::World(program) => formatter
-                .debug_tuple("World")
-                .field(program.certificate_sha256())
-                .finish(),
-        }
-    }
-}
-
-pub enum CellProgramBasis<'a> {
-    Finite(&'a Arc<crate::cell_plan::ParsedCellPlan>),
-    World(&'a Arc<crate::compiler_world::CheckedWorldCellProgram>),
 }
 
 #[derive(Debug)]
@@ -1109,11 +1076,8 @@ impl CellProgram {
     pub fn checked_cell(&self) -> &Arc<ExactCheckedCell> {
         &self.checked
     }
-    pub fn basis(&self) -> CellProgramBasis<'_> {
-        match &self.basis {
-            CellProgramBacking::Finite(plan) => CellProgramBasis::Finite(plan),
-            CellProgramBacking::World(program) => CellProgramBasis::World(program),
-        }
+    pub fn world_program(&self) -> &Arc<crate::compiler_world::CheckedWorldCellProgram> {
+        &self.world
     }
     pub fn admission_digest(&self) -> [u8; 32] {
         self.checked.admission_digest()

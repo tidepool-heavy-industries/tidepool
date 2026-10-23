@@ -686,7 +686,7 @@ impl AppliedModuleCandidateOffer {
 /// contextual sealing continues after the physical transaction has settled.
 pub struct PreparedCellProgram {
     checked: Arc<crate::checked_cell::ExactCheckedCell>,
-    basis: crate::checked_cell::CellProgramBacking,
+    world: Arc<crate::compiler_world::CheckedWorldCellProgram>,
     slots: Vec<crate::checked_cell::CheckedPlannedCellSlot>,
     items: Vec<PreparedProgramItem>,
     produced_outputs: crate::checked_cell::ProducedValueTypeInterfaces,
@@ -757,7 +757,7 @@ impl PreparedCellProgram {
         cancellation.checkpoint()?;
         let Self {
             checked: cell,
-            basis,
+            world,
             slots,
             items: prepared,
             produced_outputs,
@@ -850,7 +850,7 @@ impl PreparedCellProgram {
         }
         let program = Arc::new(CellProgram {
             checked: cell,
-            basis,
+            world,
             slots,
             items,
         });
@@ -1112,7 +1112,7 @@ fn prepare_world_cell_program_inner(
     let slots = program.reservation().slots().collect();
     Ok(PreparedCellProgram {
         checked,
-        basis: checked_cell::CellProgramBacking::World(program),
+        world: program,
         slots,
         items,
         produced_outputs,
@@ -7615,7 +7615,7 @@ mod module_product_tests {
 
     fn assert_real_world_native_history(mixed: bool, declaration_only: bool) {
         use crate::cell_plan::WorldCellAdmissionSubject;
-        use crate::checked_cell::{CellProgramBasis, CheckedPlannedCellSlot};
+        use crate::checked_cell::CheckedPlannedCellSlot;
         use crate::compiler_world::{
             CapturedCompilerSourceRoot, CapturedCompilerSources, VisibleWorldBindings,
             WorldSourceSelection,
@@ -8153,7 +8153,6 @@ mod module_product_tests {
             let program = prepared
                 .seal(&admission)
                 .expect("same actual output after END");
-            assert!(matches!(program.basis(), CellProgramBasis::World(_)));
             assert_eq!(program.items().len(), if mixed { 5 } else { 1 });
             for (ordinal, (path, bytes, table, warnings)) in metadata_drift {
                 let native = program.items()[ordinal]
@@ -8367,7 +8366,6 @@ mod module_product_tests {
         assert_eq!(std::env::var("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref(), Ok("off"),
             "physical lifetime control requires --compiler-diagnostics off; capture intentionally retains scratch");
         use crate::cell_plan::WorldCellAdmissionSubject;
-        use crate::checked_cell::CellProgramBasis;
         use crate::compiler_world::{
             CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorldBinding,
             CompilerWorldLexicalSurface, PublicModuleQuestion, VisibleWorldBindings,
@@ -8514,9 +8512,7 @@ mod module_product_tests {
             let program = prepared
                 .seal(&admission)
                 .expect("actual shadow output seal");
-            let CellProgramBasis::World(checked) = program.basis() else {
-                panic!("World basis")
-            };
+            let checked = program.world_program();
             let checked = checked.clone();
             let mut current = Arc::clone(checked.reservation().plan().world_owned());
             let history_observations = observations.join(format!("history-{item_count}"));

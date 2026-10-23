@@ -1928,9 +1928,7 @@ impl PrivateSettledFrontier {
         program: &crate::checked_cell::CellProgram,
         successor: &CheckedWorldSuccessor,
     ) -> Result<Arc<Self>, CompileError> {
-        let crate::checked_cell::CellProgramBasis::World(output) = program.basis() else {
-            return Err(source_failure("private frontier requires a World program"));
-        };
+        let output = program.world_program();
         let position = successor.world.position.as_ref().ok_or_else(|| {
             source_failure("private frontier requires its completed program cursor")
         })?;
@@ -1959,9 +1957,7 @@ impl PrivateSettledFrontier {
         &self,
         program: &crate::checked_cell::CellProgram,
     ) -> Result<Arc<Self>, CompileError> {
-        let crate::checked_cell::CellProgramBasis::World(output) = program.basis() else {
-            return Err(source_failure("private frontier requires a World program"));
-        };
+        let output = program.world_program();
         if !program.items().is_empty()
             || self.world.logical_id() != output.logical().logical_id()
             || self.world.restoration.producer != *output.producer_sha256()
@@ -2046,9 +2042,7 @@ impl crate::checked_cell::CellProgram {
     ) -> Result<CheckedWorldSuccessor, CompileError> {
         let joined = publication.join();
         let projection_context = publication.context();
-        let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
-            return Err(source_failure("finite declaration has no World successor"));
-        };
+        let program = self.world_program();
         let ordinal = item.index();
         let issued = self
             .items()
@@ -2185,11 +2179,7 @@ impl crate::checked_cell::CellProgram {
         item: &crate::checked_cell::ExactCheckedItem,
         bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
     ) -> Result<CheckedWorldSuccessor, CompileError> {
-        let crate::checked_cell::CellProgramBasis::World(program) = self.basis() else {
-            return Err(source_failure(
-                "finite cell has no compiler-world successor",
-            ));
-        };
+        let program = self.world_program();
         let ordinal = item.index();
         let issued = self
             .items()

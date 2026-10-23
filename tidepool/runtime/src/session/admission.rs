@@ -3359,9 +3359,8 @@ impl CheckedTurnCompletion {
                 }
                 Ok(())
             })??;
-        if let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
-            self.prefix.program.basis()
         {
+            let output = self.prefix.program.world_program();
             let successor = state.snapshot().world();
             tracing::debug!(target: "exomonad_harness::timing",
                 base_logical_world = ?output.logical().logical_id(),
@@ -4748,10 +4747,7 @@ impl PersistentSession {
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
-        use tidepool_toolchain::checked_cell::CellProgramBasis;
-        let CellProgramBasis::World(checked) = program.basis() else {
-            return Err(SessionError::StaleStagedDeclaration);
-        };
+        let checked = program.world_program();
         let RuntimeWorldCellInputs {
             reservation,
             preparation,

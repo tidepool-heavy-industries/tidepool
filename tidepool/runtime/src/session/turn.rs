@@ -6012,11 +6012,7 @@ mod tests {
         assert_eq!(fixture.resident.val_gen().0, initial + 3);
         let reservation = cell.admission.world_reservation();
         assert_eq!(reservation.admission_digest(), &cell.admission.digest());
-        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
-            cell.program.basis()
-        else {
-            panic!("the actual World producer owns this cell");
-        };
+        let output = cell.program.world_program();
         assert!(Arc::ptr_eq(output.reservation(), reservation));
         let reserved = reservation
             .items()

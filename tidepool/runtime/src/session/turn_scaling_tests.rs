@@ -1804,10 +1804,7 @@ where
             .filter_map(|item| item.native().map(|native| native.target_owned()))
             .collect();
 
-        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) = program.basis()
-        else {
-            panic!("scaling cells require actual World output observations");
-        };
+        let output = program.world_program();
         eprintln!(
             "protected-scale {}",
             serde_json::json!({

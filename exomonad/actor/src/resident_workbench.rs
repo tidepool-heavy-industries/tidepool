@@ -11517,13 +11517,7 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;
         cancel_on_drop.0 = None;
-        let tidepool_toolchain::checked_cell::CellProgramBasis::World(world_output) =
-            program.basis()
-        else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "resident cell preparation did not retain its checked World output".into(),
-            ));
-        };
+        let world_output = program.world_program();
         let compiler_binding_ids = world_output
             .demanded_session_bindings()
             .iter()

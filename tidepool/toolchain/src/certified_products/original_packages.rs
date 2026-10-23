@@ -345,10 +345,8 @@ impl BoundPackageSelection {
 pub(crate) fn assert_actual_world_original_package_refusals(
     program: &crate::checked_cell::CellProgram,
 ) {
-    use crate::checked_cell::{world_output_bytes, CellProgramBasis};
-    let CellProgramBasis::World(checked) = program.basis() else {
-        panic!("actual World fixture required")
-    };
+    use crate::checked_cell::world_output_bytes;
+    let checked = program.world_program();
     assert_eq!(
         checked.stages().len(),
         1,
