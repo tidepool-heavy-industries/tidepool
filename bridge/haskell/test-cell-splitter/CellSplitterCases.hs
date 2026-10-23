@@ -1060,7 +1060,7 @@ checkingSourceRequestRoundTrip = do
     other -> fail ("retired request bytes accepted: " ++ show other)
 
   [singleFlag, singlePayload] <- pure (workerArgv [ActivationPreview])
-  forM_ ["22", "2d"] $ \retiredTag -> do
+  forM_ ["07", "22", "2d"] $ \retiredTag -> do
     let retiredField = take (length singlePayload - 2) singlePayload ++ retiredTag
     case workerRequestFromArgv [singleFlag, retiredField] of
       Left message | "retired field tag" `isInfixOf` message -> pure ()
@@ -1248,7 +1248,7 @@ portableOutputRequestValidation = do
   assertEqual "inspection cannot acquire portable output intent"
     (Left InvalidPortableOutputShape) mixedAccepted
   forM_ [Turn, Cell, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
-    , SessionArtifacts "scope", CertifyHomeProducts, TargetModuleOnly, InjectVal "Binding"
+    , SessionArtifacts "scope", CertifyHomeProducts, InjectVal "Binding"
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
     case workerRequestFromArgv (workerArgv (valid ++ [conflict])) of
       Left _ -> pure ()
@@ -1282,7 +1282,7 @@ certificationRequestValidation = do
     other -> fail ("home-product certification rejected authenticated candidate input: " ++ show other)
   forM_ [ Cell, Classify, Turn, InspectType "Int", InspectTypeBatch "Batch.hs"
         , DeclarationJoin "join.cbor", BindGen 1, InjectVal "Val1"
-        , ActivationPreview, TargetModuleOnly
+        , ActivationPreview
         , RetainedGeneration (SymbolIdentity "main" "Producer" "value" "value" Nothing) 1
         ] $ \field ->
     case workerRequestFromArgv (workerArgv (valid ++ [field])) of
@@ -1321,7 +1321,7 @@ requestShapeValidation = do
   where
     sourceCheckExcludedFields =
       [ ("output directory", OutputDir "out"), ("target", Target "Main"), ("target group", Targets ["Main"])
-      , ("module-only target", TargetModuleOnly), ("binding generation", BindGen 1)
+      , ("binding generation", BindGen 1)
       , ("session injection", InjectVal "Val1"), ("session root", SessionRoot "session")
       , ("session incarnation", SessionIncarnation "1"), ("session artifacts", SessionArtifacts "scope")
       , ("turn mode", Turn), ("turn template", TurnTemplate "kind" "template")
@@ -1352,7 +1352,7 @@ requestOperationAdmission = do
         Left _ -> Left ConflictingRequestOperations
         Right Nothing -> Left ConflictingRequestOperations
       recipes =
-        [ ([], SourceOperation)
+        [ ([Targets ["first", "second"]], SourceOperation)
         , ([Turn, TurnOut "turn"], TurnOperation)
         , ([Turn, ActivationPreview, TurnOut "turn"], ActivationPreviewOperation)
         , ([Classify, ClassifyOut "classify"], ClassificationOperation)
@@ -1379,7 +1379,8 @@ requestOperationAdmission = do
     case admit (context ++ [Turn, ActivationPreview] ++ fields) of
       Left _ -> pure ()
       Right operation -> fail ("preview with another operation admitted as " ++ show operation)
-  forM_ [ [Input "unreadable-fifo", Turn, HarnessProfile]
+  forM_ [ [Input "source"]
+        , [Input "unreadable-fifo", Turn, HarnessProfile]
         , [Input "unreadable-fifo", Cell, CellOut "output", HarnessProfile]
         , [Input "unreadable-fifo", Classify, HarnessProfile]
         , [Input "unreadable-fifo", InspectInfo "value", HarnessProfile]

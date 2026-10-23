@@ -11,7 +11,7 @@ import System.IO (IOMode(ReadWriteMode), hClose, openTempFile, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (createLink, createNamedPipe, createSymbolicLink, ownerReadMode, ownerWriteMode, unionFileModes)
 import System.Timeout (timeout)
-import Tidepool.ExtractRequest (RequestField(..), AdmittedWorkerRequest, admittedSourceFiles, admittedRequestOperation, AdmittedRequestOperation(..), inspectionInputs, inspectionBatch, admitWorkerRequest, workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), AdmittedWorkerRequest, admittedSourceFiles, admittedRequestOperation, AdmittedRequestOperation(..), inspectionInputs, inspectionBatch, admitWorkerRequest, workerArgv, workerRequestFromArgv, WorkerRequest(..))
 import Tidepool.HarnessSource (harnessProfilePragmaLine, spliceHarnessProfilePragma)
 
 harnessSourceChecks :: IO ()
@@ -133,7 +133,9 @@ cancellationCheck root out = do
 
 request :: [RequestField] -> IO AdmittedWorkerRequest
 request fields = case workerRequestFromArgv (workerArgv fields) of
-  Right (Just args) -> either (fail . show) pure (admitWorkerRequest args)
+  Right (Just args) -> do
+    let actual = if null (requestInspections args) then args {requestTarget=Just "value"} else args
+    either (fail . show) pure (admitWorkerRequest actual)
   other -> fail ("invalid test request: " ++ show other)
 
 equal :: (Eq a, Show a) => String -> a -> a -> IO ()

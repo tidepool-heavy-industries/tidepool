@@ -42,6 +42,7 @@ module Tidepool.ExtractRequest
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -295,7 +296,6 @@ data RequestField
   | OutputDir FilePath
   | Target String
   | Targets [String]
-  | TargetModuleOnly
   | Include FilePath
   | BindGen Word64
   | SessionRoot FilePath
@@ -350,7 +350,6 @@ data WorkerRequest = WorkerRequest
   , requestOutDir :: Maybe FilePath
   , requestTarget :: Maybe String
   , requestTargets :: [String]
-  , requestTargetModuleOnly :: Bool
   , requestIncludes :: [FilePath]
   , requestFiles :: [FilePath]
   , requestBindGen :: Maybe Word64
@@ -424,9 +423,9 @@ data SourceRequest = SourceRequest
 data SourceOutputKind = ProduceNativeOriginals | CertifyHomeOriginals | ProducePortableExecutable
   deriving (Eq, Show)
 data SourceOutput
-  = NativeSourceOutput (Maybe FilePath) [String]
-  | CertifiedSourceOutput (Maybe FilePath) [String]
-  | PortableSourceOutput FilePath [String]
+  = NativeSourceOutput (Maybe FilePath) (NonEmpty String)
+  | CertifiedSourceOutput (Maybe FilePath) (NonEmpty String)
+  | PortableSourceOutput FilePath (NonEmpty String)
   deriving (Eq, Show)
 data SourceProductRequest = SourceProductRequest
   { payloadSourceProductSource :: SourceRequest, payloadSourceProductOutput :: SourceOutput } deriving (Eq, Show)
@@ -539,8 +538,10 @@ admitWorkerRequest args = do
     WorldCellPrepareOperation value -> pure (AdmittedWorldCellPreparePayload value)
     SourceOperation -> do
       selectedSource <- source
-      let targets = case requestTargets args of [] -> maybe [] (:[]) (requestTarget args); values -> values
-      _ <- traverse (required RequiredTarget . Just) targets
+      requested <- case requestTargets args of [] -> pure (maybe [] (:[]) (requestTarget args)); values -> pure values
+      targets <- case requested of
+        [] -> Left MissingRequestTargets
+        first:rest -> (:|) <$> required RequiredTarget (Just first) <*> traverse (required RequiredTarget . Just) rest
       output <- if requestPortableOutput args
         then PortableSourceOutput <$> required RequiredPortableOutputDirectory (requestOutDir args) <*> pure targets
         else pure ((if requestCertifyHomeProducts args then CertifiedSourceOutput else NativeSourceOutput) (requestOutDir args) targets)
@@ -608,8 +609,7 @@ admitWorkerRequest args = do
       unlessShape (turnMode || requestTurnOut args == Nothing && requestTurnVerdict args == Nothing) ConflictingRequestFields
       unlessShape (cellMode || requestCellTemplate args == Nothing && requestCellOut args == Nothing) ConflictingRequestFields
       unlessShape (turnMode || cellMode || null (requestTurnTemplates args)) ConflictingRequestFields
-      unlessShape (tag == SourceOperation || requestTarget args == Nothing && null (requestTargets args)
-        && not (requestTargetModuleOnly args)) ConflictingRequestFields
+      unlessShape (tag == SourceOperation || requestTarget args == Nothing && null (requestTargets args)) ConflictingRequestFields
       unlessShape (classificationMode || requestClassifyOut args == Nothing) ConflictingRequestFields
       unlessShape (inspectionMode || requestInspectOut args == Nothing && requestInspectTypeBatch args == Nothing && not (requestInspectionStrict args)) ConflictingRequestFields
 
@@ -648,6 +648,7 @@ data RequestShapeError
   | PreviewRequiresTurn
   | InvalidCompilerBudget
   | MissingRequestSource
+  | MissingRequestTargets
   | MissingRequestField RequiredRequestField
   | InvalidInspectionShape
   | InvalidActivationPreviewShape
@@ -726,7 +727,7 @@ admitOperationTag args
       && not (present (requestSessionIncarnation args)) && not (present (requestBindGen args))
       && not (present (requestModuleCandidates args)) && not (requestCertifyHomeProducts args)
       && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
-      && not (requestTargetModuleOnly args) && Map.null (requestRetainedGenerations args)
+      && Map.null (requestRetainedGenerations args)
     validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not hasSessionScope
@@ -741,7 +742,7 @@ admitOperationTag args
       && not (present (requestClassifyOut args)) && not (present (requestInspectOut args))
       && not (present (requestInspectTypeBatch args)) && not (present (requestSessionArtifacts args))
       && not (present (requestSessionIncarnation args))
-      && not (requestTargetModuleOnly args) && not (requestInspectionStrict args)
+      && not (requestInspectionStrict args)
       && Map.null (requestRetainedGenerations args)
     validCellPlan = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestTurn args) && not (requestClassify args)
@@ -762,7 +763,6 @@ emptyWorkerRequest = WorkerRequest
   , requestOutDir = Nothing
   , requestTarget = Nothing
   , requestTargets = []
-  , requestTargetModuleOnly = False
   , requestIncludes = []
   , requestFiles = []
   , requestBindGen = Nothing
@@ -860,7 +860,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       OutputDir path -> request { requestOutDir = Just path }
       Target name -> request { requestTarget = Just name }
       Targets names -> request { requestTargets = foldl' (flip (:)) (requestTargets request) names }
-      TargetModuleOnly -> request { requestTargetModuleOnly = True }
       Include path -> request { requestIncludes = path : requestIncludes request }
       BindGen generation -> request { requestBindGen = Just generation }
       SessionRoot path -> request { requestSessionRoot = Just path }
@@ -1014,7 +1013,6 @@ encodeField field = case field of
   OutputDir value -> taggedText 2 value
   Target value -> taggedText 3 value
   Targets values -> BS.singleton 4 <> putU32 (length values) <> BS.concat (map textFrame values)
-  TargetModuleOnly -> BS.singleton 7
   Include value -> taggedText 8 value
   BindGen value -> BS.singleton 11 <> putU64 value
   SessionRoot value -> taggedText 12 value
@@ -1215,7 +1213,7 @@ pField bytes = do
       mapParser Targets (pN (fromIntegral count) pText) rest'
     5  -> retired tag
     6  -> Left "retired worker request field tag: 6"
-    7  -> Right (TargetModuleOnly, rest)
+    7  -> retired tag
     8  -> mapParser Include pText rest
     9  -> retired tag
     10 -> retired tag
@@ -1546,7 +1544,7 @@ sourceOutputDirectory output = case output of
   NativeSourceOutput directory _ -> directory
   CertifiedSourceOutput directory _ -> directory
   PortableSourceOutput directory _ -> Just directory
-sourceOutputTargets :: SourceOutput -> [String]
+sourceOutputTargets :: SourceOutput -> NonEmpty String
 sourceOutputTargets output = case output of
   NativeSourceOutput _ targets -> targets
   CertifiedSourceOutput _ targets -> targets
