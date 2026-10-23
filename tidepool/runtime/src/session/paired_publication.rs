@@ -1673,6 +1673,17 @@ pub(in crate::session) mod tests {
         assert_eq!(lib.log.publication_revision(), revision);
     }
 
+    pub(in crate::session) fn assert_tip_instance_counts(
+        lib: &SessionLib,
+        generation: Generation,
+        classes: usize,
+        families: usize,
+    ) {
+        let cumulative = tip(lib, generation).unwrap().unwrap();
+        assert_eq!(cumulative.instances.classes.len(), classes);
+        assert_eq!(cumulative.instances.families.len(), families);
+    }
+
     #[track_caller]
     pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
@@ -2402,107 +2413,6 @@ pub(in crate::session) mod tests {
             .contains(&("%%".into(), value_id)));
         session.retire_scope(a.private_scope());
         assert!(session.bindings().get(value_id).is_some());
-    }
-
-    #[test]
-    fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/authored-inventory").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let initial = commit_source(
-            &mut session,
-            public,
-            include_str!("fixtures/paired-rich-base.hs"),
-        );
-        let value_only = commit_source(
-            &mut session,
-            public,
-            include_str!("fixtures/paired-public-value-only.hs"),
-        );
-        assert!(session
-            .lib()
-            .log
-            .certified_authored_at(value_only)
-            .unwrap()
-            .instances()
-            .classes
-            .is_empty());
-        let public_tip = tip(session.lib(), value_only).unwrap().unwrap();
-        assert_eq!(public_tip.instances.classes.len(), 1);
-        assert_eq!(public_tip.instances.families.len(), 1);
-        let a = session.begin_private_execution(public).unwrap();
-        let b = session.begin_private_execution(public).unwrap();
-        let private = commit_source(
-            &mut session,
-            a.private_scope(),
-            include_str!("fixtures/paired-instance-only.hs"),
-        );
-        assert!(session
-            .lib()
-            .log
-            .certified_authored_at(private)
-            .unwrap()
-            .introduced_exports()
-            .is_empty());
-        let intent = session.freeze_private_execution(&a).unwrap();
-        let accepted_a = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        assert_eq!(accepted_a.receipt.instances().classes.len(), 2);
-        assert_eq!(accepted_a.receipt.instances().families.len(), 2);
-        assert!(accepted_a
-            .receipt
-            .exports()
-            .iter()
-            .any(|export| export.head.module == SessionModule::lib(initial).module_name()));
-        let conflicting = commit_source(
-            &mut session,
-            b.private_scope(),
-            include_str!("fixtures/paired-instance-only.hs"),
-        );
-        assert_ne!(private, conflicting);
-        let b_intent = session.freeze_private_execution(&b).unwrap();
-        let b_publication = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), b_intent)
-                .unwrap(),
-        );
-        assert!(matches!(
-            session
-                .attempt_public_manifest(
-                    b_publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert!(matches!(
-            tidepool_testing::with_settlement(|settlement| session
-                .restage_declaration_publication(owner, intent)
-                .unwrap()
-                .certify(settlement))
-            .unwrap(),
-            CertifiedDeclarationPublication::Rejected(_)
-        ));
     }
 
     fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {

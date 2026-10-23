@@ -7,7 +7,7 @@ use super::*;
 use crate::session::paired_publication::{
     tests::{
         assert_allocation_preserves_publication_semantics, assert_original_writes,
-        reject_missing_export, reused_projection,
+        assert_tip_instance_counts, reject_missing_export, reused_projection,
     },
     AcceptedDeclarationPublication, CertifiedDeclarationPublication,
     DeclarationPublicationRejection, ExecutionPublication, FrozenWorldExecution,
@@ -1412,4 +1412,151 @@ fn paired_reused_projection_restores_detached_summary_under_original_interface()
         reopened.state.lib().scope_tip(public),
         continuation_generation
     );
+}
+
+#[test]
+fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/authored-inventory").unwrap(),
+        1,
+    )
+    .unwrap();
+    resident
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let baseline = begin_execution(&mut resident, &source, &owner);
+    let initial = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &baseline,
+        include_str!("fixtures/paired-rich-base.hs"),
+    );
+    let value_only = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &baseline,
+        include_str!("fixtures/paired-public-value-only.hs"),
+    );
+    assert!(resident
+        .state
+        .lib()
+        .log
+        .certified_authored_at(value_only)
+        .unwrap()
+        .instances()
+        .classes
+        .is_empty());
+    assert_tip_instance_counts(resident.state.lib(), value_only, 1, 1);
+    let baseline_intent = resident.freeze_private_execution(&baseline).unwrap();
+    let baseline_publication =
+        certify_declarations(&mut resident, &source, owner.clone(), baseline_intent);
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(
+                baseline_publication.stage().unwrap(),
+                &PublicationDecision::new()
+            )
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    let a = begin_execution(&mut resident, &source, &owner);
+    let b = begin_execution(&mut resident, &source, &owner);
+    let private = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &a,
+        include_str!("fixtures/paired-instance-only.hs"),
+    );
+    assert!(resident
+        .state
+        .lib()
+        .log
+        .certified_authored_at(private)
+        .unwrap()
+        .introduced_exports()
+        .is_empty());
+    let intent = resident.freeze_private_execution(&a).unwrap();
+    let accepted_a = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
+    assert_eq!(
+        accepted_a
+            .accepted_join_for_test()
+            .instances()
+            .classes
+            .len(),
+        2
+    );
+    assert_eq!(
+        accepted_a
+            .accepted_join_for_test()
+            .instances()
+            .families
+            .len(),
+        2
+    );
+    assert!(accepted_a
+        .accepted_join_for_test()
+        .exports()
+        .iter()
+        .any(|export| export.head.module == SessionModule::lib(initial).module_name()));
+    let conflicting = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &b,
+        include_str!("fixtures/paired-instance-only.hs"),
+    );
+    assert_ne!(private, conflicting);
+    let b_intent = resident.freeze_private_execution(&b).unwrap();
+    let b_publication = certify_declarations(&mut resident, &source, owner.clone(), b_intent);
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(b_publication.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    assert!(matches!(
+        source_action_with_original(
+            &mut resident,
+            source.original_source().clone(),
+            |resident, report| {
+                resident
+                    .state
+                    .restage_declaration_publication(owner, intent)
+                    .unwrap()
+                    .certify(report)
+            }
+        )
+        .unwrap(),
+        CertifiedDeclarationPublication::Rejected(_)
+    ));
 }

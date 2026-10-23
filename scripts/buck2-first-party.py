@@ -1342,6 +1342,7 @@ def runtime_world_publication_test_cases(binary):
         "paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
         "paired_reused_projection_keeps_nominal_owner_and_atomic_arbitration",
         "paired_reused_projection_restores_detached_summary_under_original_interface",
+        "paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix",
     )]
     tests.append("session::resident::world_cell_test_support::source_hidden_join::"
                  "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")
