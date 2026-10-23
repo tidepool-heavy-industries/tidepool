@@ -218,6 +218,10 @@ impl ScopedResolvedInputs {
         values: impl Iterator<Item = &'a Arc<ScopedResolvedValue>>,
     ) -> Result<(), SessionError> {
         session.validate_lexical_scope_lease(self.scope.scope(), &self.scope)?;
+        let mut values = values.peekable();
+        if values.peek().is_none() {
+            return Ok(());
+        }
         let reachable = session
             .bindings()
             .scope_reachable_binding_ids(session.scope_tree(), self.scope.scope())
@@ -242,6 +246,9 @@ impl ScopedResolvedInputs {
             .stages
             .get(&inputs.stage_first_ordinal())
             .ok_or(super::super::SessionTransitionReason::WrongPhase)?;
+        if stage.is_empty() {
+            return Ok(());
+        }
         let reachable = session
             .bindings()
             .scope_reachable_binding_ids(session.scope_tree(), self.scope.scope())
