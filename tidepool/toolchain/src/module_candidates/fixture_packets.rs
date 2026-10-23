@@ -5,7 +5,7 @@ mod codec;
 
 use super::*;
 use crate::certified_products::{
-    certify_products, decode_receipt_in, CertifiedProducts, ParsedModuleProducts,
+    certify_products, decode_receipt_in, CapturedProducts, CertifiedProducts, ParsedModuleProducts,
 };
 use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactModuleIdentity;
@@ -215,28 +215,19 @@ fn fixture_source_imports(
 // evidence. Selecting lexical visibility never selects a native implementation.
 fn admit_fixture_scope(
     producer_sha: [u8; 32],
-    certified: &CertifiedProducts,
+    captured: &CapturedProducts,
     exact_owners: &[ExactModuleIdentity],
     native_owners: &[ExactModuleIdentity],
     lexical_roots: &[ExactModuleIdentity],
 ) -> ExactDeclarationContext {
+    let certified = captured.data();
     let mut context = empty_fixture_scope(producer_sha);
     // Admit the complete interface closure before selecting any native
     // owner. Type-only dependencies cannot be inferred as packages.
-    let view = certified
-        .compiler_inputs()
-        .expect("fixture products passed physical cohort issuance")
-        .issued_artifacts()
-        .clone();
-    let support = crate::declaration_context::recover_fixture_compiler_support(
-        certified
-            .source_selection()
-            .compiler_projection(&view)
-            .unwrap(),
-        view.clone(),
-        [],
-    )
-    .unwrap();
+    let output = captured.compiler_inputs();
+    let view = output.issued_artifacts();
+    let support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output).unwrap();
     if !exact_owners.is_empty() {
         context = context
             .extend_issued_compiler_support(
@@ -316,14 +307,8 @@ fn admit_fixture_scope(
             crate::certified_products::validate_original_module_interface(product, canonical)
                 .expect("native custody must match its certified canonical module");
         }
-        let output = certified
-            .compiler_inputs()
-            .expect("fixture native products passed physical cohort issuance");
-        let closed =
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)
-                .unwrap();
         let requested = native_owners.iter().cloned().collect::<BTreeSet<_>>();
-        let selected = closed.source_support(&requested).unwrap();
+        let selected = support.source_support(&requested).unwrap();
         assert_eq!(
             selected
                 .projection()
@@ -645,7 +630,7 @@ fn source_boot_candidate_packet_producer() {
         )
         .expect("actual consumed source and resolution evidence");
         let evidence = source_admission.completed();
-        let mut certified = certify_products(
+        let pending = certify_products(
             None,
             &receipt,
             &parsed,
@@ -656,15 +641,16 @@ fn source_boot_candidate_packet_producer() {
             None,
         )
         .unwrap();
-        crate::declaration_context::issue_certified_product_native_availability(
+        let captured = crate::declaration_context::issue_certified_product_native_availability(
             producer_sha,
-            &mut certified,
+            pending,
             None,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
                 std::sync::Arc::clone(&operation),
             ),
         )
         .expect("actual captured products require physical cohort issuance");
+        let certified = captured.data();
         if !evidence.cache_safe || !evidence.selection_complete {
             assert!(
                 certified
@@ -676,7 +662,7 @@ fn source_boot_candidate_packet_producer() {
         }
         let context = admit_fixture_scope(
             producer_sha,
-            &certified,
+            &captured,
             &exact_owners,
             &native_owners,
             &lexical_roots,
@@ -688,7 +674,7 @@ fn source_boot_candidate_packet_producer() {
                 &evidence,
                 parsed,
                 &source,
-                &certified,
+                certified,
                 &requested,
                 packet.parent().unwrap(),
             );

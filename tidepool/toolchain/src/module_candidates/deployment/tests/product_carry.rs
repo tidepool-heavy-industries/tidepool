@@ -1687,7 +1687,7 @@ fn use_physical_candidate(fixture: &Fixture, bundle: &mut super::super::super::C
 fn admit_borrowed_catalog(
     fixture: &Fixture,
     selected: &super::super::super::CandidateSet,
-) -> Result<crate::certified_products::CertifiedProducts, Box<dyn std::error::Error>> {
+) -> Result<crate::certified_products::PendingProducts, Box<dyn std::error::Error>> {
     admit_borrowed_catalog_receipt(fixture, selected, &BTreeMap::new(), |_| {})
 }
 
@@ -1696,7 +1696,7 @@ fn admit_borrowed_catalog_receipt(
     selected: &super::super::super::CandidateSet,
     packages: &BTreeMap<(String, String), crate::certified_products::PackageInterfaceWitness>,
     change: impl FnOnce(&mut crate::certified_products::CertifiedReceipt),
-) -> Result<crate::certified_products::CertifiedProducts, Box<dyn std::error::Error>> {
+) -> Result<crate::certified_products::PendingProducts, Box<dyn std::error::Error>> {
     use crate::certified_products::{
         AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedReceipt,
         ParsedModuleProducts, ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
@@ -1805,7 +1805,7 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
             "catalog identity is not a fresh source observation"
         );
         let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
-        let accepted = &admitted.recovery_products[0];
+        let accepted = &admitted.data().recovery_products[0];
         assert_eq!(
             accepted.source_sha256(),
             Some(super::super::super::parse_sha(&bundle.source_sha256).unwrap())
@@ -1825,10 +1825,10 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
             .unwrap();
         use_physical_candidate(&fixture, bundle);
         let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
-        assert_eq!(accepted, &issued.recovery_products[0]);
+        assert_eq!(accepted, &issued.data().recovery_products[0]);
         assert!(!Arc::ptr_eq(
             accepted.facts(),
-            issued.recovery_products[0].facts()
+            issued.data().recovery_products[0].facts()
         ));
         // Keep semantic comparison before the reuse assertion so a no-reuse
         // sensitivity mutant distinguishes lost sharing from changed output.
@@ -1842,7 +1842,7 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
         let references = crate::recovery_artifacts::materialize_certified_products(
             durable.path(),
             producer,
-            &admitted.recovery_products,
+            &admitted.data().recovery_products,
         )
         .unwrap();
         let verified = references
@@ -1885,7 +1885,7 @@ fn cached_catalog_admission_reissues_a_changed_recipe_and_refuses_stale_source()
     // is a binding change, not permission to carry the old recipe into output.
     bundle.original_execution = None;
     let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
-    let rebound = &admitted.recovery_products[0];
+    let rebound = &admitted.data().recovery_products[0];
     assert!(rebound.execution_source().is_none());
     assert!(!Arc::ptr_eq(original.facts(), rebound.facts()));
     assert_eq!(original.product_bytes(), rebound.product_bytes());
@@ -1898,7 +1898,7 @@ fn cached_catalog_admission_reissues_a_changed_recipe_and_refuses_stale_source()
     bundle.original_execution = None;
     use_physical_candidate(&fixture, bundle);
     let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
-    assert_eq!(rebound, &issued.recovery_products[0]);
+    assert_eq!(rebound, &issued.data().recovery_products[0]);
 
     let source_path = selected.by_owner[&("u".into(), "Library".into())]
         .source
@@ -2033,7 +2033,7 @@ fn package_native_catalog_fixture(
         parsed,
         "target",
         super::super::super::CandidateVersionOrigin::Ordinary,
-        &issued.recovery_products,
+        &issued.data().recovery_products,
     );
     let output = fixture._root.path().join("native-products");
     export_under(
@@ -2072,14 +2072,14 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
         .deployment_original()
         .unwrap();
     let admitted = admit_borrowed_catalog_receipt(&fixture, &selected, &packages, |_| {}).unwrap();
-    assert_eq!(admitted.groups.len(), 1);
+    assert_eq!(admitted.data().groups.len(), 1);
     assert!(
-        matches!(admitted.groups[0].imports(), [crate::certified_products::ReceiptImportOwner::Package { unit, module, .. }]
+        matches!(admitted.data().groups[0].imports(), [crate::certified_products::ReceiptImportOwner::Package { unit, module, .. }]
         if unit == "external" && module == "External")
     );
     assert!(Arc::ptr_eq(
         original.facts(),
-        admitted.recovery_products[0].facts()
+        admitted.data().recovery_products[0].facts()
     ));
     let mut ordinary = borrow_catalog(&package).unwrap();
     let bundle = ordinary
@@ -2088,10 +2088,13 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
         .unwrap();
     use_physical_candidate(&fixture, bundle);
     let issued = admit_borrowed_catalog_receipt(&fixture, &ordinary, &packages, |_| {}).unwrap();
-    assert_eq!(admitted.recovery_products, issued.recovery_products);
+    assert_eq!(
+        admitted.data().recovery_products,
+        issued.data().recovery_products
+    );
     assert!(!Arc::ptr_eq(
         original.facts(),
-        issued.recovery_products[0].facts()
+        issued.data().recovery_products[0].facts()
     ));
     fs::write(path, b"changed-external-package-interface").unwrap();
     for candidates in [&selected, &ordinary] {
@@ -2167,16 +2170,22 @@ fn cached_catalog_metadata_uses_captured_owner_and_owned_physical_files() {
         .path()
         .join("relocated/nonphysical.hi.packages");
     let relocated = admit_borrowed_catalog(&fixture, &selected).unwrap();
-    assert_eq!(first.recovery_products, relocated.recovery_products);
+    assert_eq!(
+        first.data().recovery_products,
+        relocated.data().recovery_products
+    );
     assert!(Arc::ptr_eq(
-        first.recovery_products[0].facts(),
-        relocated.recovery_products[0].facts()
+        first.data().recovery_products[0].facts(),
+        relocated.data().recovery_products[0].facts()
     ));
 
     let mut ordinary = borrow_catalog(&package).unwrap();
     use_physical_candidate(&fixture, ordinary.by_owner.get_mut(&key).unwrap());
     let physical = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
-    assert_eq!(first.recovery_products, physical.recovery_products);
+    assert_eq!(
+        first.data().recovery_products,
+        physical.data().recovery_products
+    );
     let bundle = &ordinary.by_owner[&key];
     for path in [&bundle.iface_path, &bundle.package_imports_path] {
         let bytes = fs::read(path).unwrap();
