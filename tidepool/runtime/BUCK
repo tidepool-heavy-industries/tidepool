@@ -398,6 +398,7 @@ rust_filegroup(
         "src/session/fixtures/session-body-demand-support.hs": "tidepool/runtime/src/session/fixtures/session-body-demand-support.hs",
         "src/session/fixtures/shared_allocation_cell.hs": "tidepool/runtime/src/session/fixtures/shared_allocation_cell.hs",
         "src/session/fixtures/staged-world-first-demands.hs": "tidepool/runtime/src/session/fixtures/staged-world-first-demands.hs",
+        "src/session/fixtures/typed-segment-checked-resume.hs": "tidepool/runtime/src/session/fixtures/typed-segment-checked-resume.hs",
         "src/session/fixtures/typed-segment-illtyped.hs": "tidepool/runtime/src/session/fixtures/typed-segment-illtyped.hs",
         "src/session/fixtures/typed-segment-inline-historical-capture.hs": "tidepool/runtime/src/session/fixtures/typed-segment-inline-historical-capture.hs",
         "src/session/fixtures/typed-segment-let-generalization.hs": "tidepool/runtime/src/session/fixtures/typed-segment-let-generalization.hs",
@@ -452,6 +453,7 @@ rust_filegroup(
         "src/session/registry_properties.rs": "tidepool/runtime/src/session/registry_properties.rs",
         "src/session/render.rs": "tidepool/runtime/src/session/render.rs",
         "src/session/resident.rs": "tidepool/runtime/src/session/resident.rs",
+        "src/session/resident_paired_publication_tests.rs": "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "src/session/source_admission.rs": "tidepool/runtime/src/session/source_admission.rs",
         "src/session/staged_world_acceptance_tests.rs": "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "src/session/turn.rs": "tidepool/runtime/src/session/turn.rs",
@@ -460,6 +462,7 @@ rust_filegroup(
         "src/session/view.rs": "tidepool/runtime/src/session/view.rs",
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/session/world_cell_test_support.rs": "tidepool/runtime/src/session/world_cell_test_support.rs",
+        "src/session/world_cell_test_support/source_hidden_join.rs": "tidepool/runtime/src/session/world_cell_test_support/source_hidden_join.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
         "src/typed_receive_test_support.rs": "tidepool/runtime/src/typed_receive_test_support.rs",
         "tests/fixtures/PackageCafIsolation.hs": "tidepool/runtime/tests/fixtures/PackageCafIsolation.hs",
@@ -663,6 +666,7 @@ rust_filegroup(
         "src/session/fixtures/session-body-demand-support.hs": "tidepool/runtime/src/session/fixtures/session-body-demand-support.hs",
         "src/session/fixtures/shared_allocation_cell.hs": "tidepool/runtime/src/session/fixtures/shared_allocation_cell.hs",
         "src/session/fixtures/staged-world-first-demands.hs": "tidepool/runtime/src/session/fixtures/staged-world-first-demands.hs",
+        "src/session/fixtures/typed-segment-checked-resume.hs": "tidepool/runtime/src/session/fixtures/typed-segment-checked-resume.hs",
         "src/session/fixtures/typed-segment-illtyped.hs": "tidepool/runtime/src/session/fixtures/typed-segment-illtyped.hs",
         "src/session/fixtures/typed-segment-inline-historical-capture.hs": "tidepool/runtime/src/session/fixtures/typed-segment-inline-historical-capture.hs",
         "src/session/fixtures/typed-segment-let-generalization.hs": "tidepool/runtime/src/session/fixtures/typed-segment-let-generalization.hs",
@@ -717,6 +721,7 @@ rust_filegroup(
         "src/session/registry_properties.rs": "tidepool/runtime/src/session/registry_properties.rs",
         "src/session/render.rs": "tidepool/runtime/src/session/render.rs",
         "src/session/resident.rs": "tidepool/runtime/src/session/resident.rs",
+        "src/session/resident_paired_publication_tests.rs": "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "src/session/source_admission.rs": "tidepool/runtime/src/session/source_admission.rs",
         "src/session/staged_world_acceptance_tests.rs": "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "src/session/turn.rs": "tidepool/runtime/src/session/turn.rs",
@@ -725,6 +730,7 @@ rust_filegroup(
         "src/session/view.rs": "tidepool/runtime/src/session/view.rs",
         "src/session/workbench.rs": "tidepool/runtime/src/session/workbench.rs",
         "src/session/world_cell_test_support.rs": "tidepool/runtime/src/session/world_cell_test_support.rs",
+        "src/session/world_cell_test_support/source_hidden_join.rs": "tidepool/runtime/src/session/world_cell_test_support/source_hidden_join.rs",
         "src/span_blocking.rs": "tidepool/runtime/src/span_blocking.rs",
         "src/typed_receive_test_support.rs": "tidepool/runtime/src/typed_receive_test_support.rs",
         "tests/fixtures/PackageCafIsolation.hs": "tidepool/runtime/tests/fixtures/PackageCafIsolation.hs",
@@ -802,10 +808,12 @@ tidepool_rust_binary(
         "tidepool/runtime/src/session/package_runtime_tests.rs",
         "tidepool/runtime/src/session/paired_publication/linearization_tests.rs",
         "tidepool/runtime/src/session/registry_properties.rs",
+        "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "tidepool/runtime/src/session/turn_scaling_tests.rs",
         "tidepool/runtime/src/session/typed_segment_tests.rs",
         "tidepool/runtime/src/session/world_cell_test_support.rs",
+        "tidepool/runtime/src/session/world_cell_test_support/source_hidden_join.rs",
         "tidepool/runtime/src/typed_receive_test_support.rs",
     ],
     test_fixtures = [
@@ -920,6 +928,9 @@ tidepool_rust_test_cases(
     name = "runtime_world_owner_controls",
     binary = ":tidepool_runtime_unit_tests",
     exact_tests = [
+        "session::resident::activation_input_tests::frozen_activation_replays_same_input_and_refuses_second_private_input",
+        "session::resident::activation_input_tests::frozen_world_retry_keeps_completed_effect_and_original_binding",
+        "session::resident::activation_input_tests::frozen_world_unchanged_and_declaration_controls_preserve_source_refusals",
         "session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start",
         "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
         "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication",
@@ -927,11 +938,11 @@ tidepool_rust_test_cases(
         "session::resident::activation_input_tests::checked_declaration_cancellation_after_reservation_preserves_prefix",
         "session::resident::activation_input_tests::crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish",
     ],
-    expected_count = 6,
+    expected_count = 9,
     jobs = 1,
     timeout = 600,
     test_rule_timeout_ms = 1260000,
-    case_compiler_modes = {"session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start": "owned-resident", "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions": "owned-resident", "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication": "owned-resident", "session::resident::activation_input_tests::abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement": "owned-resident", "session::resident::activation_input_tests::checked_declaration_cancellation_after_reservation_preserves_prefix": "owned-resident", "session::resident::activation_input_tests::crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish": "owned-resident"},
+    case_compiler_modes = {"session::resident::activation_input_tests::frozen_activation_replays_same_input_and_refuses_second_private_input": "owned-resident", "session::resident::activation_input_tests::frozen_world_retry_keeps_completed_effect_and_original_binding": "owned-resident", "session::resident::activation_input_tests::frozen_world_unchanged_and_declaration_controls_preserve_source_refusals": "owned-resident", "session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start": "owned-resident", "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions": "owned-resident", "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication": "owned-resident", "session::resident::activation_input_tests::abandoned_private_mount_after_epoch_change_settles_only_after_scope_retirement": "owned-resident", "session::resident::activation_input_tests::checked_declaration_cancellation_after_reservation_preserves_prefix": "owned-resident", "session::resident::activation_input_tests::crossed_world_declarations_refuse_foreign_checked_prefixes_then_both_publish": "owned-resident"},
     env = {
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
@@ -1480,6 +1491,47 @@ tidepool_rust_test_cases(
     visibility = ["PUBLIC"],
 )
 
+tidepool_rust_test_cases(
+    name = "runtime_world_publication_histories",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = [
+        "session::resident::paired_publication_tests::paired_independent_authored_rebase_preserves_originals_and_current_winners",
+        "session::resident::paired_publication_tests::paired_first_authored_publication_preserves_atomic_visibility",
+        "session::resident::paired_publication_tests::paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
+        "session::resident::world_cell_test_support::source_hidden_join::paired_join_compiles_source_hidden_checked_bind_in_fresh_worker",
+    ],
+    expected_count = 4,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 2460000,
+    case_compiler_modes = {"session::resident::paired_publication_tests::paired_independent_authored_rebase_preserves_originals_and_current_winners": "owned-resident", "session::resident::paired_publication_tests::paired_first_authored_publication_preserves_atomic_visibility": "owned-resident", "session::resident::paired_publication_tests::paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners": "owned-resident", "session::resident::world_cell_test_support::source_hidden_join::paired_join_compiles_source_hidden_checked_bind_in_fresh_worker": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
 rust_compile_fail(
     name = "compile_fail_compiler_cell_program_requires_runtime_settlement",
     source = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.rs",
@@ -1531,6 +1583,29 @@ rust_compile_fail(
     expected = "tests/compile_fail/compiler_settled_no_reassociation.stderr",
     dependencies = {
         "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_frozen_execution_rejects_raw_write_selection",
+    source = "tests/compile_fail/frozen_execution_rejects_raw_write_selection.rs",
+    control = "tests/compile_pass/frozen_execution_rejects_raw_write_selection.rs",
+    expected = "tests/compile_fail/frozen_execution_rejects_raw_write_selection.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+    },
+    visibility = ["PUBLIC"],
+)
+
+rust_compile_fail(
+    name = "compile_fail_frozen_execution_rejects_recovered_compiler_context",
+    source = "tests/compile_fail/frozen_execution_rejects_recovered_compiler_context.rs",
+    control = "tests/compile_pass/frozen_execution_rejects_recovered_compiler_context.rs",
+    expected = "tests/compile_fail/frozen_execution_rejects_recovered_compiler_context.stderr",
+    dependencies = {
+        "tidepool_runtime": ":tidepool_runtime",
+        "tidepool_toolchain": "//tidepool/toolchain:tidepool_toolchain",
     },
     visibility = ["PUBLIC"],
 )
@@ -1884,6 +1959,7 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/session-body-demand-support.hs": "src/session/fixtures/session-body-demand-support.hs",
         "tidepool/runtime/src/session/fixtures/shared_allocation_cell.hs": "src/session/fixtures/shared_allocation_cell.hs",
         "tidepool/runtime/src/session/fixtures/staged-world-first-demands.hs": "src/session/fixtures/staged-world-first-demands.hs",
+        "tidepool/runtime/src/session/fixtures/typed-segment-checked-resume.hs": "src/session/fixtures/typed-segment-checked-resume.hs",
         "tidepool/runtime/src/session/fixtures/typed-segment-illtyped.hs": "src/session/fixtures/typed-segment-illtyped.hs",
         "tidepool/runtime/src/session/fixtures/typed-segment-inline-historical-capture.hs": "src/session/fixtures/typed-segment-inline-historical-capture.hs",
         "tidepool/runtime/src/session/fixtures/typed-segment-let-generalization.hs": "src/session/fixtures/typed-segment-let-generalization.hs",
@@ -1938,6 +2014,7 @@ filegroup(
         "tidepool/runtime/src/session/registry_properties.rs": "src/session/registry_properties.rs",
         "tidepool/runtime/src/session/render.rs": "src/session/render.rs",
         "tidepool/runtime/src/session/resident.rs": "src/session/resident.rs",
+        "tidepool/runtime/src/session/resident_paired_publication_tests.rs": "src/session/resident_paired_publication_tests.rs",
         "tidepool/runtime/src/session/source_admission.rs": "src/session/source_admission.rs",
         "tidepool/runtime/src/session/staged_world_acceptance_tests.rs": "src/session/staged_world_acceptance_tests.rs",
         "tidepool/runtime/src/session/turn.rs": "src/session/turn.rs",
@@ -1946,6 +2023,7 @@ filegroup(
         "tidepool/runtime/src/session/view.rs": "src/session/view.rs",
         "tidepool/runtime/src/session/workbench.rs": "src/session/workbench.rs",
         "tidepool/runtime/src/session/world_cell_test_support.rs": "src/session/world_cell_test_support.rs",
+        "tidepool/runtime/src/session/world_cell_test_support/source_hidden_join.rs": "src/session/world_cell_test_support/source_hidden_join.rs",
         "tidepool/runtime/src/span_blocking.rs": "src/span_blocking.rs",
         "tidepool/runtime/src/typed_receive_test_support.rs": "src/typed_receive_test_support.rs",
         "tidepool/runtime/tests/candidate_native_demand.rs": "tests/candidate_native_demand.rs",

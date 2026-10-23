@@ -51,27 +51,44 @@ struct AuthoredWrite {
 /// Each semantic certification owns a causal join reservation; storage retries
 /// retain that identity and its receipt.
 /// The private scope keeps live roots owned until publication or abandonment.
-pub struct FinalExecutionIntent {
+pub struct FrozenWorldExecution {
     owner_stamp: super::OwnerStamp,
     library: uuid::Uuid,
     private_view: super::PublicationViewWitness,
     durable_owner: Option<RecoveryPublicOwner>,
-    _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
+    _private_scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     admitted: PublicVisibilitySnapshot,
     admitted_context: Option<Arc<ExactDeclarationContext>>,
     private: PublicVisibilitySnapshot,
     private_base: Option<DeclarationTip>,
-    final_projection: Option<Arc<super::CertifiedDeclarationProjection>>,
-    final_surface: Option<AdmittedDeclarationSurface>,
-    writes: Vec<AuthoredWrite>,
+    declarations: FrozenDeclarations,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
     _completed_values: Vec<super::admission::CertifiedPrivateValueProof>,
-    /// Exact published World basis for a World execution. Finite executions
-    /// have no World intent and never synthesize one.
-    world: Option<WorldExecutionIntent>,
+    world: WorldExecutionIntent,
     pub(super) binding_policy: super::BindingPublicationPolicy,
+}
+
+pub(super) enum FrozenBindingSelection<'a> {
+    Completed,
+    ActivationInput(&'a super::RuntimeActivationPreviewAdmission),
+}
+
+/// Declaration facts are retained together; binding-only execution carries no
+/// declaration projection or surface assembled independently of its writes.
+enum FrozenDeclarations {
+    Bindings,
+    Declarations {
+        writes: Vec<AuthoredWrite>,
+        projection: FrozenDeclarationProjection,
+        surface: AdmittedDeclarationSurface,
+    },
+}
+
+enum FrozenDeclarationProjection {
+    Retained(Arc<super::CertifiedDeclarationProjection>),
+    NeedsCertification,
 }
 
 /// The exact published World association and admitted source facts a final
@@ -107,7 +124,7 @@ struct DeclarationHeadReplacement {
 /// Captured causal facts before selecting whether this attempt needs a join.
 struct CapturedDeclarationPublication {
     public: PublicManifestBase,
-    intent: Arc<FinalExecutionIntent>,
+    intent: Arc<FrozenWorldExecution>,
     current_public: Option<DeclarationTip>,
     public_context: Option<Arc<ExactDeclarationContext>>,
     surface: AdmittedDeclarationSurface,
@@ -123,7 +140,7 @@ static_assertions::assert_not_impl_any!(JoinReservation: Clone, Copy);
 pub struct DeclarationPublicationBase {
     pub(super) public: PublicManifestBase,
     reservation: JoinReservation,
-    intent: Arc<FinalExecutionIntent>,
+    intent: Arc<FrozenWorldExecution>,
     current_public: Option<DeclarationTip>,
     public_context: Option<Arc<ExactDeclarationContext>>,
     surface: AdmittedDeclarationSurface,
@@ -453,7 +470,14 @@ pub(super) fn merge_instances(
     Ok(selected)
 }
 
-impl FinalExecutionIntent {
+impl FrozenWorldExecution {
+    fn writes(&self) -> &[AuthoredWrite] {
+        match &self.declarations {
+            FrozenDeclarations::Bindings => &[],
+            FrozenDeclarations::Declarations { writes, .. } => writes,
+        }
+    }
+
     /// Names observed from the exact native identities selected for publication.
     pub fn native_binding_names(&self) -> Vec<String> {
         self.private
@@ -490,12 +514,12 @@ impl FinalExecutionIntent {
     pub(super) fn library(&self) -> uuid::Uuid {
         self.library
     }
-    pub(super) fn retained_private_scope(&self) -> Option<&Arc<super::RuntimeLexicalScopeLease>> {
-        self._private_scope_lease.as_ref()
+    pub(super) fn retained_private_scope(&self) -> &Arc<super::RuntimeLexicalScopeLease> {
+        &self._private_scope_lease
     }
 
-    pub(super) fn world(&self) -> Option<&WorldExecutionIntent> {
-        self.world.as_ref()
+    pub(super) fn world(&self) -> &WorldExecutionIntent {
+        &self.world
     }
     pub(super) fn owner_matches(
         &self,
@@ -506,36 +530,53 @@ impl FinalExecutionIntent {
 }
 
 impl PersistentSession {
-    /// Freeze the execution's final current writes once. Historical binding
-    /// writes shadowed within the same execution do not become final winners.
-    pub fn freeze_execution_intent(
+    /// Freeze the final writes selected by the completed private execution owner.
+    pub fn freeze_private_execution(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        self.freeze_execution_intent_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        self.freeze_private_execution_with_selection(admission, FrozenBindingSelection::Completed)
     }
 
-    pub(super) fn freeze_execution_intent_with_policy(
+    pub(super) fn freeze_private_execution_with_selection(
         &mut self,
         admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+        selection: FrozenBindingSelection<'_>,
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
+            || admission.session() != self.lib().session_id()
+            || admission.library != self.lib().compile_view_identity
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        if !self.scope_tree().is_live(admission.private_scope()) {
+            return Err(super::SessionTransitionReason::ScopeRevoked.into());
+        }
         let transition = admission.begin_freeze()?;
-        let result = self.freeze_execution_intent_locked_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            policy,
-        );
+        self.reconcile_private_visible_hosts(admission, true)?;
+        let world = self
+            .lib()
+            .tips
+            .get(&admission.private_scope())
+            .and_then(|tip| tip.inspection_world.as_ref())
+            .ok_or(SessionError::WorldCellPublicationBaseStale)?
+            .world
+            .clone();
+        let completed = admission.completed_frontier(&world)?;
+        let facts = admission.world_execution_facts();
+        let private_lease = completed.scope_lease().clone();
+        let result = super::RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source],
+            [private_lease, facts.public_target],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    || self.freeze_completed_execution(completed, selection),
+                )
+            },
+        )?;
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -544,212 +585,109 @@ impl PersistentSession {
         result
     }
 
-    /// The caller owns the Freezing exclusion from write selection through
-    /// final sealing. Acceptance and new authored starts cannot enter.
-    pub(super) fn freeze_execution_intent_locked(
+    fn freeze_completed_execution(
         &mut self,
-        admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        self.freeze_execution_intent_locked_with_policy(
-            admission,
-            write_ids,
-            source_keys,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )
-    }
-
-    fn freeze_execution_intent_locked_with_policy(
-        &mut self,
-        admission: &super::PrivateExecutionAdmission,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
-        let stale_reason = if !Arc::ptr_eq(&admission.owner, self.admission_owner()) {
-            Some("owner")
-        } else if admission.owner_epoch != self.admission_owner().epoch() {
-            Some("epoch")
-        } else if !self.has_lib() {
-            Some("library absent")
-        } else if admission.session() != self.lib().session_id() {
-            Some("session")
-        } else if admission.library != self.lib().compile_view_identity {
-            Some("compile view")
-        } else {
-            None
-        };
-        if let Some(reason) = stale_reason {
-            tracing::debug!(
-                target: "tidepool::session::private_host_mount",
-                %reason,
-                "private execution freeze identity refused"
-            );
-            return Err(SessionError::StaleStagedDeclaration);
+        completed: super::admission::CompletedPrivateFrontier<'_>,
+        selection: FrozenBindingSelection<'_>,
+    ) -> Result<Arc<FrozenWorldExecution>, SessionError> {
+        let admission = completed.admission();
+        if !Arc::ptr_eq(&admission.owner, self.admission_owner())
+            || admission.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
+            || admission.session() != self.lib().session_id()
+            || admission.library != self.lib().compile_view_identity
+        {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
         }
-        if let Some(intent) = admission.final_intent.get() {
-            let world_facts = admission.world_execution_facts();
-            if self
-                .public_visibility_snapshot_in(admission.private_scope())
-                .as_ref()
-                != Some(&intent.private)
-                || intent.library != self.lib().compile_view_identity
-                || !intent.private_view_is_current(self)
-                || intent.world.as_ref().is_none_or(|world| {
-                    let facts = &world_facts;
-                    !Arc::ptr_eq(&world.association, &facts.published)
-                        || !Arc::ptr_eq(&world.source, &facts.source)
-                        || !Arc::ptr_eq(&world.original_source, &facts.original_source)
-                        || !Arc::ptr_eq(&world.target, &facts.public_target)
-                        || self
-                            .lib()
-                            .tips
-                            .get(&admission.private_scope())
-                            .and_then(|tip| tip.inspection_world.as_ref())
-                            .is_none_or(|current| !Arc::ptr_eq(current, &world.private))
-                        || intent.admitted != facts.admitted
-                        || intent.admitted_context != facts.admitted_context
-                })
-            {
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            if write_ids.iter().any(|id| {
-                self.bindings()
-                    .get(*id)
-                    .is_none_or(|entry| entry.scope != admission.private_scope())
-            }) {
-                return Err(SessionError::InvalidPublicBindingPromotion(
-                    tidepool_codegen::binding_table::BindingPromotionError::MissingOrForeignBinding,
-                ));
-            }
-            let mut writes = write_ids
-                .into_iter()
-                .filter(|id| {
-                    intent
-                        .private
-                        .bindings
-                        .iter()
-                        .any(|(_, current)| current == id)
-                })
-                .collect::<Vec<_>>();
-            writes.sort_by_key(|id| id.raw());
-            writes.dedup();
-            let keys = source_keys
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            if writes != intent.write_ids
-                || keys != intent.source_keys
-                || policy != intent.binding_policy
-            {
-                return Err(invalid_at(
-                    &self.lib().root,
-                    "execution final intent is already frozen with different writes",
-                ));
-            }
-            return Ok(intent.clone());
-        }
-        self.reconcile_private_visible_hosts(admission, true)?;
-        let completed_values = admission.completed_values.lock();
+        let private_scope = admission.private_scope();
+        let private_scope_lease = completed.scope_lease().clone();
         let facts = admission.world_execution_facts();
-        let private = self
+        let private_world = self
             .lib()
             .tips
-            .get(&admission.private_scope())
+            .get(&private_scope)
             .and_then(|tip| tip.inspection_world.clone())
             .ok_or(SessionError::WorldCellPublicationBaseStale)?;
         if !self.inspection_world_base_is_current(
-            &private.base,
+            &private_world.base,
             &facts.source,
             &facts.original_source,
-        ) || !private.base.target.matches(&admission.scope_lease)
+        ) || !private_world.base.target.matches(&private_scope_lease)
         {
-            tracing::debug!(
-                target: "tidepool::session::private_host_mount",
-                key_current = self.compile_view_key_in(admission.private_scope()).as_ref()
-                    == Some(&private.base.key),
-                source_current = self.inspection_world_base_is_current(
-                    &private.base,
-                    &facts.source,
-                    &facts.original_source,
-                ),
-                target_current = private.base.target.matches(&admission.scope_lease),
-                "private execution freeze association refused"
-            );
             return Err(SessionError::WorldCellPublicationBaseStale);
         }
         let private_visibility = self
-            .public_visibility_snapshot_in(admission.private_scope())
-            .ok_or(SessionError::DeadScope(admission.private_scope()))?;
-        let host_progress = admission.accepted_host_progress();
-        if let Some(progress) = &host_progress {
-            tracing::debug!(target: "exomonad_harness::timing",
-                checked_execution_bindings = progress.checked_execution_bindings(),
-                host_interface_bindings = progress.host_interface_bindings(),
-                "private host binding progress issued");
+            .public_visibility_snapshot_in(private_scope)
+            .ok_or(super::SessionTransitionReason::ScopeRevoked)?;
+        let completed_values = admission.completed_values.lock();
+        let (mut write_ids, binding_policy) = match selection {
+            FrozenBindingSelection::Completed => {
+                let mut writes = Vec::new();
+                for (_, id) in &private_visibility.bindings {
+                    let entry = self
+                        .bindings()
+                        .get(*id)
+                        .ok_or(super::SessionTransitionReason::RetainedValueUnavailable)?;
+                    if entry.scope != private_scope {
+                        continue;
+                    }
+                    if let Some(proof) = completed_values.get(id) {
+                        if !proof.matches(entry) {
+                            return Err(super::SessionTransitionReason::PreparedValueChanged.into());
+                        }
+                        writes.push(*id);
+                    }
+                }
+                (writes, super::BindingPublicationPolicy::ExactPromotion)
+            }
+            FrozenBindingSelection::ActivationInput(input) => {
+                if input.source_lease().scope() != private_scope {
+                    return Err(super::SessionTransitionReason::ScopeRevoked.into());
+                }
+                (
+                    vec![input.binding()],
+                    super::BindingPublicationPolicy::ActivationInput,
+                )
+            }
+        };
+        write_ids.sort_by_key(|id| id.raw());
+        write_ids.dedup();
+        let source_keys = private_visibility.source_instances.clone();
+        if let Some(intent) = admission.final_intent.get() {
+            if intent.private != private_visibility
+                || !intent.private_view_is_current(self)
+                || !Arc::ptr_eq(&intent.world.private, &private_world)
+                || intent.binding_policy != binding_policy
+                || intent.write_ids != write_ids
+            {
+                return Err(super::SessionTransitionReason::WrongPhase.into());
+            }
+            return Ok(intent.clone());
         }
-        let progress = admission.publication_progress(&private.world)?;
-        let selection = self
+        let world_selection = self
             .bindings()
             .prepare_world_execution_selection_delta(
                 self.scope_tree(),
-                admission.private_scope(),
+                private_scope,
                 &private_visibility.source_selection,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let world = Some(WorldExecutionIntent {
+        let world = WorldExecutionIntent {
             association: facts.published,
             source: facts.source,
             original_source: facts.original_source,
             target: facts.public_target,
-            private,
-            progress,
-            selection,
-        });
-        let (admitted, admitted_context) = (facts.admitted, facts.admitted_context);
-        let intent = self.freeze_execution_intent_from_snapshot(
-            &admitted,
-            admitted_context,
-            admission.private_scope(),
-            write_ids,
-            source_keys,
-            Some(admission.scope_lease.clone()),
-            admission.durable_owner.clone(),
-            &completed_values,
-            world,
-            policy,
-        )?;
-        assert!(
-            admission.final_intent.set(intent.clone()).is_ok(),
-            "exclusive session checkout finalizes an admission once"
-        );
-        Ok(intent)
-    }
-
-    fn freeze_execution_intent_from_snapshot(
-        &mut self,
-        admitted: &PublicVisibilitySnapshot,
-        admitted_context: Option<Arc<ExactDeclarationContext>>,
-        private_scope: ScopeId,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-        private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
-        durable_owner: Option<RecoveryPublicOwner>,
-        completed_values: &std::collections::HashMap<
-            SessionVarId,
-            super::admission::CertifiedPrivateValueWrite,
-        >,
-        world: Option<WorldExecutionIntent>,
-        binding_policy: super::BindingPublicationPolicy,
-    ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
+            private: private_world,
+            progress: completed.publication(),
+            selection: world_selection,
+        };
+        let admitted = &facts.admitted;
+        let admitted_context = facts.admitted_context;
+        let durable_owner = admission.durable_owner.clone();
         if private_scope == admitted.scope || !self.scope_tree().is_live(private_scope) {
             return Err(SessionError::DeadScope(private_scope));
         }
-        let private = self
-            .public_visibility_snapshot_in(private_scope)
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
+        let private = private_visibility;
         let lib = self.lib();
         let chain = lib.log.chain_from_root(private.declaration_tip);
         let start = if admitted.declaration_tip == Generation(0) {
@@ -870,18 +808,12 @@ impl PersistentSession {
                 &source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        Ok(Arc::new(FinalExecutionIntent {
+        let intent = Arc::new(FrozenWorldExecution {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             library: lib.compile_view_identity,
-            private_view: match &world {
-                Some(world) => super::PublicationViewWitness::World {
-                    key: world.private.base.key.clone(),
-                    logical: *world.private.world.logical_id(),
-                },
-                None => super::PublicationViewWitness::Finite(
-                    self.compile_view_digest_in(private_scope)
-                        .ok_or(SessionError::StaleStagedDeclaration)?,
-                ),
+            private_view: super::PublicationViewWitness::World {
+                key: world.private.base.key.clone(),
+                logical: *world.private.world.logical_id(),
             },
             durable_owner,
             _private_scope_lease: private_scope_lease,
@@ -889,9 +821,20 @@ impl PersistentSession {
             admitted_context,
             private,
             private_base,
-            final_projection,
-            final_surface: final_declarations.map(|tip| tip.surface),
-            writes,
+            declarations: if writes.is_empty() {
+                FrozenDeclarations::Bindings
+            } else {
+                FrozenDeclarations::Declarations {
+                    writes,
+                    projection: final_projection.map_or(
+                        FrozenDeclarationProjection::NeedsCertification,
+                        FrozenDeclarationProjection::Retained,
+                    ),
+                    surface: final_declarations
+                        .ok_or(SessionError::StaleStagedDeclaration)?
+                        .surface,
+                }
+            },
             _completed_values: write_ids
                 .iter()
                 .filter_map(|id| completed_values.get(id).map(|proof| proof.proof.clone()))
@@ -901,21 +844,26 @@ impl PersistentSession {
             head_replacements,
             world,
             binding_policy,
-        }))
+        });
+        assert!(
+            admission.final_intent.set(intent.clone()).is_ok(),
+            "exclusive session checkout finalizes an admission once"
+        );
+        Ok(intent)
     }
 
     /// Capture only the latest public merge baseline for a fixed execution.
     pub fn restage_execution_publication(
         &mut self,
         owner: RecoveryPublicOwner,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         self.restage_execution_target(Some(owner), intent)
     }
 
     pub fn restage_ephemeral_execution_publication(
         &mut self,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         self.restage_execution_target(None, intent)
     }
@@ -923,7 +871,7 @@ impl PersistentSession {
     fn restage_execution_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<ExecutionPublication, SessionError> {
         let base = self.capture_declaration_target(owner, intent)?;
         let declaration_conflict = base.current_public.as_ref().is_some_and(|tip| {
@@ -934,7 +882,7 @@ impl PersistentSession {
                 })
             })
         });
-        if base.intent.writes.is_empty() && !declaration_conflict {
+        if base.intent.writes().is_empty() && !declaration_conflict {
             Ok(ExecutionPublication::Bindings(base.public))
         } else {
             Ok(ExecutionPublication::Declarations(
@@ -947,7 +895,7 @@ impl PersistentSession {
     pub fn restage_declaration_publication(
         &mut self,
         owner: RecoveryPublicOwner,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
         self.restage_declaration_target(Some(owner), intent)
     }
@@ -955,7 +903,7 @@ impl PersistentSession {
     fn restage_declaration_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
         let captured = self.capture_declaration_target(owner, intent)?;
         self.reserve_declaration_target(captured)
@@ -964,15 +912,9 @@ impl PersistentSession {
     fn capture_declaration_target(
         &mut self,
         owner: Option<RecoveryPublicOwner>,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> Result<CapturedDeclarationPublication, SessionError> {
-        if !intent.owner_stamp.matches(self.admission_owner())
-            || !self.has_lib()
-            || intent.library != self.lib().compile_view_identity
-            || !intent.private_view_is_current(self)
-        {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
+        self.validate_world_execution_base(&intent)?;
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
@@ -982,11 +924,11 @@ impl PersistentSession {
             intent.private.scope,
             intent.write_ids.clone(),
             intent.source_keys.clone(),
-            intent.world(),
+            Some(intent.world()),
         )?;
         public.intent = super::PublicationIntent::Final(intent.clone());
         if public.semantic.expected_private != intent.private {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(super::SessionTransitionReason::PreparedValueChanged.into());
         }
         let current_public = tip(self.lib(), public.semantic.expected_public.declaration_tip)?;
         let public_context = self
@@ -996,7 +938,7 @@ impl PersistentSession {
             .as_ref()
             .map(|tip| tip.surface.clone())
             .unwrap_or_default();
-        for write in &intent.writes {
+        for write in intent.writes() {
             surface = write.evidence.extend_source_surface(&surface)?;
         }
         Ok(CapturedDeclarationPublication {
@@ -1023,11 +965,7 @@ impl PersistentSession {
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         // World joins resolve only their owned interfaces and declared packages.
-        let includes = if intent.world().is_some() {
-            Vec::new()
-        } else {
-            self.lib().extra_include.clone()
-        };
+        let includes = Vec::new();
         Ok(DeclarationPublicationBase {
             reservation: JoinReservation {
                 generation: reserved,
@@ -1041,30 +979,6 @@ impl PersistentSession {
             session_root: self.lib().root.clone(),
             expected_public_version,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_declaration_publication(
-        &mut self,
-        owner: RecoveryPublicOwner,
-        admitted: &PublicVisibilitySnapshot,
-        private_scope: ScopeId,
-        write_ids: Vec<SessionVarId>,
-        source_keys: Vec<SourceLeaseKey>,
-    ) -> Result<DeclarationPublicationBase, SessionError> {
-        let intent = self.freeze_execution_intent_from_snapshot(
-            admitted,
-            self.lib().current_exact_context_in(admitted.scope),
-            private_scope,
-            write_ids,
-            source_keys,
-            None,
-            Some(owner.clone()),
-            &std::collections::HashMap::new(),
-            None,
-            super::BindingPublicationPolicy::ExactPromotion,
-        )?;
-        self.restage_declaration_publication(owner, intent)
     }
 
     pub fn revalidate_declaration_rejection(
@@ -1155,7 +1069,7 @@ impl DeclarationPublicationBase {
             .as_ref()
             .map(|tip| tip.families.clone())
             .unwrap_or_default();
-        for write in &self.intent.writes {
+        for write in self.intent.writes() {
             exports.retain(|export| !write.retractions.contains(&export.head));
             for introduced in write.evidence.introduced_exports() {
                 exports.retain(|export| {
@@ -1192,19 +1106,26 @@ impl DeclarationPublicationBase {
         {
             return None;
         }
-        let projection = self.intent.final_projection.as_ref()?;
+        let FrozenDeclarations::Declarations {
+            projection: FrozenDeclarationProjection::Retained(projection),
+            surface,
+            ..
+        } = &self.intent.declarations
+        else {
+            return None;
+        };
         let receipt = projection.receipt();
-        let final_write = self.intent.writes.last()?;
+        let final_write = self.intent.writes().last()?;
         if final_write.generation != self.intent.private.declaration_tip
             || selection.exports != canonical_exports(receipt.exports())
             || selection.instances != *receipt.instances()
             || selection.families != receipt.family_closure()
-            || self.intent.final_surface.as_ref() != Some(&self.surface)
+            || surface != &self.surface
         {
             return None;
         }
         let products = projection.context().recovery_products();
-        if self.intent.writes.iter().any(|write| {
+        if self.intent.writes().iter().any(|write| {
             !products
                 .iter()
                 .any(|product| product.owner() == write.evidence.product().owner())
@@ -1216,7 +1137,7 @@ impl DeclarationPublicationBase {
     pub fn reserved_generation(&self) -> Generation {
         self.reservation.generation
     }
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.intent
     }
 
@@ -1247,7 +1168,7 @@ impl DeclarationPublicationBase {
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let authored = self
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| write.evidence.clone())
             .collect::<Vec<_>>();
@@ -1283,7 +1204,7 @@ impl DeclarationPublicationBase {
             })
         };
         let mut writes = Vec::new();
-        for write in &self.intent.writes {
+        for write in self.intent.writes() {
             writes.push(DeclarationWrite {
                 generation: write.generation.0,
                 module: anchor(&module_owner(&write.evidence))?,
@@ -1306,7 +1227,7 @@ impl DeclarationPublicationBase {
                 .transpose()?,
             private_tip: self
                 .intent
-                .writes
+                .writes()
                 .last()
                 .map(|write| module_owner(&write.evidence))
                 .or_else(|| {
@@ -1359,7 +1280,7 @@ impl AcceptedDeclarationPublication {
     pub fn reserved_generation(&self) -> Generation {
         self.base.reservation.generation
     }
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.base.intent
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
@@ -1409,7 +1330,7 @@ impl AcceptedDeclarationPublication {
                 .collect();
             let mut implementation_refs = base
                 .intent
-                .writes
+                .writes()
                 .iter()
                 .map(|write| write.generation)
                 .collect::<Vec<_>>();
@@ -1423,7 +1344,7 @@ impl AcceptedDeclarationPublication {
                 .as_ref()
                 .map(|tip| tip.turn.workbench_imports.clone())
                 .unwrap_or_default();
-            for write in &base.intent.writes {
+            for write in base.intent.writes() {
                 workbench_imports.extend(&write.turn.workbench_imports);
             }
             let context_root = prepared.root().clone();
@@ -1471,13 +1392,13 @@ impl AcceptedDeclarationPublication {
             .current_public
             .as_ref()
             .map(|tip| tip.turn.clone())
-            .unwrap_or_else(|| base.intent.writes[0].turn.clone());
+            .unwrap_or_else(|| base.intent.writes()[0].turn.clone());
         if base.current_public.is_none() {
             turn.items.clear();
             turn.value_types.clear();
             turn.workbench_imports = super::SourceImports::new();
         }
-        for write in &base.intent.writes {
+        for write in base.intent.writes() {
             turn.items.retain(|item| {
                 !write
                     .retractions
@@ -1505,7 +1426,7 @@ impl AcceptedDeclarationPublication {
             .collect::<Result<Vec<_>, _>>()?;
         let private_owners = base
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| module_owner(&write.evidence))
             .collect::<BTreeSet<_>>();
@@ -1552,7 +1473,7 @@ impl AcceptedDeclarationPublication {
         };
         let source_domain_owners = base
             .intent
-            .writes
+            .writes()
             .iter()
             .map(|write| write.evidence.product().owner().clone())
             .collect();
@@ -1576,7 +1497,7 @@ impl AcceptedDeclarationPublication {
 }
 
 impl RejectedDeclarationPublication {
-    pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
+    pub fn intent(&self) -> &Arc<FrozenWorldExecution> {
         &self.base.intent
     }
 }
@@ -1632,7 +1553,7 @@ mod linearization_tests;
 mod semantic_currency_tests;
 
 #[cfg(test)]
-mod tests {
+pub(in crate::session) mod tests {
     use super::*;
     use crate::session::{
         ModuleEnv, PublicManifestCommit, PublicationDecision, PublicationPhase, SessionId,
@@ -1651,6 +1572,85 @@ mod tests {
                     rejected.receipt.outcome()
                 )
             }
+        }
+    }
+
+    pub(in crate::session) fn reject_missing_export(
+        first: AcceptedDeclarationPublication,
+        authored: &Arc<tidepool_toolchain::declaration_join::CertifiedAuthoredDeclaration>,
+    ) -> RejectedDeclarationPublication {
+        let surface = authored
+            .extend_source_surface(&AdmittedDeclarationSurface::default())
+            .unwrap();
+        let context = ExactDeclarationContext::empty()
+            .admit_authored_publication(std::slice::from_ref(authored), &surface)
+            .unwrap();
+        let scratch = Arc::new(tempfile::tempdir().unwrap());
+        let join_inputs = context
+            .publication_join_inputs(scratch.clone(), &surface)
+            .unwrap();
+        let original = join_inputs
+            .interface(&ExactModuleIdentity {
+                unit: authored.product().owner().unit.clone(),
+                module: authored.product().owner().module.clone(),
+            })
+            .unwrap();
+        let anchor = ModuleSnapshot {
+            module: original.module.clone(),
+            path: original.path.clone(),
+            sha256: original.sha256.clone(),
+        };
+        let mut input = first.receipt.input().clone();
+        input.private_tip = Some(anchor.clone());
+        input.writes[0].module = anchor;
+        input.reserved.path = scratch.path().join("rejected.hi");
+        input.expected_exports[0]
+            .head
+            .occurrence
+            .push_str("Missing");
+        let CertifiedPublicationJoin::Rejected(receipt) =
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::declaration_join::certify_publication_join(
+                    tidepool_toolchain::declaration_join::DeclarationJoinSpec {
+                        expected_public_version: input.expected_public_version,
+                        public_module: input.public_module,
+                        private_base: input.private_base,
+                        private_tip: input.private_tip,
+                        writes: input.writes,
+                        reserved: input.reserved,
+                        family_closure: input.family_closure,
+                        expected_exports: input.expected_exports,
+                        expected_instances: input.expected_instances,
+                    },
+                    join_inputs,
+                    &first.base.includes,
+                    &first.base.session_root,
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("expected protected inventory rejection");
+        };
+        RejectedDeclarationPublication {
+            base: first.base,
+            receipt,
+        }
+    }
+
+    pub(in crate::session) fn assert_original_writes(
+        intent: &FrozenWorldExecution,
+        lib: &SessionLib,
+        expected: &[(Generation, usize)],
+    ) {
+        assert_eq!(intent.writes().len(), expected.len());
+        for (write, (generation, retractions)) in intent.writes().iter().zip(expected) {
+            assert_eq!(write.generation, *generation);
+            assert_eq!(write.retractions.len(), *retractions);
+            assert!(Arc::ptr_eq(
+                &lib.log.certified_authored_arc_at(*generation).unwrap(),
+                &write.evidence,
+            ));
         }
     }
 
@@ -1720,9 +1720,7 @@ mod tests {
                 "answer :: Int\nanswer = 42",
             );
             let projection = session.lib().log.projection_at(original).unwrap().clone();
-            let intent = session
-                .freeze_execution_intent(&execution, vec![], vec![])
-                .unwrap();
+            let intent = session.freeze_private_execution(&execution).unwrap();
             let restage = |session: &mut PersistentSession| {
                 if durable {
                     session
@@ -1885,9 +1883,7 @@ mod tests {
             execution.private_scope(),
             "answer :: Int\nanswer = 42",
         );
-        let intent = session
-            .freeze_execution_intent(&execution, vec![], vec![])
-            .unwrap();
+        let intent = session.freeze_private_execution(&execution).unwrap();
         let publication = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
@@ -1944,9 +1940,7 @@ mod tests {
             continuation.private_scope(),
             "next :: Int\nnext = answer + 1",
         );
-        let continuation = reopened
-            .freeze_execution_intent(&continuation, vec![], vec![])
-            .unwrap();
+        let continuation = reopened.freeze_private_execution(&continuation).unwrap();
         let publication = accepted(
             reopened
                 .restage_declaration_publication(owner, continuation.clone())
@@ -1998,9 +1992,7 @@ mod tests {
             include_str!("fixtures/paired-rich-base.hs"),
         );
         let projection = session.lib().log.projection_at(original).unwrap().clone();
-        let intent = session
-            .freeze_execution_intent(&execution, vec![], vec![])
-            .unwrap();
+        let intent = session.freeze_private_execution(&execution).unwrap();
         let base = session
             .restage_declaration_publication(owner.clone(), intent.clone())
             .unwrap();
@@ -2110,7 +2102,7 @@ mod tests {
                 insertion_order.push(generation);
                 private_generations.push(generation);
             }
-            let intent = session.freeze_execution_intent(&execution, vec![], vec![]).unwrap();
+            let intent = session.freeze_private_execution(&execution).unwrap();
             let private = session.public_visibility_snapshot_in(execution.private_scope()).unwrap();
             let old = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
             let old_generation = old.reserved_generation();
@@ -2120,7 +2112,7 @@ mod tests {
                 let concurrent = session.begin_private_execution(public).unwrap();
                 let original = commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
                 insertion_order.push(original);
-                let concurrent_intent = session.freeze_execution_intent(&concurrent, vec![], vec![]).unwrap();
+                let concurrent_intent = session.freeze_private_execution(&concurrent).unwrap();
                 let base = session.restage_declaration_publication(owner.clone(), concurrent_intent).unwrap();
                 let concurrent_publication = accepted(base);
                 proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
@@ -2183,7 +2175,7 @@ mod tests {
 
     fn ephemeral_binding_stage(
         session: &mut PersistentSession,
-        intent: Arc<FinalExecutionIntent>,
+        intent: Arc<FrozenWorldExecution>,
     ) -> StagedPublicManifest {
         let ExecutionPublication::Bindings(base) = session
             .restage_ephemeral_execution_publication(intent)
@@ -2215,12 +2207,8 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 702);
         let b_id = b_value.id;
         session.bind_in(b.private_scope(), b_value).unwrap();
-        let a_intent = session
-            .freeze_execution_intent(&a, vec![a_id], vec![])
-            .unwrap();
-        let b_intent = session
-            .freeze_execution_intent(&b, vec![b_id], vec![])
-            .unwrap();
+        let a_intent = session.freeze_private_execution(&a).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let stale_a = ephemeral_binding_stage(&mut session, a_intent.clone());
         let b_stage = ephemeral_binding_stage(&mut session, b_intent);
         assert!(matches!(
@@ -2262,9 +2250,7 @@ mod tests {
         assert!(session.bindings().get(b_id).is_some());
         assert!(session.lib().durable_graph.is_none());
         assert!(Arc::ptr_eq(
-            &session
-                .freeze_execution_intent(&a, vec![a_id], vec![])
-                .unwrap(),
+            &session.freeze_private_execution(&a).unwrap(),
             &a_intent
         ));
     }
@@ -2290,9 +2276,7 @@ mod tests {
         session.bind_in(admission.private_scope(), value).unwrap();
         let before_freeze = session.lib().generation();
         let before_freeze_revision = session.lib().log.publication_revision();
-        let intent = session
-            .freeze_execution_intent(&admission, vec![id], vec![])
-            .unwrap();
+        let intent = session.freeze_private_execution(&admission).unwrap();
         assert_eq!(session.lib().generation(), before_freeze);
         assert_eq!(
             session.lib().log.publication_revision(),
@@ -2323,22 +2307,26 @@ mod tests {
         // A reserved node can settle without changing the generation counter.
         let generation = session.lib().generation();
         let revision = session.lib().log.publication_revision();
-        assert!(session.lib_mut().log.commit_reserved_authored(
-            unrelated,
-            DeclTurn {
-                normalized: DeclarationSource {
-                    prologue: Default::default(),
-                    body: String::new()
+        session
+            .lib_mut()
+            .log
+            .commit_reserved_authored(
+                unrelated,
+                DeclTurn {
+                    normalized: DeclarationSource {
+                        prologue: Default::default(),
+                        body: String::new(),
+                    },
+                    external_imports: SourceImports::new(),
+                    sources: Vec::new(),
+                    workbench_imports: SourceImports::new(),
+                    items: Vec::new(),
+                    value_types: BTreeMap::new(),
+                    retracts: Vec::new(),
+                    parent: None,
                 },
-                external_imports: SourceImports::new(),
-                sources: Vec::new(),
-                workbench_imports: SourceImports::new(),
-                items: Vec::new(),
-                value_types: BTreeMap::new(),
-                retracts: Vec::new(),
-                parent: None,
-            }
-        ));
+            )
+            .unwrap();
         assert_eq!(session.lib().generation(), generation);
         assert_ne!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();
@@ -2383,18 +2371,14 @@ mod tests {
         let mut first = make();
         let public = first.mint_isolated_scope();
         let admission = first.begin_ephemeral_private_execution(public).unwrap();
-        let intent = first
-            .freeze_execution_intent(&admission, vec![], vec![])
-            .unwrap();
+        let intent = first.freeze_private_execution(&admission).unwrap();
         let ticket = ephemeral_binding_stage(&mut first, intent.clone());
         let mut second = make();
         let second_public = second.mint_isolated_scope();
         let second_admission = second
             .begin_ephemeral_private_execution(second_public)
             .unwrap();
-        second
-            .freeze_execution_intent(&second_admission, vec![], vec![])
-            .unwrap();
+        second.freeze_private_execution(&second_admission).unwrap();
         assert_eq!(
             first.public_visibility_snapshot_in(public),
             second.public_visibility_snapshot_in(second_public)
@@ -2433,9 +2417,7 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let private = first.begin_private_execution(public).unwrap();
-        let intent = first
-            .freeze_execution_intent(&private, vec![], vec![])
-            .unwrap();
+        let intent = first.freeze_private_execution(&private).unwrap();
         let ExecutionPublication::Bindings(base) = first
             .restage_execution_publication(owner.clone(), intent.clone())
             .unwrap()
@@ -2539,10 +2521,8 @@ mod tests {
             session.retract_many_in(withdrawal.private_scope(), &["%%".into()], settlement)
         })
         .unwrap();
-        let withdrawn = session
-            .freeze_execution_intent(&withdrawal, vec![], vec![])
-            .unwrap();
-        assert_eq!(withdrawn.writes[0].retractions.len(), 2);
+        let withdrawn = session.freeze_private_execution(&withdrawal).unwrap();
+        assert_eq!(withdrawn.writes()[0].retractions.len(), 2);
         let withdrawn_proof = accepted(
             session
                 .restage_declaration_publication(owner.clone(), withdrawn)
@@ -2553,12 +2533,10 @@ mod tests {
             .exports()
             .iter()
             .any(|export| export.head.occurrence == "%%"));
-        let intent = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
-            .unwrap();
-        assert_eq!(intent.writes[0].retractions.len(), 1);
+        let intent = session.freeze_private_execution(&a).unwrap();
+        assert_eq!(intent.writes()[0].retractions.len(), 1);
         assert_eq!(
-            intent.writes[0].retractions[0].namespace,
+            intent.writes()[0].retractions[0].namespace,
             ExportNamespace::Value
         );
         let publication = accepted(
@@ -2612,10 +2590,8 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 501);
         let value_id = value.id;
         session.bind_in(a.private_scope(), value).unwrap();
-        let intent = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
-            .unwrap();
-        assert!(intent.writes.is_empty());
+        let intent = session.freeze_private_execution(&a).unwrap();
+        assert!(intent.writes().is_empty());
         assert!(matches!(
             session
                 .restage_execution_publication(owner.clone(), intent.clone())
@@ -2628,7 +2604,7 @@ mod tests {
             b.private_scope(),
             include_str!("fixtures/paired-late-operator.hs"),
         );
-        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let b_stage = accepted(
             session
                 .restage_declaration_publication(owner.clone(), b_intent)
@@ -2744,7 +2720,7 @@ mod tests {
             .unwrap()
             .introduced_exports()
             .is_empty());
-        let intent = session.freeze_execution_intent(&a, vec![], vec![]).unwrap();
+        let intent = session.freeze_private_execution(&a).unwrap();
         let accepted_a = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
@@ -2763,7 +2739,7 @@ mod tests {
             include_str!("fixtures/paired-instance-only.hs"),
         );
         assert_ne!(private, conflicting);
-        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let b_publication = accepted(
             session
                 .restage_declaration_publication(owner.clone(), b_intent)
@@ -2789,969 +2765,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn paired_independent_authored_rebase_preserves_originals_and_current_winners() {
-        use tidepool_toolchain::artifact_inventory::ArtifactBindingNode;
-
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let private_a = session.mint_detached_scope(public).unwrap();
-        let private_b = session.mint_detached_scope(public).unwrap();
-        let owner =
-            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/rebase").unwrap(), 1)
-                .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        for (scope, source) in [
-            (private_a, include_str!("fixtures/paired-rebase-A.hs")),
-            (private_b, include_str!("fixtures/paired-rebase-B.hs")),
-        ] {
-            let receipt = tidepool_testing::with_settlement(|settlement| {
-                session.lib().declaration_receipt(&[source], settlement)
-            })
-            .unwrap()
-            .unwrap();
-            let (candidate, values) = session
-                .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
-                .unwrap();
-            let staged = tidepool_testing::with_settlement(|settlement| {
-                crate::session::validate_declaration_candidate(
-                    candidate,
-                    session.lib().include_dir(),
-                    settlement,
-                )
-            })
-            .unwrap()
-            .with_visible_values(values);
-            session.adopt_staged_declaration_in(staged).unwrap();
-        }
-        let original_a = session.lib().scope_tip(private_a);
-        let original_b = session.lib().scope_tip(private_b);
-        // This history preserves independently authored native closures through
-        // publication and recovery. Equal-payload issuer affinity is a separate
-        // compiler-source merge contract, not an independent-compile premise.
-        let branch_closures =
-            [(private_a, original_a), (private_b, original_b)].map(|(scope, generation)| {
-                let context = session.lib().current_exact_context_in(scope).unwrap();
-                let artifacts = context.artifact_view();
-                let graph = artifacts.capture_graph_selection();
-                let original = context.authored_native_root(generation.0).unwrap();
-                let edges = artifacts.binding_dependencies();
-                let mut closure = graph
-                    .native_groups
-                    .iter()
-                    .filter(|group| group.binding.artifact() == original)
-                    .copied()
-                    .map(ArtifactBindingNode::Group)
-                    .collect::<BTreeSet<_>>();
-                assert!(!closure.is_empty(), "authored body has native groups");
-                loop {
-                    let before = closure.len();
-                    for (source, target, _) in &edges {
-                        if closure.contains(source) {
-                            closure.insert(*target);
-                        }
-                    }
-                    if closure.len() == before {
-                        break;
-                    }
-                }
-                let required_edges = edges
-                    .into_iter()
-                    .filter(|(source, _, _)| closure.contains(source))
-                    .collect::<Vec<_>>();
-                (closure, required_edges)
-            });
-        let authored_b = session
-            .lib()
-            .log
-            .certified_authored_arc_at(original_b)
-            .unwrap();
-        let value_a =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "fromA", 73);
-        let value_a_id = value_a.id;
-        session.bind_in(private_a, value_a).unwrap();
-        let value_b =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "fromB", 74);
-        let value_b_id = value_b.id;
-        session.bind_in(private_b, value_b).unwrap();
-
-        let old_b = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private_b,
-                    vec![value_b_id],
-                    vec![],
-                )
-                .unwrap(),
-        )
-        .stage()
-        .unwrap();
-        let first = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private_a,
-                    vec![value_a_id],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        let first_generation = first.base.reservation.generation;
-        assert!(matches!(
-            session
-                .attempt_public_manifest(first.stage().unwrap(), &PublicationDecision::new(),)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        let first_public = session.public_visibility_snapshot_in(public).unwrap();
-        let decision = PublicationDecision::new();
-        assert!(matches!(
-            session.attempt_public_manifest(old_b, &decision).unwrap(),
-            crate::session::PublicationAttempt::Rebase(_)
-        ));
-        assert_eq!(decision.phase(), PublicationPhase::Running);
-        assert_eq!(
-            session.public_visibility_snapshot_in(public).unwrap(),
-            first_public
-        );
-
-        let cancelled = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private_b,
-                    vec![value_b_id],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        assert_eq!(
-            cancelled
-                .receipt
-                .input()
-                .public_module
-                .as_ref()
-                .unwrap()
-                .module,
-            SessionModule::lib(first_generation).module_name()
-        );
-        let cancellation = PublicationDecision::new();
-        cancellation.request_cancellation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(cancelled.stage().unwrap(), &cancellation,)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Cancelled
-        ));
-        assert_eq!(
-            session.public_visibility_snapshot_in(public).unwrap(),
-            first_public
-        );
-
-        let retry = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private_b,
-                    vec![value_b_id],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        assert!(Arc::ptr_eq(
-            &retry.base.intent.writes.last().unwrap().evidence,
-            &authored_b
-        ));
-        let generation = retry.base.reservation.generation;
-        let proof = retry.receipt.clone();
-        for (name, original) in [
-            ("keepA", original_a),
-            ("keepB", original_b),
-            ("answer", original_b),
-            ("PublicShape", original_b),
-        ] {
-            let export = proof
-                .exports()
-                .iter()
-                .find(|export| export.head.occurrence == name)
-                .unwrap();
-            assert_eq!(
-                export.head.module,
-                SessionModule::lib(original).module_name()
-            );
-        }
-        let shape = proof
-            .exports()
-            .iter()
-            .find(|export| export.head.occurrence == "PublicShape")
-            .unwrap();
-        assert_eq!(
-            shape
-                .children
-                .iter()
-                .map(|child| child.occurrence.as_str())
-                .collect::<Vec<_>>(),
-            vec!["NewShape"]
-        );
-        assert!(matches!(
-            session
-                .attempt_public_manifest(retry.stage().unwrap(), &decision,)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(decision.phase(), PublicationPhase::Published);
-        let published = session.public_visibility_snapshot_in(public).unwrap();
-        assert_eq!(published.declaration_tip, generation);
-        assert_eq!(published.epoch, first_public.epoch + 1);
-        assert!(published.bindings.contains(&("fromA".into(), value_a_id)));
-        assert!(published.bindings.contains(&("fromB".into(), value_b_id)));
-        let turn = session.lib().log.turn(generation).unwrap();
-        assert_eq!(turn.items.len(), 4);
-        assert!(turn.sources.is_empty());
-        assert_eq!(
-            turn.value_types.get("answer"),
-            session
-                .lib()
-                .log
-                .turn(original_b)
-                .unwrap()
-                .value_types
-                .get("answer")
-        );
-        let graph = crate::session::recovery_test_fixture::graph(session.lib());
-        let joined = graph.node(generation).unwrap().unwrap();
-        let mut expected_refs = vec![original_b, first_generation];
-        expected_refs.sort();
-        assert_eq!(joined.implementation_refs, expected_refs);
-        assert_eq!(joined.exports.len(), proof.exports().len());
-        assert!(joined.exports.iter().all(|export| {
-            export
-                .children
-                .iter()
-                .all(|child| child.occurrence != "OldShape")
-        }));
-        assert_eq!(
-            graph.public_surfaces().next().unwrap().declaration_root,
-            Some(generation)
-        );
-        session.retire_scope(private_a);
-        session.retire_scope(private_b);
-        assert!(session.bindings().get(value_a_id).is_some());
-        assert!(session.bindings().get(value_b_id).is_some());
-        let view = session.compile_view_in(public).unwrap();
-        let context = view.exact_declaration_context().unwrap();
-        assert_eq!(
-            context.lexical_graph().len(),
-            1 + session
-                .lib()
-                .log
-                .joined_at(generation)
-                .unwrap()
-                .surface
-                .lexical_graph()
-                .len()
-        );
-        assert!(context
-            .lexical_graph()
-            .iter()
-            .any(|node| node.owner.module == SessionModule::lib(generation).module_name()));
-        assert!(context.lexical_graph().iter().all(|node| {
-            ![original_a, original_b]
-                .iter()
-                .any(|original| node.owner.module == SessionModule::lib(*original).module_name())
-        }));
-        for original in [original_a, original_b] {
-            assert!(context.recovery_products().iter().any(|product| {
-                product.owner().module == SessionModule::lib(original).module_name()
-            }));
-        }
-        let materialized = proof.materialize(root.path()).unwrap();
-        assert!(materialized
-            .anchors
-            .iter()
-            .any(|anchor| anchor.module == SessionModule::lib(first_generation).module_name()));
-        tidepool_toolchain::recovery_artifacts::verify_materialized_join(
-            root.path(),
-            &materialized.join,
-        )
-        .unwrap();
-        let assert_closures = |context: &ExactDeclarationContext| {
-            let graph = context.artifact_view().capture_graph_selection();
-            let edges = context.artifact_view().binding_dependencies();
-            for (closure, required_edges) in &branch_closures {
-                for node in closure {
-                    assert!(
-                        match node {
-                            ArtifactBindingNode::Artifact(binding) =>
-                                graph.bindings.contains(binding),
-                            ArtifactBindingNode::Group(group) =>
-                                graph.native_groups.contains(group),
-                        },
-                        "publication lost exact historical dependency {node:?}"
-                    );
-                }
-                for edge in required_edges {
-                    assert!(
-                        edges.contains(edge),
-                        "publication lost exact native edge {edge:?}"
-                    );
-                }
-            }
-        };
-        assert_closures(context);
-        drop(view);
-        drop(graph);
-        drop(proof);
-        drop(materialized);
-        drop(authored_b);
-        drop(session);
-        let mut reopened_lib =
-            SessionLib::open(SessionId(995), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let reopened_recovery =
-            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
-        tidepool_testing::with_settlement(|settlement| {
-            reopened_recovery.attach_root(&mut reopened_lib, settlement)
-        })
-        .unwrap();
-        let mut reopened = PersistentSession::new(Some(reopened_lib), 1024 * 1024);
-        let public = reopened.recover_public_scope(&owner).unwrap();
-        assert_eq!(reopened.lib().scope_tip(public), generation);
-        let cold_view = reopened.compile_view_in(public).unwrap();
-        assert_closures(cold_view.exact_declaration_context().unwrap());
-    }
-
-    #[test]
-    fn paired_first_authored_publication_preserves_atomic_visibility() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let private = session.mint_detached_scope(public).unwrap();
-        let owner =
-            RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/paired").unwrap(), 1)
-                .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        let receipt = tidepool_testing::with_settlement(|settlement| {
-            session.lib().declaration_receipt(
-                &["data PrivateFlag = PrivateFlag\nanswer :: Int\nanswer = 42"],
-                settlement,
-            )
-        })
-        .unwrap()
-        .unwrap();
-        let (candidate, values) = session
-            .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
-            .unwrap();
-        let staged = tidepool_testing::with_settlement(|settlement| {
-            crate::session::validate_declaration_candidate(
-                candidate,
-                session.lib().include_dir(),
-                settlement,
-            )
-        })
-        .unwrap()
-        .with_visible_values(values);
-        session.adopt_staged_declaration_in(staged).unwrap();
-        assert_eq!(session.lib().scope_tip(private), Generation(1));
-        let authored = session
-            .lib()
-            .log
-            .certified_authored_arc_at(Generation(1))
-            .unwrap();
-
-        // The original declaration is compiled once. These value writes use
-        // genuine registered native roots, and are staged independently.
-        let old_answer =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "answer", 71);
-        let old_answer_id = old_answer.id;
-        session.bind_in(public, old_answer).unwrap();
-        let other =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "other", 72);
-        let other_id = other.id;
-        session.bind_in(private, other).unwrap();
-        let incarnation = session
-            .public_visibility_snapshot_in(public)
-            .unwrap()
-            .machine_incarnation;
-
-        let first = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private,
-                    vec![other_id],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        // Obtain a real protected rejection from the same owned closure. Only
-        // the expected inventory is wrong; no runtime validation is bypassed.
-        let surface = authored
-            .extend_source_surface(&AdmittedDeclarationSurface::default())
-            .unwrap();
-        let context = ExactDeclarationContext::empty()
-            .admit_authored_publication(std::slice::from_ref(&authored), &surface)
-            .unwrap();
-        let scratch = Arc::new(tempfile::tempdir().unwrap());
-        let join_inputs = context
-            .publication_join_inputs(scratch.clone(), &surface)
-            .unwrap();
-        let original = join_inputs
-            .interface(&ExactModuleIdentity {
-                unit: authored.product().owner().unit.clone(),
-                module: authored.product().owner().module.clone(),
-            })
-            .unwrap();
-        let anchor = ModuleSnapshot {
-            module: original.module.clone(),
-            path: original.path.clone(),
-            sha256: original.sha256.clone(),
-        };
-        let mut input = first.receipt.input().clone();
-        input.private_tip = Some(anchor.clone());
-        input.writes[0].module = anchor;
-        input.reserved.path = scratch.path().join("rejected.hi");
-        input.expected_exports[0]
-            .head
-            .occurrence
-            .push_str("Missing");
-        let CertifiedPublicationJoin::Rejected(receipt) =
-            tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::declaration_join::certify_publication_join(
-                    tidepool_toolchain::declaration_join::DeclarationJoinSpec {
-                        expected_public_version: input.expected_public_version,
-                        public_module: input.public_module,
-                        private_base: input.private_base,
-                        private_tip: input.private_tip,
-                        writes: input.writes,
-                        reserved: input.reserved,
-                        family_closure: input.family_closure,
-                        expected_exports: input.expected_exports,
-                        expected_instances: input.expected_instances,
-                    },
-                    join_inputs,
-                    &first.base.includes,
-                    &first.base.session_root,
-                    settlement,
-                )
-            })
-            .unwrap()
-        else {
-            panic!("expected protected inventory rejection");
-        };
-        let rejected = RejectedDeclarationPublication {
-            base: first.base,
-            receipt,
-        };
-        assert!(matches!(
-            session.revalidate_declaration_rejection(&rejected).unwrap(),
-            DeclarationPublicationRejection::Rejected { .. }
-        ));
-        let binding_stage = session
-            .snapshot_binding_publication(owner.clone(), public, private, vec![])
-            .unwrap()
-            .stage()
-            .unwrap();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(binding_stage, &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(
-            session.revalidate_declaration_rejection(&rejected).unwrap(),
-            DeclarationPublicationRejection::Stale
-        );
-
-        let cancelled_stage = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private,
-                    vec![other_id],
-                    vec![],
-                )
-                .unwrap(),
-        )
-        .stage()
-        .unwrap();
-        let cancelled = PublicationDecision::new();
-        cancelled.request_cancellation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(cancelled_stage, &cancelled)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Cancelled
-        ));
-        assert_eq!(session.lib().scope_tip(public), Generation(0));
-        assert!(session.bindings().get(old_answer_id).is_some());
-
-        let stale_stage = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    &admitted,
-                    private,
-                    vec![other_id],
-                    vec![],
-                )
-                .unwrap(),
-        )
-        .stage()
-        .unwrap();
-        session
-            .lib_mut()
-            .reserve_declaration_generations_durable(65)
-            .unwrap();
-        let decision = PublicationDecision::new();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(stale_stage, &decision)
-                .unwrap(),
-            crate::session::PublicationAttempt::RestageMetadata(_)
-        ));
-        assert_eq!(decision.phase(), PublicationPhase::Running);
-        assert_eq!(session.lib().scope_tip(public), Generation(0));
-
-        let retry = accepted(
-            session
-                .snapshot_declaration_publication(owner, &admitted, private, vec![other_id], vec![])
-                .unwrap(),
-        );
-        let generation = retry.base.reservation.generation;
-        let proof = retry.receipt.clone();
-        let ticket = retry.stage().unwrap();
-        let before_epoch = session.public_visibility_snapshot_in(public).unwrap().epoch;
-        assert!(matches!(
-            session
-                .attempt_public_manifest(ticket, &decision)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(decision.phase(), PublicationPhase::Published);
-        let published = session.public_visibility_snapshot_in(public).unwrap();
-        assert_eq!(published.epoch, before_epoch + 1);
-        assert_eq!(published.declaration_tip, generation);
-        assert_eq!(published.machine_incarnation, incarnation);
-        assert!(!published.bindings.iter().any(|(name, _)| name == "answer"));
-        assert!(published
-            .bindings
-            .iter()
-            .any(|(name, id)| name == "other" && *id == other_id));
-        let compiled_against = session.compile_view_in(public).unwrap();
-        let context = compiled_against
-            .exact_declaration_context()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            context.lexical_graph().len(),
-            1 + session
-                .lib()
-                .log
-                .joined_at(generation)
-                .unwrap()
-                .surface
-                .lexical_graph()
-                .len()
-        );
-        assert!(context
-            .lexical_graph()
-            .iter()
-            .any(|node| node.owner.module == SessionModule::lib(generation).module_name()));
-        assert!(context
-            .lexical_graph()
-            .iter()
-            .all(|node| node.owner.module != authored.product().owner().module));
-        assert!(context
-            .recovery_products()
-            .iter()
-            .any(|product| product.owner() == authored.product().owner()));
-        assert!(Arc::ptr_eq(
-            compiled_against.exact_declaration_context().unwrap(),
-            session
-                .compile_view_in(public)
-                .unwrap()
-                .exact_declaration_context()
-                .unwrap(),
-        ));
-        let graph = crate::session::recovery_test_fixture::graph(session.lib());
-        let joined = graph.node(generation).unwrap().unwrap();
-        assert_eq!(joined.kind, recovery::RecoveryNodeKind::Join);
-        assert_eq!(joined.implementation_refs, vec![Generation(1)]);
-        assert_eq!(
-            graph.public_surfaces().next().unwrap().declaration_root,
-            Some(generation)
-        );
-        assert!(!graph
-            .public_surfaces()
-            .next()
-            .unwrap()
-            .bindings
-            .keys()
-            .any(|name| name == "answer"));
-        assert!(
-            matches!(session.lib().log.turn(generation), Some(turn) if turn.sources.is_empty())
-        );
-        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::super::render::render_module(
-                &session.lib().log,
-                generation,
-                &ModuleEnv::standalone_default(),
-            )
-        }))
-        .is_err());
-        let stored = proof.materialize(root.path()).unwrap();
-        assert_eq!(
-            tidepool_toolchain::recovery_artifacts::verify_materialized_join(
-                root.path(),
-                &stored.join
-            )
-            .unwrap()
-            .interface_bytes,
-            proof.interface_bytes()
-        );
-        assert_eq!(
-            recovery.state().revision,
-            session.lib().durable_graph.as_ref().unwrap().store_revision
-        );
-        assert_eq!(
-            session.public_visibility_snapshot_in(public).unwrap(),
-            published
-        );
-        session.retire_scope(private);
-        assert!(session.bindings().get(other_id).is_some());
-        assert_eq!(session.lib().scope_tip(public), generation);
-        let retained = session.compile_view_in(public).unwrap();
-        assert!(retained.is_current_for(&compiled_against));
-        assert!(Arc::ptr_eq(
-            retained.exact_declaration_context().unwrap(),
-            &context
-        ));
-    }
     fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {
         tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_in(scope, &[source], settlement)
         })
         .unwrap()
-    }
-
-    #[test]
-    fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap();
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/rich-fixed").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let base_admission = session.begin_private_execution(public).unwrap();
-        let base_original = commit_source(
-            &mut session,
-            base_admission.private_scope(),
-            include_str!("fixtures/paired-rich-base.hs"),
-        );
-        let base = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    base_admission.admitted_public().unwrap(),
-                    base_admission.private_scope(),
-                    vec![],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        assert_eq!(base.receipt.instances().classes.len(), 1);
-        assert!(matches!(
-            session
-                .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-
-        let a = session.begin_private_execution(public).unwrap();
-        let b = session.begin_private_execution(public).unwrap();
-        assert_ne!(a.admitted_public().unwrap().declaration_tip, Generation(0));
-        let a_first = commit_source(
-            &mut session,
-            a.private_scope(),
-            include_str!("fixtures/paired-rich-A1.hs"),
-        );
-        let a_second = commit_source(
-            &mut session,
-            a.private_scope(),
-            include_str!("fixtures/paired-rich-A2.hs"),
-        );
-        tidepool_testing::with_settlement(|settlement| {
-            session.retract_many_in(
-                a.private_scope(),
-                &["retractValue".into(), "baseValue".into()],
-                settlement,
-            )
-        })
-        .unwrap();
-        let value = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "retractValue",
-            401,
-        );
-        let value_id = value.id;
-        session.bind_in(a.private_scope(), value).unwrap();
-        let intent = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
-            .unwrap();
-        assert_eq!(intent.writes.len(), 3);
-        assert_eq!(intent.writes[2].retractions.len(), 2);
-        let high_water = session.lib().log.generation();
-        let repeated = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
-            .unwrap();
-        assert!(Arc::ptr_eq(&intent, &repeated));
-        assert_eq!(session.lib().log.generation(), high_water);
-        assert!(session.freeze_execution_intent(&a, vec![], vec![]).is_err());
-        let old_a = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        let original_attempt = old_a.reserved_generation();
-        let old_a = old_a.stage().unwrap();
-
-        let b_original = commit_source(
-            &mut session,
-            b.private_scope(),
-            include_str!("fixtures/paired-rich-B.hs"),
-        );
-        let b_publication = accepted(
-            session
-                .snapshot_declaration_publication(
-                    owner.clone(),
-                    b.admitted_public().unwrap(),
-                    b.private_scope(),
-                    vec![],
-                    vec![],
-                )
-                .unwrap(),
-        );
-        let b_generation = b_publication.reserved_generation();
-        assert!(b_generation > original_attempt);
-        assert!(matches!(
-            session
-                .attempt_public_manifest(
-                    b_publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        let decision = PublicationDecision::new();
-        assert!(matches!(
-            session.attempt_public_manifest(old_a, &decision).unwrap(),
-            crate::session::PublicationAttempt::Rebase(_)
-        ));
-        assert_eq!(decision.phase(), PublicationPhase::Running);
-        let cancelled = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        let cancelled_generation = cancelled.reserved_generation();
-        assert!(cancelled_generation > b_generation);
-        assert!(Arc::ptr_eq(cancelled.intent(), &intent));
-        let cancellation = PublicationDecision::new();
-        cancellation.request_cancellation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(cancelled.stage().unwrap(), &cancellation)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Cancelled
-        ));
-        assert_eq!(session.lib().scope_tip(public), b_generation);
-        let refused = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        let refused_generation = refused.reserved_generation();
-        assert!(refused_generation > cancelled_generation);
-        assert!(Arc::ptr_eq(refused.intent(), &intent));
-        let refused = refused.stage().unwrap();
-        let before_refusal = recovery.state();
-        recovery
-            .store
-            .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
-        assert!(matches!(
-            session
-                .attempt_public_manifest(refused, &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Refused { .. }
-        ));
-        assert_eq!(recovery.state(), before_refusal);
-        assert_eq!(session.lib().scope_tip(public), b_generation);
-        assert_eq!(
-            session.public_visibility_snapshot_in(a.private_scope()),
-            Some(intent.private.clone())
-        );
-        // A new attempt may refill its allocation range. Its ticket must pin
-        // the post-reservation scalar revisions without changing causal facts.
-        let old_ceiling = session.lib().durable_allocation_ceiling().unwrap();
-        let remaining = usize::try_from(old_ceiling.0 - session.lib().generation().0).unwrap();
-        session
-            .lib_mut()
-            .reserve_declaration_generations_durable(remaining)
-            .unwrap();
-        let publication = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        let reserved = publication.reserved_generation();
-        assert!(reserved > old_ceiling);
-        assert!(reserved > refused_generation);
-        assert!(Arc::ptr_eq(publication.intent(), &intent));
-        let proof = publication.receipt.clone();
-        assert_eq!(proof.instances().classes.len(), 2);
-        assert_eq!(proof.instances().families.len(), 2);
-        assert!(proof.family_closure().len() >= 2);
-        for (name, original) in [
-            ("firstPrivate", a_first),
-            ("privateWinner", a_second),
-            ("fromLaterPublic", b_original),
-            ("baseValue", b_original),
-        ] {
-            let export = proof
-                .exports()
-                .iter()
-                .find(|export| export.head.occurrence == name)
-                .unwrap();
-            assert_eq!(
-                export.head.module,
-                SessionModule::lib(original).module_name()
-            );
-        }
-        assert!(!proof
-            .exports()
-            .iter()
-            .any(|export| export.head.occurrence == "retractValue"));
-        let record = proof
-            .exports()
-            .iter()
-            .find(|export| export.head.occurrence == "PublicRecord")
-            .unwrap();
-        assert_eq!(
-            record.head.module,
-            SessionModule::lib(base_original).module_name()
-        );
-        assert!(record
-            .children
-            .iter()
-            .any(|child| child.occurrence == "publicField"
-                && child.record_parent.as_deref() == Some("PublicRecord")));
-        assert!(matches!(
-            session
-                .attempt_public_manifest(publication.stage().unwrap(), &decision)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(session.lib().scope_tip(public), reserved);
-        assert!(session
-            .public_visibility_snapshot_in(public)
-            .unwrap()
-            .bindings
-            .iter()
-            .any(|(name, id)| name == "retractValue" && *id == value_id));
-        let graph = crate::session::recovery_test_fixture::graph(session.lib());
-        let node = graph.node(reserved).unwrap().unwrap();
-        assert!(node
-            .implementation_refs
-            .iter()
-            .all(|reference| *reference < reserved));
-        assert!(node.implementation_refs.contains(&b_generation));
-        assert_eq!(node.instances.classes.len(), 2);
-        for write in &intent.writes {
-            assert!(Arc::ptr_eq(
-                &session
-                    .lib()
-                    .log
-                    .certified_authored_arc_at(write.generation)
-                    .unwrap(),
-                &write.evidence
-            ));
-        }
-        assert_eq!(intent.write_ids, [value_id]);
-        let cold = recovery::load_domain_graph(
-            Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()),
-            crate::session::RecoveryDomainId::Root,
-        )
-        .unwrap();
-        let cold_node = cold.node(reserved).unwrap().unwrap();
-        assert_eq!(*cold_node, *node);
-        assert!(cold.node(original_attempt).unwrap().is_none());
-        assert!(cold.node(cancelled_generation).unwrap().is_none());
-        assert!(cold.node(refused_generation).unwrap().is_none());
-        let cold_surface = cold.surface(&owner).unwrap().unwrap();
-        assert_eq!(cold_surface.declaration_root, Some(reserved));
-        assert_eq!(
-            cold_surface.bindings["retractValue"].variable,
-            value_id.raw()
-        );
-        cold.context(&cold_node.context_root).unwrap();
-        assert_eq!(
-            session.lib().import_line_in(public).unwrap(),
-            format!("import {}", SessionModule::lib(reserved).module_name())
-        );
-        session.retire_scope(a.private_scope());
-        assert!(session.bindings().get(value_id).is_some());
     }
 }

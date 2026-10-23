@@ -1,0 +1,2 @@
+error[E0599]: no method named `freeze_execution_intent` found for mutable reference `&mut PersistentSession` in the current scope
+ --> tests/compile_fail/frozen_execution_rejects_raw_write_selection.rs:7:21

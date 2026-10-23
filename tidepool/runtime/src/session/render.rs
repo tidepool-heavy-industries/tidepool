@@ -546,14 +546,11 @@ impl DeclLog {
         &mut self,
         generation: Generation,
         turn: DeclTurn,
-    ) -> bool {
-        let Ok(prepared) =
-            self.prepare_reserved_commit(generation, DeclarationSlot::Committed(turn))
-        else {
-            return false;
-        };
+    ) -> Result<(), super::SessionError> {
+        let prepared =
+            self.prepare_reserved_commit(generation, DeclarationSlot::Committed(turn))?;
         self.activate_prepared_commit(prepared);
-        true
+        Ok(())
     }
 
     fn prepare_reserved_commit(
@@ -566,15 +563,17 @@ impl DeclLog {
                 turn
             }
             DeclarationSlot::Joined(joined) => &joined.turn,
-            _ => return Err(super::SessionError::StaleStagedDeclaration),
+            _ => return Err(super::SessionTransitionReason::WrongPhase.into()),
         };
-        if generation.0 == 0
-            || !self.is_reserved(generation)
-            || turn
-                .parent
-                .is_some_and(|parent| parent.0 >= generation.0 || self.turn(parent).is_none())
-        {
-            return Err(super::SessionError::StaleStagedDeclaration);
+        if generation.0 == 0 || !self.is_reserved(generation) {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        if let Some(parent) = turn.parent {
+            if parent.0 >= generation.0 || self.turn(parent).is_none() {
+                return Err(
+                    super::DeclarationFactsFailure::InvalidParent { generation, parent }.into(),
+                );
+            }
         }
         Ok(PreparedDeclarationCommit { generation, slot })
     }
@@ -585,12 +584,32 @@ impl DeclLog {
         turn: DeclTurn,
         prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
     ) -> Result<PreparedDeclarationCommit, super::SessionError> {
-        if prepared.generation != generation
-            || prepared.parent != turn.parent.unwrap_or(Generation(0))
-            || prepared.evidence.product().owner().module
-                != SessionModule::lib(generation).module_name()
-        {
-            return Err(super::SessionError::StaleStagedDeclaration);
+        if prepared.generation != generation {
+            return Err(super::DeclarationFactsFailure::AuthoredGeneration {
+                expected: generation,
+                actual: prepared.generation,
+            }
+            .into());
+        }
+        let expected_parent = turn.parent.unwrap_or(Generation(0));
+        if prepared.parent != expected_parent {
+            return Err(super::DeclarationFactsFailure::AuthoredParent {
+                generation,
+                expected: expected_parent,
+                actual: prepared.parent,
+            }
+            .into());
+        }
+        let owner = prepared.evidence.product().owner();
+        if owner.module != SessionModule::lib(generation).module_name() {
+            return Err(super::DeclarationFactsFailure::AuthoredOwner {
+                generation,
+                actual: tidepool_toolchain::declaration_join::ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                },
+            }
+            .into());
         }
         self.prepare_reserved_commit(
             generation,
@@ -604,7 +623,7 @@ impl DeclLog {
         joined: JoinedDeclaration,
     ) -> Result<PreparedDeclarationCommit, super::SessionError> {
         if !joined.evidence.matches_generation(generation) {
-            return Err(super::SessionError::StaleStagedDeclaration);
+            return Err(super::DeclarationFactsFailure::JoinedGeneration { generation }.into());
         }
         self.prepare_reserved_commit(generation, DeclarationSlot::Joined(joined))
     }
@@ -617,20 +636,6 @@ impl DeclLog {
         assert!(matches!(slot, DeclarationSlot::Reserved));
         *slot = prepared.slot;
         self.advance_revision();
-    }
-
-    pub(super) fn commit_reserved_certified_authored(
-        &mut self,
-        generation: Generation,
-        turn: DeclTurn,
-        prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
-    ) -> bool {
-        let Ok(prepared) = self.prepare_certified_authored_commit(generation, turn, prepared)
-        else {
-            return false;
-        };
-        self.activate_prepared_commit(prepared);
-        true
     }
 
     pub(crate) fn projection_at(
@@ -762,18 +767,6 @@ impl DeclLog {
                 .expect("declaration generation exhausted"),
         );
         self.high_water
-    }
-
-    pub(crate) fn commit_reserved(
-        &mut self,
-        generation: Generation,
-        joined: JoinedDeclaration,
-    ) -> bool {
-        let Ok(prepared) = self.prepare_joined_commit(generation, joined) else {
-            return false;
-        };
-        self.activate_prepared_commit(prepared);
-        true
     }
 
     pub fn turn(&self, generation: Generation) -> Option<&DeclTurn> {
@@ -1569,6 +1562,49 @@ mod tests {
                 DeclarationSlot::Committed(turn("answer = 43", vec![val("answer")])),
             )
             .is_err());
+    }
+
+    #[test]
+    fn commit_refusal_preserves_cause_and_state_across_logging_filters() {
+        for level in [
+            tracing::level_filters::LevelFilter::OFF,
+            tracing::level_filters::LevelFilter::TRACE,
+        ] {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(level)
+                .with_writer(std::io::sink)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut log = DeclLog::new();
+                let generation = log.reserve();
+                let revision = log.publication_revision();
+                let mut invalid = turn("answer = 42", vec![val("answer")]);
+                invalid.parent = Some(generation);
+                assert!(matches!(log.commit_reserved_authored(generation, invalid),
+                    Err(super::super::SessionError::DeclarationFacts(
+                        super::super::DeclarationFactsFailure::InvalidParent { generation: actual, parent }
+                    )) if actual == generation && parent == generation));
+                assert!(log.is_reserved(generation));
+                assert!(log.turn(generation).is_none());
+                assert_eq!(log.publication_revision(), revision);
+
+                let original = turn("answer = 42", vec![val("answer")]);
+                log.commit_reserved_authored(generation, original.clone())
+                    .unwrap();
+                let revision = log.publication_revision();
+                assert!(matches!(
+                    log.commit_reserved_authored(
+                        generation,
+                        turn("answer = 43", vec![val("answer")])
+                    ),
+                    Err(super::super::SessionError::TransitionRefused(
+                        super::super::SessionTransitionReason::WrongPhase
+                    ))
+                ));
+                assert_eq!(log.turn(generation), Some(&original));
+                assert_eq!(log.publication_revision(), revision);
+            });
+        }
     }
 
     #[test]

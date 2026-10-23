@@ -18,7 +18,6 @@ module Tidepool.GhcPipeline
   , NativeProductProvenance, nativeProductProducer, nativeProductProfile
   , NativeProductConfigurationUnavailable(..), scopedNativeProductProvenance
   , captureSupportedPackageProfile
-  , runPipelineSessionSelectedWithProducer
   , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose
   , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
   , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
@@ -256,7 +255,7 @@ import Tidepool.CheckedPrefixImports
 import Tidepool.FamilyConsistency (validateCompilationFamilies, validateEnvironmentFamilies)
 import Tidepool.HostBindingAuthority (hostBindingOriginsRequired)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
-import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
+import Tidepool.ExtractUtil (boundedUtf8, trySynchronous)
 import Tidepool.Logging
   ( LogLevel(LogTrace, LogWarn), LogValue(..), logEvent, logTrace, loggerEnabled, readLogger )
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
@@ -312,7 +311,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -1294,20 +1293,12 @@ runPipelineSelected :: PipelineSelection result -> FilePath -> [FilePath] -> IO 
 runPipelineSelected selection path includes =
   runPipelineSessionSelected selection Set.empty GeneralCompile Nothing path includes Nothing
 
--- | Like 'runPipelineSelected', but withholding unfoldings for the given
--- retained-generation symbols from GHC's own simplifier -- see
--- 'Tidepool.RetainedUnfoldings' for the mechanism and why it must run this
--- early. Used today only by 'test-prepared-stg/ExecutionProjectionTest.hs';
--- 'app/Main.hs' threads a live request's @--retained-generation@ set through
--- 'runPipelineSessionSelected' directly for its one-shot (non-resident)
--- 'PreparedStg' compiles, and through 'withResidentPipelineSelected' for its
--- resident-daemon compiles.
+-- Retained-generation policy enters the same scoped kernel as ordinary
+-- finite and daemon requests. This wrapper returns facts, not a live allowance.
 runPipelineSelectedRetaining
   :: PipelineSelection result -> Set.Set SymbolIdentity -> FilePath -> [FilePath] -> IO result
-runPipelineSelectedRetaining selection retained path includes = do
-  producer <- captureCompilerProducerIdentity
-  variant <- normalVariant GeneralCompile
-  runCompile selection retained variant {pvCompilerProducer = producer} path includes Nothing
+runPipelineSelectedRetaining selection retained path includes =
+  runPipelineSessionSelected selection retained GeneralCompile Nothing path includes Nothing
 
 -- The process owner supplies this configuration before any authored compiler
 -- effect runs. A resident compiler retains it across requests and recovery;
@@ -1750,10 +1741,6 @@ compilerProducerFor variant = case pvCompilerProducer variant of
   Just (CompilerProducerIdentity producer) -> Just (hexBytes producer)
   Nothing -> Nothing
 
-exactCompileCycle :: PipelineSelection result -> PipelineVariant -> Bool
-exactCompileCycle selection variant =
-  isJust (candidateManifestFor selection) || isJust (pvExactScope variant)
-
 -- The worker owns one interpreter. An interrupted retirement leaves it
 -- unusable; a later request must not borrow its partially unloaded symbols.
 data ResidentAvailability = ResidentAvailable | ResidentBusy | ResidentPoisoned | ResidentClosed
@@ -1808,18 +1795,30 @@ evictCompilerRecovery caches stale = do
   evictPreparedBodyMatching (compilerPreparedBodies caches) stale
   evictOriginalProjectionMatching (compilerOriginalProjections caches) stale
 
--- The universe is fixed by the booted package closure, compiler producer and
--- base compilation policy. Changing a request's lexical view cannot discard
--- its loaded package facts or completed module versions. Attempts fork its
--- home resolution cells; lazy retained interfaces share their fixed package
--- state owner with the selected attempt.
+-- Only initialization issues this fixed package/NameCache owner. Attempts
+-- borrow its shared package cells and allocate independent HOME resolution.
+data CompilerBootContext = CompilerBootContext HscEnv PackageFinderFacts
+
+data CompilerBootFailure = CompilerBootContainsHomeInterfaces
+  deriving Show
+instance Exception CompilerBootFailure
+
+universeBootEnvironment :: CompilerUniverse -> HscEnv
+universeBootEnvironment universe = case universeBoot universe of
+  CompilerBootContext environment _ -> environment
+
+universePackageFinder :: CompilerUniverse -> PackageFinderFacts
+universePackageFinder universe = case universeBoot universe of
+  CompilerBootContext _ finder -> finder
+
+-- Completed versions retain their actual HMI knots independently of the
+-- active attempt. No last-operation environment becomes another HOME owner.
 data CompilerUniverse = CompilerUniverse
-  { universeEnvironment :: HscEnv
+  { universeBoot :: CompilerBootContext
   , universeSourceVersions :: Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion))
   , universeOriginalVersions :: Map.Map (Module, HomeDependencyDigest, Maybe String) CompletedOriginalVersion
   , universeRecovery :: RecoveryContext
   , universeInterpreter :: IORef CompilerInterpreterState
-  , universePackageFinder :: PackageFinderFacts
   , universeOriginalInputs :: ExactInputOwner
   , universePackageAssociation :: Maybe ServicePackageAssociation
   , universeWorlds :: CompilerWorldCache
@@ -1924,7 +1923,7 @@ beginHeldWorldDependencyAttempt universe
       | otherwise -> throwIO WorldCellCorrupt
   cache <- newIfaceCache
   memo <- newIORef Map.empty
-  recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe) []
+  recovery <- selectCompilerRecoveryCaches (universeBootEnvironment universe) (universeRecovery universe) []
   recoveryRef <- newIORef recovery
   pure (WorldDependencyAttempt (worldInputsIdentity facts) reference policy paths versions canonicalRecovery cache memo recoveryRef (universeInterpreter universe))
 
@@ -1934,7 +1933,7 @@ worldDependencyCycle (WorldDependencyAttempt _ _ _ _ versions canonicalRecovery 
     (universeInterpreter universe) (universePackageFinder universe) attempt
   where
     activate selected = do
-      recovery <- selectCompilerRecoveryCaches (universeEnvironment universe) (universeRecovery universe)
+      recovery <- selectCompilerRecoveryCaches (universeBootEnvironment universe) (universeRecovery universe)
         [(owner,completedModuleRecovery node) | (owner,node) <- Map.toList selected]
       writeIORef recoveryRef recovery
       pure recovery
@@ -1964,20 +1963,22 @@ stageHeldWorldDependencies executor
       -- The normal cycle already validated each selected source version before
       -- entering the working memo. Only captured source owners can be added;
       -- private value aliases and earlier checking targets have no such row.
-      additions = Map.fromListWith Map.union
-        [(owner,Map.singleton (memoSelectionKey validity)
-          (Map.singleton validity (CompletedModuleVersion entry home context epoch products)))
-        | entry <- Map.elems eligible
+      selectedEntries =
+        [entry | entry <- Map.elems eligible
         , let owner = payloadOwner (gmePayload entry)
         , let validity = gmeValidity entry
-        , let home = retainCompletedModuleHome (lookupHpt (hsc_HPT final) (moduleName owner))
-        , let products = maybe [] pure (payloadProduct (gmePayload entry))
         , let previousVersion = do
                 bySelection <- Map.lookup owner previous
                 byValidity <- Map.lookup (memoSelectionKey validity) bySelection
                 Map.lookup validity byValidity
         , maybe True (\node -> gmeCycle (completedModuleEntry node) /= gmeCycle entry
             || completedModuleEpoch node /= epoch) previousVersion]
+  additions <- Map.fromListWith Map.union <$> forM selectedEntries (\entry -> do
+    let owner = payloadOwner (gmePayload entry)
+        validity = gmeValidity entry
+        products = maybe [] pure (payloadProduct (gmePayload entry))
+    node <- issueCompletedModuleVersion (hsc_HPT final) entry context epoch products
+    pure (owner,Map.singleton (memoSelectionKey validity) (Map.singleton validity node)))
   evictCompilerRecovery recovery (== target)
   _ <- evaluate (Map.size additions)
   pending <- newIORef (Just (WorldDependencyAdditions additions emptyWorldCanonicalRecovery))
@@ -2020,9 +2021,6 @@ inheritWorldCanonicalRecovery (WorldCanonicalRecovery roots) current version =
   forM_ (Map.lookup version roots) $ \source -> inheritPreparedBodyOwner
     (compilerPreparedBodies current) (compilerPreparedBodies (recoveryContextCaches source)) (originalVersionOwner version)
 
-cycleCanonicalRecovery :: CycleState -> WorldCanonicalRecovery
-cycleCanonicalRecovery StandaloneCycle = emptyWorldCanonicalRecovery
-cycleCanonicalRecovery (TransactionCycle _ _ _ _ roots _ _ _ _) = roots
 
 mergeWorldModuleVersions :: WorldModuleVersions -> WorldModuleVersions -> WorldModuleVersions
 mergeWorldModuleVersions = Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
@@ -2225,7 +2223,7 @@ retainHeldWorldSuccessor universeRef (HeldCompilerWorld base _ materialized prep
     (throwIO WorldCellCorrupt)
   WorldPreparedModules table receipts dependencies demandScope <- readIORef preparedRef
   universe <- readIORef universeRef
-  updatedScope <- traverse (updateSegmentDemandScope (universeEnvironment universe)
+  updatedScope <- traverse (updateSegmentDemandScope (universeBootEnvironment universe)
     [(alias,WorldBaseBinding <$> Map.lookup alias (worldInputsBindings facts)) | alias <- Set.toAscList (worldSuccessorChangedAliases successorInputs)]) demandScope
   prepared <- newIORef (WorldPreparedModules table receipts dependencies updatedScope)
   unless (Map.member (worldMaterializationKey materialized) (compilerWorldBackingAccounts (universeWorlds universe)))
@@ -2376,7 +2374,7 @@ runWorldPublicModule producer universe baseEnv timing
       StructuredPublicModule name | not (isReservedSessionModuleName name) -> pure name
       _ -> liftIO (throwIO WorldQueryUnsupported)
     prepared@(WorldPreparedModules table receipts dependencies demandScope) <- liftIO (readIORef preparedRef)
-    borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+    borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
     let flags = (hsc_dflags baseEnv) {importPaths=[],workingDirectory=Nothing}
         fresh = (hscUpdateHPT (const table) (hscUpdateFlags (const flags) borrowed))
           {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv,hsc_targets=[]}
@@ -2392,7 +2390,7 @@ runWorldPublicModule producer universe baseEnv timing
           Nothing -> do
             -- A cold demand checks the real module and its transitive source
             -- closure. Historical memo/candidate/home alternatives are absent.
-            compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+            compileEnv <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
             -- This metadata route retains the actual in-memory HMI. No lazy
             -- realization may depend on a generated home interface file.
             let compileFlags = foldl' gopt_unset ((hsc_dflags baseEnv)
@@ -2860,7 +2858,7 @@ heldWorldDemandScope universe timing (HeldCompilerWorld facts _ _ preparedRef) =
     Nothing -> do
       emitCount timing "world.cell.demand_scope_builds" 1
       emitCount timing "world.cell.demand_scope_aliases" (toInteger (Map.size (worldInputsBindings facts)))
-      scope <- newSegmentDemandScope (universeEnvironment universe) (Map.map WorldBaseBinding (worldInputsBindings facts))
+      scope <- newSegmentDemandScope (universeBootEnvironment universe) (Map.map WorldBaseBinding (worldInputsBindings facts))
       writeIORef preparedRef (WorldPreparedModules table receipts dependencies (Just scope))
       pure scope
 
@@ -2924,7 +2922,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     traceStageIO "directory-containment-refused"
       [("resolved_target", LogText target),("directory", LogText directory)]
     throwIO WorldCellCorrupt)
-  borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeEnvironment universe))
+  borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe) (universeBootEnvironment universe))
   let flags = heldWorldCellFlags baseEnv directory roots
       policy = retainedContext retained
   -- Source compatibility runs before the target hook refines value demand.
@@ -3812,17 +3810,47 @@ data RecoveryContext = RecoveryContext
 
 data CompletedModuleVersion = CompletedModuleVersion
   { completedModuleEntry :: GutsMemoEntry
-  , completedModuleHome :: !(Maybe HomeModInfo)
+  , completedModuleHome :: !HomeModInfo
   , completedModuleRecovery :: RecoveryContext
   , completedModuleEpoch :: Word64
   , completedModuleProducts :: [ModuleProduct]
   }
 
--- Retain the selected home, rather than a lookup closure over the full HscEnv.
--- The strict field forces the Maybe; its selected payload must also be in WHNF.
-retainCompletedModuleHome :: Maybe HomeModInfo -> Maybe HomeModInfo
-retainCompletedModuleHome Nothing = Nothing
-retainCompletedModuleHome (Just home) = home `seq` Just home
+data CompletedModuleFailure
+  = CompletedModuleHomeMissing Module
+  | CompletedModuleHomeMismatch Module
+
+instance Show CompletedModuleFailure where
+  show (CompletedModuleHomeMissing owner) =
+    "completed source version lacks installed HOME " ++ label owner
+    where label value = unitString (moduleUnit value) ++ ":" ++ moduleNameString (moduleName value)
+  show (CompletedModuleHomeMismatch owner) =
+    "completed source version has incompatible installed HOME " ++ label owner
+    where label value = unitString (moduleUnit value) ++ ":" ++ moduleNameString (moduleName value)
+
+instance Exception CompletedModuleFailure
+
+-- The completion owner retains the exact installed HMI, including its lazy
+-- details knot and current executable capacity. A finalized interface is not
+-- a substitute for a missing or incompatible installed home.
+issueCompletedModuleVersion :: HomePackageTable -> GutsMemoEntry -> RecoveryContext
+  -> Word64 -> [ModuleProduct] -> IO CompletedModuleVersion
+issueCompletedModuleVersion homes entry recovery epoch products = do
+  home <- requireCompletedModuleHome homes entry
+  pure (CompletedModuleVersion entry home recovery epoch products)
+
+requireCompletedModuleHome :: HomePackageTable -> GutsMemoEntry -> IO HomeModInfo
+requireCompletedModuleHome homes entry = do
+  let owner = payloadOwner (gmePayload entry)
+      finalized = hm_iface (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
+  home <- maybe (throwIO (CompletedModuleHomeMissing owner)) pure
+    (lookupHpt homes (moduleName owner))
+  let actual = hm_iface home
+  unless (mi_module actual == owner && mi_module finalized == owner
+      && mi_hsc_src actual == mi_hsc_src finalized
+      && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts finalized))
+    (throwIO (CompletedModuleHomeMismatch owner))
+  pure home
 
 data CompletedOriginalVersion = CompletedOriginalVersion
   { completedOriginalHome :: HomeModInfo
@@ -3836,13 +3864,17 @@ newtype ActiveCompilerAttempt = ActiveCompilerAttempt
   { activeEnvironment :: HscEnv
   }
 
-data CycleState
-  = StandaloneCycle
-  | TransactionCycle ModIfaceCache (IORef GutsMemo) (Maybe (Either String CapturedCandidateManifest))
-      (Map.Map Module (Map.Map MemoSelectionKey (Map.Map MemoValidity CompletedModuleVersion)))
-      WorldCanonicalRecovery
-      (Map.Map Module CompletedModuleVersion -> IO CompilerRecoveryCaches)
-      (IORef CompilerInterpreterState) PackageFinderFacts (IORef InterpreterAttemptState)
+data CycleState = TransactionCycle
+  { cycleInterfaceCache :: ModIfaceCache
+  , cycleMemo :: IORef GutsMemo
+  , cycleCandidates :: Maybe (Either String CapturedCandidateManifest)
+  , cycleSourceVersions :: WorldModuleVersions
+  , cycleCanonicalRecovery :: WorldCanonicalRecovery
+  , cycleActivateRecovery :: Map.Map Module CompletedModuleVersion -> IO CompilerRecoveryCaches
+  , cycleInterpreter :: IORef CompilerInterpreterState
+  , cyclePackageFinder :: PackageFinderFacts
+  , cycleInterpreterAttempt :: IORef InterpreterAttemptState
+  }
 
 data CompilePurpose = GeneralCompile | InspectionTypeCompile | WorldObservationCompile | CertifyHomeProductsCompile | OriginalDeclarationCompile
   | WorldPlannedDeclarationCompile PlannedDeclaration
@@ -4443,75 +4475,15 @@ withExactInterfaceTransaction includes use =
     runScope (pure ()) $ \compiler ->
       withScopedExactInterfaceTransaction compiler includes use
 
-runCompile :: PipelineSelection result -> Set.Set SymbolIdentity -> PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
-runCompile selection retained variant path includes buildProductsDir = do
-  timing <- readTimingEnabled
-  requestIdentity <- newTimingRequestIdentity
-  (libdir, startupMs) <- timeSection getLibdir
-  emitPhase timing "startup" startupMs
-  runGhc (Just libdir) $ do
-    sessionT0 <- monotonicTime
-    setupResources <- beginResourceTiming timing
-    dflags <- getSessionDynFlags
-    -- Force x86_64-linux target platform regardless of host architecture.
-    -- The Cranelift runtime has a single backend; prepared STG must use
-    -- x86_64 primops on all hosts (including ARM/macOS).
-    -- Use genericPlatform verbatim — mixing in host platform_constants causes
-    -- GHC's specializer to produce Core with mismatched constructor tags on
-    -- aarch64, leading to case-exhaustion SIGILL in the JIT.
-    -- Platform spoofing happens HERE ONLY (session setup, before 'load'):
-    -- GHC populates platform constants during session/unit initialization,
-    -- so re-pinning bare genericPlatform later strips them
-    -- ("Platform constants not available!" panic). Backend/opt pinning lives
-    -- in canonicalizeDFlags and is also re-applied per-module below.
-    -- Expose the (otherwise hidden) `ghc` package to the session so lib
-    -- modules on the --include path can import the GHC API. The [fmt|]
-    -- quasi-quoter's hole parser is the vendored Tidepool.QQ.HsMeta.*, which
-    -- runs GHC's own expression parser inside the splice; those modules import
-    -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
-    -- fails with "member of the hidden package ghc-9.12.2".
-    paths <- liftIO (compileSearchPaths variant includes (importPaths dflags))
-    let extracted = (extractionDynFlags dflags []) { importPaths = paths }
-        dflags' = configureBuildProducts extracted buildProductsDir extracted
-    setSessionDynFlags dflags'
-    -- Withhold unfoldings for retained-generation symbols BEFORE 'load''
-    -- runs: load and deferred finalization share the canonical simplifier,
-    -- so the plugin must already be registered on the session's 'HscEnv'.
-    -- See 'Tidepool.RetainedUnfoldings' for why a Core plugin is the seam
-    -- that reaches both 'load'' and 'core2core' uniformly. The plugin reads
-    -- immutable retained context owns each pass, so an empty retained set
-    -- costs nothing on the compiled bytes (see
-    -- 'withholdRetainedUnfoldings').
-    let context = retainedContext retained
-    hscForRetained <- getSession
-    setSession (installRetainedUnfoldingsPlugin context hscForRetained)
-    -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
-    -- DynFlags bootstrap (above) so the default-on per-compile summary's
-    -- wall-clock figure covers it too, exactly as it always has. See
-    -- 'runCompileCycle''s haddock for what each argument controls.
-    runCompileCycle selection StandaloneCycle context Nothing timing requestIdentity sessionT0 setupResources variant path
-
--- | Like 'runPipelineSelected'/'runPipelineSessionSelected', but also taking a
--- retained-generation set (see 'Tidepool.RetainedUnfoldings') to withhold
--- from GHC's own simplifier before it runs. This is the production one-shot
--- entry point 'app/Main.hs' calls for every request; a caller with no
--- retained-generation set to thread passes 'Set.empty', which
--- 'installRetainedUnfoldingsPlugin' makes a true no-op.
+-- Supported finite callers use the resident kernel for one scope. The
+-- returned compiler facts do not extend that scope or its interpreter lease.
 runPipelineSessionSelected
   :: PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
-runPipelineSessionSelected selection retained purpose mscope path includes buildProductsDir = do
-  producer <- captureCompilerProducerIdentity
-  runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir
-
-runPipelineSessionSelectedWithProducer
-  :: Maybe CompilerProducerIdentity -> PipelineSelection result -> Set.Set SymbolIdentity -> CompilePurpose -> Maybe SessionScope
-  -> FilePath -> [FilePath] -> Maybe FilePath -> IO result
-runPipelineSessionSelectedWithProducer producer selection retained purpose mscope path includes buildProductsDir = do
-  variant <- case mscope of
-    Just scope | isSessionScopeActive scope -> sessionVariant purpose scope
-    _ -> normalVariant purpose
-  runCompile selection retained variant {pvCompilerProducer = producer} path includes buildProductsDir
+runPipelineSessionSelected selection retained purpose session path includes products =
+  withResidentCompilerScopes includes $ \runScope ->
+    runScope (pure ()) $ \scope ->
+      scopedCompile scope selection retained purpose session path includes products
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -5156,7 +5128,6 @@ type GutsMemo = Map.Map ModuleName GutsMemoEntry
 -- 'CycleState' carries immutable completed versions from its universe owner.
 -- Each attempt has a private EPS/finder/home view and selects only versions
 -- validated against the current source and exact imported environment.
--- 'sessionT0' includes bootstrap only for standalone compilation.
 --
 -- 'retained' is the immutable per-request index used by both the plugin's
 -- recompilation fingerprint and the prepared memo's module validity check.
@@ -5166,9 +5137,7 @@ runCompileCycle
   -> RetainedContext -> Maybe String -> Bool -> Word64 -> Double -> Maybe ResourceTimingStart -> PipelineVariant -> FilePath -> Ghc result
 runCompileCycle selection cycleState retained incarnation timing requestIdentity sessionT0 setupResources variant path = withCycleHooks $ withCompilerViewDirectory $ \compilerViewDirectory -> do
     completionRecoveryRef <- liftIO (newIORef Nothing)
-    packageFinder <- case cycleState of
-      StandaloneCycle -> getSession >>= liftIO . newPackageFinderFacts
-      TransactionCycle _ _ _ _ _ _ _ facts _ -> pure facts
+    let packageFinder = cyclePackageFinder cycleState
     forM_ (pvExactScope variant) $ \scope ->
       case compilerProducerFor variant of
         Nothing -> liftIO (throwIO CompilerProducerUnavailable)
@@ -5183,9 +5152,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     disabledSourceOwnersRef <- liftIO (newIORef Set.empty)
     bodyReuseDisabled <- liftIO ((== Just "1") <$> lookupEnv "TIDEPOOL_DISABLE_BODY_REUSE")
     disabledPreparedOwnersRef <- liftIO (newIORef Set.empty)
-    interpreterAttempt <- case cycleState of
-      StandaloneCycle -> liftIO (newIORef InterpreterConfirmed)
-      TransactionCycle _ _ _ _ _ _ _ _ attempt -> pure attempt
+    let interpreterAttempt = cycleInterpreterAttempt cycleState
     let markInterpreterMutation = writeIORef interpreterAttempt InterpreterMutationPending
     let reuseContext = ReuseContext requestIdentity (compilePurposeLabel (pvPurpose variant))
         reuseOwner summary = Just (ReuseModule (unitString (moduleUnit (ms_mod summary)))
@@ -5202,20 +5169,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         preparation = selectionKind selection
         captureProducts = capturesProductInterfaces selection
         candidateManifest = candidateManifestFor selection
-        exactCycle = exactCompileCycle selection variant
-        mCache = case cycleState of
-          StandaloneCycle -> Nothing
-          TransactionCycle cache _ _ _ _ _ _ _ _ -> Just cache
-        mMemoRef = case cycleState of
-          StandaloneCycle -> Nothing
-          TransactionCycle _ memo _ _ _ _ _ _ _ -> Just memo
-        capturedCandidates = case cycleState of
-          StandaloneCycle -> Nothing
-          TransactionCycle _ _ captured _ _ _ _ _ _ -> captured
-    when (exactCycle && case cycleState of StandaloneCycle -> True; _ -> False) $ do
-      current <- getSession
-      fresh <- liftIO (freshExactState current)
-      setSession fresh
+        memoRef = cycleMemo cycleState
+        versions = cycleSourceVersions cycleState
+        capturedCandidates = cycleCandidates cycleState
     originalMetaHook <- runMetaHook . hsc_hooks <$> getSession
     -- Observe the actual splice evaluator, including audited quasiquoters,
     -- without adding an authored effect that would change cacheability.
@@ -5482,9 +5438,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         selectedExecutables = Map.union originalExecutables (Map.fromList
           [(ms_mod summary,sourceExecutable summary) | summary <- Map.elems summaryByDependency
             , ms_hsc_src summary == HsSrcFile])
-    interpreterState <- case cycleState of
-      StandaloneCycle -> liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
-      TransactionCycle _ _ _ _ _ _ retainedInterpreter _ _ -> pure retainedInterpreter
+    let interpreterState = cycleInterpreter cycleState
     selectedVersionsRef <- liftIO (newIORef Map.empty)
     executableObservationsRef <- liftIO $ if memoTrace
       then Just <$> newIORef Map.empty else pure Nothing
@@ -5505,22 +5459,20 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                ,(not (isJust (parseSessionModule (moduleNameString (ms_mod_name summary))))
                    || (isJust incarnation && memoIncarnation validity == incarnation), MemoSelectionIncarnation)]
              , not valid]
-    case cycleState of
-      TransactionCycle _ memo _ versions _ _ _ _ _ -> liftIO $ do
-        let select summary = do
-              byIngress <- Map.lookup (ms_mod summary) versions
-              let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
-                    (homeDependencyWitnesses summary) (incarnationFor summary)
-                    (exactImportEnvironment summary)
-              narrowed <- Map.lookup ingress byIngress
-              find (null . selectionRefusals summary) (Map.elems narrowed)
-            selected = Map.fromList [(ms_mod summary,node)
-              | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
-              , Just node <- [select summary]]
-        writeIORef selectedVersionsRef selected
-        writeIORef memo (Map.fromList
-          [(moduleName owner,completedModuleEntry node) | (owner,node) <- Map.toList selected])
-      StandaloneCycle -> pure ()
+    liftIO $ do
+      let select summary = do
+            byIngress <- Map.lookup (ms_mod summary) versions
+            let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
+                  (homeDependencyWitnesses summary) (incarnationFor summary)
+                  (exactImportEnvironment summary)
+            narrowed <- Map.lookup ingress byIngress
+            find (null . selectionRefusals summary) (Map.elems narrowed)
+          selected = Map.fromList [(ms_mod summary,node)
+            | summary <- Map.elems summaryByDependency, ms_mod summary /= targetOwner
+            , Just node <- [select summary]]
+      writeIORef selectedVersionsRef selected
+      writeIORef memoRef (Map.fromList
+        [(moduleName owner,completedModuleEntry node) | (owner,node) <- Map.toList selected])
     let depsValidSoFar modSum = liftIO $ do
           validMap <- readIORef validThisCycleRef
           pure (all (\d -> Map.findWithDefault False d validMap)
@@ -5574,9 +5526,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               loaded <- liftIO (readIORef loadedModulesRef)
               if ms_mod modSum `Map.member` loaded
                 then pure Nothing
-                else case mMemoRef of
-                  Nothing -> pure Nothing
-                  Just ref -> lookupMemo ref modSum
+                else lookupMemo memoRef modSum
         lookupMemo ref modSum = do
             depsOk <- depsValidSoFar modSum
             -- Cpp/TemplateHaskell gate here, before any entry lookup:
@@ -5863,8 +5813,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , let owner = ms_mod summary
               , Just entry <- [Map.lookup owner validEntries]
               , Just node <- [Map.lookup owner selectedVersions]
-              , let hmi = fromMaybe (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
-                      (completedModuleHome node)
+              , let hmi = completedModuleHome node
               , isNothing (lookupHpt (hsc_HPT current) (ms_mod_name summary))
               , let finalized = hm_iface (finalizedHomeModInfo (loadedFinalized
                       (payloadLoaded summary (gmePayload entry))))
@@ -5874,7 +5823,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           writeIORef disabledSourceOwnersRef (Set.union (Map.keysSet normalEntries)
             (Set.fromList [ms_mod summary | summary <- sourceOrder
               , ms_mod_name summary `Map.member` normalCandidates]))
-          forM_ mMemoRef (`writeIORef` Map.empty)
+          writeIORef memoRef Map.empty
         setSession (hscUpdateHPT (\table -> foldr
           (\hmi homes -> addToHpt homes (moduleName (mi_module (hm_iface hmi))) hmi)
           table restoredHomes) current)
@@ -5892,15 +5841,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                  | reusable = Matched
                  | ms_mod summary `Set.member` unsealedClosure = ChangedDependency
                  | hasUnconditionallyUntrackedCompileTimeExecution (ms_hspp_opts summary) = ThFresh
-                 | otherwise = case cycleState of
-                     StandaloneCycle -> CacheDisabled
-                     TransactionCycle _ _ _ versions _ _ _ _ _ ->
-                       case Map.lookup (ms_mod summary) versions of
-                         Nothing -> Absent
-                         Just previous ->
-                           if any ((== ms_hs_hash summary) . memoSourceHash)
-                               [validity | entries <- Map.elems previous, validity <- Map.keys entries]
-                             then ChangedDependency else ChangedSource
+                 | otherwise = case Map.lookup (ms_mod summary) versions of
+                     Nothing -> Absent
+                     Just previous ->
+                       if any ((== ms_hs_hash summary) . memoSourceHash)
+                           [validity | entries <- Map.elems previous, validity <- Map.keys entries]
+                         then ChangedDependency else ChangedSource
       reuseEvent SourceFrontend decision reason summary
       when disabled $ do
         reuseEvent FinalizedCore ReuseDisabled CacheDisabled summary
@@ -5908,12 +5854,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       when reusable $ do
         reuseEvent FinalizedCore ReuseHit Matched summary
         reuseEvent Interface ReuseHit Matched summary
-    case cycleState of
-      StandaloneCycle -> pure ()
-      TransactionCycle _ _ _ _ _ activateRecovery _ _ _ -> liftIO $ do
-        selectedVersions <- readIORef selectedVersionsRef
-        recovery <- activateRecovery (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
-        writeIORef completionRecoveryRef (Just recovery)
+    liftIO $ do
+      selectedVersions <- readIORef selectedVersionsRef
+      recovery <- cycleActivateRecovery cycleState (Map.restrictKeys selectedVersions (Map.keysSet validatedMemo))
+      writeIORef completionRecoveryRef (Just recovery)
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
           , ms_mod summary `Map.notMember` validatedMemo
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
@@ -5942,44 +5886,42 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       setSession (hscUpdateHPT (\table -> foldr
         (\home homes -> addToHpt homes (moduleName (mi_module (hm_iface home))) (withoutBytecode home))
         emptyHomePackageTable (eltsHpt table)) current)
-    case cycleState of
-      StandaloneCycle -> pure ()
-      TransactionCycle cache _ _ _ _ _ _ _ _ -> do
-        selectedVersions <- liftIO (readIORef selectedVersionsRef)
-        forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
-          current <- getSession
-          let finalized = payloadFinalized (gmePayload entry)
-              original = fromMaybe (finalizedHomeModInfo finalized)
-                (lookupHpt (hsc_HPT current) (ms_mod_name summary))
-              nodeEpoch = completedModuleEpoch <$> Map.lookup (ms_mod summary) selectedVersions
-              sameEpoch = nodeEpoch == Just epoch
-              home = if sameEpoch then original else withoutBytecode original
-              hasCode = isJust (homeMod_bytecode (hm_linkable home))
-                || isJust (homeMod_object (hm_linkable home))
-              needsBytecode = backendGeneratesCode (backend (ms_hspp_opts summary))
-                && (not sameEpoch || not hasCode)
-          -- Observe the actual capacity branch separately from source validity.
-          forM_ executableObservationsRef $ \observations -> liftIO $
-            modifyIORef' observations (Map.insert (ms_mod summary)
-              (MemoExecutableTrace nodeEpoch epoch hasCode needsBytecode))
-          refreshed <- if needsBytecode
-            then do
-              -- Executable demand can follow metadata-only preparation in the
-              -- same epoch. A retired epoch also needs new RemotePtrs. Both
-              -- consume the retained finalized Core and publish its complete
-              -- current interface/linkable pair without a source frontend.
-              let native = scopeRetainedSummaryHscEnv summary current
-                  guts = (finalizedTidyGuts finalized) {cg_modBreaks=Nothing}
-              liftIO markInterpreterMutation
-              bytecode <- timePhase timing "retained_source_bytecode" (liftIO
-                (generateFreshByteCode native (ms_mod_name summary) (mkCgInteractiveGuts guts) (ms_location summary)))
-              pure home {hm_linkable=justBytecode bytecode}
-            else pure home
-          setSession (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) refreshed) current)
-          -- Make publishes empty linkables for metadata-only loads. This
-          -- selected complete owner retains the exact current executable
-          -- capacity, including across code-to-metadata-to-code transitions.
-          liftIO (addHmiToCache cache refreshed)
+    do
+      let cache = cycleInterfaceCache cycleState
+      selectedVersions <- liftIO (readIORef selectedVersionsRef)
+      forM_ sourceOrder $ \summary -> forM_ (Map.lookup (ms_mod summary) validatedMemo) $ \entry -> do
+        current <- getSession
+        original <- liftIO (requireCompletedModuleHome (hsc_HPT current) entry)
+        let finalized = payloadFinalized (gmePayload entry)
+            nodeEpoch = completedModuleEpoch <$> Map.lookup (ms_mod summary) selectedVersions
+            sameEpoch = nodeEpoch == Just epoch
+            home = if sameEpoch then original else withoutBytecode original
+            hasCode = isJust (homeMod_bytecode (hm_linkable home))
+              || isJust (homeMod_object (hm_linkable home))
+            needsBytecode = backendGeneratesCode (backend (ms_hspp_opts summary))
+              && (not sameEpoch || not hasCode)
+        -- Observe the actual capacity branch separately from source validity.
+        forM_ executableObservationsRef $ \observations -> liftIO $
+          modifyIORef' observations (Map.insert (ms_mod summary)
+            (MemoExecutableTrace nodeEpoch epoch hasCode needsBytecode))
+        refreshed <- if needsBytecode
+          then do
+            -- Executable demand can follow metadata-only preparation in the
+            -- same epoch. A retired epoch also needs new RemotePtrs. Both
+            -- consume the retained finalized Core and publish its complete
+            -- current interface/linkable pair without a source frontend.
+            let native = scopeRetainedSummaryHscEnv summary current
+                guts = (finalizedTidyGuts finalized) {cg_modBreaks=Nothing}
+            liftIO markInterpreterMutation
+            bytecode <- timePhase timing "retained_source_bytecode" (liftIO
+              (generateFreshByteCode native (ms_mod_name summary) (mkCgInteractiveGuts guts) (ms_location summary)))
+            pure home {hm_linkable=justBytecode bytecode}
+          else pure home
+        setSession (hscUpdateHPT (\table -> addToHpt table (ms_mod_name summary) refreshed) current)
+        -- Make publishes empty linkables for metadata-only loads. This
+        -- selected complete owner retains the exact current executable
+        -- capacity, including across code-to-metadata-to-code transitions.
+        liftIO (addHmiToCache cache refreshed)
     -- Observe the original ingress, not the already-pruned working memo.
     -- Failed checks inspect only versions under this exact immutable key.
     when memoTrace $ liftIO $ do
@@ -6003,11 +5945,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             observation state narrowed originating failures omitted = MemoSelectionTrace
               state (unitString (moduleUnit (ms_mod summary))) keySha narrowed originating failures omitted
                 (Map.lookup (ms_mod summary) observedExecutables)
-            selection = case cycleState of
-              StandaloneCycle -> observation MemoStandalone 0 Nothing [] 0
-              TransactionCycle _ _ _ versions _ _ _ _ _
-                | ms_mod summary == targetOwner -> observation MemoTargetExcluded 0 Nothing [] 0
-                | otherwise -> case Map.lookup (ms_mod summary) versions of
+            selection
+              | ms_mod summary == targetOwner = observation MemoTargetExcluded 0 Nothing [] 0
+              | otherwise = case Map.lookup (ms_mod summary) versions of
                     Nothing -> observation MemoOwnerAbsent 0 Nothing [] 0
                     Just byIngress ->
                       let ingress = MemoSelectionKey (ms_hs_hash summary) (retainedFor summary)
@@ -6028,9 +5968,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           selectedPath resolvedPath fingerprint directDeps digestHex selection
     let bodyTier = nativeBodyTier (pvPurpose variant)
     -- 'ghc_setup' phase (TIDEPOOL_TIMING): 'guessTarget'/'setTargets' + this
-    -- 'depanal' call, nothing else, on EVERY caller — a lone compile also
-    -- includes its session bootstrap because 'runCompile' captures
-    -- 'sessionT0' first. A resident request starts after the shared bootstrap.
+    -- 'depanal' call, nothing else. Finite and daemon cycles both start after
+    -- the shared compiler bootstrap.
     -- This phase is flat and non-overlapping with 'ghc_load'.
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
@@ -6437,7 +6376,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           Nothing -> False
           Just original -> mi_hsc_src iface == mi_hsc_src original
             && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
-        loadCache = fmap (filterModIfaceCache keepCurrent) mCache
+        loadCache = Just (filterModIfaceCache keepCurrent (cycleInterfaceCache cycleState))
     -- Fresh providers compile after exact hydration under the same canonical
     -- frontend/finalization owner as GHC Make. Restore only this owner's
     -- temporary fields; the plan's Core-expression link hook remains in force
@@ -6557,7 +6496,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     forM_ (Map.elems capturedModules) $ \loaded -> do
       let summary = loadedSummary loaded
       when (ms_mod summary /= targetOwner) $
-        forM_ mMemoRef $ \ref -> liftIO $ modifyIORef' ref (Map.insert (ms_mod_name summary)
+        liftIO $ modifyIORef' memoRef (Map.insert (ms_mod_name summary)
           (GutsMemoEntry (memoValidity summary (loadedFinalized loaded))
             (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedAcquisition loaded))
             requestIdentity (memoDiagnosticWitnesses summary)))
@@ -6653,9 +6592,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     mResTy   = foldr (<|>) Nothing
                                  [ capturedBindingType occ tcGblEnv
                                  | occ <- cpResultBinders plan ]
-                packageRoots <- if captureProducts || isJust mMemoRef
-                  then liftIO (directPackageImports hscEnv tcGblEnv)
-                  else pure emptyPackageImports
+                packageRoots <- liftIO (directPackageImports hscEnv tcGblEnv)
                 when (ms_mod_name modSum == targetModName') $ liftIO $ hPutStrLn stderr $
                   "tidepool-target phase=desugar module=" ++ targetModName
                 dependentFiles <- liftIO (readIORef (tcg_dependent_files tcGblEnv))
@@ -6708,8 +6645,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
                 liftIO (reuseEvent FinalizedCore ReuseWork Absent (mfSummary mf))
                 liftIO (reuseEvent Interface ReuseWork Absent (mfSummary mf))
-                let interfaceReuse = if isJust mMemoRef then MemoMiss else MemoDisabled
-                (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity interfaceReuse
+                (interfaceMs, registration) <- registerPreparedInterface timing requestIdentity MemoMiss
                   interfaceUse mf simplified
                 liftIO $ recordInterface (mfSummary mf) (Just interfaceMs)
                 let externalized = externalizeInternalTops simplified
@@ -6848,7 +6784,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         Left _ -> do
                           -- Each task's actual cache refusal is determined by
                           -- the frozen typed site witness or executable closure.
-                          cached <- maybe (pure Nothing) (fmap (Map.lookup (ms_mod_name summary)) . readIORef) mMemoRef
+                          cached <- Map.lookup (ms_mod_name summary) <$> readIORef memoRef
                           disabled <- Set.member (ms_mod summary) <$> readIORef disabledPreparedOwnersRef
                           let reason | disabled = CacheDisabled
                                      | otherwise = case cached >>= payloadProduct . gmePayload of
@@ -6967,7 +6903,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         finalized = loadedFinalized loaded
                         prepared = Map.lookup (ms_mod_name summary) preparedByName
                     moduleProduct <- requireProduct loaded prepared
-                    forM_ mMemoRef $ \ref -> liftIO (modifyIORef' ref
+                    liftIO (modifyIORef' memoRef
                       (Map.insert (ms_mod_name summary) (GutsMemoEntry
                         (memoValidity summary finalized)
                         (ExecutableProduct moduleProduct) requestIdentity
@@ -7097,15 +7033,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     let modSum = loadedSummary loaded
                         finalized = loadedFinalized loaded
                     moduleProduct <- requireProduct loaded prepared
-                    case mMemoRef of
-                      Just ref -> liftIO (modifyIORef' ref
-                        (Map.insert (ms_mod_name modSum)
-                          (GutsMemoEntry
-                            (memoValidity modSum finalized)
-                            (ExecutableProduct moduleProduct)
-                            requestIdentity
-                            (memoDiagnosticWitnesses modSum))))
-                      Nothing -> pure ()
+                    liftIO (modifyIORef' memoRef
+                      (Map.insert (ms_mod_name modSum)
+                        (GutsMemoEntry
+                          (memoValidity modSum finalized)
+                          (ExecutableProduct moduleProduct)
+                          requestIdentity
+                          (memoDiagnosticWitnesses modSum))))
                   compileReachable loaded = do
                     rememberFinalized loaded
                     let r = loadedOutput loaded
@@ -7114,15 +7048,13 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     pure [(r, prepared)]
                   validationOnly loaded moduleFacts = do
                     let modSum = loadedSummary loaded
-                    case mMemoRef of
-                      Just ref -> liftIO (modifyIORef' ref
-                        (Map.insert (ms_mod_name modSum)
-                          (GutsMemoEntry
-                            (memoValidity modSum (loadedFinalized loaded))
-                            (ValidationOnly moduleFacts (loadedOutput loaded) (loadedAcquisition loaded))
-                            requestIdentity
-                            (memoDiagnosticWitnesses modSum))))
-                      Nothing -> pure ()
+                    liftIO (modifyIORef' memoRef
+                      (Map.insert (ms_mod_name modSum)
+                        (GutsMemoEntry
+                          (memoValidity modSum (loadedFinalized loaded))
+                          (ValidationOnly moduleFacts (loadedOutput loaded) (loadedAcquisition loaded))
+                          requestIdentity
+                          (memoDiagnosticWitnesses modSum))))
               rs <- fmap concat $ forM (zip3 observations' facts interfaceUses) $ \(observation, moduleFacts, interfaceUse) -> do
                 let modSum = observationSummary observation
                 depsExecutable <- executableDepsValid modSum
@@ -8597,8 +8529,13 @@ withResidentCompilerScopes baseIncludes useRequests = do
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
     packageFinder <- liftIO (newPackageFinderFacts baseEnv)
+    boot <- liftIO $ do
+      environment <- retainClosedHomeContext packageFinder Nothing baseEnv
+      unless (null (eltsHpt (hsc_HPT environment)))
+        (throwIO CompilerBootContainsHomeInterfaces)
+      pure (CompilerBootContext environment packageFinder)
     originalInputs <- liftIO newExactInputOwner
-    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder originalInputs packageAssociation emptyCompilerWorldCache worldDirectory))
+    universe <- liftIO (newIORef (CompilerUniverse boot Map.empty Map.empty initialRecovery interpreter originalInputs packageAssociation emptyCompilerWorldCache worldDirectory))
     active <- liftIO (newIORef Nothing)
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
@@ -9029,16 +8966,11 @@ withResidentCompilerScopes baseIncludes useRequests = do
                       retainedUniverse <- readIORef universe
                       current <- readIORef active
                       borrowed <- forkExactContextWithPackageFacts (universePackageFinder retainedUniverse)
-                        (maybe (universeEnvironment retainedUniverse) activeEnvironment current)
+                        (maybe (universeBootEnvironment retainedUniverse) activeEnvironment current)
                       result <- reflectGhc (setSession (borrowed
                         {hsc_hooks=hsc_hooks baseEnv,hsc_logger=hsc_logger baseEnv}) >> operation) session
-                      observed <- reflectGhc getSession session
-                      -- A successful helper may demand package declarations. Retain
-                      -- its EPS/finder cells without publishing its home visibility.
-                      modifyIORef' universe (\state -> state {universeEnvironment =
-                        (universeEnvironment state)
-                          {hsc_FC=hsc_FC observed, hsc_unit_env=(hsc_unit_env (universeEnvironment state))
-                            {ue_eps=ue_eps (hsc_unit_env observed)}}})
+                      -- Package cells are shared by the fixed boot owner. The
+                      -- helper's HOME table, graph and Finder stay private.
                       pure result)
                 finish = do
                   writeIORef phase CompilerClosed
@@ -9155,7 +9087,8 @@ residentCompileOne
   -> IORef CompilerUniverse -> IORef (Maybe ActiveCompilerAttempt) -> IORef InterpreterAttemptState
   -> HscEnv -> DynFlags -> Bool -> Word64 -> CompilePurpose -> Maybe SessionScope
   -> FilePath -> [FilePath] -> Maybe FilePath -> Ghc (CompletedCompilerResult result)
-residentCompileOne guard producer selection retained universeRef active interpreterAttempt baseEnv baseFlags timing requestIdentity purpose mscope path includes products = do
+residentCompileOne guard producer selection retained universeRef active interpreterAttempt baseEnv baseFlags timing requestIdentity requestedPurpose mscope path includes products = do
+  purpose <- either (liftIO . throwIO) pure (normalizeCompilePurpose requestedPurpose)
   sessionT0 <- monotonicTime
   resources <- beginResourceTiming timing
   selected <- liftIO $ case mscope of
@@ -9173,7 +9106,7 @@ residentCompileOne guard producer selection retained universeRef active interpre
   candidates <- liftIO $ traverse captureCandidateManifest (candidateManifestFor selection)
   universe <- liftIO (readIORef universeRef)
   borrowed <- liftIO (forkExactContextWithPackageFacts (universePackageFinder universe)
-    (universeEnvironment universe))
+    (universeBootEnvironment universe))
   initialEpoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
   -- Only currently admitted original nodes become initially visible. Fresh
   -- source nodes are installed after this graph's dependency validation.
@@ -9223,33 +9156,33 @@ residentCompileOne guard producer selection retained universeRef active interpre
   -- Commit after the complete compiler operation. Failed/cancelled targets or
   -- partial dependency additions never enter this inventory.
   epoch <- liftIO (compilerInterpreterEpoch <$> readIORef (universeInterpreter universe))
-  let sourceNodes = Map.fromListWith Map.union
-        [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
-            (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
-                (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))))))
-        | entry <- Map.elems admittedSnapshot
-        , let owner = payloadOwner (gmePayload entry)
-        , owner /= targetOwner
-        , let home = retainCompletedModuleHome (lookupHpt (hsc_HPT final) (moduleName owner))]
-      originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
+  -- Validate the retained dependency closure without publishing its request
+  -- environment. SOURCE backedges may keep the target HMI in this closure.
+  closed <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) final)
+  let completedHomes = hsc_HPT closed
+  sourceNodes <- liftIO $ Map.fromListWith Map.union <$> forM
+    [entry | entry <- Map.elems admittedSnapshot
+      , payloadOwner (gmePayload entry) /= targetOwner] (\entry -> do
+        let owner = payloadOwner (gmePayload entry)
+            validity = gmeValidity entry
+            products = maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
+              (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))
+        node <- issueCompletedModuleVersion completedHomes entry recoveryContext epoch products
+        pure (owner,Map.singleton (memoSelectionKey validity) (Map.singleton validity node)))
+  let originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
           CompletedOriginalVersion home recoveryContext epoch)
         | scope <- maybe [] pure (pvExactScope variant), (artifact,_,_) <- scopeInterfaces scope
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , Just digest <- [Map.lookup (exactUnit artifact,exactModule artifact) originals]
-        , Just home <- [lookupHpt (hsc_HPT final) (moduleName owner)]
+        , Just home <- [lookupHpt completedHomes (moduleName owner)]
         , mi_module (hm_iface home) == owner]
-      -- A SOURCE-cycle dependency can retain the target's HMI as part of its
-      -- details knot. The closure keeps it only when reached by another home;
-      -- the target still never enters sourceNodes.
-      retainedHomes = hscUpdateFlags (const baseFlags) final
-  retainedView <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) retainedHomes)
   liftIO $ do
     evictCompilerRecovery recovery (== targetOwner)
     writeIORef active (Just context)
     emitCount timing "original_inputs.context_variants_before" (fromIntegral (Map.size (universeOriginalVersions universe)))
     emitCount timing "original_inputs.context_variants_selected" (fromIntegral (Map.size originalVersions))
     modifyIORef' universeRef (\current -> current
-      { universeEnvironment=retainedView, universeRecovery=recoveryContext
+      { universeRecovery=recoveryContext
       , universeSourceVersions=Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))
           sourceNodes (universeSourceVersions current)
       , universeOriginalVersions=if admitted then Map.unionWith preferOriginalVersion
@@ -9267,8 +9200,8 @@ preferModuleVersion incoming previous = selected
   where
     selected
       | completedModuleEpoch incoming /= completedModuleEpoch previous = incoming
-      | maybe False hasCode (completedModuleHome incoming)
-          && not (maybe False hasCode (completedModuleHome previous)) = incoming
+      | hasCode (completedModuleHome incoming)
+          && not (hasCode (completedModuleHome previous)) = incoming
       | isJust (payloadProduct (gmePayload (completedModuleEntry incoming)))
           && isNothing (payloadProduct (gmePayload (completedModuleEntry previous))) = incoming
       | otherwise = previous
@@ -9445,11 +9378,10 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
           && unpackFS (srcSpanFile rss) == "<cell>")
     inTarget _ = False
 
--- | The session-setup DynFlags transform, applied once by 'runCompile' and so
--- shared by BOTH variants: 'canonicalizeDFlags' + the genericPlatform spoof +
--- exposing the @ghc@ package + clearing host SIMD. The produced 'DynFlags' is
--- byte-for-byte what the normal path always built. See the long commentary at
--- the 'runCompile' call site for the rationale of each field.
+-- Boot establishes the package and x86_64-linux target policy before GHC unit
+-- initialization. Runtime primops use that target on every host. Do not mix
+-- host platform constants into genericPlatform or reapply it after GHC has
+-- initialized the target constants.
 extractionDynFlags :: DynFlags -> [FilePath] -> DynFlags
 extractionDynFlags dflags includes = canonicalizeDFlags dflags
   { importPaths = importPaths dflags ++ includes

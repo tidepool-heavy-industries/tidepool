@@ -1,6 +1,8 @@
 # G2: issued dependencies and acquired compiler context
 
-Accepted 2026-10-23. Integration: `refactor/g2-context-ownership-c-20261022`.
+Superseded by [the domain-owner cutover](../domain-owners/README.md), accepted
+2026-10-23. Do not implement this older adapter sequence independently.
+Prior integration: `refactor/g2-context-ownership-c-20261022`.
 Root owns architecture, integration and joined qualification. G2/G3 remain
 unqualified. Prior checkpoint history is in Git and retained validation evidence.
 

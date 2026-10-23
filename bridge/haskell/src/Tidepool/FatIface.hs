@@ -3,9 +3,9 @@
 -- post-optimization Core for ALL bindings including workers, loop-breakers,
 -- and internal helpers that don't get normal unfoldings.
 --
--- Uses findAndReadIface to read .hi files directly from disk, bypassing the
--- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
--- a panic thunk to save memory, so loadSysInterface can't be used here.
+-- HOME reads consume the installed interface owner. Package reads bypass the
+-- PIT (Package Interface Table), which replaces mi_extra_decls with a panic
+-- thunk; package loadSysInterface therefore cannot supply defining bodies.
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
@@ -15,7 +15,7 @@ module Tidepool.FatIface
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
-  , ExactInterfaceFailure(..), readExactInterface, readCapturedDefiningInterface
+  , ExactInterfaceFailure(..), readHomeInterface, readPackageInterface, readCapturedDefiningInterface
   , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceBytes, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
@@ -25,7 +25,7 @@ module Tidepool.FatIface
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
-import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags, hsc_FC, hsc_HUG, hsc_units, hsc_home_unit_maybe)
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags, hsc_FC, hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit, hsc_HPT)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
 import GHC.Types.Var (Id, isId, isLocalId)
 import GHC.Types.Id (isFCallId, isPrimOpId_maybe)
@@ -53,6 +53,8 @@ import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
+import GHC.Unit.Home (isHomeUnit)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar_, newMVar, readMVar)
@@ -226,7 +228,7 @@ lookupModuleOutcome env (FatIfaceCache cache) owner =
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.
--- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
+-- Packages bypass the PIT cache, which strips mi_extra_decls.
 loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
   result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl >>= evaluate)
@@ -238,74 +240,80 @@ loadModuleExtraDecls hscEnv modl = do
         [("module", LogText (showSDocUnsafe (ppr modl))), ("detail", LogText (show e))]
       return (FatIfaceLoadFailureOutcome (show e))
 
--- | Read an already-resolved defining identity, including hidden package
--- modules. Import visibility is not a condition for preparing a recovered
--- implementation. Preserve its exact location for CorePrep; home interfaces
--- use the finder's recorded location, never a reconstructed source path.
-readExactInterface :: HscEnv -> Module
+-- HOME TYPE owners are already decoded in this compiler's NameCache. Their
+-- captured input aliases do not authorize reopening any filesystem location.
+readHomeInterface :: HscEnv -> Module -> IO (Either ExactInterfaceFailure ModIface)
+readHomeInterface env owner = pure $ case lookupHpt (hsc_HPT env) (moduleName owner) of
+  Just home | mi_module (hm_iface home) == owner -> Right (hm_iface home)
+  _ -> Left (ExactInterfaceReadFailure "exact HOME interface is not installed")
+
+-- | Read an exact installed package identity, including hidden modules.
+-- HOME interfaces belong to their captured compiler owner and never enter
+-- this filesystem route. Import visibility is not executable-body authority.
+readPackageInterface :: HscEnv -> Module
   -> IO (Either ExactInterfaceFailure (ModIface, ModLocation))
-readExactInterface env owner = do
-  let installed = mkModule (toUnitId (moduleUnit owner)) (moduleName owner)
-  attempted <- trySynchronous $ findAndReadIface env
-    (text "Tidepool exact defining interface") installed owner NotBoot
-  case attempted of
-    Left exception -> pure (Left
-      (ExactInterfaceFinderFailure (displayException exception)))
-    Right (Succeeded pair) -> pure (Right pair)
-    Right (Failed (HomeModError _ location)) -> do
-      raw <- trySynchronous $ readIface (hsc_dflags env) (hsc_NC env)
-        owner (ml_hi_file location)
-      pure $ case raw of
-        Left exception -> Left (ExactInterfaceReadFailure (displayException exception))
-        Right (Succeeded iface) -> Right (iface, location)
-        Right (Failed failure) -> Left
-          (ExactInterfaceReadFailure (renderReadInterfaceError failure))
-    Right (Failed failure) -> pure $ Left $ case failure of
-      BadIfaceFile{} -> ExactInterfaceReadFailure
-        (renderMissingInterfaceError failure)
-      DynamicHashMismatchError{} -> ExactInterfaceReadFailure
-        (renderMissingInterfaceError failure)
-      FailedToLoadDynamicInterface{} -> ExactInterfaceReadFailure
-        (renderMissingInterfaceError failure)
-      _ -> ExactInterfaceFinderFailure (renderMissingInterfaceError failure)
+readPackageInterface env owner
+  | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
+      pure (Left (ExactInterfaceReadFailure "package interface reader cannot consume HOME"))
+  | otherwise = do
+      let installed = mkModule (toUnitId (moduleUnit owner)) (moduleName owner)
+      attempted <- trySynchronous $ findAndReadIface env
+        (text "Tidepool exact defining interface") installed owner NotBoot
+      case attempted of
+        Left exception -> pure (Left
+          (ExactInterfaceFinderFailure (displayException exception)))
+        Right (Succeeded pair) -> pure (Right pair)
+        Right (Failed failure) -> pure $ Left $ case failure of
+          BadIfaceFile{} -> ExactInterfaceReadFailure
+            (renderMissingInterfaceError failure)
+          DynamicHashMismatchError{} -> ExactInterfaceReadFailure
+            (renderMissingInterfaceError failure)
+          FailedToLoadDynamicInterface{} -> ExactInterfaceReadFailure
+            (renderMissingInterfaceError failure)
+          _ -> ExactInterfaceFinderFailure (renderMissingInterfaceError failure)
 
 -- Resolve once and decode exactly the captured bytes. The temporary decoder
 -- path never replaces the defining location used by CorePrep and provenance.
 readCapturedDefiningInterface :: HscEnv -> Module
   -> IO (Either ExactInterfaceFailure (ModIface, ModLocation, ArtifactBytes))
-readCapturedDefiningInterface env owner = do
-  attempted <- trySynchronous $ do
-    found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
-      (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
-      (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
-    case found of
-      InstalledFound location _ -> do
-        captured <- captureArtifactBytes <$> BS.readFile (ml_hi_file location)
-        decoded <- Shared.withCapturedIface False (showSDocUnsafe (ppr owner))
-          (artifactBytes captured) $ readIface (hsc_dflags env) (hsc_NC env) owner
-        pure $ case decoded of
-          Succeeded iface | mi_module iface == owner ->
-            Right (iface, location, captured)
-          Succeeded _ -> Left (ExactInterfaceReadFailure "captured defining interface owner differs")
-          Failed failure -> Left (ExactInterfaceReadFailure (renderReadInterfaceError failure))
-      _ -> pure (Left (ExactInterfaceFinderFailure "defining package interface does not resolve"))
-  pure $ case attempted of
-    Left failure -> Left (ExactInterfaceReadFailure (displayException failure))
-    Right result -> result
+readCapturedDefiningInterface env owner
+  | isHomeUnit (hsc_home_unit env) (moduleUnit owner) =
+      pure (Left (ExactInterfaceReadFailure "captured package interface reader cannot consume HOME"))
+  | otherwise = do
+      attempted <- trySynchronous $ do
+        found <- findExactModule (hsc_FC env) (initFinderOpts (hsc_dflags env))
+          (fmap (initFinderOpts . homeUnitEnv_dflags) (hsc_HUG env))
+          (hsc_units env) (hsc_home_unit_maybe env) (toUnitId <$> owner)
+        case found of
+          InstalledFound location _ -> do
+            captured <- captureArtifactBytes <$> BS.readFile (ml_hi_file location)
+            decoded <- Shared.withCapturedIface False (showSDocUnsafe (ppr owner))
+              (artifactBytes captured) $ readIface (hsc_dflags env) (hsc_NC env) owner
+            pure $ case decoded of
+              Succeeded iface | mi_module iface == owner ->
+                Right (iface, location, captured)
+              Succeeded _ -> Left (ExactInterfaceReadFailure "captured defining interface owner differs")
+              Failed failure -> Left (ExactInterfaceReadFailure (renderReadInterfaceError failure))
+          _ -> pure (Left (ExactInterfaceFinderFailure "defining package interface does not resolve"))
+      pure $ case attempted of
+        Left failure -> Left (ExactInterfaceReadFailure (displayException failure))
+        Right result -> result
 
 loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   logger <- readLogger "tidepool.compiler.fat-iface"
   let doc = text "tidepool fat-iface lookup"
-  -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact.
-  ifaceResult <- readExactInterface hscEnv modl
+  -- HOME uses its installed owner; packages retain the defining-file route.
+  ifaceResult <- if isHomeUnit (hsc_home_unit hscEnv) (moduleUnit modl)
+    then readHomeInterface hscEnv modl
+    else fmap (fmap fst) (readPackageInterface hscEnv modl)
   case ifaceResult of
     Left reason -> do
       logTrace logger "module.interface-read-refused"
         [ ("module", LogText (showSDocUnsafe (ppr modl)))
         , ("detail", LogText (renderExactInterfaceFailure reason)) ]
       return (FatIfaceLoadFailureOutcome (renderExactInterfaceFailure reason))
-    Right (iface, _) ->
+    Right iface ->
       case mi_extra_decls iface of
         Nothing -> do
           logTrace logger "module.extra-declarations-absent"
@@ -461,7 +469,7 @@ ownerInterfaceMatchesOriginal context (FatOriginalVersion owner interface core) 
       Just _ -> ownerInterfaceCapturedCore context == Just core
 
 -- | Daemon-lifetime cache of an owner module's already-read-and-typechecked
--- defining context: the 'ModLocation' 'readExactInterface' resolved it at,
+-- defining context: the 'ModLocation' 'readPackageInterface' resolved it at,
 -- and the type constructors and defining entry Ids 'typecheckIface' produced. Recovered-body
 -- preparation ('Tidepool.PreparedStg.prepareRecoveredBodies') reads and
 -- typechecks an owner's interface at most once per cache lifetime; only

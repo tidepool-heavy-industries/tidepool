@@ -46,7 +46,7 @@ import Data.Set qualified as Set
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Unit.Module.ModIface (mi_module, mi_usages, mi_deps)
 import GHC.Unit.Module.Deps (Usage(..), Dependencies(..))
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.ExtractUtil (shaHex, getLibdir)
 import GHC.Driver.Config.Finder (initFinderOpts)
 import GHC.Driver.Env (HscEnv(..), hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit)
@@ -440,7 +440,7 @@ packageInputClosure env roots = do
           let ((ownerKey, expected), rest) = Map.deleteFindMin pending
               owner = mkModule (stringToUnit (packageUnit expected)) (mkModuleName (packageModule expected))
           before <- validatePackageImportRoot env expected
-          iface <- readExactInterface env owner
+          iface <- readPackageInterface env owner
           case (before, iface) of
             (Right (), Right (interface, _)) | mi_module interface == owner -> do
               after <- validatePackageImportRoot env expected

@@ -209,6 +209,10 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 })
         })
         .expect("the actual helper product exports second");
+    // Record the actual producer's exact closures before any generated demand,
+    // custody attachment or recovery. Later inventory membership is no oracle
+    // for whether a target used that immutable issuer.
+    let mut publication_issuer_groups = BTreeSet::new();
     for (index, ordinal) in ordinals.iter().enumerate() {
         let definitions = original_native_group_definitions(root_product, *ordinal).unwrap();
         assert_eq!(
@@ -236,6 +240,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             .all(|group| group.binding.artifact() == root.descriptor.id
                 && group.original_ordinal == *ordinal));
         let closure = selected_group_carriers(&dependency);
+        publication_issuer_groups.extend(closure.keys().copied());
         let helper_groups = closure
             .keys()
             .filter(|group| group.binding.artifact() == helper.descriptor.id)
@@ -251,6 +256,16 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
             "the exact issued group closure distinguishes independent and helper-dependent demand"
         );
     }
+    let publication_native_domain = original
+        .compiler_input_roles()
+        .iter()
+        .filter_map(CompilerInputRole::original)
+        .chain(
+            publication_issuer_groups
+                .iter()
+                .map(|group| group.binding.artifact()),
+        )
+        .collect::<BTreeSet<_>>();
     let expected_publication = original
         .compiler_input_roles()
         .into_iter()
@@ -629,10 +644,8 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     }).collect::<BTreeSet<_>>();
                     prop_assert_eq!(&actual_target, &expected_target);
                     aggregate_targets.extend(actual_target);
-                    let issuer_originals = original.compiler_input_roles().iter()
-                        .filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
-                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact()))
-                        .all(|group| original.artifact_view().contains_issued_native_group(*group));
+                    let issued_groups = groups.iter().filter(|group| publication_native_domain.contains(&group.binding.artifact()))
+                        .all(|group| publication_issuer_groups.contains(group));
                     let selected = context.published_source_original_selections_for_target(&groups, target.imports()).unwrap();
                     prop_assert_eq!(selected.len(), usize::from(issued_groups),
                         "target policy follows exact issuer-owned dependency groups: {:?}", groups);

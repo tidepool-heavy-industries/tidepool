@@ -2802,6 +2802,8 @@ pub enum ArtifactIdentityStage {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CertificationError {
+    #[error("World program cursor refused: {0}")]
+    WorldProgramCursor(#[source] crate::declaration_context::WorldProgramCursorFailure),
     #[error("input native decision for {owner:?} refused: {reason:?}")]
     InputDecision {
         owner: crate::declaration_join::ExactModuleIdentity,
@@ -33234,7 +33236,7 @@ None,
                 .unwrap()
                 .contains_key(&candidate));
             assert!(
-                !rebound.contains_issued_native_group(candidate),
+                !rebound.contains_acquired_native_group(candidate),
                 "raw payload and raw graph reconstruction do not recreate this earned group scope"
             );
             unsupported.insert(key);

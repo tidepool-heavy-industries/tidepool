@@ -38,7 +38,7 @@ import System.IO (hClose, openTempFile)
 import System.Process (readProcess)
 import Tidepool.FatIface
   (FatIfaceLookup(..), ownerInterfaceLocation, ownerInterfaceEntries, lookupFatIfaceExact,
-   lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache, readExactInterface)
+   lookupOwnerInterface, newFatIfaceCache, newOwnerInterfaceCache, readPackageInterface)
 import Tidepool.PreparedStg
   (PreparedModule, RecoveredModuleInput(..), newPreparedBodyCache,
    pmBindings, pmTagSigs, prepareRecoveredBodies, prepareRecoveredModule)
@@ -202,7 +202,7 @@ wiredConstructorEntry = do
           (varName canonical == workerName && eqType (idType canonical) (idType worker))
           "wired worker Name does not carry its exact GHC-issued Id"
         _ -> fail "wired list worker Name is not an AnId"
-      (iface, _) <- readExactInterface env owner >>= either (fail . show) pure
+      (iface, _) <- readPackageInterface env owner >>= either (fail . show) pure
       extra <- maybe (fail "wired owner's original Core is absent") pure (mi_extra_decls iface)
       decoded <- initIfaceCheck doc env $ do
         types <- liftIO (newIORef emptyTypeEnv)

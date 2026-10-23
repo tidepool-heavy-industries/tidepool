@@ -289,9 +289,7 @@ fn sibling_fence_before_preflight(cancel: bool) {
     let admitted = session
         .begin_durable_private_execution(&owner, scope)
         .unwrap();
-    let prepared = session
-        .freeze_execution_intent(&admitted, Vec::new(), Vec::new())
-        .unwrap();
+    let prepared = session.freeze_private_execution(&admitted).unwrap();
     let before = session.public_visibility_snapshot_in(scope).unwrap();
 
     let sibling_id = fresh_session_id();

@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | Versioned request protocol between the Rust launcher and the Haskell
 -- compiler worker. The worker receives domain fields, not command-line
 -- options; CLI compatibility is owned by the launcher layer.
@@ -16,8 +18,22 @@ module Tidepool.ExtractRequest
   , InspectionProvenance(..)
   , WorkerRequest(..)
   , RequestOperation(..)
-  , RequestShapeError(..)
-  , admitRequestOperation
+  , RequestShapeError(..), RequiredRequestField(..)
+  , AdmittedWorkerRequest, RequestOptions(..)
+  , AdmittedRequestOperation
+      (AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare
+      , AdmittedSource, AdmittedTurn, AdmittedActivationPreview, AdmittedClassification, AdmittedInspection
+      , AdmittedCell, AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration)
+  , SourceRequest, sourceInput, sourceAdditionalInputs
+  , SourceProductRequest, sourceProductSource, sourceProductOutput
+  , SourceOutput, SourceOutputKind(..), sourceOutputKind, sourceOutputDirectory, sourceOutputTargets
+  , admittedOutputDirectory, admittedTurnTemplates
+  , TurnRequest, turnSourceRequest, turnOutput, turnVerdict, turnTemplates, turnOutputDirectory
+  , ClassificationRequest, classificationSources, classificationOutput, classificationOutputDirectory
+  , InspectionPayload, inspectionInputs, inspectionOutput, inspectionBatch, inspectionStrict, inspectionOutputDirectory
+  , CellRequest, cellSourceRequest, cellTemplate, cellOutput, cellTemplates, cellOutputDirectory
+  , RequestSourceRole(..), admittedSourceFiles, traverseAdmittedSources
+  , admitWorkerRequest, admittedRequestOptions, admittedRequestOperation, requestOperation
   , validateRequestShape
   , workerRequestFromArgv
   , workerArgv
@@ -26,6 +42,7 @@ module Tidepool.ExtractRequest
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -279,7 +296,6 @@ data RequestField
   | OutputDir FilePath
   | Target String
   | Targets [String]
-  | TargetModuleOnly
   | Include FilePath
   | BindGen Word64
   | SessionRoot FilePath
@@ -325,8 +341,8 @@ data RequestField
   | WorldCellPrepare WorldCellPrepareRequest
   deriving (Eq, Show)
 
--- | A decoded compiler-worker invocation. This is the Haskell boundary's
--- domain request; the executable never reconstructs or parses CLI syntax.
+-- | Decoded worker transport fields. Only pure full admission may turn this
+-- record into compiler inputs; compiler helpers consume the admitted payload.
 data WorkerRequest = WorkerRequest
   { requestWorkload :: CompileWorkload
   , requestCompilerJobs :: Int
@@ -334,7 +350,6 @@ data WorkerRequest = WorkerRequest
   , requestOutDir :: Maybe FilePath
   , requestTarget :: Maybe String
   , requestTargets :: [String]
-  , requestTargetModuleOnly :: Bool
   , requestIncludes :: [FilePath]
   , requestFiles :: [FilePath]
   , requestBindGen :: Maybe Word64
@@ -385,8 +400,221 @@ data WorkerRequest = WorkerRequest
   }
   deriving (Eq, Show)
 
--- | One operation admitted from the externally encoded request fields. Preview
--- refines a turn; declaration operations own both their manifest and output.
+-- Decoded fields never enter compiler helpers. Admission owns their complete
+-- relationship and retains only shared compiler policy plus one closed payload.
+data RequestOptions = RequestOptions
+  { optionWorkload :: CompileWorkload
+  , optionCompilerJobs :: Int
+  , optionCompilerCapabilities :: Int
+  , optionIncludes :: [FilePath]
+  , optionBindGen :: Maybe Word64
+  , optionSessionRoot :: Maybe FilePath
+  , optionSessionIncarnation :: Maybe String
+  , optionInjectVals :: [String]
+  , optionHarnessProfile :: Bool
+  , optionBuildProductsDir :: Maybe FilePath
+  , optionModuleCandidates :: Maybe FilePath
+  , optionSessionArtifacts :: Maybe FilePath
+  , optionRetainedGenerations :: Map SymbolIdentity Word64
+  } deriving (Eq, Show)
+
+data SourceRequest = SourceRequest
+  { payloadSourceInput :: FilePath, payloadSourceAdditionalInputs :: [FilePath] } deriving (Eq, Show)
+data SourceOutputKind = ProduceNativeOriginals | CertifyHomeOriginals | ProducePortableExecutable
+  deriving (Eq, Show)
+data SourceOutput
+  = NativeSourceOutput (Maybe FilePath) (NonEmpty String)
+  | CertifiedSourceOutput (Maybe FilePath) (NonEmpty String)
+  | PortableSourceOutput FilePath (NonEmpty String)
+  deriving (Eq, Show)
+data SourceProductRequest = SourceProductRequest
+  { payloadSourceProductSource :: SourceRequest, payloadSourceProductOutput :: SourceOutput } deriving (Eq, Show)
+data TurnRequest = TurnRequest
+  { payloadTurnSourceRequest :: SourceRequest, payloadTurnOutput :: FilePath, payloadTurnVerdict :: Maybe String
+  , payloadTurnTemplates :: [(String,FilePath)], payloadTurnOutputDirectory :: Maybe FilePath } deriving (Eq, Show)
+data ClassificationRequest = ClassificationRequest
+  { payloadClassificationSources :: [FilePath], payloadClassificationOutput :: FilePath, payloadClassificationOutputDirectory :: Maybe FilePath } deriving (Eq, Show)
+data InspectionPayload = InspectionPayload
+  { payloadInspectionInputs :: [(FilePath, InspectionRequest)]
+  , payloadInspectionOutput :: FilePath, payloadInspectionBatch :: Maybe FilePath, payloadInspectionStrict :: Bool, payloadInspectionOutputDirectory :: Maybe FilePath
+  } deriving (Eq, Show)
+data CellRequest = CellRequest
+  { payloadCellSourceRequest :: SourceRequest, payloadCellTemplate :: FilePath, payloadCellOutput :: FilePath
+  , payloadCellTemplates :: [(String,FilePath)], payloadCellOutputDirectory :: Maybe FilePath } deriving (Eq, Show)
+data AdmittedRequestOperation
+  = AdmittedEnsureExactInputsPayload ExactInputsRequest
+  | AdmittedWorldQueryPayload WorldQueryRequest
+  | AdmittedWorldCellPlanPayload WorldCellPlanRequest
+  | AdmittedWorldCellPreparePayload WorldCellPrepareRequest
+  | AdmittedSourcePayload SourceProductRequest
+  | AdmittedTurnPayload TurnRequest
+  | AdmittedActivationPreviewPayload TurnRequest
+  | AdmittedClassificationPayload ClassificationRequest
+  | AdmittedInspectionPayload InspectionPayload
+  | AdmittedCellPayload CellRequest
+  | AdmittedCellPlanPayload CellRequest
+  | AdmittedSourceCheckPayload SourceRequest
+  | AdmittedDeclarationPayload FilePath FilePath
+  deriving (Eq, Show)
+data AdmittedWorkerRequest = AdmittedWorkerRequest RequestOptions AdmittedRequestOperation
+  deriving (Eq, Show)
+
+admittedRequestOptions :: AdmittedWorkerRequest -> RequestOptions
+admittedRequestOptions (AdmittedWorkerRequest options _) = options
+admittedRequestOperation :: AdmittedWorkerRequest -> AdmittedRequestOperation
+admittedRequestOperation (AdmittedWorkerRequest _ operation) = operation
+
+-- Reporting only. Production dispatch consumes the payload-bearing variant.
+requestOperation :: AdmittedWorkerRequest -> RequestOperation
+requestOperation = admittedOperationTag . admittedRequestOperation
+
+admittedOperationTag :: AdmittedRequestOperation -> RequestOperation
+admittedOperationTag operation = case operation of
+  AdmittedEnsureExactInputsPayload value -> EnsureExactInputsOperation value
+  AdmittedWorldQueryPayload value -> WorldQueryOperation value
+  AdmittedWorldCellPlanPayload value -> WorldCellPlanOperation value
+  AdmittedWorldCellPreparePayload value -> WorldCellPrepareOperation value
+  AdmittedSourcePayload _ -> SourceOperation
+  AdmittedTurnPayload _ -> TurnOperation
+  AdmittedActivationPreviewPayload _ -> ActivationPreviewOperation
+  AdmittedClassificationPayload _ -> ClassificationOperation
+  AdmittedInspectionPayload _ -> InspectionOperation
+  AdmittedCellPayload _ -> CellOperation
+  AdmittedCellPlanPayload _ -> CellPlanOperation
+  AdmittedSourceCheckPayload _ -> SourceCheckOperation
+  AdmittedDeclarationPayload manifest output -> DeclarationOperation manifest output
+
+data RequestSourceRole = PrimarySource | AdditionalSource | InspectionSource Int | InspectionBatchSource
+  deriving (Eq, Show)
+
+admittedSourceFiles :: AdmittedWorkerRequest -> [FilePath]
+admittedSourceFiles request = case admittedRequestOperation request of
+  AdmittedSourcePayload request -> sources (payloadSourceProductSource request)
+  AdmittedSourceCheckPayload source -> sources source
+  AdmittedTurnPayload turn -> sources (payloadTurnSourceRequest turn)
+  AdmittedActivationPreviewPayload turn -> sources (payloadTurnSourceRequest turn)
+  AdmittedCellPayload cell -> sources (payloadCellSourceRequest cell)
+  AdmittedCellPlanPayload cell -> sources (payloadCellSourceRequest cell)
+  AdmittedClassificationPayload classification -> payloadClassificationSources classification
+  AdmittedInspectionPayload inspection -> map fst (payloadInspectionInputs inspection) ++ maybe [] (:[]) (payloadInspectionBatch inspection)
+  _ -> []
+  where sources source = payloadSourceInput source : payloadSourceAdditionalInputs source
+
+-- Path replacement preserves the admitted operation's shape and query pairing.
+traverseAdmittedSources :: Applicative f => (RequestSourceRole -> FilePath -> f FilePath)
+  -> AdmittedWorkerRequest -> f AdmittedWorkerRequest
+traverseAdmittedSources replace (AdmittedWorkerRequest options operation) = AdmittedWorkerRequest options <$> case operation of
+  AdmittedSourcePayload request -> (\source -> AdmittedSourcePayload (request {payloadSourceProductSource=source})) <$> sourcePaths (payloadSourceProductSource request)
+  AdmittedSourceCheckPayload source -> AdmittedSourceCheckPayload <$> sourcePaths source
+  AdmittedTurnPayload turn -> AdmittedTurnPayload <$> turnPaths turn
+  AdmittedActivationPreviewPayload turn -> AdmittedActivationPreviewPayload <$> turnPaths turn
+  AdmittedCellPayload cell -> AdmittedCellPayload <$> cellPaths cell
+  AdmittedCellPlanPayload cell -> AdmittedCellPlanPayload <$> cellPaths cell
+  AdmittedClassificationPayload classification -> (\paths -> AdmittedClassificationPayload (classification {payloadClassificationSources=paths}))
+    <$> traverse (\(index,path) -> replace (if index == (0 :: Int) then PrimarySource else AdditionalSource) path) (zip [0..] (payloadClassificationSources classification))
+  AdmittedInspectionPayload inspection -> (\inputs batch -> AdmittedInspectionPayload (inspection {payloadInspectionInputs=inputs,payloadInspectionBatch=batch}))
+    <$> traverse (\(index,(path,query)) -> (\copy -> (copy,query)) <$> replace (InspectionSource index) path)
+      (zip [0..] (payloadInspectionInputs inspection))
+    <*> traverse (replace InspectionBatchSource) (payloadInspectionBatch inspection)
+  other -> pure other
+  where
+    sourcePaths source = SourceRequest <$> replace PrimarySource (payloadSourceInput source)
+      <*> traverse (replace AdditionalSource) (payloadSourceAdditionalInputs source)
+    turnPaths turn = (\source -> turn {payloadTurnSourceRequest=source}) <$> sourcePaths (payloadTurnSourceRequest turn)
+    cellPaths cell = (\source -> cell {payloadCellSourceRequest=source}) <$> sourcePaths (payloadCellSourceRequest cell)
+
+admitWorkerRequest :: WorkerRequest -> Either RequestShapeError AdmittedWorkerRequest
+admitWorkerRequest args = do
+  if requestCompilerJobs args > 0 && requestCompilerCapabilities args > 0
+    then pure () else Left InvalidCompilerBudget
+  tag <- admitOperationTag args
+  checkExclusivePayload tag
+  _ <- traverse (required RequiredOutputDirectory . Just) (requestOutDir args)
+  _ <- traverse (\(kind,path) -> (,) <$> required RequiredTemplateKind (Just kind) <*> required RequiredTemplatePath (Just path)) (requestTurnTemplates args)
+  operation <- case tag of
+    EnsureExactInputsOperation value -> pure (AdmittedEnsureExactInputsPayload value)
+    WorldQueryOperation value -> pure (AdmittedWorldQueryPayload value)
+    WorldCellPlanOperation value -> pure (AdmittedWorldCellPlanPayload value)
+    WorldCellPrepareOperation value -> pure (AdmittedWorldCellPreparePayload value)
+    SourceOperation -> do
+      selectedSource <- source
+      requested <- case requestTargets args of [] -> pure (maybe [] (:[]) (requestTarget args)); values -> pure values
+      targets <- case requested of
+        [] -> Left MissingRequestTargets
+        first:rest -> (:|) <$> required RequiredTarget (Just first) <*> traverse (required RequiredTarget . Just) rest
+      output <- if requestPortableOutput args
+        then PortableSourceOutput <$> required RequiredPortableOutputDirectory (requestOutDir args) <*> pure targets
+        else pure ((if requestCertifyHomeProducts args then CertifiedSourceOutput else NativeSourceOutput) (requestOutDir args) targets)
+      pure (AdmittedSourcePayload (SourceProductRequest selectedSource output))
+    TurnOperation -> AdmittedTurnPayload <$> turn
+    ActivationPreviewOperation -> do
+      unlessShape (length (requestFiles args) == 1 && null (requestTurnTemplates args)
+        && requestTurnVerdict args == Nothing && not (requestHarnessProfile args)
+        && null (requestInjectVals args) && Map.null (requestRetainedGenerations args)) InvalidActivationPreviewShape
+      AdmittedActivationPreviewPayload <$> turn
+    ClassificationOperation -> AdmittedClassificationPayload <$> (ClassificationRequest
+      <$> (nonempty (requestFiles args) >>= traverse (required RequiredClassificationSource . Just)) <*> required RequiredClassificationOutput (requestClassifyOut args) <*> pure (requestOutDir args))
+    InspectionOperation -> do
+      let paths = requestFiles args; queries = requestInspections args
+      unlessShape (not (null paths) && length paths == length queries) InvalidInspectionShape
+      unlessShape (case requestInspectTypeBatch args of
+        Nothing -> True
+        Just _ -> length queries > 1 && all isTypeQuery queries) InvalidInspectionShape
+      _ <- traverse (required RequiredInspectionSource . Just) paths
+      _ <- traverse (required RequiredInspectionBatch . Just) (requestInspectTypeBatch args)
+      output <- required RequiredInspectionOutput (requestInspectOut args)
+      pure (AdmittedInspectionPayload (InspectionPayload (zip paths queries) output
+        (requestInspectTypeBatch args) (requestInspectionStrict args) (requestOutDir args)))
+    CellOperation -> AdmittedCellPayload <$> cell
+    CellPlanOperation -> AdmittedCellPlanPayload <$> cell
+    SourceCheckOperation -> AdmittedSourceCheckPayload <$> source
+    DeclarationOperation manifest output -> AdmittedDeclarationPayload
+      <$> required RequiredDeclarationManifest (Just manifest) <*> required RequiredDeclarationOutput (Just output)
+  pure (AdmittedWorkerRequest options operation)
+  where
+    options = RequestOptions
+      { optionWorkload = requestWorkload args
+      , optionCompilerJobs = requestCompilerJobs args
+      , optionCompilerCapabilities = requestCompilerCapabilities args
+      , optionIncludes = requestIncludes args
+      , optionBindGen = requestBindGen args
+      , optionSessionRoot = requestSessionRoot args
+      , optionSessionIncarnation = requestSessionIncarnation args
+      , optionInjectVals = requestInjectVals args
+      , optionHarnessProfile = requestHarnessProfile args
+      , optionBuildProductsDir = requestBuildProductsDir args
+      , optionModuleCandidates = requestModuleCandidates args
+      , optionSessionArtifacts = requestSessionArtifacts args
+      , optionRetainedGenerations = requestRetainedGenerations args
+      }
+    required label = maybe (Left (MissingRequestField label)) (\value -> if null value then Left (MissingRequestField label) else Right value)
+    nonempty [] = Left MissingRequestSource
+    nonempty values = pure values
+    source = case requestFiles args of
+      [] -> Left MissingRequestSource
+      path:rest -> SourceRequest <$> required RequiredSourcePath (Just path) <*> traverse (required RequiredSourcePath . Just) rest
+    turn = TurnRequest <$> source <*> required RequiredTurnOutput (requestTurnOut args) <*> pure (requestTurnVerdict args)
+      <*> pure (requestTurnTemplates args) <*> pure (requestOutDir args)
+    cell = CellRequest <$> source <*> required RequiredCellTemplate (requestCellTemplate args) <*> required RequiredCellOutput (requestCellOut args)
+      <*> pure (requestTurnTemplates args) <*> pure (requestOutDir args)
+    unlessShape True _ = Right ()
+    unlessShape False failure = Left failure
+    isTypeQuery (InspectTypeOf _) = True
+    isTypeQuery _ = False
+    checkExclusivePayload tag = do
+      let turnMode = tag `elem` [TurnOperation, ActivationPreviewOperation]
+          cellMode = tag `elem` [CellOperation, CellPlanOperation]
+          inspectionMode = tag == InspectionOperation
+          classificationMode = tag == ClassificationOperation
+      unlessShape (turnMode || requestTurnOut args == Nothing && requestTurnVerdict args == Nothing) ConflictingRequestFields
+      unlessShape (cellMode || requestCellTemplate args == Nothing && requestCellOut args == Nothing) ConflictingRequestFields
+      unlessShape (turnMode || cellMode || null (requestTurnTemplates args)) ConflictingRequestFields
+      unlessShape (tag == SourceOperation || requestTarget args == Nothing && null (requestTargets args)) ConflictingRequestFields
+      unlessShape (classificationMode || requestClassifyOut args == Nothing) ConflictingRequestFields
+      unlessShape (inspectionMode || requestInspectOut args == Nothing && requestInspectTypeBatch args == Nothing && not (requestInspectionStrict args)) ConflictingRequestFields
+
+-- | Authority-free operation labels for reporting and pure shape comparison.
+-- Production consumers use AdmittedRequestOperation and its required payload.
 data RequestOperation
   = EnsureExactInputsOperation ExactInputsRequest
   | WorldQueryOperation WorldQueryRequest
@@ -403,6 +631,11 @@ data RequestOperation
   | DeclarationOperation FilePath FilePath
   deriving (Eq, Show)
 
+-- Names are data, so refusal consumers never branch on rendered labels.
+data RequiredRequestField
+  = RequiredSourcePath | RequiredTarget | RequiredOutputDirectory | RequiredPortableOutputDirectory | RequiredTurnOutput | RequiredCellTemplate | RequiredCellOutput | RequiredClassificationSource | RequiredClassificationOutput | RequiredInspectionSource | RequiredInspectionBatch | RequiredInspectionOutput | RequiredDeclarationManifest | RequiredDeclarationOutput | RequiredTemplateKind | RequiredTemplatePath
+  deriving (Eq, Show)
+
 data RequestShapeError
   = InvalidExactInputsShape
   | InvalidWorldQueryShape
@@ -413,15 +646,22 @@ data RequestShapeError
   | IncompleteDeclarationOperation
   | ConflictingRequestOperations
   | PreviewRequiresTurn
+  | InvalidCompilerBudget
+  | MissingRequestSource
+  | MissingRequestTargets
+  | MissingRequestField RequiredRequestField
+  | InvalidInspectionShape
+  | InvalidActivationPreviewShape
+  | ConflictingRequestFields
   deriving (Eq, Show)
 
 -- Keep mode shape policy pure. Manifest contents and exact-scope authority are
 -- admitted by Main at the point where their I/O is performed.
 validateRequestShape :: WorkerRequest -> Either RequestShapeError ()
-validateRequestShape args = () <$ admitRequestOperation args
+validateRequestShape args = () <$ admitWorkerRequest args
 
-admitRequestOperation :: WorkerRequest -> Either RequestShapeError RequestOperation
-admitRequestOperation args
+admitOperationTag :: WorkerRequest -> Either RequestShapeError RequestOperation
+admitOperationTag args
   | Just request <- requestEnsureExactInputs args =
       if validExactInputsRequest request && args == emptyWorkerRequest
         { requestWorkload = requestWorkload args
@@ -487,7 +727,7 @@ admitRequestOperation args
       && not (present (requestSessionIncarnation args)) && not (present (requestBindGen args))
       && not (present (requestModuleCandidates args)) && not (requestCertifyHomeProducts args)
       && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
-      && not (requestTargetModuleOnly args) && Map.null (requestRetainedGenerations args)
+      && Map.null (requestRetainedGenerations args)
     validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not hasSessionScope
@@ -502,7 +742,7 @@ admitRequestOperation args
       && not (present (requestClassifyOut args)) && not (present (requestInspectOut args))
       && not (present (requestInspectTypeBatch args)) && not (present (requestSessionArtifacts args))
       && not (present (requestSessionIncarnation args))
-      && not (requestTargetModuleOnly args) && not (requestInspectionStrict args)
+      && not (requestInspectionStrict args)
       && Map.null (requestRetainedGenerations args)
     validCellPlan = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestTurn args) && not (requestClassify args)
@@ -523,7 +763,6 @@ emptyWorkerRequest = WorkerRequest
   , requestOutDir = Nothing
   , requestTarget = Nothing
   , requestTargets = []
-  , requestTargetModuleOnly = False
   , requestIncludes = []
   , requestFiles = []
   , requestBindGen = Nothing
@@ -621,7 +860,6 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
       OutputDir path -> request { requestOutDir = Just path }
       Target name -> request { requestTarget = Just name }
       Targets names -> request { requestTargets = foldl' (flip (:)) (requestTargets request) names }
-      TargetModuleOnly -> request { requestTargetModuleOnly = True }
       Include path -> request { requestIncludes = path : requestIncludes request }
       BindGen generation -> request { requestBindGen = Just generation }
       SessionRoot path -> request { requestSessionRoot = Just path }
@@ -775,7 +1013,6 @@ encodeField field = case field of
   OutputDir value -> taggedText 2 value
   Target value -> taggedText 3 value
   Targets values -> BS.singleton 4 <> putU32 (length values) <> BS.concat (map textFrame values)
-  TargetModuleOnly -> BS.singleton 7
   Include value -> taggedText 8 value
   BindGen value -> BS.singleton 11 <> putU64 value
   SessionRoot value -> taggedText 12 value
@@ -976,7 +1213,7 @@ pField bytes = do
       mapParser Targets (pN (fromIntegral count) pText) rest'
     5  -> retired tag
     6  -> Left "retired worker request field tag: 6"
-    7  -> Right (TargetModuleOnly, rest)
+    7  -> retired tag
     8  -> mapParser Include pText rest
     9  -> retired tag
     10 -> retired tag
@@ -1250,3 +1487,122 @@ decodeHex input
           in (byte :) <$> pairs rest
       | otherwise = Left "worker request: hex payload contains a non-hex digit"
     pairs _ = Left "worker request: hex payload has odd length"
+
+sourceInput :: SourceRequest -> FilePath
+sourceInput = payloadSourceInput
+
+sourceAdditionalInputs :: SourceRequest -> [FilePath]
+sourceAdditionalInputs = payloadSourceAdditionalInputs
+
+turnSourceRequest :: TurnRequest -> SourceRequest
+turnSourceRequest = payloadTurnSourceRequest
+
+turnOutput :: TurnRequest -> FilePath
+turnOutput = payloadTurnOutput
+
+turnVerdict :: TurnRequest -> Maybe String
+turnVerdict = payloadTurnVerdict
+
+classificationSources :: ClassificationRequest -> [FilePath]
+classificationSources = payloadClassificationSources
+
+classificationOutput :: ClassificationRequest -> FilePath
+classificationOutput = payloadClassificationOutput
+
+inspectionInputs :: InspectionPayload -> [(FilePath, InspectionRequest)]
+inspectionInputs = payloadInspectionInputs
+
+inspectionOutput :: InspectionPayload -> FilePath
+inspectionOutput = payloadInspectionOutput
+
+inspectionBatch :: InspectionPayload -> Maybe FilePath
+inspectionBatch = payloadInspectionBatch
+
+inspectionStrict :: InspectionPayload -> Bool
+inspectionStrict = payloadInspectionStrict
+
+cellSourceRequest :: CellRequest -> SourceRequest
+cellSourceRequest = payloadCellSourceRequest
+
+cellTemplate :: CellRequest -> FilePath
+cellTemplate = payloadCellTemplate
+
+cellOutput :: CellRequest -> FilePath
+cellOutput = payloadCellOutput
+
+sourceProductSource :: SourceProductRequest -> SourceRequest
+sourceProductSource = payloadSourceProductSource
+sourceProductOutput :: SourceProductRequest -> SourceOutput
+sourceProductOutput = payloadSourceProductOutput
+sourceOutputKind :: SourceOutput -> SourceOutputKind
+sourceOutputKind output = case output of
+  NativeSourceOutput _ _ -> ProduceNativeOriginals
+  CertifiedSourceOutput _ _ -> CertifyHomeOriginals
+  PortableSourceOutput _ _ -> ProducePortableExecutable
+sourceOutputDirectory :: SourceOutput -> Maybe FilePath
+sourceOutputDirectory output = case output of
+  NativeSourceOutput directory _ -> directory
+  CertifiedSourceOutput directory _ -> directory
+  PortableSourceOutput directory _ -> Just directory
+sourceOutputTargets :: SourceOutput -> NonEmpty String
+sourceOutputTargets output = case output of
+  NativeSourceOutput _ targets -> targets
+  CertifiedSourceOutput _ targets -> targets
+  PortableSourceOutput _ targets -> targets
+turnTemplates :: TurnRequest -> [(String,FilePath)]
+turnTemplates = payloadTurnTemplates
+turnOutputDirectory :: TurnRequest -> Maybe FilePath
+turnOutputDirectory = payloadTurnOutputDirectory
+cellTemplates :: CellRequest -> [(String,FilePath)]
+cellTemplates = payloadCellTemplates
+cellOutputDirectory :: CellRequest -> Maybe FilePath
+cellOutputDirectory = payloadCellOutputDirectory
+inspectionOutputDirectory :: InspectionPayload -> Maybe FilePath
+inspectionOutputDirectory = payloadInspectionOutputDirectory
+classificationOutputDirectory :: ClassificationRequest -> Maybe FilePath
+classificationOutputDirectory = payloadClassificationOutputDirectory
+admittedOutputDirectory :: AdmittedWorkerRequest -> Maybe FilePath
+admittedOutputDirectory request = case admittedRequestOperation request of
+  AdmittedSourcePayload source -> sourceOutputDirectory (sourceProductOutput source)
+  AdmittedTurnPayload turn -> turnOutputDirectory turn
+  AdmittedActivationPreviewPayload turn -> turnOutputDirectory turn
+  AdmittedCellPayload cell -> cellOutputDirectory cell
+  AdmittedCellPlanPayload cell -> cellOutputDirectory cell
+  AdmittedInspectionPayload inspection -> inspectionOutputDirectory inspection
+  AdmittedClassificationPayload classification -> classificationOutputDirectory classification
+  _ -> Nothing
+admittedTurnTemplates :: AdmittedRequestOperation -> [(String,FilePath)]
+admittedTurnTemplates operation = case operation of
+  AdmittedTurnPayload turn -> turnTemplates turn
+  AdmittedActivationPreviewPayload turn -> turnTemplates turn
+  AdmittedCellPayload cell -> cellTemplates cell
+  AdmittedCellPlanPayload cell -> cellTemplates cell
+  _ -> []
+
+pattern AdmittedEnsureExactInputs :: ExactInputsRequest -> AdmittedRequestOperation
+pattern AdmittedEnsureExactInputs request <- AdmittedEnsureExactInputsPayload request
+pattern AdmittedWorldQuery :: WorldQueryRequest -> AdmittedRequestOperation
+pattern AdmittedWorldQuery request <- AdmittedWorldQueryPayload request
+pattern AdmittedWorldCellPlan :: WorldCellPlanRequest -> AdmittedRequestOperation
+pattern AdmittedWorldCellPlan request <- AdmittedWorldCellPlanPayload request
+pattern AdmittedWorldCellPrepare :: WorldCellPrepareRequest -> AdmittedRequestOperation
+pattern AdmittedWorldCellPrepare request <- AdmittedWorldCellPreparePayload request
+pattern AdmittedSource :: SourceProductRequest -> AdmittedRequestOperation
+pattern AdmittedSource request <- AdmittedSourcePayload request
+pattern AdmittedTurn :: TurnRequest -> AdmittedRequestOperation
+pattern AdmittedTurn request <- AdmittedTurnPayload request
+pattern AdmittedActivationPreview :: TurnRequest -> AdmittedRequestOperation
+pattern AdmittedActivationPreview request <- AdmittedActivationPreviewPayload request
+pattern AdmittedClassification :: ClassificationRequest -> AdmittedRequestOperation
+pattern AdmittedClassification request <- AdmittedClassificationPayload request
+pattern AdmittedInspection :: InspectionPayload -> AdmittedRequestOperation
+pattern AdmittedInspection request <- AdmittedInspectionPayload request
+pattern AdmittedCell :: CellRequest -> AdmittedRequestOperation
+pattern AdmittedCell request <- AdmittedCellPayload request
+pattern AdmittedCellPlan :: CellRequest -> AdmittedRequestOperation
+pattern AdmittedCellPlan request <- AdmittedCellPlanPayload request
+pattern AdmittedSourceCheck :: SourceRequest -> AdmittedRequestOperation
+pattern AdmittedSourceCheck request <- AdmittedSourceCheckPayload request
+pattern AdmittedDeclaration :: FilePath -> FilePath -> AdmittedRequestOperation
+pattern AdmittedDeclaration manifest output <- AdmittedDeclarationPayload manifest output
+{-# COMPLETE AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare, AdmittedSource, AdmittedTurn, AdmittedActivationPreview, AdmittedClassification, AdmittedInspection, AdmittedCell, AdmittedCellPlan, AdmittedSourceCheck, AdmittedDeclaration #-}

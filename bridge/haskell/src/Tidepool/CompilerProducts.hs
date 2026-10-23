@@ -149,8 +149,10 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)
 import Tidepool.PreparedJson (JsonAuthority, resolveJsonAuthorityWithCanonicalInterfaces)
 import Tidepool.PreparedTime (resolveTimeAuthority)
-import Tidepool.DependencyPlan (requireUnambiguousDependencySymbols)
-import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply, requireNativeDemandOwner, exchangeNativeDemand)
+import Tidepool.DependencyPlan
+  ( requireUnambiguousDependencySymbols, NativeOriginalUse, NativeDependencyQuery
+  , NativeDependencyReply, exchangeNativeDependencies )
+import Tidepool.WorkerServer (NativeDemandExchange, requireNativeDemandOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
   , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer, newPreparedCanonicalModuleTaskPreparerWithLookup, acquirePreparedModule )
@@ -346,11 +348,11 @@ bindWorldStageInputsWithNativeDemand stage prior native = withCompiledWorldStage
       either fail (const (pure ())) (retainTypeInterfaceCaptures (Map.singleton key old) (Map.singleton key pair))
   pure (WorldStageInputs stage prior names captures current (pprAcquiredCanonicalOriginals prepared) native)
 
-exchangeWorldNativeDemand :: WorldStageInputs -> BS.ByteString -> IO NativeDemandReply
-exchangeWorldNativeDemand (WorldStageInputs stage _ _ _ _ _ native) payload =
+exchangeWorldNativeDemand :: WorldStageInputs -> NativeDependencyQuery -> IO (Map.Map NativeOriginalUse NativeDependencyReply)
+exchangeWorldNativeDemand (WorldStageInputs stage _ _ _ _ _ native) query =
   withCompiledWorldNativeCoordinates stage $ \_ _ _ ordinal -> case native of
     Nothing -> throwIO WorldCellUnsupported
-    Just exchange -> exchangeNativeDemand exchange ordinal payload
+    Just exchange -> exchangeNativeDependencies exchange ordinal query
 
 pairOwner :: (ExactIfaceArtifact,ArtifactBytes) -> Module
 pairOwner (artifact,_) = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))

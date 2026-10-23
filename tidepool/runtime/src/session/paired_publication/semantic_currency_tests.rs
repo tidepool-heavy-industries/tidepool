@@ -51,8 +51,8 @@ fn reservations_refill_and_unrelated_private_facts_preserve_certificate_through_
         b.private_scope(),
         "answerB :: Int\nanswerB = 22",
     );
-    let intent_a = session.freeze_execution_intent(&a, vec![], vec![]).unwrap();
-    let intent_b = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+    let intent_a = session.freeze_private_execution(&a).unwrap();
+    let intent_b = session.freeze_private_execution(&b).unwrap();
     let base_a = session
         .restage_declaration_publication(owner_a.clone(), intent_a.clone())
         .unwrap();
@@ -172,9 +172,7 @@ fn semantic_change_between_metadata_retry_and_refresh_retains_execution_intent()
     let admission = session
         .begin_durable_private_execution(&owner, public)
         .unwrap();
-    let intent = session
-        .freeze_execution_intent(&admission, vec![], vec![])
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = session
         .restage_execution_publication(owner, intent.clone())
         .unwrap()
@@ -238,9 +236,7 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public = session.mint_scope(ScopeId::ROOT).unwrap();
     let admission = session.begin_private_execution(public).unwrap();
-    let intent = session
-        .freeze_execution_intent(&admission, vec![], vec![])
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = session
         .restage_ephemeral_execution_publication(intent.clone())
         .unwrap()
@@ -258,8 +254,10 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     .unwrap();
     *session.lib_mut() = library;
     assert!(matches!(
-        session.freeze_execution_intent(&before_first_freeze, vec![], vec![]),
-        Err(SessionError::StaleStagedDeclaration)
+        session.freeze_private_execution(&before_first_freeze),
+        Err(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::OwnerChanged
+        ))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),
@@ -285,8 +283,10 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     ));
     let _removed_library = session.take_lib().unwrap();
     assert!(matches!(
-        session.freeze_execution_intent(&before_first_freeze, vec![], vec![]),
-        Err(SessionError::StaleStagedDeclaration)
+        session.freeze_private_execution(&before_first_freeze),
+        Err(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::OwnerChanged
+        ))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),
@@ -312,7 +312,7 @@ proptest::proptest! {
         session.initialize_durable_public_scope(owner_a.clone(), public_a).unwrap();
         session.initialize_durable_public_scope(owner_b.clone(), public_b).unwrap();
         let admission_a = session.begin_durable_private_execution(&owner_a, public_a).unwrap();
-        let intent_a = session.freeze_execution_intent(&admission_a, vec![], vec![]).unwrap();
+        let intent_a = session.freeze_private_execution(&admission_a).unwrap();
         let ExecutionPublication::Bindings(base) = session.restage_execution_publication(owner_a.clone(), intent_a.clone()).unwrap() else { panic!("bindings") };
         let mut ticket = Some(base.stage().unwrap());
         let decision = PublicationDecision::new();
@@ -325,7 +325,7 @@ proptest::proptest! {
                 1 => { session.lib_mut().reserve_declaration_generations_durable(65).unwrap(); }
                 2 => {
                     let b = session.begin_durable_private_execution(&owner_b, public_b).unwrap();
-                    let intent_b = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+                    let intent_b = session.freeze_private_execution(&b).unwrap();
                     let ExecutionPublication::Bindings(base) = session.restage_execution_publication(owner_b.clone(), intent_b).unwrap() else { panic!("bindings") };
                     proptest::prop_assert!(matches!(session.attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicationAttempt::Settled(PublicManifestCommit::Durable)));
                     model_owners.insert(owner_b.clone());

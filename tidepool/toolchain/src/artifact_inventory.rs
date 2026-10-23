@@ -33,7 +33,7 @@ pub(crate) use native_availability::{
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
-mod metadata_conflict;
+pub(crate) mod metadata_conflict;
 pub(crate) use metadata_conflict::{ArtifactMetadataField, ArtifactMetadataInvariant};
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
@@ -7699,7 +7699,9 @@ impl ArtifactView {
         )
     }
 
-    pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
+    /// Observe exact DATA custody, independently of issued native permission.
+    #[cfg(test)]
+    pub(crate) fn contains_acquired_native_group(&self, group: NativeGroupBinding) -> bool {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         self.read_projection(&state)
             .nodes
@@ -18045,16 +18047,16 @@ mod tests {
                 .iter()
                 .find(|group| group.binding.artifact() == helper.descriptor.id)
                 .unwrap();
-            assert!(issuer.contains_issued_native_group(helper_group));
-            assert!(!issuers[1 - index].contains_issued_native_group(helper_group));
+            assert!(issuer.contains_acquired_native_group(helper_group));
+            assert!(!issuers[1 - index].contains_acquired_native_group(helper_group));
             let narrowed = issuer
                 .select_publication_roots(
                     originals[index].descriptor.id,
                     vec![originals[index].descriptor.id],
                 )
                 .unwrap();
-            assert!(narrowed.contains_issued_native_group(helper_group));
-            assert!(!narrowed.contains_issued_native_group(
+            assert!(narrowed.contains_acquired_native_group(helper_group));
+            assert!(!narrowed.contains_acquired_native_group(
                 *helper_groups
                     .iter()
                     .find(|other| **other != helper_group)
@@ -18107,7 +18109,7 @@ mod tests {
             assert_eq!(retained.roots(), joined.roots());
             assert!(helper_groups
                 .iter()
-                .all(|group| retained.contains_issued_native_group(*group)));
+                .all(|group| retained.contains_acquired_native_group(*group)));
             let generated = Arc::new(entry("RecaptureScaffold", &[]));
             let scaffold = inventory
                 .admit_shared(&inventory.empty_view(), vec![generated.clone()])

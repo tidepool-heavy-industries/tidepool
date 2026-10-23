@@ -14,7 +14,7 @@ import GHC.Unit.Module (mkModuleName, moduleUnit)
 import GHC.Unit.Module.ModIface (ModIface, mi_module)
 import GHC.Unit.State (lookupPackageName)
 import GHC.Unit.Types (GenUnit(RealUnit), Definite(Definite))
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 
 resolveResumeInterface :: HscEnv -> IO (Either String ModIface)
 resolveResumeInterface environment = case lookupPackageName
@@ -26,7 +26,7 @@ resolveResumeInterface environment = case lookupPackageName
       Found _ owner
         | moduleUnit owner == RealUnit (Definite selected)
         , not (isHomeUnit (hsc_home_unit environment) (moduleUnit owner)) -> do
-            loaded <- readExactInterface environment owner
+            loaded <- readPackageInterface environment owner
             pure $ case loaded of
               Right (iface, _) | mi_module iface == owner -> Right iface
               Right _ -> Left "compiler support interface has another package owner"

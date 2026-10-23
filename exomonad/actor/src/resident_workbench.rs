@@ -24869,7 +24869,9 @@ pub(crate) mod request_tests {
                             prop_assert!(result.is_ok());
                             epoch += 1;
                         } else {
-                            prop_assert!(matches!(result, Err(tidepool_runtime::session::SessionError::StaleStagedDeclaration)));
+                            prop_assert!(matches!(result, Err(tidepool_runtime::session::SessionError::TransitionRefused(
+                                tidepool_runtime::session::SessionTransitionReason::PublicBaselineChanged
+                            ))));
                             prop_assert_eq!(session.compile_view_in(scope).unwrap(), before);
                         }
                     },
@@ -26489,7 +26491,9 @@ pub(crate) mod request_tests {
                     assert!(matches!(
                         session.publish_source_originals(stale_installation),
                         Err(ResidentError::Session(
-                            tidepool_runtime::session::SessionError::StaleStagedDeclaration
+                            tidepool_runtime::session::SessionError::TransitionRefused(
+                                tidepool_runtime::session::SessionTransitionReason::PublicBaselineChanged
+                            )
                         ))
                     ));
                     assert_eq!(

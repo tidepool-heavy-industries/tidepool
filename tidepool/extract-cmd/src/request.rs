@@ -669,7 +669,6 @@ enum Field {
     OutputDir(OsString),
     Target(OsString),
     Targets(Vec<String>),
-    TargetModuleOnly,
     Include(OsString),
     Turn,
     TurnTemplate {
@@ -975,7 +974,6 @@ impl ExtractRequest {
                             | Field::BindGen(_)
                             | Field::ModuleCandidates(_)
                             | Field::CertifyHomeProducts
-                            | Field::TargetModuleOnly
                     )
                 }))
         {
@@ -1014,7 +1012,6 @@ impl ExtractRequest {
                         .push(Field::Targets(raw.split(',').map(str::to_owned).collect()));
                 }
                 Some("--portable-output") => request.portable_output(),
-                Some("--target-module-only") => request.fields.push(Field::TargetModuleOnly),
                 Some("--include") => request.include(value(&mut args, "--include")?),
                 Some("--turn") => request.turn(),
                 Some("--turn-template") => {
@@ -1156,7 +1153,7 @@ impl ExtractRequest {
                 }
                 5 => return Err(ProtocolError::RetiredFieldTag(5)),
                 6 | 39 => return Err(ProtocolError::RetiredFieldTag(tag)),
-                7 => Field::TargetModuleOnly,
+                7 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 8 => Field::Include(decoder.os_string()?),
                 9 | 10 | 14 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 11 => Field::BindGen(decoder.u64()?),
@@ -1746,7 +1743,6 @@ impl ExtractRequest {
                 Field::Targets(values) => {
                     flag(&mut flags, "--targets", OsStr::new(&values.join(",")))
                 }
-                Field::TargetModuleOnly => flags.push("--target-module-only".into()),
                 Field::Include(value) => flag(&mut flags, "--include", value),
                 Field::Turn => flags.push("--turn".into()),
                 Field::TurnTemplate { kind, path } => flag(
@@ -2181,8 +2177,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 push_frame(out, OsStr::new(value));
             }
         }
-        // Tag 5 was the retired Core dump request.
-        Field::TargetModuleOnly => out.push(7),
         Field::Include(value) => tagged_frame(out, 8, value),
         Field::Turn => out.push(16),
         Field::TurnTemplate { kind, path } => {
@@ -2656,12 +2650,12 @@ mod tests {
     fn payload_free_tags_are_one_byte_fields() {
         let mut request = ExtractRequest::default().encode()[..17].to_vec();
         request.extend_from_slice(&2u32.to_le_bytes());
-        request.extend_from_slice(&[7, 16]);
+        request.extend_from_slice(&[16, 24]);
 
         let decoded = ExtractRequest::decode(&request).unwrap();
         assert!(matches!(
             decoded.fields.as_slice(),
-            [Field::TargetModuleOnly, Field::Turn]
+            [Field::Turn, Field::HarnessProfile]
         ));
     }
 
@@ -2772,7 +2766,6 @@ mod tests {
             Field::ModuleCandidates("scope".into()),
             Field::SessionArtifacts("scope".into()),
             Field::CertifyHomeProducts,
-            Field::TargetModuleOnly,
             Field::InjectVal("Binding".into()),
             Field::BindGen(1),
             Field::SessionRoot("session".into()),
@@ -3274,7 +3267,7 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_retired_fields_explicitly() {
-        for tag in [6, 9, 10, 14, 34, 39, 45] {
+        for tag in [6, 7, 9, 10, 14, 34, 39, 45] {
             let mut request = ExtractRequest::default().encode()[..17].to_vec();
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);
@@ -3287,7 +3280,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_retired_cell_fold_and_type_pin_options() {
-        for option in ["--cell-fold-turn", "--turn-pin"] {
+        for option in ["--cell-fold-turn", "--turn-pin", "--target-module-only"] {
             let error = ExtractRequest::from_cli(&[option.into()]).unwrap_err();
             assert_eq!(
                 error.to_string(),

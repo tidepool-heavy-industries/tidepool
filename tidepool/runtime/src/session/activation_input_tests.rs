@@ -7524,3 +7524,415 @@ fn prior_source_home_contracts_execute_first_demands_and_published_originals() {
     resident.set_run_context(resident.public_context()).unwrap();
     resident.retire_scope(reopened.private_scope());
 }
+
+#[test]
+fn frozen_world_retry_keeps_completed_effect_and_original_binding() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let library = SessionLib::open(
+        SessionId(1804),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident = TestSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        crate::DEFAULT_NURSERY_SIZE,
+        Some(library),
+    );
+    resident.bootstrap_world(&recipe);
+    let public_context = resident.public_context();
+    resident
+        .set_actor_execution(
+            public_context,
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let a = begin_fixture_execution(&mut resident);
+    let b = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: a.private_scope(),
+            ..public_context
+        })
+        .unwrap();
+    let (bound, compiled, item) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "selectedResult <- do { putStrLn \"once\"; pure (41 :: Int) }",
+        a.clone(),
+    );
+    let effect_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_requests = effect_requests.clone();
+    let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> = Arc::new(move |event| {
+        if matches!(event, ResidentContinuationEvent::Parked(_)) {
+            observed_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let hole = suspended(
+        source_action(&mut resident, |resident, settlement| {
+            resident.with_continuation_observer(observer.clone(), |resident| {
+                resident.run_bind_with_sites(
+                    &bound[0].name,
+                    compiled.code(),
+                    &bound[0],
+                    item.generation(),
+                    settlement,
+                )
+            })
+        })
+        .unwrap(),
+    );
+    // The host delivers this actual suspended effect exactly once. Publication
+    // retries receive only the completed frontier, never this continuation.
+    assert!(matches!(
+        resident.freeze_private_execution(&a),
+        Err(SessionError::WorldCellPublicationIncomplete)
+    ));
+    assert!(a.final_intent.get().is_none());
+    let completed = source_action(&mut resident, |resident, settlement| {
+        resident.resume(hole, (), settlement)
+    })
+    .unwrap();
+    assert!(matches!(completed, ResidentOutcome::Completed { .. }));
+    let intent = resident.freeze_private_execution(&a).unwrap();
+    let [original_id] = intent.native_write_ids() else {
+        panic!("one completed binding")
+    };
+    let original_id = *original_id;
+    let original_handle = resident
+        .state
+        .bindings()
+        .get(original_id)
+        .unwrap()
+        .value
+        .handle;
+    let private_world = intent.world().private.world.clone();
+    let stale = match resident
+        .restage_ephemeral_execution_publication(intent.clone())
+        .unwrap()
+    {
+        crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+        _ => panic!("a value-only World execution has no authored declaration suffix"),
+    };
+
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: b.private_scope(),
+            ..public_context
+        })
+        .unwrap();
+    let (bound_b, compiled_b, item_b) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        "selectedResult <- pure (91 :: Int)",
+        b.clone(),
+    );
+    let outcome = source_action(&mut resident, |resident, settlement| {
+        resident.run_bind_with_sites(
+            &bound_b[0].name,
+            compiled_b.code(),
+            &bound_b[0],
+            item_b.generation(),
+            settlement,
+        )
+    })
+    .unwrap();
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    let newer_id = SessionVarId::from_extract(bound_b[0].var_id);
+    assert_ne!(original_id, newer_id);
+    publish_checked_fixture(&mut resident, &b, 1);
+    assert_eq!(
+        resident
+            .state
+            .resolve_in(public_context.lexical_scope, "selectedResult")
+            .unwrap()
+            .id,
+        newer_id
+    );
+    let decision = crate::session::PublicationDecision::new();
+    let crate::session::PublicationAttempt::Rebase(retained) = resident
+        .with_continuation_observer(observer.clone(), |resident| {
+            resident.attempt_public_manifest(stale, &decision)
+        })
+        .unwrap()
+    else {
+        panic!("the intervening public winner changes only the merge baseline")
+    };
+    assert!(Arc::ptr_eq(&retained, &intent));
+    assert_eq!(effect_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let current = match resident
+        .restage_ephemeral_execution_publication(retained)
+        .unwrap()
+    {
+        crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
+        _ => panic!("retry preserves the binding-only payload"),
+    };
+    assert!(matches!(
+        source_action(&mut resident, |resident, _| {
+            resident.with_continuation_observer(observer.clone(), |resident| {
+                resident.attempt_public_manifest(current, &decision)
+            })
+        })
+        .unwrap(),
+        crate::session::PublicationAttempt::Settled(
+            crate::session::PublicManifestCommit::Ephemeral
+        )
+    ));
+    assert!(Arc::ptr_eq(&private_world, &intent.world().private.world));
+    assert_eq!(
+        resident
+            .state
+            .resolve_in(public_context.lexical_scope, "selectedResult")
+            .unwrap()
+            .id,
+        original_id
+    );
+    assert_eq!(
+        resident
+            .state
+            .bindings()
+            .get(original_id)
+            .unwrap()
+            .value
+            .handle,
+        original_handle
+    );
+    assert!(Arc::ptr_eq(
+        &resident.freeze_private_execution(&a).unwrap(),
+        &intent
+    ));
+    assert_eq!(effect_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn frozen_world_unchanged_and_declaration_controls_preserve_source_refusals() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    #[derive(Clone, Copy)]
+    enum History {
+        Unchanged,
+        Declaration,
+        ScopeRevoked,
+        SourceFenced,
+    }
+    for (ordinal, history) in [
+        History::Unchanged,
+        History::Declaration,
+        History::ScopeRevoked,
+        History::SourceFenced,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let library = SessionLib::open(
+            SessionId(1810 + ordinal as u64),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+        let mut resident = TestSession::unbootstrapped(
+            frunk::HNil,
+            EmptyOutput,
+            crate::DEFAULT_NURSERY_SIZE,
+            Some(library),
+        );
+        resident.bootstrap_world(&recipe);
+        let execution = begin_fixture_execution(&mut resident);
+        let public_before = resident
+            .public_visibility_snapshot_in(execution.public_scope())
+            .unwrap();
+        match history {
+            History::ScopeRevoked => {
+                resident.retire_scope(execution.private_scope());
+                assert!(matches!(
+                    resident.freeze_private_execution(&execution),
+                    Err(SessionError::TransitionRefused(
+                        crate::session::SessionTransitionReason::ScopeRevoked
+                    ))
+                ));
+                assert!(execution.final_intent.get().is_none());
+                assert_eq!(
+                    resident.public_visibility_snapshot_in(execution.public_scope()),
+                    Some(public_before)
+                );
+                continue;
+            }
+            History::SourceFenced => {
+                let original = resident.public_source.original_source().clone();
+                let fence = original.source_admission().fence().unwrap();
+                assert!(matches!(
+                    resident.freeze_private_execution(&execution),
+                    Err(SessionError::SourceAdmission(
+                        crate::session::SourceAdmissionError::Closed {
+                            phase: crate::session::SourceAdmissionPhase::Fenced { .. },
+                            ..
+                        }
+                    ))
+                ));
+                assert!(execution.final_intent.get().is_none());
+                assert_eq!(
+                    resident.public_visibility_snapshot_in(execution.public_scope()),
+                    Some(public_before)
+                );
+                fence.reopen(&original).unwrap();
+            }
+            History::Declaration => {
+                resident
+                    .set_run_context(SessionRunContext {
+                        lexical_scope: execution.private_scope(),
+                        ..resident.public_context()
+                    })
+                    .unwrap();
+                let cell = check_fixture_cell(
+                    &mut resident,
+                    &recipe,
+                    "data FrozenFlag = FrozenFlag",
+                    execution.clone(),
+                    1,
+                );
+                cell.adopt_declaration(&mut resident);
+            }
+            History::Unchanged => {}
+        }
+        let intent = resident.freeze_private_execution(&execution).unwrap();
+        assert!(Arc::ptr_eq(
+            intent.retained_private_scope(),
+            &execution.retained_lexical_scope()
+        ));
+        assert!(intent.native_write_ids().is_empty());
+        match history {
+            History::Declaration => assert!(matches!(
+                intent.world().progress,
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_)
+            )),
+            _ => assert!(matches!(
+                intent.world().progress,
+                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged
+            )),
+        }
+        publish_checked_fixture(&mut resident, &execution, 0);
+        if matches!(history, History::Declaration) {
+            assert!(resident
+                .current_decl_heads_in(execution.public_scope())
+                .iter()
+                .any(|(name, _)| name == "FrozenFlag"));
+        }
+    }
+}
+
+#[test]
+fn frozen_activation_replays_same_input_and_refuses_second_private_input() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-function.hs"),
+        false,
+        SessionId(1815),
+    );
+    let mut resident = fixture.fresh();
+    let mut captured = Vec::new();
+    for request in [1, 2] {
+        let reservation = fixture.start(&mut resident);
+        let (_, activation) = fixture.deliver(&mut resident, reservation, request);
+        let site = parked_site(&mut resident, &activation);
+        captured.push(
+            resident
+                .capture_activation_input(&activation, RealmId::ROOT, site)
+                .unwrap(),
+        );
+    }
+    let second = captured.pop().unwrap();
+    let first = captured.pop().unwrap();
+    let execution = begin_fixture_execution(&mut resident);
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..resident.public_context()
+        })
+        .unwrap();
+    let preparation = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_execution(execution.clone(), None)
+    })
+    .unwrap();
+    let (snapshot, operand) = preparation.into_parts();
+    assert!(operand.is_none());
+    let (input, interface) = issued_captured_input_with_private(
+        &mut resident,
+        first,
+        fixture.recipe.clone(),
+        Some((&execution, &snapshot)),
+    );
+    let mounted = source_action(&mut resident, |resident, settlement| {
+        resident.mount_activation_input_for_execution(
+            input, interface, settlement, &execution, &snapshot,
+        )
+    })
+    .unwrap();
+    let first_binding = mounted.binding();
+    let view = resident
+        .compile_view_in(execution.private_scope())
+        .unwrap()
+        .with_scoped_injection();
+    let preview = resident.admit_activation_preview(mounted, view).unwrap();
+    let preparation = source_action(&mut resident, |resident, _| {
+        resident.prepare_private_execution(execution.clone(), None)
+    })
+    .unwrap();
+    let (snapshot, operand) = preparation.into_parts();
+    assert!(operand.is_none());
+    let visibility = resident
+        .public_visibility_snapshot_in(execution.private_scope())
+        .unwrap();
+    let requests = tidepool_extract_cmd::extract_spawn_count();
+    let interface_requests = tidepool_toolchain::artifacts::host_binding_interface_request_count();
+    let parked = resident.parked_count();
+    let refused = source_action(&mut resident, |resident, _| {
+        resident.admit_activation_input_for_execution(&execution, &snapshot, second)
+    });
+    assert!(
+        matches!(refused, Err(ResidentError::Session(SessionError::HostBindingNameCollision {
+        scope, ref binding,
+    })) if scope == execution.private_scope() && binding == "sessionInput")
+    );
+    assert_eq!(
+        resident.public_visibility_snapshot_in(execution.private_scope()),
+        Some(visibility)
+    );
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+    assert_eq!(
+        tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+        interface_requests
+    );
+    assert_eq!(resident.parked_count(), parked);
+    let first_base = resident
+        .snapshot_activation_publication(&execution, &preview)
+        .unwrap();
+    let intent = execution.final_intent.get().unwrap().clone();
+    assert_eq!(intent.native_write_ids(), &[first_binding]);
+    let replay = resident
+        .snapshot_activation_publication(&execution, &preview)
+        .unwrap();
+    assert!(Arc::ptr_eq(execution.final_intent.get().unwrap(), &intent));
+    assert_eq!(first_base.write_ids, replay.write_ids);
+    assert_eq!(resident.parked_count(), parked);
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
+    assert_eq!(
+        tidepool_toolchain::artifacts::host_binding_interface_request_count(),
+        interface_requests
+    );
+}

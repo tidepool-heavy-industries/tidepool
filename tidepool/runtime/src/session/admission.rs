@@ -183,7 +183,7 @@ pub struct PrivateExecutionAdmission {
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     state: Arc<parking_lot::Mutex<PrivateExecutionState>>,
-    pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+    pub(super) final_intent: OnceLock<Arc<super::FrozenWorldExecution>>,
 }
 
 struct PrivateExecutionState {
@@ -8744,9 +8744,7 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        let intent = session
-            .freeze_execution_intent(&private, vec![], vec![])
-            .unwrap();
+        let intent = session.freeze_private_execution(&private).unwrap();
         let ExecutionPublication::Bindings(base) = session
             .restage_execution_publication(owner.clone(), intent.clone())
             .unwrap()
@@ -8769,8 +8767,10 @@ mod tests {
             Err(SessionError::StaleStagedDeclaration)
         ));
         assert!(matches!(
-            session.freeze_execution_intent(&private, vec![], vec![]),
-            Err(SessionError::StaleStagedDeclaration)
+            session.freeze_private_execution(&private),
+            Err(SessionError::TransitionRefused(
+                crate::session::SessionTransitionReason::OwnerChanged
+            ))
         ));
         assert!(matches!(
             session.restage_execution_publication(owner.clone(), intent),
@@ -9016,8 +9016,10 @@ mod tests {
             None
         );
         assert!(matches!(
-            second.freeze_execution_intent(&private, vec![], vec![]),
-            Err(SessionError::StaleStagedDeclaration)
+            second.freeze_private_execution(&private),
+            Err(SessionError::TransitionRefused(
+                crate::session::SessionTransitionReason::OwnerChanged
+            ))
         ));
         let first_cell = first
             .admit_cell_in(

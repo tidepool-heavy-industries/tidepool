@@ -19,6 +19,7 @@ import Control.Exception
   , IOException )
 import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
 import Data.List (intercalate, nub, isPrefixOf)
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (fromMaybe, mapMaybe, isJust, isNothing)
 import Data.Word (Word32, Word64)
 import Control.Monad (replicateM, foldM, forM, forM_, when, unless, void)
@@ -118,13 +119,20 @@ import Tidepool.RequestCompletion
 import Tidepool.WorkerDiagnostics
   ( throwCellSplitError, sourceFailureDiagnostics )
 import Tidepool.ExtractRequest
-  ( RequestOperation(..), WorkerRequest(..), workerRequestFromArgv, workerRequestFlag, admitRequestOperation
-  , WorldQueryRequest(..), WorldCellPlanRequest(..) )
+  ( RequestOptions(..), AdmittedWorkerRequest, AdmittedRequestOperation(..)
+  , SourceProductRequest, sourceProductSource, sourceProductOutput, SourceOutputKind(..), sourceOutputKind, sourceOutputDirectory, sourceOutputTargets
+  , sourceInput, TurnRequest, turnSourceRequest, turnOutput, turnVerdict, turnTemplates, turnOutputDirectory
+  , ClassificationRequest, classificationSources, classificationOutput
+  , InspectionPayload, inspectionOutput, CellRequest, cellSourceRequest, cellTemplate, cellOutput, cellTemplates, cellOutputDirectory
+  , admittedRequestOperation, admitWorkerRequest
+  , workerRequestFromArgv, workerRequestFlag
+  , WorldQueryRequest(..), WorldCellPlanRequest(..)
+  )
 import Tidepool.Introspection
   ( encodeInspectionResults, runInspectionGhc, withInspectionWork
   , inspectionCompilationWork )
 import Tidepool.InspectionRunner
-  ( runInspectionRequests, isInspectionTypeQuery )
+  ( runInspectionRequests )
 import Tidepool.ExactScope
   ( ExactScope, scopeRequestSha256, scopeSemanticSha256, ExactProduct(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -150,8 +158,6 @@ import Tidepool.Session
   , SessionModule(..), SessionModuleKind(..), Generation(..)
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath, sessionModuleString, capturedSessionInterface, capturedSessionInterfaceEvidence )
-import Tidepool.FatIface
-  ( readExactInterface )
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface
@@ -194,9 +200,8 @@ main = do
         WorkerServer.runWorkerLoop $ \serveTransaction ->
           runRequest (pure ()) $ \scope ->
             serveTransaction (\sink native cwd argv ->
-              setCurrentDirectory cwd >> runWorkerInvocation sink native scope argv)
+              runWorkerInvocation sink native scope cwd argv)
     else do
-      requireObservationPackageEnvironment
       hSetEncoding stdout utf8
       -- Direct transport boots the same compiler owner once for all helpers.
       result <- WorkerServer.runDirectRequest (runDirectInvocation rawWorkerRequest)
@@ -205,11 +210,17 @@ main = do
 -- Retain the issued request result while the outer GHC scope and interpreter
 -- release. A failure before issuance remains an independent operation failure.
 runDirectInvocation :: [String] -> PhaseSink -> IO (Completion WorkerServer.WorkerResponse)
-runDirectInvocation raw sink = do
+runDirectInvocation raw sink = case decodeWorkerInvocation raw of
+  Left failure -> captureCompletion (throwIO failure)
+  Right admitted -> runDirectAdmittedInvocation admitted sink
+
+runDirectAdmittedInvocation :: AdmittedWorkerRequest -> PhaseSink -> IO (Completion WorkerServer.WorkerResponse)
+runDirectAdmittedInvocation admitted sink = do
+  requireObservationPackageEnvironment
   issued <- newIORef Nothing
   outer <- captureCompletion $ withResidentCompilerScopes [] $ \runRequest ->
     runRequest (pure ()) $ \scope -> mask $ \restore -> do
-      completed <- restore (runWorkerInvocation sink Nothing scope raw)
+      completed <- restore (runAdmittedInvocation sink Nothing scope admitted)
       writeIORef issued (Just completed)
       pure completed
   known <- readIORef issued
@@ -219,68 +230,63 @@ runDirectInvocation raw sink = do
       BodySucceeded _ -> completionFailures outer
       _ -> asCleanupFailures CompilerScopeRestore outer
 
--- Direct and resident transports decode the same versioned worker payload.
-runWorkerInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> [String] -> IO (Completion WorkerServer.WorkerResponse)
-runWorkerInvocation sink native compilerScope raw = case workerRequestFromArgv raw of
-  Left failure -> captureCompletion (throwIO (InvalidWorkerRequest failure))
-  Right Nothing -> captureCompletion (throwIO (InvalidWorkerRequest "worker requires a versioned request"))
-  Right (Just request) -> runParsedInvocation sink native compilerScope request
+-- Direct and resident transports admit the same versioned request before
+-- entering request-specific compiler or filesystem work.
+decodeWorkerInvocation :: [String] -> Either InputRejection AdmittedWorkerRequest
+decodeWorkerInvocation raw = do
+  decoded <- either (Left . InvalidWorkerRequest) Right (workerRequestFromArgv raw)
+  request <- maybe (Left (InvalidWorkerRequest "worker requires a versioned request")) Right decoded
+  either (Left . InvalidWorkerRequest . show) Right (admitWorkerRequest request)
 
-runParsedInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> WorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
-runParsedInvocation _ _ compilerScope parsed | isJust (requestEnsureExactInputs parsed) =
-  captureCompletion $ case admitRequestOperation parsed of
-    Right (EnsureExactInputsOperation request) -> WorkerServer.ExactInputsResponse <$> scopedEnsureWorld compilerScope request
-    _ -> throwIO (InvalidWorkerRequest "invalid source-free world acquisition")
-runParsedInvocation sink native compilerScope parsed = fmap WorkerServer.DiagnosticResponse <$>
-  (flattenCompletion <$> captureCompletion (do
-    case (admitRequestOperation parsed,native) of
-      (Right (WorldCellPrepareOperation _),Nothing) -> throwIO WorldCellUnsupported
-      _ -> pure ()
-    timing <- readTimingEnabled
-    withBoundCompilerRequestWithNativeDemand sink native compilerScope parsed (dispatch timing)))
+runWorkerInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> FilePath -> [String] -> IO (Completion WorkerServer.WorkerResponse)
+runWorkerInvocation sink native compilerScope cwd raw = case decodeWorkerInvocation raw of
+  Left failure -> captureCompletion (throwIO failure)
+  Right admitted -> setCurrentDirectory cwd >> runAdmittedInvocation sink native compilerScope admitted
 
--- Mode selection, normalized arguments and exact admission come from one owner.
+runAdmittedInvocation :: PhaseSink -> Maybe WorkerServer.NativeDemandExchange -> CompilerScope -> AdmittedWorkerRequest -> IO (Completion WorkerServer.WorkerResponse)
+runAdmittedInvocation sink native compilerScope admitted = case admittedRequestOperation admitted of
+  AdmittedEnsureExactInputs request -> captureCompletion $
+    WorkerServer.ExactInputsResponse <$> scopedEnsureWorld compilerScope request
+  AdmittedWorldCellPrepare _ | isNothing native -> captureCompletion (throwIO WorldCellUnsupported)
+  _ -> fmap WorkerServer.DiagnosticResponse <$>
+    (flattenCompletion <$> captureCompletion (do
+      timing <- readTimingEnabled
+      withBoundCompilerRequestWithNativeDemand sink native compilerScope admitted (dispatch timing)))
+
+-- Required inputs belong to the admitted payload; dispatch never recovers them
+-- from mode flags or optional raw fields.
 dispatch :: Bool -> BoundCompilerRequest -> IO [Diag]
-dispatch timing bound =
-  let args = boundWorkerRequest bound
-  in case boundRequestOperation bound of
-    DeclarationOperation manifest output -> runDeclarationOperation bound manifest output
-    WorldCellPrepareOperation _ -> do
-      outcome <- prepareWorldCell bound
-      case outcome of
-        Left _ -> pure () -- The typed refusal is carried by the emitted response.
-        Right completed -> mapM_ (commitPreparedWorldDependencies bound) completed
-      pure []
-    WorldCellPlanOperation question -> do
-      bytes <- runBoundWorldCellPlan bound
-      BS.writeFile (worldCellPlanOutput question) bytes
-      pure []
-    WorldQueryOperation question -> do
-      bytes <- runBoundWorldQuery bound
-      BS.writeFile (worldQueryOutput question) bytes
-      pure []
-    _ -> case requestFiles args of
-      [] -> fail "worker request contains no input"
-      (file : _)
-        | isJust (requestInspectTypeBatch args)
-          && not (length (requestInspections args) > 1 && all isInspectionTypeQuery (requestInspections args))
-          -> fail "inspection type batch requires at least two type queries and no other query kinds"
-        | otherwise -> case boundRequestOperation bound of
-            EnsureExactInputsOperation _ -> fail "source-free exact input acquisition entered source dispatch"
-            WorldQueryOperation _ -> fail "held world query entered source dispatch"
-            ActivationPreviewOperation -> runActivationPreviewMode bound file
-            SourceCheckOperation -> runSourceCheckMode bound file
-            CellPlanOperation -> runCellPlanMode (boundParserFlags bound) args file
-            CellOperation -> runCellMode bound file
-            ClassificationOperation -> runClassifyMode (boundParserFlags bound) timing args
-            InspectionOperation -> runInspectionMode bound file
-            TurnOperation -> runTurnMode bound file
-            SourceOperation -> timePhase timing "total" (processFile bound timing file)
+dispatch timing bound = case boundAdmittedOperation bound of
+  AdmittedEnsureExactInputs _ -> fail "source-free exact input acquisition entered source dispatch"
+  AdmittedDeclaration manifest output -> runDeclarationOperation bound manifest output
+  AdmittedWorldCellPrepare _ -> do
+    outcome <- prepareWorldCell bound
+    case outcome of
+      Left _ -> pure ()
+      Right completed -> mapM_ (commitPreparedWorldDependencies bound) completed
+    pure []
+  AdmittedWorldCellPlan question -> do
+    bytes <- runBoundWorldCellPlan bound
+    BS.writeFile (worldCellPlanOutput question) bytes
+    pure []
+  AdmittedWorldQuery question -> do
+    bytes <- runBoundWorldQuery bound
+    BS.writeFile (worldQueryOutput question) bytes
+    pure []
+  AdmittedActivationPreview request -> runActivationPreviewMode bound request
+  AdmittedSourceCheck request -> runSourceCheckMode bound (sourceInput request)
+  AdmittedCellPlan request -> runCellPlanMode (boundParserFlags bound) (boundWorkerRequest bound) request
+  AdmittedCell request -> runCellMode bound request
+  AdmittedClassification request -> runClassifyMode (boundParserFlags bound) timing request
+  AdmittedInspection request -> runInspectionMode bound request
+  AdmittedTurn request -> runTurnMode bound request
+  AdmittedSource request -> timePhase timing "total" (processFile bound timing request)
 
 -- Compile a pure function over an already mounted input. No value interface
 -- or authored completion is issued by either the opaque probe or final pass.
-runActivationPreviewMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
-runActivationPreviewMode bound path = do
+runActivationPreviewMode :: BoundCompilerRequest -> TurnRequest -> IO [Diag]
+runActivationPreviewMode bound request = do
+  let path = sourceInput (turnSourceRequest request)
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
   timing <- readTimingEnabled
@@ -297,7 +303,7 @@ runActivationPreviewMode bound path = do
       (fail "activation preview template differs from its protected offer")
     original <- either (fail . show) (pure . T.unpack) (TE.decodeUtf8' originalBytes)
     selectedFlags <- templateParserFlags parserFlags original >>= either throwCellSplitError pure
-    let outDir = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
+    let outDir = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (turnOutputDirectory request)
         opaque = "(TidepoolScaffoldText.pack \"<opaque value>\\nUse the input type to select fields or apply sessionInput.\", False)"
         basePurpose = HostActivationPreviewCompile (previewInputSignature admission)
         render body = do
@@ -319,7 +325,7 @@ runActivationPreviewMode bound path = do
     (source, modulePath, purpose) <- render (if rendered
       then "TidepoolInspection.workbenchActivationDisplay " ++ show (previewBudget admission) ++ " __activationInput"
       else opaque)
-    completion <- compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args)) Set.empty purpose
+    completion <- compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args)) Set.empty purpose
       (Just (scopeFromWorkerRequest args)) modulePath
     let prepared = preparedCompilationResult completion
         compiled = pprPipelineResult prepared
@@ -355,8 +361,8 @@ runActivationPreviewMode bound path = do
         void $ writePreparedSidecars InlineYieldSites outDir binds
           (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
         void $ writePreparedArtifacts outDir artifacts
-        void $ writeRequestProducts args originalInterfaces outDir prepared productContext artifacts
-        outFile <- requireArg "--turn-out" (requestTurnOut args)
+        void $ writeRequestProducts bound originalInterfaces outDir prepared productContext artifacts
+        let outFile = turnOutput request
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
         BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
           (encodeListLen 7 <> text "TPEXACTACTIVATIONRENDERER1" <> text "1"
@@ -373,7 +379,7 @@ runSourceCheckMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
 runSourceCheckMode bound path = do
   let args = boundWorkerRequest bound
   checked <- trySynchronous $ do
-    compiled <- compileBoundRequest bound (maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args))
+    compiled <- compileBoundRequest bound (maybe CheckedEnvironment CheckedEnvironmentProducts (optionModuleCandidates args))
       Set.empty GeneralCompile Nothing path
     pure (crWarnings compiled)
   either throwIO pure checked
@@ -411,11 +417,11 @@ runDeclarationOperation bound manifest out = do
             <> encodeBindingInterfacePurpose issuedPurpose)
   either throwIO (const (pure [])) result
 
-runInspectionMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
-runInspectionMode bound _path = do
+runInspectionMode :: BoundCompilerRequest -> InspectionPayload -> IO [Diag]
+runInspectionMode bound request = do
   let args = boundWorkerRequest bound
   res <- trySynchronous $ withInspectionWork $ \work -> do
-    out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
+    let out = inspectionOutput request
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
         compile purpose path = do
           inspectionCompilationWork work
@@ -426,40 +432,41 @@ runInspectionMode bound _path = do
           (crTargetTcGblEnv successful)
           (crTargetRdrEnv successful)
           (crInspectionProbes successful) requests
-    bytes <- encodeInspectionResults <$> runInspectionRequests args compile inspect
+    bytes <- encodeInspectionResults <$> runInspectionRequests request compile inspect
     BS.writeFile out bytes
   either throwIO (const (pure [])) res
 
 
 -- | Whether a generic extraction needs stable session values in scope.
-hasSessionScope :: WorkerRequest -> Bool
-hasSessionScope args = not (null (requestInjectVals args))
-  || isJust (requestSessionRoot args) || isJust (requestSessionArtifacts args)
+hasSessionScope :: RequestOptions -> Bool
+hasSessionScope args = not (null (optionInjectVals args))
+  || isJust (optionSessionRoot args) || isJust (optionSessionArtifacts args)
 
 -- | Project the session portion of a worker request. Callers decide whether
 -- the resulting scope is active.
-scopeFromWorkerRequest :: WorkerRequest -> SessionScope
+scopeFromWorkerRequest :: RequestOptions -> SessionScope
 scopeFromWorkerRequest args = SessionScope
-  { ssRoot      = fromMaybe "" (requestSessionRoot args)
-  , ssValIfaces = mapMaybe parseValModule (requestInjectVals args)
-  , ssExactScope = requestSessionArtifacts args
-  , ssIncarnation = requestSessionIncarnation args
+  { ssRoot      = fromMaybe "" (optionSessionRoot args)
+  , ssValIfaces = mapMaybe parseValModule (optionInjectVals args)
+  , ssExactScope = optionSessionArtifacts args
+  , ssIncarnation = optionSessionIncarnation args
   }
 
 processFile
-  :: BoundCompilerRequest -> Bool -> FilePath -> IO [Diag]
-processFile bound timing path = do
+  :: BoundCompilerRequest -> Bool -> SourceProductRequest -> IO [Diag]
+processFile bound timing request = do
+  let path = sourceInput (sourceProductSource request)
+      outputRequest = sourceProductOutput request
   let args = boundWorkerRequest bound
-  let mOutDir = requestOutDir args
-      mTarget = requestTarget args
+  let mOutDir = sourceOutputDirectory outputRequest
   hPutStrLn stderr $ "Processing: " ++ path
   res <- trySynchronous $ do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    let purpose = if requestCertifyHomeProducts args
+    let purpose = if sourceOutputKind outputRequest == CertifyHomeOriginals
           then CertifyHomeProductsCompile else GeneralCompile
-    completion <- compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) purpose scope path
+    completion <- compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args)) (Map.keysSet (optionRetainedGenerations args)) purpose scope path
     let prepared = preparedCompilationResult completion
         result = pprPipelineResult prepared
     let binds = prBinds result
@@ -477,13 +484,11 @@ processFile bound timing path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
-    let preparedTargets = case requestTargets args of
-          targets@(_ : _) -> targets
-          [] -> maybe [] pure mTarget
+    let preparedTargets = NE.toList (sourceOutputTargets outputRequest)
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     output <- prepareArtifactsWithIntent
       originalInterfaces outDir completion preparedTargets
-      (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
+      (standardAuxiliaryRoots binds) (optionRetainedGenerations args) []
     let preparedArtifacts = case output of
           NativeOutputs artifacts _ -> artifacts
           PortableOutputs artifacts -> artifacts
@@ -494,10 +499,10 @@ processFile bound timing path = do
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     case output of
       NativeOutputs _ productContext -> void $ timePhase timing "module_products" $
-        writeRequestProducts args originalInterfaces outDir prepared (Just productContext) preparedArtifacts
+        writeRequestProducts bound originalInterfaces outDir prepared (Just productContext) preparedArtifacts
       PortableOutputs _ -> do
         _ <- writeDependencyEvidence outDir (preparedFreshDependencies prepared)
-        writeRequestInputProof args outDir prepared
+        writeRequestInputProof bound outDir prepared
         BS.writeFile (outDir </> "portable-output.mode") "TPPORTABLEOUTPUT1\n"
 
   either throwIO (const (pure [])) res
@@ -505,19 +510,25 @@ processFile bound timing path = do
 -- Every completed worker product carries its original input evidence. Exact
 -- and session requests use their separate retained authority instead.
 writeRequestProducts
-  :: WorkerRequest -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
+  :: BoundCompilerRequest -> OriginalInterfaceArtifacts -> FilePath -> PreparedPipelineResult -> Maybe PreparedProductContext
   -> [PreparedArtifact] -> IO CertifiedOriginalProducts
-writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts = do
-  products <- writeCertifiedProductsKeepingWithOriginals (requestIncludes args) originalInterfaces outDir prepared productContext
+writeRequestProducts bound originalInterfaces outDir prepared productContext preparedArtifacts = do
+  let args = boundWorkerRequest bound
+  products <- writeCertifiedProductsKeepingWithOriginals (optionIncludes args) originalInterfaces outDir prepared productContext
     [(paTarget artifact, paProgram artifact) | artifact <- preparedArtifacts]
-  writeRequestInputProof args outDir prepared
+  writeRequestInputProof bound outDir prepared
   pure products
 
-writeRequestInputProof :: WorkerRequest -> FilePath -> PreparedPipelineResult -> IO ()
-writeRequestInputProof args outDir prepared =
-  when (not (requestCell args) && not (requestActivationPreview args)
-      && null (requestInjectVals args) && not (isJust (requestSessionArtifacts args))
-      && Map.null (requestRetainedGenerations args)
+writeRequestInputProof :: BoundCompilerRequest -> FilePath -> PreparedPipelineResult -> IO ()
+writeRequestInputProof bound outDir prepared =
+  let args = boundWorkerRequest bound
+      sourceProofAllowed = case boundAdmittedOperation bound of
+        AdmittedCell _ -> False
+        AdmittedActivationPreview _ -> False
+        _ -> True
+  in when (sourceProofAllowed
+      && null (optionInjectVals args) && not (isJust (optionSessionArtifacts args))
+      && Map.null (optionRetainedGenerations args)
       && isNothing (preparedExactCompilation prepared)) $
     writeCompileInputProof outDir (prHscEnv (pprPipelineResult prepared))
       (preparedFreshDependencies prepared) (pprPackageImports prepared)
@@ -541,16 +552,17 @@ writeRequestInputProof args outDir prepared =
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
-runTurnMode bound path = do
+runTurnMode :: BoundCompilerRequest -> TurnRequest -> IO [Diag]
+runTurnMode bound request = do
+  let path = sourceInput (turnSourceRequest request)
   let args = boundWorkerRequest bound
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   lastAttempt <- newIORef Nothing
   res <- timePhase timing "total" $ trySynchronous $ do
     turnSrc   <- readFile path
-    let templates = requestTurnTemplates args
-    mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
+    let templates = turnTemplates request
+    mVerdict  <- traverse parseTurnVerdictArg (turnVerdict request)
     -- The parse emits no phases of its own. This mode times it as the single
     -- @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
@@ -563,8 +575,8 @@ runTurnMode bound path = do
         (evaluate (classifyWithFlags parserFlags turnSrc))
     let exact = boundRequestExactScope bound
     let admittedItem = exact >>= scopeCheckedItem
-    forM_ admittedItem $ \admission -> validateCheckedItemAdmission args admission turnSrc sb
-    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
+    forM_ admittedItem $ \admission -> validateCheckedItemAdmission args (turnTemplates request) admission turnSrc sb
+    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (turnOutputDirectory request)
         bindersStr = intercalate ", " (sbBinders sb)
     turnOut <- case sbKind sb of
       KDecl -> do
@@ -576,14 +588,14 @@ runTurnMode bound path = do
           >>= either throwCellSplitError pure
         spliced <- either fail pure (renderDeclarationForTemplate tmplSrc declarationSource)
         (_spliced, modName, modulePath) <- writeSplicedModule parserFlags outDir lastAttempt spliced
-        items <- timePhase timing "declaration_binders" $ runBoundGhc bound (extractBindersNamedGhc modulePath (requestIncludes args) modName)
+        items <- timePhase timing "declaration_binders" $ runBoundGhc bound (extractBindersNamedGhc modulePath (optionIncludes args) modName)
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
         return (TDecl binders items declarationSource)
       _kind -> do
         compileClassifiedTurn parserFlags bound timing outDir turnSrc sb bindersStr admittedItem lastAttempt exact
-    outFile <- requireArg "--turn-out" (requestTurnOut args)
+    let outFile = turnOutput request
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
     forM_ (exact >>= \scope -> (,) scope <$> scopeCheckedItem scope) $ \(scope,admission) ->
@@ -663,7 +675,7 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
             in (["session-scope-root", ssRoot scope]
               ++ maybe ["session-incarnation-absent"] (\value -> ["session-incarnation", value]) (ssIncarnation scope)
               ++ concatMap (\value -> ["session-value-interface", sessionModuleString value]) (ssValIfaces scope))
-    let templates = requestTurnTemplates args
+    let templates = boundTurnTemplates bound
         protectedTemplates = itemTurnTemplates <$> admitted
         templateImports = maybe (CheckedTemplateImports [] []) itemTemplateImports admitted
         verifyProtectedTemplate path captured = forM_ protectedTemplates $ \expected ->
@@ -719,7 +731,7 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
                 Nothing -> ["unadmitted"]
               includeFields = case admitted of
                 Nothing -> ["source-search-includes"]
-                  ++ concatMap (\include -> ["include-path", include]) (requestIncludes args)
+                  ++ concatMap (\include -> ["include-path", include]) (optionIncludes args)
                 _ -> ["checked-import-authority"]
               retainedFields = concat
                 [ ["retained", T.unpack (symbolUnit identity), T.unpack (symbolModule identity)
@@ -727,7 +739,7 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
                   ++ maybe ["no-record-parent"] (\parent -> ["record-parent", T.unpack parent])
                     (symbolRecordParent identity)
                   ++ [show generation]
-                | (identity, generation) <- Map.toAscList (requestRetainedGenerations args) ]
+                | (identity, generation) <- Map.toAscList (optionRetainedGenerations args) ]
               renderNamedRecipe = do
                 withProgram <- prepareTemplate originalTemplate
                 (baseSource, baseLineOffset) <- renderRecipe withProgram
@@ -778,8 +790,8 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
               recipe <- generatedScaffoldRecipeWithImportRendering parserFlags templateImports
                 protectedOccurrences protected spliced modulePath modName >>= either fail pure
               pure (GeneratedScaffoldCompile recipe basePurpose)
-          compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args))
-            (Map.keysSet (requestRetainedGenerations args)) purpose
+          compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args))
+            (Map.keysSet (optionRetainedGenerations args)) purpose
             (Just scope) modulePath
         compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         compileVariants _ ((index,tmplFile):rest) = do
@@ -807,27 +819,27 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
     (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir completion
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
-      (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
+      (optionRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
     void $ timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
     void $ timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
-      writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
+      writeRequestProducts bound originalInterfaces outDir prepared productContext preparedArtifacts
     -- Mutable turns never enter the artifact cache, but publication must
     -- still reject source changes observed during this compilation.
     validateDependencyEvidence (preparedFreshDependencies prepared)
     let wrapped = T.pack spliced
     turn <- case selector of
       SBind -> do
-        g    <- requireArg "--bind-gen"     (requestBindGen args)
-        root <- requireArg "--session-root" (requestSessionRoot args)
+        g    <- requireArg "--bind-gen"     (optionBindGen args)
+        root <- requireArg "--session-root" (optionSessionRoot args)
         bbs  <- writeSessionBindings g root sessionBindings
         return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
       SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
       SExpr -> case admitted >>= itemObservationName of
         Just observation -> do
-          generation <- requireArg "--bind-gen" (requestBindGen args)
-          root <- requireArg "--session-root" (requestSessionRoot args)
+          generation <- requireArg "--bind-gen" (optionBindGen args)
+          root <- requireArg "--session-root" (optionSessionRoot args)
           bindings <- writeSessionBindings generation root sessionBindings
           return (TBind [T.pack observation] variant bindings asksSites wrapped)
         Nothing -> return (TExpr variant asksSites wrapped)
@@ -842,13 +854,13 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
 -- block into decl runs before compiling any item and so needs every verdict
 -- up front — one spawn for the whole block instead of one classify spawn per
 -- item.
-runClassifyMode :: DynFlags -> Bool -> WorkerRequest -> IO [Diag]
-runClassifyMode parserFlags timing args =
+runClassifyMode :: DynFlags -> Bool -> ClassificationRequest -> IO [Diag]
+runClassifyMode parserFlags timing request =
   timePhase timing "total" $
     trySynchronous
       ( do
-          out      <- requireArg "--classify-out" (requestClassifyOut args)
-          srcs     <- mapM readFile (requestFiles args)
+          let out = classificationOutput request
+          srcs     <- mapM readFile (classificationSources request)
           verdicts <- timePhase timing "classify" (mapM (evaluate . classifyWithFlags parserFlags) srcs)
           writeFile out (renderVerdictsJson verdicts)
           hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
@@ -860,13 +872,14 @@ runClassifyMode parserFlags timing args =
 -- GHC owns every Haskell decision and returns post-zonk statement binder pins.
 -- Parsing chooses execution ordinals before runtime reserves original owners.
 -- The emitted receipt contains no checked pins, prepared bodies or live values.
-runCellPlanMode :: DynFlags -> WorkerRequest -> FilePath -> IO [Diag]
-runCellPlanMode parserFlags args cellPath = do
+runCellPlanMode :: DynFlags -> RequestOptions -> CellRequest -> IO [Diag]
+runCellPlanMode parserFlags args request = do
+  let cellPath = sourceInput (cellSourceRequest request)
   result <- trySynchronous $ do
     source <- readFile cellPath
-    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    let templatePath = cellTemplate request
     template <- readFile templatePath
-    templates <- forM (requestTurnTemplates args) $ \(kind,path) -> do
+    templates <- forM (cellTemplates request) $ \(kind,path) -> do
       bytes <- BS.readFile path
       pure (kind, shaHex bytes)
     plan <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
@@ -877,10 +890,10 @@ runCellPlanMode parserFlags args cellPath = do
           <> text (shaHex (TE.encodeUtf8 (T.pack template)))
           <> encodeListLen (fromIntegral (length templates))
           <> foldMap (\(kind,digest) -> encodeListLen 2 <> text kind <> text digest) templates
-          <> encodeListLen (fromIntegral (length (requestIncludes args)))
-          <> foldMap text (requestIncludes args)
-          <> encodeListLen (fromIntegral (length (requestInjectVals args)))
-          <> foldMap text (requestInjectVals args)
+          <> encodeListLen (fromIntegral (length (optionIncludes args)))
+          <> foldMap text (optionIncludes args)
+          <> encodeListLen (fromIntegral (length (optionInjectVals args)))
+          <> foldMap text (optionInjectVals args)
           <> encodeBytes observation
           <> encodeListLen (fromIntegral (length (cellPlanItems plan)))
           <> foldMap (text . bindingForm) (cellPlanItems plan)
@@ -889,29 +902,30 @@ runCellPlanMode parserFlags args cellPath = do
           Just LetBinding -> "let"
           Just RecursiveBinding -> "recursive"
           Nothing -> "none"
-    out <- requireArg "--cell-out" (requestCellOut args)
+    let out = cellOutput request
     BS.writeFile out (toStrictByteString receipt)
   either throwIO (const (pure [])) result
 
-runCellMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
-runCellMode bound cellPath = do
+runCellMode :: BoundCompilerRequest -> CellRequest -> IO [Diag]
+runCellMode bound request = do
   let exact = boundRequestExactScope bound
   case exact >>= \scope -> (,) scope <$> (scopeCheckedCell scope >>= checkedPlannedCell) of
-    Just (scope, planned) -> runCellProgramMode bound cellPath scope planned
-    Nothing -> runLegacyCellMode bound cellPath
+    Just (scope, planned) -> runCellProgramMode bound request scope planned
+    Nothing -> runLegacyCellMode bound request
 
-runLegacyCellMode :: BoundCompilerRequest -> FilePath -> IO [Diag]
-runLegacyCellMode bound cellPath = do
+runLegacyCellMode :: BoundCompilerRequest -> CellRequest -> IO [Diag]
+runLegacyCellMode bound request = do
+  let cellPath = sourceInput (cellSourceRequest request)
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
   provisionalOutput <- newIORef Nothing
   res <- trySynchronous $ do
     cellSource <- readFile cellPath
-    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    let templatePath = cellTemplate request
     template <- readFile templatePath
     let admittedScope = boundRequestExactScope bound
     forM_ admittedScope $ \scope -> forM_ (scopeCheckedCell scope) $ \admission ->
-      validateCheckedCellAdmission args admission cellSource template
+      validateCheckedCellAdmission args (cellTemplates request) admission cellSource template
     checkingTemplate <- case admittedScope >>= scopeCheckedCell of
       Nothing -> pure template
       Just _ -> either (throwIO . InvalidCheckingWrapper) pure
@@ -924,14 +938,14 @@ runLegacyCellMode bound cellPath = do
     declaredModule <- either fail pure (extractModuleName effectiveFlags initialSource)
     let outDir = fromMaybe
           (takeDirectory cellPath </> takeBaseName cellPath ++ "_cell")
-          (requestOutDir args)
+          (cellOutputDirectory request)
         moduleName' = fromMaybe "Main" declaredModule
         modulePath = outDir </> moduleName' ++ ".hs"
         scope = if hasSessionScope args
           then Just (scopeFromWorkerRequest args)
           else Nothing
     createDirectoryIfMissing True outDir
-    out <- requireArg "--cell-out" (requestCellOut args)
+    let out = cellOutput request
     preparedDeclaration <- case admittedScope >>= \exact -> (,) exact <$> scopeCheckedCell exact of
       Just (exact, admission)
         | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
@@ -939,7 +953,7 @@ runLegacyCellMode bound cellPath = do
       _ -> pure Nothing
     let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact,_) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
         checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
-          maybe CheckedEnvironment CheckedEnvironmentProducts (requestModuleCandidates args)
+          maybe CheckedEnvironment CheckedEnvironmentProducts (optionModuleCandidates args)
         checkPlan plan = maybe plan (\(_,planned,_,_,_) -> plannedCheckPlan planned) preparedDeclaration
     (analyzed, provisional) <- checkCellInstances (\plan -> do
       let effective = checkPlan plan
@@ -972,7 +986,7 @@ runLegacyCellMode bound cellPath = do
       binderSignatures <- cellCheckedBinderSignatures compiled
       cellNow <- readFile cellPath
       templateNow <- readFile templatePath
-      validateCheckedCellAdmission args admission cellNow templateNow
+      validateCheckedCellAdmission args (cellTemplates request) admission cellNow templateNow
       verified <- revalidateExactScope (crHscEnv compiled) receiptScope
       either fail pure verified
       plannedReceipt <- traverse (const (BS.readFile (outDir </> "planned-declaration.cbor"))) preparedDeclaration
@@ -999,18 +1013,19 @@ runLegacyCellMode bound cellPath = do
 
 -- The worker owns all GHC passes of a cell. Interfaces produced here are
 -- type evidence; no value or effect is evaluated by this transaction.
-runCellProgramMode :: BoundCompilerRequest -> FilePath
+runCellProgramMode :: BoundCompilerRequest -> CellRequest
   -> ExactScope -> PlannedCellAdmission -> IO [Diag]
-runCellProgramMode bound cellPath exact planned = do
+runCellProgramMode bound request exact planned = do
+  let cellPath = sourceInput (cellSourceRequest request)
   let args = boundWorkerRequest bound
       parserFlags = boundParserFlags bound
   timing <- readTimingEnabled
   attempted <- trySynchronous $ do
     source <- readFile cellPath
-    templatePath <- requireArg "--cell-template" (requestCellTemplate args)
+    let templatePath = cellTemplate request
     template <- readFile templatePath
     admission <- maybe (fail "compiled cell has no source admission") pure (scopeCheckedCell exact)
-    validateCheckedCellAdmission args admission source template
+    validateCheckedCellAdmission args (cellTemplates request) admission source template
     parserBytes <- BS.readFile (plannedParserPath planned)
     unless (shaHex parserBytes == plannedParserSha256 planned
         && plannedReservationDigest planned == checkedAdmissionDigest admission)
@@ -1018,9 +1033,9 @@ runCellProgramMode bound cellPath exact planned = do
     initial <- analyzeOrderedCellWithFlags parserFlags template source >>= either throwCellSplitError pure
     unless (length (cellPlanItems initial) == length (plannedSlots planned))
       (fail "compiled cell reservation count differs from parser")
-    root <- requireArg "--session-root" (requestSessionRoot args)
-    let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (requestOutDir args)
-        initialState = initialProgramCellState (cellPlanPrologue initial) exact (requestRetainedGenerations args)
+    root <- requireArg "--session-root" (optionSessionRoot args)
+    let outDir = fromMaybe (takeDirectory cellPath </> "cell-program") (cellOutputDirectory request)
+        initialState = initialProgramCellState (cellPlanPrologue initial) exact (optionRetainedGenerations args)
     createDirectoryIfMissing True outDir
     batches <- newIORef []
     settled <- foldM (compileSegment parserFlags timing admission template outDir batches)
@@ -1041,10 +1056,10 @@ runCellProgramMode bound cellPath exact planned = do
           <> text (plannedParserDigest planned)
           <> encodeListLen (fromIntegral (length (programTypedPlans settled)))
           <> foldMap encodeTypedSegmentPlan (programTypedPlans settled)
-    out <- requireArg "--cell-out" (requestCellOut args)
+    let out = cellOutput request
     sourceNow <- readFile cellPath
     templateNow <- readFile templatePath
-    validateCheckedCellAdmission args admission sourceNow templateNow
+    validateCheckedCellAdmission args (cellTemplates request) admission sourceNow templateNow
     unless (sourceNow == source && templateNow == template) (fail "compiled cell source changed")
     completedBatches <- readIORef batches
     foldr (\batch next -> withTypedSegmentSessionPublication root batch next)
@@ -1138,8 +1153,8 @@ runCellProgramMode bound cellPath exact planned = do
                       (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan)
                         (TypedSegmentCompile typedPlan (preparedTypedSegmentOperations authored) (CheckedItemCompile [] (programOriginal state) prefix)))
                 compiledSegment <- compilePreparedSegmentRequest segmentRequest (WithTypedSegmentPreparation prepare
-                  (PreparedSegmentProducts typedPlan (requestModuleCandidates localArgs)))
-                  (Map.keysSet (requestRetainedGenerations localArgs))
+                  (PreparedSegmentProducts typedPlan (optionModuleCandidates localArgs)))
+                  (Map.keysSet (optionRetainedGenerations localArgs))
                   purpose
                   (Just (scopeFromWorkerRequest localArgs)) sourcePath
                 pure (authored,compiledSegment)
@@ -1191,7 +1206,7 @@ runCellProgramMode bound cellPath exact planned = do
               projectionGenerations (typedSegmentSessionBindingRepresentations batch)
           unless (length artifacts == length items) (fail "typed segment projection lost an entry")
           currentProducts <- maybe (fail "typed segment has no admitted original inventory") pure productContext
-          sharedProducts <- writeCertifiedSegmentProducts (requestIncludes localArgs) originalInterfaces
+          sharedProducts <- writeCertifiedSegmentProducts (optionIncludes localArgs) originalInterfaces
             directory prepared currentProducts
           emitted <- forM (zip3 items artifacts (cellPlanItems finalized)) $ \(item,artifact,sourceItem) -> do
             let itemPlan = typedItemPlan item
@@ -1325,8 +1340,8 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
         mapped <- either fail pure (renderProtectedTemplateImports (plannedSourceLineOffset original) protectedImports)
         recipe <- generatedCheckingTemplateRecipeWithImportRendering parserFlags
           (checkedTemplateImports admission) mapped wrapper (plannedSourceImports original) sourcePath reserved >>= either fail pure
-        compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args))
-          (Map.keysSet (requestRetainedGenerations args))
+        compilePreparedRequest bound (PreparedProducts (optionModuleCandidates args))
+          (Map.keysSet (optionRetainedGenerations args))
           (GeneratedScaffoldCompile recipe (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
   createDirectoryIfMissing True directory
   (finalized, completion) <- checkCellInstances compileOriginal initial
@@ -1338,11 +1353,11 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
   inventory <- certifyPlannedDeclaration original environment >>= either fail pure
   originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces directory completion
-    ["__result"] [] (requestRetainedGenerations args) []
+    ["__result"] [] (optionRetainedGenerations args) []
   void $ writePreparedSidecars SeparateYieldSites directory binds
     Nothing (map T.pack (prWarnings result)) artifacts
   void $ writePreparedArtifacts directory artifacts
-  certified <- writeRequestProducts args originalInterfaces directory prepared productContext artifacts
+  certified <- writeRequestProducts bound originalInterfaces directory prepared productContext artifacts
   let products = certifiedOriginalProducts certified
   supportScope <- retainProgramProducts directory prepared certified reserved exact
   originalProductEncoding <- case
@@ -1388,18 +1403,6 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
       "authored declarations use the compiler-reserved __result binder")
     rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
     rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
-
--- Retain checked supporting originals in this cell's private scope. Cached
--- products keep their producer's bytes and version; fresh products use the
--- validated source witness. Neither path replaces an admitted hidden owner.
-programInterfaceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
-programInterfaceRequirements prepared unit owner = do
-  source <- programSourceRequirements prepared unit owner
-  iface <- case Map.lookup (mkModuleName owner) (pprProductInterfaces prepared) of
-    Just value | unitString (moduleUnit (mi_module value)) == unit -> pure value
-    _ -> fmap fst <$> readExactInterface (prHscEnv (pprPipelineResult prepared))
-      (mkModule (stringToUnit unit) (mkModuleName owner)) >>= either (fail . show) pure
-  pure (nub (source ++ homeInterfaceUsageOwners (prHscEnv (pprPipelineResult prepared)) iface))
 
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
 exactProgramProductVersion scope unit owner source =

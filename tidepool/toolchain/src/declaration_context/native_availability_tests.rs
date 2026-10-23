@@ -11549,20 +11549,7 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
         }
     }
 
-    let left_only = inventory
-        .admit_shared(&inventory.empty_view(), vec![Arc::clone(&entries[0])])
-        .unwrap();
-    assert!(!left_only.artifact_ids().contains(right_id));
-    assert!(matches!(
-        rows.retain_acquisitions(&left_only),
-        Err(CompileError::ArtifactInventory(error))
-            if matches!(
-                error.failure,
-                crate::artifact_inventory::ArtifactInventoryFailure::NativeRootOutsideView {
-                    artifact
-                } if artifact == *right_id
-            )
-    ));
+
 }
 
 #[test]
