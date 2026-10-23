@@ -6109,18 +6109,25 @@ mod tests {
                     &mut validation,
                 )
                 .map(|_| ());
-            let expected = match mutation {
-                0 => "source module version",
-                1 => "source outside compiler selection",
-                2 => "target Source exact native membership",
+            let refused = match mutation {
+                1 => matches!(&denied, Err(CompileError::CompilerEvidence(error))
+                    if matches!(error.as_ref(), certified_products::CertificationError::SourceOutsideCompilerSelection {
+                        owner, requested_version, original_ordinal: None,
+                    } if owner.unit == "fixture" && owner.module == "WrongOwner"
+                        && requested_version == &products[1].owner().module_version)),
+                0 | 2 => {
+                    let expected = if mutation == 0 {
+                        "source module version"
+                    } else {
+                        "target Source exact native membership"
+                    };
+                    matches!(&denied, Err(CompileError::CompilerEvidence(error))
+                        if matches!(error.as_ref(), certified_products::CertificationError::Mismatch(actual)
+                            if *actual == expected))
+                }
                 _ => unreachable!(),
             };
-            assert!(
-                matches!(&denied, Err(CompileError::CompilerEvidence(error))
-                    if matches!(error.as_ref(), certified_products::CertificationError::Mismatch(actual)
-                        if *actual == expected)),
-                "mutation={mutation}, actual={denied:?}",
-            );
+            assert!(refused, "mutation={mutation}, actual={denied:?}");
         }
         assert_eq!(
             inventory.metrics().issued_scope_nodes,
@@ -6152,7 +6159,7 @@ mod tests {
             .unwrap();
         let observed =
             AuthenticatedTargetImports::issue(&target, &accepted, &validation.inventory).unwrap();
-        assert!(missing_inventory
+        let missing_admission = missing_inventory
             .select_native_target(
                 missing_fixed.captured_stage().physical_cohort(),
                 observed,
@@ -6162,7 +6169,16 @@ mod tests {
                 &BTreeMap::new(),
                 &mut validation,
             )
-            .is_err());
+            .map(|_| ());
+        assert!(
+            matches!(&missing_admission, Err(CompileError::CompilerEvidence(error))
+                if matches!(error.as_ref(), certified_products::CertificationError::SourceOutsideCompilerSelection {
+                    owner, requested_version, original_ordinal: None,
+                } if owner.unit == products[1].owner().unit
+                    && owner.module == products[1].owner().module
+                    && requested_version == &products[1].owner().module_version)),
+            "the omitted Wrapper must refuse at source selection: {missing_admission:?}",
+        );
     }
 
     #[test]
