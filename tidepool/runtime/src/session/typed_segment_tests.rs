@@ -1550,6 +1550,168 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
     }
 }
 
+#[derive(Clone, Default)]
+struct SourceQueryObserver(Arc<CaptureMutex<Vec<(String, u64, String)>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SourceQueryObserver {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "tidepool_toolchain::compiler_world::native_demand" {
+            return;
+        }
+        let mut fields = RequestFields::default();
+        event.record(&mut fields);
+        if fields.0.get("message").map(String::as_str) != Some("source_dependency_query") {
+            return;
+        }
+        self.0.lock().push((
+            fields.0["admission"].clone(),
+            fields.0["stage"].parse().unwrap(),
+            fields.0["binder_occurrence"].clone(),
+        ));
+    }
+}
+
+#[test]
+fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
+    use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
+    let mut session = SemanticSession::new();
+    session
+        .execute("same_cell_source", "historyValue0 <- pure (23 :: Int)", 0)
+        .unwrap();
+    let original = session
+        .resident
+        .current_binding_in(session.public, "historyValue0")
+        .unwrap();
+    let original_interface = session
+        .resident
+        .retained_checked_value_artifact(original.1)
+        .unwrap()
+        .certified_interface()
+        .artifact_id();
+    session
+        .execute(
+            "same_cell_source",
+            include_str!("fixtures/typed-segment-inline-historical-capture.hs"),
+            1,
+        )
+        .unwrap();
+    session
+        .execute("same_cell_source", "historyValue0 <- pure (91 :: Int)", 0)
+        .unwrap();
+    let replacement = session
+        .resident
+        .current_binding_in(session.public, "historyValue0")
+        .unwrap();
+    assert_ne!(original.0, replacement.0);
+    assert_ne!(original.1, replacement.1);
+
+    let observer = SourceQueryObserver::default();
+    let before_effects = Arc::clone(&session.trace);
+    tracing::subscriber::with_default(
+        tracing_subscriber::registry().with(observer.clone()),
+        || {
+            session
+                .execute_observed(
+                    "same_cell_source",
+                    include_str!("fixtures/typed-segment-same-cell-source-capture.hs"),
+                    CellDeclarationExpectation::Total(1),
+                    SemanticChecks::None,
+                    &SourceImports::new(),
+                    None,
+                    |program| {
+                        assert!(before_effects.lock().is_empty());
+                        let terminals = program
+                            .items()
+                            .iter()
+                            .filter(|item| item.native().is_some())
+                            .flat_map(|item| {
+                                item.checked_item()
+                                    .world_selected_dependency_terminals()
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        assert!(
+                            terminals.iter().any(|terminal| {
+                                terminal.origin() == DependencyTerminalOrigin::SourceDefinition
+                                    && terminal.identity().module == original.1.module_name()
+                                    && terminal.generation() == original.1.gen.0
+                                    && terminal.binding().artifact == original_interface
+                            }),
+                            "the executable stage must seal the old exact SOURCE occurrence"
+                        );
+                        assert!(
+                            terminals.iter().all(|terminal| {
+                                terminal.identity().module != replacement.1.module_name()
+                            }),
+                            "the later visible value must not replace the inherited SOURCE capture"
+                        );
+                    },
+                )
+                .unwrap();
+        },
+    );
+    // NativeDemandResolver is borrowed synchronously by the endpoint response
+    // loop. Stage zero proves the subscriber saw this exact resolver admission.
+    let queries = observer.0.lock();
+    let admissions = queries
+        .iter()
+        .filter_map(|(admission, stage, occurrence)| {
+            (*stage == 0 && occurrence == "historicalCapture").then_some(admission)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        admissions.len(),
+        1,
+        "one actual stage-zero SOURCE operation"
+    );
+    let admission = *admissions.first().unwrap();
+    assert!(
+        queries.iter().any(|(actual, stage, occurrence)| {
+            actual == admission && *stage == 1 && occurrence == "historicalCapture"
+        }),
+        "the used predecessor output must requery its SOURCE use under the new stage fence"
+    );
+    drop(queries);
+    assert_eq!(session.observed(), [23]);
+    session.assert_no_compiler_since_last_effect();
+
+    let observer = SourceQueryObserver::default();
+    tracing::subscriber::with_default(
+        tracing_subscriber::registry().with(observer.clone()),
+        || {
+            session
+                .execute(
+                    "unused_same_cell_source",
+                    include_str!("fixtures/typed-segment-unused-same-cell-source-capture.hs"),
+                    1,
+                )
+                .unwrap();
+        },
+    );
+    let queries = observer.0.lock();
+    let admissions = queries
+        .iter()
+        .filter_map(|(admission, stage, occurrence)| {
+            (*stage == 0 && occurrence == "historicalCapture").then_some(admission)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        admissions.len(),
+        1,
+        "the declaration publication must positively observe its actual SOURCE input"
+    );
+    let admission = *admissions.first().unwrap();
+    assert!(queries.iter().all(|(actual, stage, occurrence)| {
+        actual != admission || *stage != 1 || occurrence != "historicalCapture"
+    }), "an unused predecessor output must issue no SOURCE query in the executable stage of the same admission");
+    assert_eq!(session.observed(), [23, 99]);
+    session.assert_no_compiler_since_last_effect();
+}
+
 #[test]
 fn compiler_issued_binding_survives_capture_and_releases_interface_and_root() {
     let mut session = SemanticSession::new();
