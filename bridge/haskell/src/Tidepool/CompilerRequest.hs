@@ -285,7 +285,6 @@ cellCompilationPurpose :: CellCompilationInputs -> CompilePurpose -> CompilePurp
 cellCompilationPurpose (CellCompilationInputs imports originals values) = withProgramSourceImports imports . replacePurpose
   where
     replacePurpose purpose = case purpose of
-      ParsedImportSelection intents inner -> ParsedImportSelection intents (replacePurpose inner)
       GeneratedScaffoldCompile recipe inner -> GeneratedScaffoldCompile recipe (replacePurpose inner)
       GeneratedInstanceCheck recipe inner -> GeneratedInstanceCheck recipe (replacePurpose inner)
       TypedSegmentCompile plan operations inner -> TypedSegmentCompile plan operations (replacePurpose inner)

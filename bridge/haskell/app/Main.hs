@@ -66,7 +66,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
   , pprPackageImports, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, retainProgramSourceImports
-  , CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
+  , CompilePurpose(..), prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, checkCellInstances
   , captureSupportedPackageProfile
@@ -670,8 +670,7 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
           unless (any (\(kind,file) -> file == path
               && lookup kind expected == Just (shaHex (TE.encodeUtf8 (T.pack captured)))) templates)
             (fail "generated scaffold template differs from its protected offer")
-        basePurpose = maybe id withSourceImportIntents prologue $
-          maybe GeneralCompile checkedItemCompilePurpose admitted
+        basePurpose = maybe GeneralCompile checkedItemCompilePurpose admitted
         -- Splice @tmplFile@ against the turn text and write the generated
         -- module under the name in its compiler-owned header. Non-declaration
         -- turns derive a stable owner from their semantic compile inputs;
@@ -960,9 +959,7 @@ runLegacyCellMode bound cellPath = do
             (checkedTemplateImports admission) mappedImports checkingTemplate rendering modulePath moduleName'
             >>= either fail pure
           pure (GeneratedScaffoldCompile recipe baseCheckPurpose)
-      compileBoundRequest bound checkedSelection Set.empty
-        (withSourceImportIntents (cellPlanPrologue effective) compilePurpose)
-        scope modulePath)
+      compileBoundRequest bound checkedSelection Set.empty compilePurpose scope modulePath)
         (maybe initialPlan (\(plan,_,_,_,_) -> plan) preparedDeclaration)
     checkedSource <- either fail pure (renderCellCheckSource checkingTemplate (checkPlan analyzed))
     let (finalPlan, finalSource, compiled) = (analyzed, checkedSource, provisional)
@@ -1064,7 +1061,7 @@ runCellProgramMode bound cellPath exact planned = do
           localArgs = boundWorkerRequest segmentRequest
           directory = outDir </> "segment-" ++ show segmentIndex
       withPrefix <- either fail pure (appendCompletedProgramImports scope prefix
-        (programOriginals state) segment)
+        (map fst (programOriginals state)) segment)
       createDirectoryIfMissing True directory
       case cellPlanItems segment of
         [item] | sbKind (cellAnalysisVerdict item) == KDecl -> do
@@ -1143,7 +1140,7 @@ runCellProgramMode bound cellPath exact planned = do
                 compiledSegment <- compilePreparedSegmentRequest segmentRequest (WithTypedSegmentPreparation prepare
                   (PreparedSegmentProducts typedPlan (requestModuleCandidates localArgs)))
                   (Map.keysSet (requestRetainedGenerations localArgs))
-                  (withSourceImportIntents (cellPlanPrologue plan) purpose)
+                  purpose
                   (Just (scopeFromWorkerRequest localArgs)) sourcePath
                 pure (authored,compiledSegment)
           (finalized,(authored,compiled)) <- timePhase timing "cell_program_segment_frontend"
@@ -1330,8 +1327,7 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
           (checkedTemplateImports admission) mapped wrapper (plannedSourceImports original) sourcePath reserved >>= either fail pure
         compilePreparedRequest bound (PreparedProducts (requestModuleCandidates args))
           (Map.keysSet (requestRetainedGenerations args))
-          (withSourceImportIntents (cellPlanPrologue plan)
-            (GeneratedScaffoldCompile recipe (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile))) scope sourcePath
+          (GeneratedScaffoldCompile recipe (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)) scope sourcePath
   createDirectoryIfMissing True directory
   (finalized, completion) <- checkCellInstances compileOriginal initial
   original <- planned finalized
