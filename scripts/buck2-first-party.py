@@ -1345,6 +1345,11 @@ def runtime_world_publication_test_cases(binary):
     )]
     tests.append("session::resident::world_cell_test_support::source_hidden_join::"
                  "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")
+    tests.extend("session::resident::world_cell_test_support::publication_linearization::" + name for name in (
+        "paired_guarded_cancellation_before_publication_preserves_public_winner",
+        "paired_publication_before_guarded_cancellation_preserves_committed_winner",
+        "fixed_sibling_intents_restage_after_observation_and_domain_changes_without_reexecution",
+    ))
     env, resources, worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_world_publication_histories"
     )

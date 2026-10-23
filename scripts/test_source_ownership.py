@@ -110,7 +110,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/resident_paired_publication_tests.rs',
         'tidepool/runtime/src/session/package_runtime_tests.rs',
         'tidepool/runtime/src/session/exact_recovery_acceptance_tests.rs',
-        'tidepool/runtime/src/session/paired_publication/linearization_tests.rs',
+        'tidepool/runtime/src/session/world_cell_test_support/publication_linearization.rs',
         'tidepool/runtime/src/session/registry_properties.rs',
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
         'tidepool/runtime/src/session/typed_segment_tests.rs',
