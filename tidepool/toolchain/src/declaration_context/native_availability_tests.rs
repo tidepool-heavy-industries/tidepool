@@ -8429,7 +8429,10 @@ fn compiled_publication_fixture() -> CompiledPublicationFixture {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
-    use crate::artifact_inventory::{ArtifactSelectionId, NativeArtifactDemand, ScopeProofV3};
+    use crate::artifact_inventory::{
+        ArtifactSelectionId, IssuedNativeOffer, NativeArtifactDemand, NativeOriginalRequirement,
+        ScopeProofV3,
+    };
     use crate::exact_context::{hydrate_context, ImmutableScopeProofRef, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 
@@ -8466,22 +8469,42 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 &fixture.source
             };
             let inventory = source.artifact_view().inventory();
-            let initial = source
-                .artifact_view()
-                .select_roots(
+            assert_eq!(
+                source
+                    .compiler_input_roles()
+                    .iter()
+                    .any(CompilerInputRole::is_published_source_original),
+                published,
+            );
+            // The receiving TYPE owner retains the source's exact byte/proof
+            // custody without acquiring its compiler Original or SOURCE roles.
+            let baseline = source
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .type_interfaces_for_owners(
                     source
                         .compiler_input_projection()
-                        .roles()
-                        .iter()
-                        .map(CompilerInputRole::interface)
+                        .snapshot_roles()
+                        .keys()
+                        .cloned()
                         .collect(),
                 )
+                .unwrap()
+                .retain_custody(source.artifact_view())
                 .unwrap();
+            let initial = baseline.artifacts();
+            let interface =
+                baseline.projection().snapshot_roles()[&entry.descriptor.owner].interface();
             assert!(initial.selected_native_groups().is_empty());
-            assert!(initial.capture_graph_selection().native_groups.is_empty());
+            assert!(initial
+                .capture_graph_selection()
+                .roots
+                .iter()
+                .all(|root| { !matches!(root, ArtifactBindingNode::Group(_)) }));
             let full = inventory
                 .admit_recovery_selection(
-                    &initial,
+                    initial,
                     vec![],
                     &fixture
                         .own_ordinals
@@ -8493,13 +8516,20 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                         .collect(),
                 )
                 .unwrap();
-            let projection = source.compiler_input_projection().clone();
-            let full_support = fixture_compiler_support(projection.clone(), full.clone());
-            let full_offer = full_support
-                .native_offers()
-                .iter()
-                .find(|offer| offer.original() == id && offer.is_full())
-                .unwrap();
+            let projection = baseline.projection().clone();
+            let full_offer = IssuedNativeOffer::issue(
+                id,
+                &full,
+                NativeOriginalRequirement::from_selected_view(id, &full).unwrap(),
+            )
+            .unwrap();
+            assert!(full_offer.is_full());
+            let full_support = fixture_support_with_issued_offers(
+                projection.clone(),
+                full.clone(),
+                [full_offer.clone()],
+            )
+            .unwrap();
             let carriers = full_offer.issued_group_carriers().unwrap();
             assert!(
                 carriers
@@ -8509,7 +8539,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             );
             let chosen = inventory
                 .admit_recovery_selection(
-                    &initial,
+                    initial,
                     vec![],
                     &ordinals
                         .iter()
@@ -8520,7 +8550,14 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                         .collect(),
                 )
                 .unwrap();
-            let available = fixture_compiler_support(projection.clone(), chosen);
+            let available_offer = IssuedNativeOffer::issue(
+                id,
+                &chosen,
+                NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
+            )
+            .unwrap();
+            let available =
+                fixture_support_with_issued_offers(projection, chosen, [available_offer]).unwrap();
             let initial_graph = initial.capture_graph_selection();
             assert_eq!(
                 available.artifacts().capture_graph_selection().namespace,
@@ -8532,7 +8569,6 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             );
             // Only the checked availability owner transfers permission. Raw Full
             // custody independently preserves proof scopes without selecting groups.
-            let baseline = fixture_compiler_support(projection, initial);
             let support = baseline
                 .retain_offers(
                     full_support
@@ -8548,21 +8584,20 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 support.recorded_input_decisions(),
                 baseline.recorded_input_decisions()
             );
-            source
-                .source_scope()
-                .preserve_support(source.compiler_source_support(), &support)
-                .unwrap();
-            let context = source
-                .as_ref()
-                .clone()
-                .rebuild(|facts| facts.compiler_support = support)
-                .finish()
-                .unwrap();
+            let context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
+                producer: producer.sha256(),
+                compiler_support: support,
+                lexical: Default::default(),
+                source_scope: Default::default(),
+                template_imports: None,
+            })
+            .finish()
+            .unwrap();
             let selection =
                 crate::artifact_inventory::ExactArtifactSelection::capture(context.artifact_view());
             let reopened = context
                 .artifact_view()
-                .select_issued(vec![id], &selection)
+                .select_issued(vec![interface], &selection)
                 .unwrap();
             assert!(Arc::ptr_eq(
                 reopened.selection_snapshot(),
@@ -8590,7 +8625,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 )
                 .unwrap();
             assert!(broader.selection_snapshot().scopes.len() > selection.snapshot().scopes.len());
-            let narrowed = broader.select_issued(vec![id], &selection).unwrap();
+            let narrowed = broader.select_issued(vec![interface], &selection).unwrap();
             assert!(Arc::ptr_eq(
                 narrowed.selection_snapshot(),
                 selection.snapshot()
@@ -8618,7 +8653,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             ));
             assert!(
                 matches!(
-                    baseline.artifacts().select_issued(vec![id], &selection),
+                    baseline.artifacts().select_issued(vec![interface], &selection),
                     Err(CompileError::ExtractFailed(detail))
                         if detail == "artifact inventory: issued selection scope is outside acquisition custody"
                 ),
@@ -8646,19 +8681,18 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(altered));
             assert!(
                 matches!(
-                    context.artifact_view().select_issued(vec![id], &altered),
+                    context.artifact_view().select_issued(vec![interface], &altered),
                     Err(CompileError::ExtractFailed(detail))
                         if detail == "artifact inventory: issued selection scope proof differs from acquisition custody"
                 ),
                 "scope identity alone cannot authenticate different immutable proof facts"
             );
-            assert_eq!(
-                context
-                    .compiler_input_roles()
-                    .iter()
-                    .any(CompilerInputRole::is_published_source_original),
-                published
-            );
+            assert!(context
+                .compiler_input_roles()
+                .iter()
+                .all(|role| role.original().is_none()));
+            assert!(context.source_scope().rows().is_empty());
+            assert!(context.lexical_graph().is_empty());
             assert!(context.artifact_view().selected_native_groups().is_empty());
             let row = context
                 .compiler_source_support()
@@ -8725,13 +8759,12 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .unwrap();
         assert!(restored.artifact_view().selected_native_groups().is_empty());
         assert_eq!(restored.snapshot().roles, snapshot.roles);
-        assert_eq!(
-            restored
-                .compiler_input_roles()
-                .iter()
-                .any(CompilerInputRole::is_published_source_original),
-            published,
-        );
+        assert!(restored
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(restored.source_scope().rows().is_empty());
+        assert!(restored.lexical_graph().is_empty());
         assert_eq!(
             restored.snapshot().selection().as_ref(),
             snapshot.selection().as_ref()
@@ -8752,19 +8785,9 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             .unwrap();
         assert_eq!(full.snapshot_facts(), recorded_full);
         assert_eq!(full.issued_group_carriers().unwrap(), carriers);
-        if published {
-            let roles = restored.compiler_input_roles();
-            let selection = roles
-                .iter()
-                .find_map(|role| match role {
-                    CompilerInputRole::PublishedSourceOriginal { selection, .. } => Some(selection),
-                    _ => None,
-                })
-                .unwrap();
-            for (scope, proof) in &selection.snapshot().scopes {
-                let acquired = &restored.artifact_view().selection_snapshot().scopes[scope];
-                assert!(Arc::ptr_eq(proof.proof(), acquired.proof()));
-            }
+        for (scope, proof) in &full.custody_snapshot().scopes {
+            let acquired = &restored.artifact_view().selection_snapshot().scopes[scope];
+            assert!(Arc::ptr_eq(proof.proof(), acquired.proof()));
         }
         let scratch = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(restored))
@@ -10052,6 +10075,23 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
         .published_source_original_selection("revision", &entry.descriptor.owner)
         .unwrap();
     let published = publication.context();
+    let initial_request_root = tempfile::tempdir().unwrap();
+    let initial_request = published
+        .prepare_compilation(initial_request_root.path(), &fixture.producer)
+        .unwrap();
+    // Request closing issues the exact executable choices. The retained
+    // publication independently carries its source policy and native bytes.
+    let published = published
+        .as_ref()
+        .clone()
+        .rebuild(|facts| {
+            facts.compiler_support = initial_request
+                .compiler_inputs()
+                .compiler_source_support()
+                .clone();
+        })
+        .finish()
+        .unwrap();
     let role =
         published.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].clone();
     let empty = published
@@ -10064,6 +10104,8 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
                 .map(|role| role.interface())
                 .collect(),
         )
+        .unwrap()
+        .finalize_namespace()
         .unwrap();
     let fresh = recovered_witness_fixtures(&[fixture_finalized_product(
         original_groups_fixture_with_interface(
@@ -10094,7 +10136,6 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
                 if choices.is_empty() != full_demand
         ));
         let context = published
-            .as_ref()
             .clone()
             .rebuild(|facts| facts.compiler_support = support)
             .finish()
@@ -11559,9 +11600,9 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
         .unwrap();
     let inventory = source.artifact_view().inventory();
-    let initial = source
-        .artifact_view()
-        .select_roots(
+    let initial_support = source
+        .compiler_source_support()
+        .select_support_roots(
             source
                 .compiler_input_projection()
                 .roles()
@@ -11569,8 +11610,12 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 .map(CompilerInputRole::interface)
                 .collect(),
         )
+        .unwrap()
+        .finalize_namespace()
         .unwrap();
-    let projection = source.compiler_input_projection().clone();
+    let initial = initial_support.artifacts();
+    let projection = initial_support.projection().clone();
+    assert_eq!(&projection, source.compiler_input_projection());
     let full_support = source.compiler_source_support();
     assert!(full_support
         .native_offers()
@@ -11591,7 +11636,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             })
             .collect();
         let chosen = inventory
-            .admit_recovery_selection(&initial, vec![], &selected)
+            .admit_recovery_selection(initial, vec![], &selected)
             .unwrap();
         let support = fixture_compiler_support(projection.clone(), chosen)
             .retain_offers(full_support.native_offers().iter().cloned())
