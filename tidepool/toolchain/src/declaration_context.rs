@@ -21200,8 +21200,8 @@ mod tests {
 
             use fvm_ipld_blockstore::{Blockstore,MemoryBlockstore};
             use crate::exact_context::{Materializer,hydrate_context};
-            let alpha = fixture.entry.products().published_source_original_selection("revision", &fixture.helper.descriptor.owner).unwrap();
-            let beta = fixture.entry.products().published_source_original_selection("revision", &fixture.root.descriptor.owner).unwrap();
+            let alpha = fixture.entry.products().published_source_original_selection("revision", &fixture.root.descriptor.owner).unwrap();
+            let beta = fixture.entry.products().published_source_original_selection("revision", &fixture.helper.descriptor.owner).unwrap();
             let empty = ExactDeclarationContext::new(&[],&[],vec![]).unwrap();
             let left = empty.clone().with_published_source_originals(&alpha).unwrap();
             let right = empty.clone().with_published_source_originals(&beta).unwrap();
@@ -22506,11 +22506,16 @@ mod tests {
             .published_source_original_selection("lifetime-revision", &root)
             .unwrap();
         let expected = publication.context();
-        assert_eq!(expected.compiler_source_support().native_offers().len(), 1);
-        assert!(expected.compiler_source_support().native_offers()[0].is_full());
         let original = expected.compiler_input_projection().snapshot_roles()[&root]
             .original()
             .unwrap();
+        let offer = expected
+            .compiler_source_support()
+            .native_offers()
+            .iter()
+            .find(|offer| offer.original() == original)
+            .expect("the published root retains its exact native carrier");
+        assert!(offer.is_full());
         let store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&store);
         let written = writer
@@ -22555,7 +22560,12 @@ mod tests {
                 .find(|row| row.original.descriptor.id == original)
                 .unwrap();
             assert_eq!(row.mode, NativeTransportMode::Full);
-            assert!(row.permits(7));
+            assert!(!fixture.helper.native_group_ordinals.is_empty());
+            assert!(fixture
+                .helper
+                .native_group_ordinals
+                .iter()
+                .all(|ordinal| row.permits(*ordinal)));
             assert!(!Arc::ptr_eq(row, expected_row));
             assert!(!Arc::ptr_eq(&row.original, &expected_row.original));
             Arc::downgrade(row)
@@ -22587,14 +22597,16 @@ mod tests {
             assert_eq!(decoded, facts);
             let wire_store = MemoryBlockstore::new();
             let mut wire_writer = Materializer::new(&wire_store);
-            let live_cid = <crate::exact_context::CompilerRoleCodec as
-                crate::exact_context::SnapshotValueCodec<CompilerInputRole>>::encode(
-                    &mut wire_writer, &role,
-                ).unwrap();
-            let fact_cid = <crate::exact_context::CompilerRoleCodec as
-                crate::exact_context::SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole>>::encode(
-                    &mut wire_writer, &facts,
-                ).unwrap();
+            let live_cid =
+                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
+                    CompilerInputRole,
+                >>::encode(&mut wire_writer, &role)
+                .unwrap();
+            let fact_cid =
+                <crate::exact_context::CompilerRoleCodec as crate::exact_context::SnapshotValueCodec<
+                    crate::artifact_inventory::RecordedCompilerRole,
+                >>::encode(&mut wire_writer, &facts)
+                .unwrap();
             assert_eq!(live_cid, fact_cid);
             wire_writer.finish().unwrap();
         }
@@ -22992,8 +23004,7 @@ mod tests {
                     for operation in history {
                         match operation {
                             0 => {
-                                context =
-                                    context.with_published_source_originals(&selection).unwrap();
+                                context = context.with_published_source_originals(&selection).unwrap();
                             }
                             1 => {
                                 let view = context.artifact_view();
@@ -23043,8 +23054,16 @@ mod tests {
                                 context = inventory
                                     .context_for_expected_snapshot(published.root(), &acquired)
                                     .unwrap();
-                                let reopened =
-                                    context.published_source_original_selections().unwrap();
+                                proptest::prop_assert_eq!(
+                                    context.semantic_sha256(),
+                                    expected,
+                                    "cold restoration preserves the exact published context",
+                                );
+                                proptest::prop_assert_eq!(
+                                    context.snapshot().graph_selection().unwrap(),
+                                    acquired.snapshot().graph_selection().unwrap(),
+                                );
+                                let reopened = context.published_source_original_selections().unwrap();
                                 proptest::prop_assert_eq!(reopened.len(), 1);
                                 context = context
                                     .with_published_source_originals(&reopened[0])
@@ -23067,8 +23086,7 @@ mod tests {
                             _ => {
                                 let mut altered = context.clone();
                                 {
-                                    let updated =
-                                        crate::exact_context::ExactLexicalSnapshot::default();
+                                    let updated = crate::exact_context::ExactLexicalSnapshot::default();
                                     altered = altered.rebuild(|facts| facts.lexical = updated);
                                 }
                                 proptest::prop_assert!(altered.normalize().is_err());
@@ -30175,6 +30193,19 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         .unwrap()
                         .select_support_roots(roots.clone())
                         .unwrap();
+                    // Narrowing roles does not release the exact bytes owned
+                    // by a carried native completion.
+                    let mut expected_custody = expected_view
+                        .artifact_ids()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    for closure in parent
+                        .compiler_source_support()
+                        .acquired_native_closures()
+                        .iter()
+                    {
+                        expected_custody.extend(closure.artifacts().artifact_ids());
+                    }
                     let scoped = support.projection().roles();
                     // Requested carriers can include dependencies. The oracle
                     // follows the actual captured selection rather than counting
@@ -30183,9 +30214,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         scoped.len(),
                         roles
                             .iter()
-                            .filter(
-                                |role| expected_view.contains_namespace_artifact(role.interface())
-                            )
+                            .filter(|role| expected_view.contains_namespace_artifact(role.interface()))
                             .count()
                     );
                     for role in &roles {
@@ -30194,9 +30223,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                             .find(|candidate| candidate.interface() == role.interface());
                         if !expected_view.contains_namespace_artifact(role.interface()) {
                             assert!(observed.is_none());
-                        } else if expected_view
-                            .contains_namespace_artifact(role.original().unwrap())
-                        {
+                        } else if expected_view.contains_namespace_artifact(role.original().unwrap()) {
                             assert_eq!(observed.unwrap(), role);
                         } else {
                             assert_eq!(observed.unwrap().original(), None);
@@ -30204,12 +30231,16 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         }
                     }
                     assert_eq!(
-                        support.artifacts().artifact_ids(),
-                        expected_view.artifact_ids()
+                        support
+                            .artifacts()
+                            .artifact_ids()
+                            .into_iter()
+                            .collect::<BTreeSet<_>>(),
+                        expected_custody,
                     );
                     assert_eq!(
                         support.artifacts().selected_native_groups(),
-                        expected_view.selected_native_groups()
+                        expected_view.selected_native_groups(),
                     );
                     // Repeated extension/reopening cannot convert a type carrier to native authority.
                     let reopened = support
@@ -30264,9 +30295,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let before = baseline.semantic_sha256();
         let roles = baseline.compiler_input_roles();
         let custody = baseline.artifact_view().artifact_ids();
-        let products = ["InstanceOwner", "InstanceRelay"].map(|module| {
-            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1)
-        });
+        let products = ["InstanceOwner", "InstanceRelay"]
+            .map(|module| scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1));
         let offer = support_offer(&products);
         let mut request = program_request(directory.path(), baseline.clone());
         request.producer_sha256 = baseline.owner.facts.producer;
@@ -30284,8 +30314,32 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             offer.projection().roles()
         );
         assert_eq!(
-            transient.compiler_support.artifacts().artifact_ids(),
-            offer.artifacts().artifact_ids()
+            transient
+                .compiler_support
+                .artifacts()
+                .artifact_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            offer
+                .artifacts()
+                .artifact_ids()
+                .into_iter()
+                .chain(
+                    baseline
+                        .compiler_source_support()
+                        .acquired_native_closures()
+                        .iter()
+                        .flat_map(|closure| closure.artifacts().artifact_ids())
+                )
+                .collect::<BTreeSet<_>>(),
+        );
+        assert_eq!(
+            transient
+                .compiler_support
+                .artifacts()
+                .selected_native_groups(),
+            offer.artifacts().selected_native_groups(),
+            "retaining completion bytes does not select their executable Groups",
         );
         assert!(!transient
             .compiler_support
@@ -30318,8 +30372,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &mut PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let consumer =
-            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
+        let consumer = scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
         let artifacts = effective
             .context()
             .artifact_view()
