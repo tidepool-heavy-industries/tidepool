@@ -4043,7 +4043,8 @@ sameImportSourcePolicy left right =
 -- root summary refuses instead of silently substituting another parse.
 parseModuleWithImportRoot :: Maybe ParsedModule -> ModSummary -> Ghc ParsedModule
 parseModuleWithImportRoot owned summary = case owned of
-  Just parsed | ms_mod (pm_mod_summary parsed) == ms_mod summary -> do
+  Just parsed | ms_mod (pm_mod_summary parsed) == ms_mod summary
+      && ms_hsc_src (pm_mod_summary parsed) == ms_hsc_src summary -> do
     let admitted = pm_mod_summary parsed
     oldPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location admitted)))
     newPath <- liftIO (traverse canonicalizePath (ml_hs_file (ms_location summary)))
