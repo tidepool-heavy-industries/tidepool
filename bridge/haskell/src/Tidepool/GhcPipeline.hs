@@ -3819,7 +3819,15 @@ data CompletedModuleVersion = CompletedModuleVersion
 data CompletedModuleFailure
   = CompletedModuleHomeMissing Module
   | CompletedModuleHomeMismatch Module
-  deriving Show
+
+instance Show CompletedModuleFailure where
+  show (CompletedModuleHomeMissing owner) =
+    "completed source version lacks installed HOME " ++ label owner
+    where label value = unitString (moduleUnit value) ++ ":" ++ moduleNameString (moduleName value)
+  show (CompletedModuleHomeMismatch owner) =
+    "completed source version has incompatible installed HOME " ++ label owner
+    where label value = unitString (moduleUnit value) ++ ":" ++ moduleNameString (moduleName value)
+
 instance Exception CompletedModuleFailure
 
 -- The completion owner retains the exact installed HMI, including its lazy
