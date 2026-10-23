@@ -798,6 +798,18 @@ a synchronous refusal discards partial additions while preserving previously
 completed versions. Cancellation terminates the transaction. Transactions and
 their requests are serialized and carry their own CWD and compiler options.
 
+GHC Make may observe SOURCE dependencies on module-task threads.
+`GhcPipeline.runHeldWorldSource` issues a request- and stage-bound SOURCE-only
+borrow before Make; executable acquisition retains the handler-thread API.
+The dependency-basis gate covers missing-use discovery through row publication,
+then takes the transport gate for the complete framed exchange. Reserved wire
+failures poison that exchange without rolling back its sequence or budget.
+`runCompileCycle` returns from `load'` before the World stage freezes its basis;
+Make tasks must settle before the request handler returns. Terminal processing
+then revokes borrowing under the transport gate before reading the remaining
+budget and emitting its response. A retained borrow cannot authorize a later
+request or stage.
+
 The worker process environment and trusted RTS options are fixed at startup.
 The daemon supplies `-I0` for resident workers, retaining allocation-driven GC;
 direct finite invocations keep the normal idle-GC default. Idle collections no

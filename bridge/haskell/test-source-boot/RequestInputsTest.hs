@@ -2142,6 +2142,7 @@ sourceBasisConcurrency facts environment = do
       generations = [(symbolTerm symbol,generation) | (symbol,generation) <- Map.toList expected]
       header = "TPNDX001" <> BS.replicate 32 1 <> BS.replicate 32 2
         <> worldInputsIdentityBytes facts <> worldInputsCompilerIdentityBytes facts <> little 8 (999999999999999999 :: Integer)
+      little :: Integral value => Int -> value -> BS.ByteString
       little count value = BS.pack [fromIntegral (value `div` (256 ^ power)) | power <- [0..count-1 :: Int]]
       frame bytes = little 4 (BS.length bytes) <> bytes
       exact handle count = do
@@ -2214,18 +2215,26 @@ sourceBasisConcurrency facts environment = do
         -- Duplicates after freeze stay memo hits and must not emit frame3.
         captureSourceDependencies basis uses
         pure (DiagnosticResponse [])
-      channels = do
-        (workerInput,peerInput) <- createPipe >>= \(readFd,writeFd) -> (,) <$> fdToHandle readFd <*> fdToHandle writeFd
-        (peerOutput,workerOutput) <- createPipe >>= \(readFd,writeFd) -> (,) <$> fdToHandle readFd <*> fdToHandle writeFd
-        pure (workerInput,peerInput,peerOutput,workerOutput)
       close handle = void (try (hClose handle) :: IO (Either IOException ()))
+      closeRaw descriptor = void (try (closeFd descriptor) :: IO (Either IOException ()))
+      pipeHandles = mask $ \_ -> do
+        (readFd,writeFd) <- createPipe
+        input <- fdToHandle readFd `onException` (closeRaw readFd >> closeRaw writeFd)
+        output <- fdToHandle writeFd `onException` (close input >> closeRaw writeFd)
+        pure (input,output)
+      channels = mask $ \_ ->
+        bracketOnError pipeHandles (\(input,output) -> mapM_ close [input,output]) $ \(workerInput,peerInput) -> do
+          (peerOutput,workerOutput) <- pipeHandles
+          pure (workerInput,peerInput,peerOutput,workerOutput)
+      savedStdio = mask $ \_ -> bracketOnError (hDuplicate stdin) close $ \savedInput -> do
+        savedOutput <- hDuplicate stdout
+        pure (savedInput,savedOutput)
+      restoreStdio (savedInput,savedOutput) =
+        (hDuplicateTo savedInput stdin `finally` hDuplicateTo savedOutput stdout)
+          `finally` mapM_ close [savedInput,savedOutput]
   completed <- timeout 10000000 $
     bracket channels (\(a,b,c,d) -> mapM_ close [a,b,c,d]) $ \(workerInput,peerInput,peerOutput,workerOutput) ->
-      bracket ((,) <$> hDuplicate stdin <*> hDuplicate stdout)
-        (\(savedInput,savedOutput) -> do
-          hDuplicateTo savedInput stdin
-          hDuplicateTo savedOutput stdout
-          mapM_ hClose [savedInput,savedOutput]) $ \_ -> do
+      bracket savedStdio restoreStdio $ \_ -> do
         hDuplicateTo workerInput stdin
         hDuplicateTo workerOutput stdout
         done <- newEmptyMVar
