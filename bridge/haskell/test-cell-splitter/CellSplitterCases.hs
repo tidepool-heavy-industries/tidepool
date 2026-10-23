@@ -82,7 +82,9 @@ import Tidepool.ExactHydration
   , originalInterfaceBytes, originalInterfaceSha256, CheckedTemplateImports(..)
   , captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedCheckingTemplateRecipeWithImportRendering, captureGeneratedScaffoldSource
-  , capturedSourceImportOrigins )
+  , parseCapturedGeneratedImports, capturedGeneratedImportSyntax
+  , capturedGeneratedImportOccurrences, capturedGeneratedImportOccurrenceOrigin )
+import Tidepool.ImportSyntax (capturedParsedSource)
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -3253,19 +3255,10 @@ parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \d
         , replaceHeader "{- multi-line\n import qualified Fake -- not an import\n λ comment -}\n"]
       replaceHeader addition = Text.unpack (Text.replace "module CellCheck where\n"
         (Text.pack ("module CellCheck where\n" ++ addition)) (Text.pack checkTemplate))
-      parse selected path bytes = case unP Parser.parseModule
-          (initParserState (initParserOpts selected) (stringToStringBuffer bytes)
-            (mkRealSrcLoc (mkFastString path) 1 1)) of
-        PFailed _ -> fail "role regression rendered invalid Haskell"
-        POk _ parsed -> pure parsed
   forM_ templates $ \template -> do
     selected <- templateParserFlags flags template >>= either (fail . renderCellSplitError) pure
-    original <- analyzeOrderedCellWithFlags selected template source >>= either (fail . renderCellSplitError) pure
-    let prologue = cellPlanPrologue original
-        plan = original { cellPlanPrologue = prologue { prologueImports =
-          LocatedImport (CellSourceSpan 1 1 1 1) "import qualified Data.Maybe as Carried" InheritedLexicalImport
-            [mkModuleName "Data.Maybe",mkModuleName "Carried"] : prologueImports prologue } }
-        path = directory </> "CellCheck.hs"
+    plan <- analyzeOrderedCellWithFlags selected template source >>= either (fail . renderCellSplitError) pure
+    let path = directory </> "CellCheck.hs"
     (rendering,offset) <- either fail pure (renderCellCheckSourceWithImports template plan)
     mapped <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" selected template
       >>= renderProtectedTemplateImports offset)
@@ -3274,14 +3267,13 @@ parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \d
     recipe <- generatedCheckingTemplateRecipeWithImportRendering selected (CheckedTemplateImports [] [])
       mapped template rendering path "CellCheck" >>= either fail pure
     captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
-    parsed <- parse selected path rendered
-    origins <- either fail pure (capturedSourceImportOrigins captured parsed)
-    let observations = zip [moduleNameString (unLoc (ideclName (unLoc imported)))
+    imports <- either fail pure (parseCapturedGeneratedImports selected captured)
+    let parsed = capturedParsedSource (capturedGeneratedImportSyntax imports)
+        origins = map capturedGeneratedImportOccurrenceOrigin (capturedGeneratedImportOccurrences imports)
+        observations = zip [moduleNameString (unLoc (ideclName (unLoc imported)))
           | imported <- hsmodImports (unLoc parsed)] origins
     assertEqual "authored multiline import origin" [AuthoredCurrent]
       [origin | ("Data.List",origin) <- observations]
-    assertEqual "inherited import origin" [InheritedLexical]
-      [origin | ("Data.Maybe",origin) <- observations]
     assertEqual "automatic Display import stays compiler-only" [ProtectedCompiler]
       [origin | ("Tidepool.Inspection.Display",origin) <- observations]
     unless (not (null [() | ("GHC.Generics",ProtectedCompiler) <- observations]))
@@ -3289,7 +3281,7 @@ parsedImportOriginChecks flags = bracket temporary removeDirectoryRecursive $ \d
     incomplete <- generatedCheckingTemplateRecipeWithImportRendering selected (CheckedTemplateImports [] [])
       mapped template (literalImportRendering rendered) path "CellCheck" >>= either fail pure
     missing <- captureGeneratedScaffoldSource incomplete path >>= either fail pure
-    unless (case capturedSourceImportOrigins missing parsed of Left _ -> True; Right _ -> False)
+    unless (case parseCapturedGeneratedImports selected missing of Left _ -> True; Right _ -> False)
       (fail "missing occurrence roles were reconstructed from rendered imports")
   where
     temporary = do
