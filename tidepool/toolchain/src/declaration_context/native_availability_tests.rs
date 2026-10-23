@@ -5103,6 +5103,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             );
             assert_eq!(
                 advanced
+                    .primary
                     .inputs
                     .native_selection
                     .candidates
@@ -7282,9 +7283,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 .type_interfaces_for_owners(
                     native_context
                         .compiler_input_projection()
-                        .roles()
-                        .keys()
-                        .cloned()
+                        .snapshot_roles()
+                        .into_keys()
                         .collect(),
                 )
                 .unwrap(),
@@ -7333,9 +7333,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 .type_interfaces_for_owners(
                     native_context
                         .compiler_input_projection()
-                        .roles()
-                        .keys()
-                        .cloned()
+                        .snapshot_roles()
+                        .into_keys()
                         .collect(),
                 )
                 .unwrap(),
@@ -9848,9 +9847,8 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                         .type_interfaces_for_owners(
                             original
                                 .compiler_input_projection()
-                                .roles()
-                                .keys()
-                                .cloned()
+                                .snapshot_roles()
+                                .into_keys()
                                 .collect(),
                         )
                         .unwrap(),
@@ -9904,7 +9902,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
         if changed_canonical {
             assert!(
                 matches!(contexts[0].clone().extend_type_interfaces(&SelectedTypeInterfaces {
-            support: contexts[1].compiler_source_support().selected_interfaces().unwrap().type_interfaces_for_owners(contexts[1].compiler_input_projection().roles().keys().cloned().collect()).unwrap(),
+            support: contexts[1].compiler_source_support().selected_interfaces().unwrap().type_interfaces_for_owners(contexts[1].compiler_input_projection().snapshot_roles().into_keys().collect()).unwrap(),
             producer: contexts[1].toolchain_identity_sha256(), identity: OnceLock::new(),
         }),
                 Err(CompileError::ArtifactInventory(error))
@@ -10414,9 +10412,8 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
                 .type_interfaces_for_owners(
                     fallback_context
                         .compiler_input_projection()
-                        .roles()
-                        .keys()
-                        .cloned()
+                        .snapshot_roles()
+                        .into_keys()
                         .collect(),
                 )
                 .unwrap(),
@@ -10440,9 +10437,8 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
                 .type_interfaces_for_owners(
                     fallback_context
                         .compiler_input_projection()
-                        .roles()
-                        .keys()
-                        .cloned()
+                        .snapshot_roles()
+                        .into_keys()
                         .collect(),
                 )
                 .unwrap(),

@@ -815,9 +815,8 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
                 .type_interfaces_for_owners(
                     demanded
                         .compiler_input_projection()
-                        .roles()
-                        .keys()
-                        .cloned()
+                        .snapshot_roles()
+                        .into_keys()
                         .collect(),
                 )
                 .unwrap(),

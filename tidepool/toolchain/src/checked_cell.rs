@@ -9255,7 +9255,9 @@ mod tests {
         let context = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
         );
-        assert!(ExactHostBindingPrototype::from_original_input(witness, context).is_err());
+        assert!(context
+            .select_original_type_interfaces(&[&witness], &[])
+            .is_err());
         // Indefinite arrays decode to the same structure but are not the
         // compiler's canonical serialized payload.
         assert_eq!(bytes[0], 0x85);

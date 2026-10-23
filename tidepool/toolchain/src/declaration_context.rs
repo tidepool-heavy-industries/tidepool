@@ -21529,7 +21529,7 @@ mod tests {
                 .artifact_view()
                 .selected_native_groups()
                 .iter()
-                .all(|group| group.binding.artifact() == fixture.helper.descriptor.id),
+                .all(|group| group.artifact == fixture.helper.descriptor.id),
             "retained custody does not select the private target or unrelated native bodies"
         );
         let interface = selection
@@ -23004,7 +23004,8 @@ mod tests {
                     for operation in history {
                         match operation {
                             0 => {
-                                context = context.with_published_source_originals(&selection).unwrap();
+                                context =
+                                    context.with_published_source_originals(&selection).unwrap();
                             }
                             1 => {
                                 let view = context.artifact_view();
@@ -23063,7 +23064,8 @@ mod tests {
                                     context.snapshot().graph_selection().unwrap(),
                                     acquired.snapshot().graph_selection().unwrap(),
                                 );
-                                let reopened = context.published_source_original_selections().unwrap();
+                                let reopened =
+                                    context.published_source_original_selections().unwrap();
                                 proptest::prop_assert_eq!(reopened.len(), 1);
                                 context = context
                                     .with_published_source_originals(&reopened[0])
@@ -23086,7 +23088,8 @@ mod tests {
                             _ => {
                                 let mut altered = context.clone();
                                 {
-                                    let updated = crate::exact_context::ExactLexicalSnapshot::default();
+                                    let updated =
+                                        crate::exact_context::ExactLexicalSnapshot::default();
                                     altered = altered.rebuild(|facts| facts.lexical = updated);
                                 }
                                 proptest::prop_assert!(altered.normalize().is_err());
@@ -30214,7 +30217,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                         scoped.len(),
                         roles
                             .iter()
-                            .filter(|role| expected_view.contains_namespace_artifact(role.interface()))
+                            .filter(
+                                |role| expected_view.contains_namespace_artifact(role.interface())
+                            )
                             .count()
                     );
                     for role in &roles {
@@ -30223,7 +30228,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                             .find(|candidate| candidate.interface() == role.interface());
                         if !expected_view.contains_namespace_artifact(role.interface()) {
                             assert!(observed.is_none());
-                        } else if expected_view.contains_namespace_artifact(role.original().unwrap()) {
+                        } else if expected_view
+                            .contains_namespace_artifact(role.original().unwrap())
+                        {
                             assert_eq!(observed.unwrap(), role);
                         } else {
                             assert_eq!(observed.unwrap().original(), None);
@@ -30295,8 +30302,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let before = baseline.semantic_sha256();
         let roles = baseline.compiler_input_roles();
         let custody = baseline.artifact_view().artifact_ids();
-        let products = ["InstanceOwner", "InstanceRelay"]
-            .map(|module| scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1));
+        let products = ["InstanceOwner", "InstanceRelay"].map(|module| {
+            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1)
+        });
         let offer = support_offer(&products);
         let mut request = program_request(directory.path(), baseline.clone());
         request.producer_sha256 = baseline.owner.facts.producer;
@@ -30372,7 +30380,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &mut PackageInterfaceValidation::default(),
             )
             .unwrap();
-        let consumer = scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
+        let consumer =
+            scaffold_native_fixture(baseline.owner.facts.producer, "fixture", "Consumer", 1);
         let artifacts = effective
             .context()
             .artifact_view()

@@ -335,11 +335,13 @@ pub(crate) fn display_prototype(
     ]);
     let mut bytes = Vec::new();
     ciborium::into_writer(&wire, &mut bytes).unwrap();
-    ExactHostBindingPrototype::from_original_input(
-        CanonicalInputTypeWitness::from_bytes(&bytes).unwrap(),
-        context.clone(),
-    )
-    .unwrap()
+    let witness = CanonicalInputTypeWitness::from_bytes(&bytes).unwrap();
+    let interfaces = Arc::new(
+        context
+            .select_original_type_interfaces(&[&witness], &[])
+            .unwrap(),
+    );
+    ExactHostBindingPrototype::from_original_input(witness, interfaces).unwrap()
 }
 
 pub(crate) fn with_irrelevant_values(
