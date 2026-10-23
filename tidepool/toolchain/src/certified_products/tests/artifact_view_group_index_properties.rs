@@ -74,7 +74,6 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
         let product = products.iter().find(|product| entries.iter().any(|entry| entry.descriptor.id == key.artifact && matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(p) if p.owner() == product.owner()))).unwrap();
         let expected = product
             .original_native()
-            .unwrap()
             .group(key.original_ordinal)
             .unwrap();
         let actual = admitted
@@ -87,9 +86,7 @@ fn check_admission_shapes(ordinals: &[u32], choices: &[(u8, u8, u8)]) {
         assert!(std::ptr::eq(actual.group(), expected.group()));
         assert_eq!(
             actual.imports(),
-            expected
-                .source_imports(product.original_native().unwrap())
-                .unwrap()
+            expected.source_imports(product.original_native()).unwrap()
         );
     }
     let repeated =

@@ -16667,9 +16667,13 @@ pub(crate) mod tests {
         let roles = support
             .projection()
             .world_stage_roles(&BTreeSet::from([owner.clone()]));
+        let selected = support
+            .source_support(&BTreeSet::from([owner.clone()]))
+            .unwrap();
+        assert_eq!(selected.projection(), &roles);
         let availability = support
             .native_availability()
-            .for_compiler_roles(&roles, support.artifacts())
+            .for_compiler_roles(selected.compiler_roles(), support.artifacts())
             .unwrap();
         (roles, availability)
     }
@@ -16757,9 +16761,15 @@ pub(crate) mod tests {
         let roles_with_extra = support_a
             .projection()
             .world_stage_roles(&BTreeSet::from([root_owner.clone()]));
+        let selected_with_extra = support_a
+            .source_support(&BTreeSet::from([root_owner.clone()]))
+            .unwrap()
+            .retain_custody(&extra)
+            .unwrap();
+        assert_eq!(selected_with_extra.projection(), &roles_with_extra);
         let availability_with_extra = support_a
             .native_availability()
-            .for_compiler_roles(&roles_with_extra, &with_extra)
+            .for_compiler_roles(selected_with_extra.compiler_roles(), &with_extra)
             .unwrap();
         assert_eq!(
             roles_with_extra.snapshot_roles()[&root_owner].original(),
@@ -18006,8 +18016,19 @@ pub(crate) mod tests {
         let producer = product.module_interface().producer_sha256();
         let original = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let alternate = Arc::new(
-            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
-                .unwrap(),
+            ArtifactEntry::original(
+                [3; 32],
+                fixture_finalized_product(
+                    original_groups_fixture(
+                        "SelectedScopeIdentity",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                    ),
+                    [3; 32],
+                ),
+            )
+            .unwrap(),
         );
         let ArtifactPayload::Original(alternate_product) = &alternate.payload else {
             unreachable!()
@@ -18129,7 +18150,19 @@ pub(crate) mod tests {
         let child_entry = Arc::new(ArtifactEntry::original(producer, child.clone()).unwrap());
         let root_entry = Arc::new(ArtifactEntry::original(producer, root).unwrap());
         let other_entry = Arc::new(
-            ArtifactEntry::original([3; 32], fixture_finalized_product(child, [3; 32])).unwrap(),
+            ArtifactEntry::original(
+                [3; 32],
+                fixture_finalized_product(
+                    original_groups_fixture(
+                        "SelectedExactChild",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                    ),
+                    [3; 32],
+                ),
+            )
+            .unwrap(),
         );
         let inventory = ArtifactInventory::default();
         let selected = inventory
@@ -18235,12 +18268,17 @@ pub(crate) mod tests {
         )
         .sha256();
         let product = fixture_finalized_product(
-            full_native_fixture("BoundOriginal", vec![(7, vec![]), (11, vec![])], 1),
+            original_groups_fixture(
+                "BoundOriginal",
+                vec![(7, vec![]), (11, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
             producer,
         );
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let other_product = fixture_finalized_product(
-            full_native_fixture("OtherSelected", vec![(7, vec![])], 2),
+            original_groups_fixture("OtherSelected", vec![(7, vec![])], 2, &BTreeMap::new()),
             producer,
         );
         let other_entry = Arc::new(ArtifactEntry::original(producer, other_product).unwrap());
@@ -18299,8 +18337,19 @@ pub(crate) mod tests {
 
         // A genuine different artifact for the same owner cannot replace the selected pair.
         let alternate = Arc::new(
-            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
-                .unwrap(),
+            ArtifactEntry::original(
+                [3; 32],
+                fixture_finalized_product(
+                    original_groups_fixture(
+                        "BoundOriginal",
+                        vec![(7, vec![]), (11, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                    ),
+                    [3; 32],
+                ),
+            )
+            .unwrap(),
         );
         let alternate_view = inventory
             .admit_shared(&inventory.empty_view(), vec![alternate.clone()])
@@ -18899,9 +18948,8 @@ pub(crate) mod tests {
         let closed =
             CompilerSourceSupport::close_complete_output(issued.compiler_inputs()).unwrap();
         let published = closed.certify_original_closure(&publication).unwrap();
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            publication.products()[0].module_interface(),
-        );
+        let canonical =
+            ArtifactEntry::canonical_artifact_id(publication.products()[0].module_interface());
         let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = published
             .checked_native_input_decision(fresh_id, canonical, row.original_owner())
             .unwrap()
@@ -18965,7 +19013,7 @@ pub(crate) mod tests {
             .is_err());
 
         let empty_product = fixture_finalized_product(
-            full_native_fixture(
+            original_groups_fixture(
                 "EmptyPublished",
                 vec![(
                     17,
@@ -18976,6 +19024,7 @@ pub(crate) mod tests {
                     }],
                 )],
                 9,
+                &BTreeMap::new(),
             ),
             producer,
         );
@@ -19102,8 +19151,19 @@ pub(crate) mod tests {
         let producer = product.module_interface().producer_sha256();
         let entry = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
         let other = Arc::new(
-            ArtifactEntry::original([3; 32], fixture_finalized_product(product.clone(), [3; 32]))
-                .unwrap(),
+            ArtifactEntry::original(
+                [3; 32],
+                fixture_finalized_product(
+                    original_groups_fixture(
+                        "ExactReceiptIdentity",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                    ),
+                    [3; 32],
+                ),
+            )
+            .unwrap(),
         );
         let crate::artifact_inventory::ArtifactPayload::Original(other_product) = &other.payload
         else {
@@ -21385,8 +21445,10 @@ pub(crate) mod tests {
             ("partial", partial, partial_offer, None, Some(2)),
             ("empty", empty, empty_offer, None, None),
         ] {
+            let receiver = input_owner.retain_custody(&view).unwrap();
             let availability = RequestNativeAvailability::issue_checked(
-                &input_roles,
+                receiver.compiler_roles(),
+                &receiver.compiler_metadata(),
                 &view,
                 std::slice::from_ref(&offer),
             )
@@ -21643,7 +21705,8 @@ pub(crate) mod tests {
                 .issue_native_offer(&support_entry.descriptor.owner, None)
                 .unwrap();
             let empty_rows = RequestNativeAvailability::issue_checked(
-                support_output.role_projection(),
+                support_source.compiler_roles(),
+                &support_source.compiler_metadata(),
                 issued_view,
                 std::slice::from_ref(&empty_offer),
             )

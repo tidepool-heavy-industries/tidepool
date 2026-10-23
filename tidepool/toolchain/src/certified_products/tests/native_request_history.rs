@@ -336,11 +336,7 @@ fn replay_native_transport_history(
     } else {
         products
             .iter()
-            .map(|product| {
-                Arc::new(ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone(),
-                ))
-            })
+            .map(|product| Arc::new(ArtifactEntry::canonical(product.module_interface().clone())))
             .collect()
     };
     let base = inventory
@@ -360,9 +356,7 @@ fn replay_native_transport_history(
                 vec![
                     entries[0].clone(),
                     entries[index].clone(),
-                    Arc::new(ArtifactEntry::canonical(
-                        marker.module_interface().unwrap().clone(),
-                    )),
+                    Arc::new(ArtifactEntry::canonical(marker.module_interface().clone())),
                 ],
                 &BTreeSet::from([
                     NativeGroupKey {
@@ -379,8 +373,7 @@ fn replay_native_transport_history(
     };
     let sources = [issue(1, "LeftScope", 83), issue(2, "RightScope", 84)];
     let proofs = std::array::from_fn::<_, 2, _>(|index| {
-        let canonical =
-            ArtifactEntry::canonical(products[index + 1].module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(products[index + 1].module_interface().clone());
         NativeOriginalRequirement::from_issued_group_custody(
             entries[index + 1].descriptor.id,
             canonical.descriptor.id,
@@ -438,8 +431,7 @@ fn replay_native_transport_history(
             })),
         )
         .unwrap();
-    let dependency_interface =
-        ArtifactEntry::canonical(products[0].module_interface().unwrap().clone());
+    let dependency_interface = ArtifactEntry::canonical(products[0].module_interface().clone());
     let ambient_proof = NativeOriginalRequirement::from_issued_group_custody(
         entries[0].descriptor.id,
         dependency_interface.descriptor.id,
@@ -572,8 +564,7 @@ fn replay_native_transport_history(
                 .find(|binding| binding.artifact == id)
                 .unwrap()
         };
-        let canonical =
-            ArtifactEntry::canonical(products[index + 1].module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(products[index + 1].module_interface().clone());
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
             assert_eq!(binding(&selected, id), binding(&sources[index], id));
         }
@@ -889,7 +880,7 @@ fn replay_native_transport_history(
         .admit_current(
             dependent.owner(),
             ProductOrigin::RetainedCore,
-            dependent.module_interface().unwrap(),
+            dependent.module_interface(),
             &operation,
         )
         .unwrap();

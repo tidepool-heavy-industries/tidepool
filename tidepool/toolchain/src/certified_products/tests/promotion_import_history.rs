@@ -303,7 +303,6 @@ fn native_import_facts(
 ) -> Vec<Vec<ReceiptImportOwner>> {
     product
         .original_native()
-        .unwrap()
         .groups
         .iter()
         .map(|group| group.imports.to_vec())
@@ -478,7 +477,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .map(|product| {
             (
                 product.owner().module.clone(),
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -613,7 +612,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 .iter()
                 .find(|old| old.owner().module == product.module)
                 .unwrap();
-            let canonical = original.module_interface().unwrap();
+            let canonical = original.module_interface();
             let mut accepted = receipt(&promoted_bytes, &worker, "");
             accepted.origin = ProductOrigin::RetainedCore;
             accepted.unit = UNIT.into();
@@ -817,7 +816,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(
         current_a
             .original_native()
-            .unwrap()
             .groups
             .iter()
             .map(|group| group.group().original_ordinal())
@@ -827,7 +825,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert_eq!(
         current_b
             .original_native()
-            .unwrap()
             .groups
             .iter()
             .map(|group| group.group().original_ordinal())
@@ -1545,7 +1542,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert_eq!(
             current_a
                 .original_native()
-                .unwrap()
                 .groups
                 .iter()
                 .map(|group| group.group().original_ordinal())
@@ -1555,7 +1551,6 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert_eq!(
             current_b
                 .original_native()
-                .unwrap()
                 .groups
                 .iter()
                 .map(|group| group.group().original_ordinal())

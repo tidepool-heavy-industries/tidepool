@@ -70,14 +70,8 @@ pub(super) fn issued_original(
     )
     .unwrap();
     let original = certified.recovery_products.iter().next().unwrap().clone();
-    assert!(original
-        .original_native()
-        .unwrap()
-        .matches_original(&original));
-    assert_eq!(
-        original.module_interface().unwrap().interface_bytes(),
-        &[interface]
-    );
+    assert!(original.original_native().matches_original(&original));
+    assert_eq!(original.module_interface().interface_bytes(), &[interface]);
     original
 }
 
@@ -101,15 +95,9 @@ fn available_inputs(
         )
         .unwrap(),
     );
-    let fresh_canonical = Arc::new(ArtifactEntry::canonical(
-        fresh.module_interface().unwrap().clone(),
-    ));
-    let side = Arc::new(ArtifactEntry::canonical(
-        side.module_interface().unwrap().clone(),
-    ));
-    let other = Arc::new(ArtifactEntry::canonical(
-        other.module_interface().unwrap().clone(),
-    ));
+    let fresh_canonical = Arc::new(ArtifactEntry::canonical(fresh.module_interface().clone()));
+    let side = Arc::new(ArtifactEntry::canonical(side.module_interface().clone()));
+    let other = Arc::new(ArtifactEntry::canonical(other.module_interface().clone()));
     let inventory = ArtifactInventory::default();
     let view = inventory
         .admit_recovery_selection(
@@ -232,7 +220,7 @@ fn compiler_issuer_refuses_missing_paired_canonical_artifact() {
     let crate::artifact_inventory::ArtifactPayload::Original(original) = &entries[0].payload else {
         unreachable!()
     };
-    let paired = ArtifactEntry::canonical(original.module_interface().unwrap().clone())
+    let paired = ArtifactEntry::canonical(original.module_interface().clone())
         .descriptor
         .id;
     assert!(Arc::make_mut(&mut metadata)

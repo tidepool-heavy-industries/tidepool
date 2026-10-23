@@ -60,7 +60,7 @@ fn assert_canonical_materialization_premises(context: &ExactDeclarationContext) 
     let products = context.recovery_products();
     let mut interfaces = BTreeMap::new();
     for product in &products {
-        let interface = product.module_interface().unwrap();
+        let interface = product.module_interface();
         let key = interface.interface_sha256();
         let value = (
             (&product.owner().unit, &product.owner().module),
@@ -178,8 +178,13 @@ pub(super) fn issue_planned_original_with_retained_child(
     child_product: &CertifiedRecoveryProduct,
     child_occurrence: &str,
 ) -> Result<IssuedOriginal, crate::CompileError> {
-    assert!(child_product.original_native().is_some());
-    assert!(child_product.module_interface().is_some());
+    assert!(child_product
+        .original_native()
+        .matches_original(child_product));
+    assert_eq!(
+        child_product.module_interface().interface_sha256(),
+        child_product.owner().skinny_iface_sha256
+    );
     let child = child_product.owner();
     assert!(context
         .recovery_products()
@@ -494,10 +499,7 @@ pub(super) fn issue_planned_original_with_source_value(
     )
     .unwrap();
     assert_eq!(
-        certified.recovery_products[0]
-            .module_interface()
-            .unwrap()
-            .origin(),
+        certified.recovery_products[0].module_interface().origin(),
         CanonicalOrigin::NativeAuthoredDeclaration {
             generation: module.gen.0
         }
@@ -539,14 +541,9 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     assert!(all_owners
         .iter()
         .all(|owner| { owner.unit == "main" && owner.module == module_name }));
-    let canonical_interface = history[0].certified.recovery_products[0]
-        .module_interface()
-        .unwrap();
+    let canonical_interface = history[0].certified.recovery_products[0].module_interface();
     assert!(history.iter().all(|issued| {
-        issued.certified.recovery_products[0]
-            .module_interface()
-            .unwrap()
-            == canonical_interface
+        issued.certified.recovery_products[0].module_interface() == canonical_interface
     }));
 
     let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(

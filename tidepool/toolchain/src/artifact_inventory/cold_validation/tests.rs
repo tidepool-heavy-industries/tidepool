@@ -24,7 +24,7 @@ impl Fixture {
         let ArtifactPayload::Original(product) = &entry.payload else {
             panic!("original fixture");
         };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone());
         let carrier = self.add(canonical, scope);
         let original = self.add(entry, scope);
         self.edge(original, carrier, ArtifactDependency::Interface);

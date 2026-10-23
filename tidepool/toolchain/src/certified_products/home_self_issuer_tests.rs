@@ -42,9 +42,7 @@ fn ghc_home_self_owner_refuses_substituted_requirements() {
         .artifact_edges
         .iter()
         .all(|(required, _)| { required.unit == owner.unit && required.module == owner.module }));
-    let canonical = original
-        .module_interface()
-        .expect("actual canonical GHC interface");
+    let canonical = original.module_interface();
     validate_original_module_interface(original, canonical).unwrap();
     validate_home_certification(bytes, owner).unwrap();
     let modules = tidepool_repr::execution_schema::parse_module_products(

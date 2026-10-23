@@ -60,9 +60,7 @@ fn original_entry(
 fn canonical_entry(
     product: &crate::recovery_artifacts::CertifiedRecoveryProduct,
 ) -> Arc<ArtifactEntry> {
-    Arc::new(ArtifactEntry::canonical(
-        product.module_interface().unwrap().clone(),
-    ))
+    Arc::new(ArtifactEntry::canonical(product.module_interface().clone()))
 }
 
 fn issued_archive(
@@ -132,14 +130,9 @@ fn expected_roles(entries: &[Arc<ArtifactEntry>], selected_interfaces: u8) -> Se
         }
         let facts = match &entry.payload {
             ArtifactPayload::Original(product) => RoleFacts {
-                interface: ArtifactEntry::canonical(
-                    product
-                        .module_interface()
-                        .expect("issued original has canonical interface")
-                        .clone(),
-                )
-                .descriptor
-                .id,
+                interface: ArtifactEntry::canonical(product.module_interface().clone())
+                    .descriptor
+                    .id,
                 original: Some(entry.descriptor.id),
                 native_owner: Some(product.owner().clone()),
             },
@@ -167,14 +160,9 @@ fn observed_roles(
     for (owner, entry) in entries {
         let facts = match &entry.payload {
             ArtifactPayload::Original(product) => RoleFacts {
-                interface: ArtifactEntry::canonical(
-                    product
-                        .module_interface()
-                        .ok_or_else(|| "selected original has no canonical interface".to_owned())?
-                        .clone(),
-                )
-                .descriptor
-                .id,
+                interface: ArtifactEntry::canonical(product.module_interface().clone())
+                    .descriptor
+                    .id,
                 original: Some(entry.descriptor.id),
                 native_owner: Some(product.owner().clone()),
             },

@@ -100,7 +100,7 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
         [1; 32],
         Some(BTreeMap::from([(
             ("fixture".into(), "AdmissionDependency".into()),
-            dependency.module_interface().unwrap().interface_sha256(),
+            dependency.module_interface().interface_sha256(),
         )])),
     )])
     .remove(0)
