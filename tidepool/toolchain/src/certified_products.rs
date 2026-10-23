@@ -32061,7 +32061,7 @@ pub(crate) mod tests {
                 })
             ));
             let quoter = issued
-                .recovery_products
+                .data().recovery_products
                 .iter()
                 .find(|product| product.owner().module == "Quoter")
                 .unwrap();
@@ -32247,7 +32247,7 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&{
                 let inventory = crate::artifact_inventory::ArtifactInventory::default();
                 let entries = initial
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .cloned()
                     .map(|product| {
@@ -32522,7 +32522,7 @@ None,
                 vec![&owner]
             );
             let current = issued
-                .recovery_products
+                .data().recovery_products
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
@@ -32532,7 +32532,7 @@ None,
                 .retained_core_products
                 .contains_original(current));
             let selected = issued
-                .groups
+                .data().groups
                 .iter()
                 .filter(|group| group.owner() == &owner)
                 .collect::<Vec<_>>();
@@ -32553,7 +32553,7 @@ None,
             }
             for old in &prior {
                 let retained = issued
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
@@ -32566,7 +32566,7 @@ None,
             expected_owners.insert(owner.clone());
             assert_eq!(
                 issued
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .map(|product| product.owner().clone())
                     .collect::<BTreeSet<_>>(),
@@ -32607,7 +32607,7 @@ None,
                 .iter()
                 .all(|group| group.origin() == ProductOrigin::RetainedCore
                     && issued
-                        .recovery_products
+                        .data().recovery_products
                         .iter()
                         .any(|product| group.matches_original(product))));
             let mut duplicate = packet.clone();
@@ -33686,7 +33686,7 @@ None,
             .extend_issued_compiler_support(&{
                 let inventory = crate::artifact_inventory::ArtifactInventory::default();
                 let entries = initial
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .cloned()
                     .map(|product| {
@@ -33785,7 +33785,7 @@ None,
                 .extend_issued_compiler_support(&{
                     let inventory = crate::artifact_inventory::ArtifactInventory::default();
                     let entries = marker_certified
-                        .recovery_products
+                        .data().recovery_products
                         .iter()
                         .cloned()
                         .map(|product| {
@@ -34009,7 +34009,7 @@ None,
             // handoff must preserve that issuance for a later notebook cell.
             let mut selection = certified.source_selection().clone();
             let output_entries = certified
-                .recovery_products
+                .data().recovery_products
                 .iter()
                 .cloned()
                 .map(|product| {
@@ -34067,7 +34067,7 @@ None,
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 certified
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .map(|product| product.owner().clone())
                     .collect::<BTreeSet<_>>(),
@@ -34075,7 +34075,7 @@ None,
                 "private original custody lost: iteration={index}, nonempty={nonempty}"
             );
             let current = certified
-                .recovery_products
+                .data().recovery_products
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
@@ -34198,7 +34198,7 @@ None,
             }
             for old in &prior {
                 let retained = certified
-                    .recovery_products
+                    .data().recovery_products
                     .iter()
                     .find(|product| product.owner() == old.owner())
                     .unwrap();
@@ -34484,7 +34484,7 @@ None,
         .with_module_interface(original.module_interface().clone())
         .unwrap();
         let groups = certified
-            .groups
+            .data().groups
             .iter()
             .filter(|group| group.owner() == original.owner())
             .cloned()
@@ -34516,7 +34516,7 @@ None,
                 .clone()
                 .extend_issued_compiler_support(&{
                     let entries = certified
-                        .recovery_products
+                        .data().recovery_products
                         .iter()
                         .cloned()
                         .map(|product| {
@@ -34674,7 +34674,7 @@ None,
         assert_eq!(certified.data().recovery_products.len(), 1);
         assert_eq!(certified.data().module_interfaces.len(), 2);
         assert!(certified
-            .module_interfaces
+            .data().module_interfaces
             .iter()
             .any(|interface| interface.module() == "Types" && interface.core_bytes().is_none()));
         let mut missing = receipt.clone();
