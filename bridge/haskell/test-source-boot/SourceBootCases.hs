@@ -782,6 +782,27 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
     unless (case rejected of Left _ -> True; Right _ -> False) $
       fail "captured command alias authorized changed or missing bytes"
   unless (length binders == 1) (fail "checked command has another binder inventory")
+  laterBinders <- mkBoundBinders ["cmd"] 8 work result
+  unless (length laterBinders == 1) (fail "second checked command has another binder inventory")
+  laterOwner <- maybe (fail "second checked command has no canonical value owner") pure
+    (parseValModule "Tidepool.Session.Val.G8")
+  let laterPath = sessionHiPath work laterOwner
+  laterBytes <- BS.readFile laterPath
+  laterRequirements <- BS.readFile (laterPath ++ ".requirements")
+  unless (laterRequirements == requirementBytes)
+    (fail "same checked command type changed its captured requirements")
+  let laterValue = value {exactModule="Tidepool.Session.Val.G8",exactPath=laterPath,exactSha256=digest laterBytes}
+      interfaceIdentity artifact = (exactUnit artifact,exactModule artifact,exactPath artifact,exactSha256 artifact)
+  forM_ [[],[value],[laterValue,value]] $ \values -> do
+    accepted <- admitInspectionScope base includes values
+    unless (map interfaceIdentity (scopeValueInterfaces accepted) == map interfaceIdentity values)
+      (fail "inspection fixture changed its ordered captured value inventory")
+  duplicatePurpose <- writeInspectionPurposeCodecFixture work includes [value,value] >>= readCodecTerm
+  duplicateScope <- readScopeVariant base (\fields -> take 8 fields ++ [duplicatePurpose] ++ drop 9 fields)
+  unless (case duplicateScope of
+      Left diagnostic -> "checked value interface owners" `isInfixOf` diagnostic
+      Right _ -> False)
+    (fail "inspection fixture deduplicated or admitted duplicate captured value owners")
   consumerSource <- T.unpack . TE.decodeUtf8 <$> BS.readFile consumerPath
   inferredSource <- either fail pure
     (replaceTemplateMarker "import Tidepool.Command.Types (Command)\n" "" consumerSource

@@ -802,6 +802,10 @@ fn purpose(root: &Path, _case: PurposeCase, includes: &[PathBuf], signature: Opt
 }
 
 fn inspection_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterfaceInput>) {
+    let owners = values
+        .iter()
+        .map(|ValueInterfaceInput(_, module, _, _)| module.clone())
+        .collect::<BTreeSet<_>>();
     let baseline = Value::Array(
         values
             .into_iter()
@@ -818,7 +822,7 @@ fn inspection_purpose(root: &Path, includes: &[PathBuf], values: Vec<ValueInterf
             })
             .collect(),
     );
-    let body = crate::artifacts::encode_inspection_authorization(&BTreeSet::new(), baseline);
+    let body = crate::artifacts::encode_inspection_authorization(&owners, baseline);
     let value = crate::artifacts::checked_search_authorization(body, includes)
         .expect("purpose search encoder");
     let mut bytes = vec![];
