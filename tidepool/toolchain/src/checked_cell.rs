@@ -5063,31 +5063,20 @@ mod tests {
         (inputs, owner, path)
     }
 
-    fn capture_test_produced_value_interface(
+    fn capture_test_value_row_issuer(
         producer: [u8; 32],
         owner: tidepool_repr::SessionModule,
         path: &std::path::Path,
-        ordinal: usize,
-    ) -> super::ProducedValueTypeInterfaces {
-        use super::*;
+    ) -> (
+        Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+        crate::declaration_context::CheckedValueRowIssuer,
+    ) {
         let interface = CapturedValueInterfaceOutput::capture(path)
             .unwrap()
             .certify(producer, owner, None)
             .unwrap();
-        let bytes = interface.interface_bytes_owned();
-        let output = ProducedValueTypeInterface {
-            row: crate::declaration_context::CheckedValueRowIssuer::new(interface.clone()),
-            ordinal,
-            input: ValueInterfaceBytes {
-                owner,
-                module: owner.module_name(),
-                digest: hash(&bytes),
-                bytes,
-                path: path.to_owned(),
-            },
-            interface,
-        };
-        ProducedValueTypeInterfaces::from_outputs(vec![output], ordinal..ordinal + 1).unwrap()
+        let row = crate::declaration_context::CheckedValueRowIssuer::new(interface.clone());
+        (interface, row)
     }
 
     fn retain_test_value_surface(
@@ -5100,36 +5089,34 @@ mod tests {
         Arc<crate::recovery_artifacts::CertifiedValueInterface>,
     ) {
         let (_inputs, owner, path) = prepare_test_value_interface_files(generation, demands_epoch);
-        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
-        let output = produced.output(owner).unwrap();
+        let produced = capture_test_value_row_issuer([2; 32], owner, &path);
         let context = Arc::new(
             (**original)
                 .clone()
-                .extend_program_value_interface(output.interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(&output.row),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         let surface = crate::declaration_context::PreparedValueSourceSupport::new(context, &[])
             .unwrap()
-            .retain_output(&output.interface)
+            .retain_output(&produced.0)
             .unwrap();
-        (surface, row, output.interface.clone())
+        (surface, row, produced.0.clone())
     }
 
     #[test]
-    fn produced_value_rows_reuse_captured_bytes_after_diagnostic_paths_removed() {
+    fn value_rows_reuse_captured_bytes_after_diagnostic_paths_removed() {
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 4);
-        let output = produced.output(owner).unwrap();
+        let produced = capture_test_value_row_issuer([2; 32], owner, &path);
         let context = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
-                .extend_program_value_interface(output.interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         for path in [
@@ -5142,34 +5129,20 @@ mod tests {
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(&output.row),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         let again =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(&output.row),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         assert!(Arc::ptr_eq(&row, &again));
-        assert_eq!(output.row.promotion_count(), 1);
+        assert_eq!(produced.1.promotion_count(), 1);
         assert!(std::fs::read(row.checked_value_transport().endpoint())
             .unwrap()
-            .starts_with(&output.input.bytes));
-        let artifact = output.interface.artifact_id();
-        let hidden = produced.for_segment(4..4).unwrap();
-        assert!(Arc::ptr_eq(&hidden.lookup, &produced.lookup));
-        assert!(hidden.owns_artifact(artifact));
-        assert!(!hidden.selects_artifact(artifact));
-        assert!(hidden.current_interface(owner.gen.0).is_err());
-        assert_eq!(hidden.interfaces().count(), 0);
-        assert_eq!(hidden.required().count(), 0);
-        let item = produced.for_item(4).unwrap();
-        assert!(item.selects_artifact(artifact));
-        assert!(Arc::ptr_eq(
-            item.current_interface(owner.gen.0).unwrap(),
-            &output.interface
-        ));
+            .starts_with(&produced.0.interface_bytes_owned()));
     }
 
     fn check_captured_value_epoch_reattachment(demands_epoch: bool) {
@@ -5370,7 +5343,7 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let produced = capture_test_value_row_issuer(producer, owner, &path);
         let (sibling_inputs, sibling_owner, sibling_path) =
             prepare_test_value_interface_files(2, false);
         let sibling_bytes = vec![b'S'; 1024 * 1024];
@@ -5389,16 +5362,13 @@ mod tests {
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&packages, &mut encoded).unwrap();
         std::fs::write(sibling_path.with_extension("hi.packages"), encoded).unwrap();
-        let sibling =
-            capture_test_produced_value_interface(producer, sibling_owner, &sibling_path, 1);
+        let sibling = capture_test_value_row_issuer(producer, sibling_owner, &sibling_path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap()
-                .extend_program_value_interface(
-                    sibling.output(sibling_owner).unwrap().interface.clone(),
-                )
+                .extend_program_value_interface(sibling.0.clone())
                 .unwrap(),
         );
         let scratch = tempfile::tempdir().unwrap();
@@ -5433,7 +5403,7 @@ mod tests {
         let full_context = context;
         let selected = full_context
             .compiler_source_support()
-            .select_value_interface(produced.output(owner).unwrap().interface.as_ref())
+            .select_value_interface(produced.0.as_ref())
             .unwrap();
         let context = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -5457,9 +5427,7 @@ mod tests {
         let value =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row,
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         assert_eq!(
@@ -5467,7 +5435,7 @@ mod tests {
             broad_value,
             "promotion borrows the original dedicated row"
         );
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        assert_eq!(produced.1.promotion_count(), 0);
         let leaf_path = value.checked_value_interface().path.clone();
         let overlaid = context
             .prepare_compilation(&scratch.path().join("same-view"), producer_bytes)
@@ -5494,9 +5462,7 @@ mod tests {
             broad_value,
             "already issued requests keep their original complete owner"
         );
-        let retained = support
-            .retain_output(&produced.output(owner).unwrap().interface)
-            .unwrap();
+        let retained = support.retain_output(&produced.0).unwrap();
         drop(broad);
         drop(full_context);
         drop(support);
@@ -5555,11 +5521,11 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let produced = capture_test_value_row_issuer(producer, owner, &path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let scratch = tempfile::tempdir().unwrap();
@@ -5576,16 +5542,14 @@ mod tests {
         let value =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row,
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         assert_eq!(
             value.checked_value_interface().path,
             before_request.artifacts[0].interface.path
         );
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        assert_eq!(produced.1.promotion_count(), 0);
         for index in 0..4 {
             let retained = context
                 .artifact_view()
@@ -5625,19 +5589,17 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+        let produced = capture_test_value_row_issuer(producer, owner, &path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let value =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row,
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         let scratch = tempfile::tempdir().unwrap();
@@ -5659,7 +5621,7 @@ mod tests {
                 value.checked_value_interface().path
             );
         }
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert_eq!(produced.1.promotion_count(), 1);
     }
 
     #[test]
@@ -5674,14 +5636,9 @@ mod tests {
         let mut selected = (*original).clone();
         for generation in 1..=16 {
             let (_inputs, owner, path) = prepare_test_value_interface_files(generation, false);
-            let produced = capture_test_produced_value_interface(
-                producer,
-                owner,
-                &path,
-                generation as usize - 1,
-            );
+            let produced = capture_test_value_row_issuer(producer, owner, &path);
             selected = selected
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap();
             staged.push((_inputs, owner, produced));
         }
@@ -5689,21 +5646,16 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let escaped = staged
             .iter()
-            .enumerate()
-            .map(|(index, (_inputs, owner, produced))| {
+            .map(|(_inputs, _owner, produced)| {
                 let context = Arc::new(
                     (*original)
                         .clone()
-                        .extend_program_value_interface(
-                            produced.output(*owner).unwrap().interface.clone(),
-                        )
+                        .extend_program_value_interface(produced.0.clone())
                         .unwrap(),
                 );
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(
-                        &produced.output(*owner).unwrap().row,
-                    ),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
                 .unwrap()
             })
@@ -5722,9 +5674,7 @@ mod tests {
             let value =
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(
-                        &produced.output(*owner).unwrap().row,
-                    ),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
                 .unwrap();
             let request = context
@@ -5781,11 +5731,11 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let produced = capture_test_value_row_issuer([2; 32], owner, &path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let barrier = std::sync::Barrier::new(2);
@@ -5794,9 +5744,7 @@ mod tests {
                 barrier.wait();
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(
-                        &produced.output(owner).unwrap().row,
-                    ),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
                 .unwrap()
             });
@@ -5804,16 +5752,14 @@ mod tests {
                 barrier.wait();
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(
-                        &produced.output(owner).unwrap().row,
-                    ),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
                 .unwrap()
             });
             [first.join().unwrap(), second.join().unwrap()]
         });
         assert!(Arc::ptr_eq(&values[0], &values[1]));
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert_eq!(produced.1.promotion_count(), 1);
     }
 
     #[test]
@@ -5823,43 +5769,37 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let produced = capture_test_value_row_issuer([2; 32], owner, &path);
         let (_other_inputs, other_owner, other_path) = prepare_test_value_interface_files(2, false);
-        let other = capture_test_produced_value_interface([2; 32], other_owner, &other_path, 0);
+        let other = capture_test_value_row_issuer([2; 32], other_owner, &other_path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(
-                    other.output(other_owner).unwrap().interface.clone(),
-                )
+                .extend_program_value_interface(other.0.clone())
                 .unwrap(),
         );
         assert!(
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .is_err()
         );
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        assert_eq!(produced.1.promotion_count(), 0);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let value =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row,
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
         assert_eq!(value.checked_value_interface().module, owner.module_name());
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert_eq!(produced.1.promotion_count(), 1);
     }
 
     #[test]
@@ -5872,11 +5812,11 @@ mod tests {
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
         );
         let (_inputs, owner, path) = prepare_test_value_interface_files(1, false);
-        let produced = capture_test_produced_value_interface([2; 32], owner, &path, 0);
+        let produced = capture_test_value_row_issuer([2; 32], owner, &path);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let cancellation = CompilerTransactionCancellation::new();
@@ -5887,29 +5827,25 @@ mod tests {
             || {
                 crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(
-                        &produced.output(owner).unwrap().row,
-                    ),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 )
             },
         );
         assert!(refused.action.is_err());
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
+        assert_eq!(produced.1.promotion_count(), 0);
         let context = Arc::new(
             (*original)
                 .clone()
-                .extend_program_value_interface(produced.output(owner).unwrap().interface.clone())
+                .extend_program_value_interface(produced.0.clone())
                 .unwrap(),
         );
         let value =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
-                crate::declaration_context::CheckedValueRowSource::Produced(
-                    &produced.output(owner).unwrap().row,
-                ),
+                crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
             )
             .unwrap();
-        assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
+        assert_eq!(produced.1.promotion_count(), 1);
         assert!(value.checked_value_interface().path.exists());
     }
 
@@ -6822,8 +6758,8 @@ mod tests {
                 }
 
                 let (_inputs, owner, path) = prepare_test_value_interface_files(1, true);
-                let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
-                let interface = produced.output(owner).unwrap().interface.clone();
+                let produced = capture_test_value_row_issuer(producer, owner, &path);
+                let interface = produced.0.clone();
                 let prepared_context = Arc::new(
                     (*original)
                         .clone()
@@ -6834,7 +6770,7 @@ mod tests {
                     PreparedValueSourceSupport::new(prepared_context.clone(), &lexical).unwrap();
                 let result = crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                     prepared_context.compiler_source_support(),
-                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.output(owner).unwrap().row),
+                    crate::declaration_context::CheckedValueRowSource::Produced(&produced.1),
                 ).and_then(|row| prepared_support.retain_output(&interface).map(|surface| (surface, row, interface.clone())));
                 let captured = match result {
                     Ok(captured) => captured,
