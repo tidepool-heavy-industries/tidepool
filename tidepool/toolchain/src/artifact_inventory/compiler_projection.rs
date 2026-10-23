@@ -1462,6 +1462,13 @@ impl SupportDraft {
         let native_custody =
             availability_source.retain_native_availability_custody(&self.native_availability)?;
         self.artifacts = self.artifacts.retain_custody(&native_custody)?;
+        self.retain_completion_custody()
+    }
+
+    /// Completed targets retain their actually acquired groups. Source support
+    /// keeps unconsumed availability in its opaque offers instead of expanding
+    /// that permission into the receiving graph.
+    fn retain_completion_custody(mut self) -> Result<Self, CompileError> {
         for completion in self.native_closures.iter() {
             crate::host_work::checkpoint()?;
             self.artifacts = self.artifacts.retain_custody(completion.artifacts())?;
@@ -5161,7 +5168,7 @@ impl CompilerSourceSupport {
             selected: Arc::new(AdmittedCompilerRoles::from_admitted(selected)),
             input_decisions: decisions,
         }
-        .retain_runtime_custody(&self.artifacts)?
+        .retain_completion_custody()?
         .close()
     }
 

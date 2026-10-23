@@ -23142,7 +23142,7 @@ mod tests {
         let mut runner = proptest::test_runner::TestRunner::new(policy_property_config());
         runner
             .run(
-                &("[a-z]{1,12}", proptest::collection::vec(0u8..4, 1..24)),
+                &("[a-z]{1,12}", proptest::collection::vec(0u8..5, 1..24)),
                 |(revision, history)| {
                     let root = fixture.helper.descriptor.owner.clone();
                     let selection = fixture
@@ -23262,7 +23262,7 @@ mod tests {
                                     .with_published_source_originals(&conflicting)
                                     .is_err());
                             }
-                            _ => {
+                            3 => {
                                 let mut altered = context.clone();
                                 {
                                     let updated =
@@ -23271,6 +23271,14 @@ mod tests {
                                 }
                                 proptest::prop_assert!(altered.normalize().is_err());
                                 context = context.extend(&[], &[], vec![]).unwrap();
+                            }
+                            _ => {
+                                let reopened =
+                                    context.published_source_original_selections().unwrap();
+                                proptest::prop_assert_eq!(reopened.len(), 1);
+                                context = context
+                                    .with_published_source_originals(&reopened[0])
+                                    .unwrap();
                             }
                         }
                         let observed_facts = context.snapshot();
