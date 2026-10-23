@@ -29208,173 +29208,65 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     #[test]
     fn selected_original_instance_graph_keeps_mounted_value_without_public_lexical_edge() {
-        use crate::cache::{
-            DependencyEvidence, ImportQualifier, ModuleEvidence, ModuleImportEvidence,
-            ProductAvailability, ResolutionEvidence, SourceEvidence,
-        };
+        // Component evidence uses the existing structural source/product
+        // fixtures and production admission owners. The staged World history
+        // supplies the actual GHC and obsolete-value execution discriminator.
         let directory = tempfile::tempdir().unwrap();
-        let (old_request, old_context, receipt) =
-            source_selected_receipt(directory.path(), false, None);
-        let admission = old_request
-            .validate_receipt(&receipt, None, &old_context)
-            .unwrap();
-        let historical = admission.selected_originals.clone();
+        let (_, old_context, receipt) = source_selected_receipt(directory.path(), false, None);
         let value_owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
         let mounted = identity("main", &value_owner.module_name());
-        let source_path = directory.path().join("A.hs");
-        let source = std::fs::read(&source_path).unwrap();
-        let product = crate::certified_products::fixture_source_finalized_product(
-            support_product_in_unit("main", "A").with_source_sha256(Sha256::digest(&source).into()),
-            [7; 32],
-            vec![crate::certified_products::CanonicalSourceImport {
-                qualifier: ImportQualifier::Unqualified,
-                module: mounted.module.clone(),
-                boot: false,
-                home_unit: Some("main".into()),
-            }],
+        let obsolete = identity(
+            "main",
+            &tidepool_repr::SessionModule::val(tidepool_repr::Generation(2)).module_name(),
         );
-        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
-            .pop()
-            .unwrap()
-            .product;
-        let canonical = product.module_interface().unwrap().clone();
-        let value_evidence = support_product_in_unit("main", &mounted.module);
-        let value = Arc::new(
-            CertifiedValueInterface::from_checked_compilation(
-                [7; 32],
-                mounted.clone(),
-                value_evidence.interface_bytes().to_vec(),
-                value_evidence.package_imports_bytes().to_vec(),
-                vec![],
+        let values = [&mounted, &obsolete].map(|owner| {
+            let evidence = support_product_in_unit("main", &owner.module);
+            Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    [7; 32],
+                    owner.clone(),
+                    evidence.interface_bytes().to_vec(),
+                    evidence.package_imports_bytes().to_vec(),
+                    vec![],
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        );
+        });
         let shared = vec![ExactLexicalNode {
             owner: identity("main", "A"),
             imports: vec![],
         }];
-        let initial = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_with_value_interfaces(std::slice::from_ref(&value), vec![])
-            .unwrap();
-        let support = {
-            let entry = Arc::new(ArtifactEntry::original([7; 32], product.clone()).unwrap());
-            let artifacts = initial
-                .artifact_view()
-                .inventory()
-                .admit_shared_with_demand(
-                    initial.artifact_view(),
-                    vec![entry.clone()],
-                    crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-                )
-                .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&[entry]).unwrap();
-            let mut validation = PackageInterfaceValidation::default();
-            let mut selected =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &projection,
-                    &artifacts.metadata_snapshot(),
-                    &validation.inventory,
-                )
-                .unwrap();
-            let output = CapturedCompilerStage::issue(
-                &mut selected,
-                &artifacts,
-                Vec::new(),
-                &mut validation,
-            )
-            .unwrap();
-            crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
-                output.compiler_inputs(),
-            )
-            .unwrap()
-        };
         let context = Arc::new(
-            initial
-                .extend_issued_compiler_support(&support)
+            old_context
+                .as_ref()
+                .clone()
+                .extend_with_value_interfaces(&values, vec![])
                 .unwrap()
                 .extend_lexical_joins(&[], &shared)
                 .unwrap(),
         );
         let inputs = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
-            value_owner,
-            Arc::from(value.interface().interface_bytes()),
+            value_owner.clone(),
+            Arc::from(values[0].interface().interface_bytes()),
         )])
         .unwrap();
         let mut request = program_request(directory.path(), context.clone())
             .with_checked_value_imports(inputs.import_authority())
             .with_source_search_context(&[directory.path().to_path_buf()]);
         request.producer_sha256 = [7; 32];
-        let evidence = DependencyEvidence {
-            version: 4,
-            cache_safe: true,
-            selection_complete: true,
-            sources: vec![SourceEvidence {
-                path: source_path.clone(),
-                sha256: sha256(&source),
-            }],
-            modules: vec![ModuleEvidence {
-                unit: "main".into(),
-                module: "A".into(),
-                boot: false,
-                source: source_path.clone(),
-                product: ProductAvailability::InterfaceOnly,
-                imports: vec![ModuleImportEvidence {
-                    qualifier: ImportQualifier::Unqualified,
-                    module: mounted.module.clone(),
-                    boot: false,
-                    selected: None,
-                }],
-            }],
-            resolutions: vec![ResolutionEvidence {
-                qualifier: ImportQualifier::Unqualified,
-                module: "A".into(),
-                boot: false,
-                selected: Some(source_path.clone()),
-                candidates: vec![source_path],
-            }],
-            packages: vec![],
-        };
-        // Change the raw producer receipt before admission. The current
-        // request's real validator owns both the selected-source proof and
-        // its exact import graph; no issued source proof is amended.
+        // Rebind the actual request identity, preserving every SOURCE row,
+        // role and current-source proof from the original receipt.
         let mut receipt_value = read_receipt(&receipt);
         let fields = receipt_value.as_array_mut().unwrap();
         fields[2] = text(&request.request_sha256);
         fields[3] = text(hex(&request.semantic_sha256));
-        fields[8].as_array_mut().unwrap()[0].as_array_mut().unwrap()[3]
-            .as_array_mut()
-            .unwrap()
-            .push(Value::Array(vec![
-                text("none"),
-                text(&mounted.module),
-                Value::Bool(false),
-                text(&mounted.unit),
-            ]));
-        fields[10].as_array_mut().unwrap().push(Value::Array(vec![
-            text("none"),
-            text(&mounted.module),
-            Value::Bool(false),
-            text(&mounted.unit),
-            Value::Integer(1.into()),
-        ]));
-        fields[10].as_array_mut().unwrap().sort_by(|a, b| {
-            let a = a.as_array().unwrap();
-            let b = b.as_array().unwrap();
-            (a[0].as_text(), a[1].as_text()).cmp(&(b[0].as_text(), b[1].as_text()))
-        });
-        fields[9] = Value::Array(vec![
-            Value::Array(vec![Value::Array(vec![
-                text("main"),
-                text("A"),
-                text(sha256(canonical.certificate_bytes())),
-                text(hex(&canonical.interface_sha256())),
-                text(hex(&canonical.source_sha256())),
-            ])]),
-            text(serde_json::to_string(&evidence).unwrap()),
-        ]);
+        let source_fields = fields[8..].to_vec();
         write_receipt(&receipt, &receipt_value);
-        let mut admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        let admission = request.validate_receipt(&receipt, None, &context).unwrap();
+        assert!(admission
+            .consumed_home_adjacency()
+            .values()
+            .all(|imports| !imports.contains(&mounted) && !imports.contains(&obsolete)));
         let artifacts = context
             .artifact_view()
             .merge_fixture_selections(&support_view(&[scaffold_native_fixture(
@@ -29393,33 +29285,77 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .find(|node| node.owner == identity("main", "A"))
                 .unwrap()
                 .imports,
-            vec![mounted]
+            Vec::<ExactModuleIdentity>::new()
         );
+        assert_eq!(
+            original
+                .lexical_graph()
+                .iter()
+                .find(|node| node.owner == mounted)
+                .expect("the actual checked input retains its thin instance leaf")
+                .imports,
+            Vec::<ExactModuleIdentity>::new()
+        );
+        assert!(original
+            .lexical_graph()
+            .iter()
+            .all(|node| node.owner != obsolete));
+        assert!(original
+            .source_scope()
+            .rows()
+            .iter()
+            .all(|node| node.owner != mounted && node.owner != obsolete));
         assert!(matches!(
             original.original_instance_environment(),
             OriginalInstanceEnvironment::Complete { .. }
+        ));
+        // Change only the raw checked input to the production authority
+        // capture boundary. Existing selected interfaces and SOURCE proof
+        // remain unchanged, so neither mismatch can be satisfied by custody.
+        let mut changed = values[0].interface().interface_bytes().to_vec();
+        changed.push(0);
+        let mismatched = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
+            value_owner,
+            Arc::from(changed),
+        )])
+        .unwrap();
+        let mismatched_request = request
+            .clone()
+            .with_checked_value_imports(mismatched.import_authority());
+        assert!(matches!(
+            (&mismatched_request)
+                .product_admission(&admission)
+                .original_execution_fixture(&artifacts),
+            Err(CompileError::ExtractFailed(detail))
+                if detail == "exact declaration context: checked value instance evidence differs from its exact interface authority"
+        ));
+        let missing = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
+            tidepool_repr::SessionModule::val(tidepool_repr::Generation(3)),
+            Arc::from(values[0].interface().interface_bytes()),
+        )])
+        .unwrap();
+        let missing_request = request
+            .clone()
+            .with_checked_value_imports(missing.import_authority());
+        assert!(matches!(
+            (&missing_request)
+                .product_admission(&admission)
+                .original_execution_fixture(&artifacts),
+            Err(CompileError::ExtractFailed(detail))
+                if detail == "exact declaration context: checked value instance evidence lacks its selected interface"
         ));
         let captured_request = request
             .program_admission()
             .in_program_context(original.clone())
             .unwrap();
-        assert!(
-            captured_request
-                .receipt_admission()
-                .product_admission(&admission)
-                .original_execution_fixture(&artifacts)
-                .is_ok(),
-            "complete inherited instance graphs must project shared rows before comparison"
-        );
-        // Owner-local negative corruption: a historical selection is not
-        // an admission and must not satisfy the selected-owner consumer.
-        admission.selected_originals = historical;
-        assert!(
-            (&request)
-                .product_admission(&admission)
-                .original_execution_fixture(&artifacts)
-                .is_err(),
-            "historical certificate cannot replace the selected owner"
+        assert!(captured_request
+            .receipt_admission()
+            .product_admission(&admission)
+            .original_execution_fixture(&artifacts)
+            .is_ok());
+        assert_eq!(
+            read_receipt(&receipt).as_array().unwrap()[8..],
+            source_fields
         );
         assert_eq!(context.lexical_graph(), shared);
     }
