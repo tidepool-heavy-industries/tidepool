@@ -34098,7 +34098,7 @@ None,
                 boot: false,
                 source: crate::cache::GENERATED_SOURCE.into(),
                 imports: vec![],
-                product: crate::cache::ProductAvailability::Ready,
+                product: crate::cache::ProductAvailability::InterfaceOnly,
             });
             let mut worker = admitted.clone();
             worker.sources[1].path = input.clone();
@@ -34168,25 +34168,69 @@ None,
             };
             assert!(prior.iter().all(|product| product.owner() != &owner));
             let owners = [owner.clone()];
+            let native_owners = parsed
+                .products()
+                .iter()
+                .map(|product| (product.unit.as_str(), product.module.as_str()))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(native_owners, BTreeSet::from([("main", "Fresh")]));
+            assert_eq!(
+                packet
+                    .modules
+                    .iter()
+                    .map(|module| (module.unit.as_str(), module.module.as_str()))
+                    .collect::<BTreeSet<_>>(),
+                native_owners
+            );
+            assert_eq!(
+                admitted
+                    .modules
+                    .iter()
+                    .filter(|module| module.product.has_native_product())
+                    .map(|module| (module.unit.as_str(), module.module.as_str()))
+                    .collect::<BTreeSet<_>>(),
+                native_owners
+            );
+            assert_eq!(
+                owners
+                    .iter()
+                    .map(|owner| (owner.unit.as_str(), owner.module.as_str()))
+                    .collect::<BTreeSet<_>>(),
+                native_owners
+            );
             let fresh = BTreeSet::from([crate::declaration_join::ExactModuleIdentity {
                 unit: "main".into(),
                 module: "Fresh".into(),
             }]);
-            let ExecutionSourceAdmission::Available(issued) =
+            let graph_input = ExecutionSourceGraphInput {
+                producer: CanonicalProducerIdentity::from_producer_bytes(&producer),
+                semantic_sha256: Some(request.semantic_sha256),
+                include: &include,
+                source_path: &input,
+                source,
+                evidence: &admitted,
+                exact_imports: source_admission.exact_imports(),
+                owners: &owners,
+                fresh_owners: &fresh,
+                retained_sources: &BTreeMap::new(),
+                packages: &BTreeMap::new(),
+            };
+            let mut false_ready = admitted.clone();
+            let target = false_ready.modules.last_mut().unwrap();
+            assert_eq!(target.module, "Target");
+            assert_eq!(target.source, Path::new(crate::cache::GENERATED_SOURCE));
+            assert_eq!(target.product, ProductAvailability::InterfaceOnly);
+            target.product = ProductAvailability::Ready;
+            assert!(matches!(
                 CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
-                    producer: CanonicalProducerIdentity::from_producer_bytes(&producer),
-                    semantic_sha256: Some(request.semantic_sha256),
-                    include: &include,
-                    source_path: &input,
-                    source,
-                    evidence: &admitted,
-                    exact_imports: source_admission.exact_imports(),
-                    owners: &owners,
-                    fresh_owners: &fresh,
-                    retained_sources: &BTreeMap::new(),
-                    packages: &BTreeMap::new(),
-                })
-                .unwrap()
+                    evidence: &false_ready,
+                    ..graph_input
+                }),
+                Err(CompileError::ExtractFailed(reason))
+                    if reason == "original execution source proof: source product lacks an exact original owner"
+            ));
+            let ExecutionSourceAdmission::Available(issued) =
+                CertifiedExecutionSourceGraph::admit(graph_input).unwrap()
             else {
                 panic!("complete current source recipe")
             };
