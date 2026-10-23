@@ -70,6 +70,25 @@ and package-interface reader fixes. The next warm checkpoint must compile
 `tidepool-toolchain`, `tidepool-runtime`, `tidepool-extract-cmd`, and
 `tidepool-codegen`, including cfg consumers. No source-only parcel is a test pass.
 
+Checkpoint `7e2e35c0a0` was pushed on both integration branches, then failed
+joined compilation in 40 seconds. Both production and cfg callers still used
+old optional Original-product fields; some callers also supplied assembly roles
+where selected-owner roles are now required. There were no test executions.
+Full diagnostics and owner partition:
+`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/7e2e-joined-cfg-four-caller-diagnostic-ledger.json`.
+Repairs are divided among the existing facts, certified-product, context and
+consumer owners. Root owns compiler-World integration repairs. Do not restore
+optional accessors or turn decoded records into admitted authority to satisfy
+these callers.
+
+The independent native Haskell check is admitted at `f6557528c4`; its resource
+closure also builds the Rust candidate fixture issuer, so a Rust dependency
+failure may prevent execution. Validation owns that exact pin until settlement.
+Root source additionally contains the mandatory canonical-interface consumer
+repair from `33545adac8`. P8's complete selected-evidence accessor and targeted
+sidecar controls (`92c094eefa`) and P14's compiler-mode registrations
+(`bbd69359a7`) are integrated.
+
 ## Required next sequence
 
 1. Repair joined compile errors with owning workers; compile tests as well as
