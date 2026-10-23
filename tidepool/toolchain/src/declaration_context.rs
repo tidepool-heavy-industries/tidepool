@@ -15644,7 +15644,21 @@ impl ExactDeclarationContext {
         surface: &crate::declaration_join::AdmittedDeclarationSurface,
     ) -> Result<PublicationJoinInputs, CompileError> {
         for row in surface.lexical_graph() {
-            if self.source_scope().imports(&row.owner) != Some(row.imports.as_slice()) {
+            let admitted = if surface.is_facade_anchor(&row.owner) {
+                self.lexical_graph().iter().any(|selected| selected == row)
+                    && self
+                        .compiler_source_support()
+                        .world_primary_type_row(&row.owner)
+                        .is_some_and(|selected| {
+                            matches!(
+                                &selected.entry.payload,
+                                ArtifactPayload::Interface(_, JoinedInterfaceRole::LexicalJoin)
+                            )
+                        })
+            } else {
+                self.source_scope().imports(&row.owner) == Some(row.imports.as_slice())
+            };
+            if !admitted {
                 return Err(failure(
                     "publication source adjacency differs from its exact input",
                 ));
@@ -15653,7 +15667,7 @@ impl ExactDeclarationContext {
         if surface
             .roots()
             .iter()
-            .any(|owner| !self.source_scope().admits(owner))
+            .any(|owner| !self.source_scope().admits(owner) && !surface.is_facade_anchor(owner))
         {
             return Err(failure(
                 "publication source root is outside its exact input",

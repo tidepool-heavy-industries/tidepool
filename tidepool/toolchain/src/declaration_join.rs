@@ -302,6 +302,19 @@ impl NativeAuthoredDeclarationAdmission {
     }
 }
 
+/// Exact binding evidence distinguishes source permission from a certified
+/// facade's lexical interface; a facade never acquires an Original role here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeclarationSurfaceBinding {
+    Source {
+        interface: crate::artifact_inventory::ArtifactBinding,
+        original: Option<crate::artifact_inventory::ArtifactBinding>,
+    },
+    Facade {
+        interface: crate::artifact_inventory::ArtifactBinding,
+    },
+}
+
 /// Shared source permission issued by authored or strictly restored evidence.
 /// Interface inspection anchors and Original compiler roles are independent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -309,20 +322,13 @@ pub struct AdmittedDeclarationSurface {
     roots: Vec<ExactModuleIdentity>,
     lexical: Vec<ExactLexicalNode>,
     source_originals: BTreeSet<ExactModuleIdentity>,
-    source_bindings: std::collections::BTreeMap<
-        ExactModuleIdentity,
-        (
-            crate::artifact_inventory::ArtifactBinding,
-            Option<crate::artifact_inventory::ArtifactBinding>,
-        ),
-    >,
+    source_bindings: std::collections::BTreeMap<ExactModuleIdentity, DeclarationSurfaceBinding>,
 }
 
 impl AdmittedDeclarationSurface {
     pub fn roots(&self) -> &[ExactModuleIdentity] {
         &self.roots
     }
-
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
         &self.lexical
     }
@@ -340,7 +346,20 @@ impl AdmittedDeclarationSurface {
             let row = support
                 .world_primary_type_row(owner)
                 .ok_or_else(|| contract("publication source lacks its issued binding"))?;
-            let incoming = (row.interface_binding.clone(), row.original_binding.cloned());
+            let incoming = match self.source_bindings.get(owner) {
+                Some(DeclarationSurfaceBinding::Facade { .. }) => {
+                    if row.original_binding.is_some() {
+                        return Err(contract("publication facade has an Original binding"));
+                    }
+                    DeclarationSurfaceBinding::Facade {
+                        interface: *row.interface_binding,
+                    }
+                }
+                _ => DeclarationSurfaceBinding::Source {
+                    interface: *row.interface_binding,
+                    original: row.original_binding.copied(),
+                },
+            };
             if let Some(prior) = self.source_bindings.get(owner) {
                 if prior != &incoming {
                     return Err(contract(
@@ -363,26 +382,48 @@ impl AdmittedDeclarationSurface {
             .iter()
             .any(|node| !self.source_bindings.contains_key(&node.owner))
             || self.source_originals.iter().any(|owner| {
-                self.source_bindings
-                    .get(owner)
-                    .is_none_or(|(_, original)| original.is_none())
+                !matches!(
+                    self.source_bindings.get(owner),
+                    Some(DeclarationSurfaceBinding::Source {
+                        original: Some(_),
+                        ..
+                    })
+                )
             })
         {
             return Err(contract(
                 "publication source selection lacks its exact issuing binding",
             ));
         }
-        for (owner, (interface, original)) in &self.source_bindings {
+        for (owner, binding) in &self.source_bindings {
             let row = support
                 .world_primary_type_row(owner)
                 .ok_or_else(|| contract("publication source lacks its exact input binding"))?;
-            if row.interface_binding != interface || row.original_binding != original.as_ref() {
+            let valid = match binding {
+                DeclarationSurfaceBinding::Source {
+                    interface,
+                    original,
+                } => {
+                    row.interface_binding == interface && row.original_binding == original.as_ref()
+                }
+                DeclarationSurfaceBinding::Facade { interface } => {
+                    row.interface_binding == interface && row.original_binding.is_none()
+                }
+            };
+            if !valid {
                 return Err(contract(
                     "publication source binding differs from its exact input",
                 ));
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn is_facade_anchor(&self, owner: &ExactModuleIdentity) -> bool {
+        matches!(
+            self.source_bindings.get(owner),
+            Some(DeclarationSurfaceBinding::Facade { .. })
+        )
     }
 
     pub(crate) fn source_originals(&self) -> &BTreeSet<ExactModuleIdentity> {
@@ -395,6 +436,7 @@ impl AdmittedDeclarationSurface {
 pub struct PublicationComposition {
     join: Arc<AcceptedJoin>,
     context: Arc<ExactDeclarationContext>,
+    source_surface: AdmittedDeclarationSurface,
 }
 
 impl PublicationComposition {
@@ -404,6 +446,10 @@ impl PublicationComposition {
 
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.context
+    }
+
+    pub fn source_surface(&self) -> &AdmittedDeclarationSurface {
+        &self.source_surface
     }
 }
 
@@ -1395,9 +1441,40 @@ pub fn certify_publication_join(
                 .context
                 .clone()
                 .compose_joined_publication(&join, &surface)?;
+            let mut source_surface = surface;
+            let owner = ExactModuleIdentity {
+                unit: join.reserved().unit.clone(),
+                module: join.reserved().module.clone(),
+            };
+            let facade = context
+                .compiler_source_support()
+                .world_primary_type_row(&owner)
+                .ok_or_else(|| contract("publication omits its accepted facade binding"))?;
+            if facade.original_binding.is_some()
+                || !context.compiler_source_support().same_interface_binding(
+                    join.compiler_source_support(),
+                    &owner,
+                    join.artifact_id(),
+                )
+            {
+                return Err(contract(
+                    "publication substitutes its accepted facade binding",
+                ));
+            }
+            source_surface.source_bindings.insert(
+                owner.clone(),
+                DeclarationSurfaceBinding::Facade {
+                    interface: *facade.interface_binding,
+                },
+            );
+            source_surface.roots = vec![owner];
+            source_surface.lexical = context.lexical_graph().to_vec();
+            let lexical = source_surface.lexical_graph().to_vec();
+            source_surface.retain_source_bindings(context.compiler_source_support(), &lexical)?;
             Ok(CertifiedPublicationJoin::Accepted(PublicationComposition {
                 join,
                 context: Arc::new(context),
+                source_surface,
             }))
         }
         CertifiedDeclarationJoin::Rejected(rejected) => {
@@ -2839,13 +2916,14 @@ mod authored_tests {
             .expect("the actual issued SOURCE bindings remain a valid preflight");
         assert!(repeated_preflight.same_authenticated_context(&context));
         let mut substituted = source_surface.clone();
-        substituted
+        let DeclarationSurfaceBinding::Source { interface, .. } = substituted
             .source_bindings
             .get_mut(&selected_support)
             .unwrap()
-            .0
-            .selection
-            .0[0] ^= 1;
+        else {
+            panic!("the source dependency must retain SOURCE binding evidence")
+        };
+        interface.selection.0[0] ^= 1;
         let refusal = context
             .publication_join_inputs(Arc::new(tempfile::tempdir().unwrap()), &substituted)
             .err()
