@@ -5006,8 +5006,8 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     .expect("same selected canonical supports each genuine Full in isolation")
             })
             .collect::<Vec<_>>();
-        assert!(
-            !witnesses[0].same_recorded_facts(&witnesses[1]),
+        assert_ne!(
+            witnesses[0], witnesses[1],
             "equal payload cannot identify exact carrier/group issuance"
         );
         let metadata = projection
@@ -9692,16 +9692,26 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .collect::<Vec<_>>();
                         let fresh_projection =
                             CompilerInputProjection::from_issued_entries(&native_entries).unwrap();
-                        let fresh_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                            &fresh_projection, &compiled.metadata_snapshot(),
-                            &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
+                        let mut validation = PackageInterfaceValidation::default();
+                        let mut fresh_selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                            &fresh_projection, &compiled.metadata_snapshot(), &validation.inventory,
                         ).unwrap();
-                        let originals = fresh_selection
-                            .selected_original_closure(&compiled)
+                        let fresh_stage = CapturedCompilerStage::issue(
+                            &mut fresh_selection,
+                            &compiled,
+                            Vec::new(),
+                            &mut validation,
+                        )
+                        .unwrap();
+                        let originals = fresh_stage
+                            .source_selection()
+                            .selected_original_closure(fresh_stage.issued_artifacts())
                             .unwrap();
-                        let source_support = fresh_projection
+                        let fresh_support = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                            fresh_stage.compiler_inputs(),
+                        ).unwrap();
+                        let source_support = fresh_support
                             .source_support(
-                                &compiled,
                                 &native_entries
                                     .iter()
                                     .map(|entry| entry.descriptor.owner.clone())
@@ -9714,7 +9724,26 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                             .unwrap();
                         let published =
                             certified_artifact_view(&originals, &publication_context).unwrap();
-                        assert_eq!(published.native_offer_observations().unwrap(), expected);
+                        let published_offers = published.native_offer_observations().unwrap();
+                        assert!(expected.is_subset(&published_offers));
+                        let mut expected_published_offers = expected.clone();
+                        expected_published_offers
+                            .extend(source_support.native_offer_observations().unwrap());
+                        assert_eq!(published_offers, expected_published_offers);
+                        assert_eq!(
+                            published_offers,
+                            publication_context
+                                .compiler_source_support()
+                                .native_offer_observations()
+                                .unwrap()
+                        );
+                        assert!(!source_support.native_offers().is_empty());
+                        for issued in source_support.native_offers() {
+                            assert!(published
+                                .native_offers()
+                                .iter()
+                                .any(|retained| retained.same_issuance(issued)));
+                        }
                         assert!(originals
                             .native_closure()
                             .capture_graph_selection()
