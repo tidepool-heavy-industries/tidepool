@@ -154,9 +154,9 @@ impl SelectedTypeInterfaces {
             .identity
             .get_or_init(|| self.materialization_context().semantic_sha256())
     }
+    /// Compare certified TYPE facts and their exact dependency bindings.
+    /// This does not equate acquiring owners or confer Original/SOURCE rights.
     pub fn same_authenticated_interfaces(&self, other: &Self) -> bool {
-        // TYPE issuance closes every canonical requirement into selected rows.
-        // Their scoped bindings own the immutable edges as well as payloads.
         std::ptr::eq(self, other)
             || (self.producer == other.producer && self.support.same_recorded_facts(&other.support))
     }
@@ -2296,6 +2296,8 @@ impl RequestNativeAvailability {
         self.0.get(&key.artifact)?.dependency_support(key, owner)
     }
 
+    /// Compare persisted native permission observations. Compiler/private
+    /// classification belongs to the receiving request and is not encoded here.
     pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
         self.1 == other.1
     }
