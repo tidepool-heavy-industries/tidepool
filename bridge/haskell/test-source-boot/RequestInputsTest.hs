@@ -147,7 +147,7 @@ import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, in
 import Tidepool.OwnedInputTransport qualified as Transport
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..), scaffoldTargetName
   , capturedSessionInterface, capturedSessionInterfaceEvidence)
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuineMetadataScopeWithContext, writeGenuinePublishedScopeWithContext)
+import Tidepool.Test.GenuineCandidate (FixtureCompilerInput(..), writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope, writeGenuineExecutionScopeWithContext, writeGenuineMetadataScopeWithContext, writeGenuinePublishedScopeWithContext)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer, issueCodecFixturePacket)
@@ -1439,13 +1439,16 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work ->
     firstPath <- ownedFixtureScope handles fileScope
     semanticWorldBindingControls handles work firstPath contextParcel
     let publishedWork = work </> "published-world"
-    createDirectoryIfMissing True publishedWork
+        publishedSources = publishedWork </> "sources"
+    createDirectoryIfMissing True publishedSources
     forM_ ["PublishedConsumer.hs","PublishedSeed.hs","PublishedSibling.hs"] $ \name ->
-      copyFile ("test-source-boot/fixtures" </> name) (publishedWork </> name)
-    publishedOriginal <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-      Nothing (publishedWork </> "PublishedConsumer.hs") [publishedWork] Nothing
-    publishedFixture <- capturePreparedFixture publishedWork publishedOriginal
-    (publishedScope,publishedParcel) <- writeGenuinePublishedScopeWithContext "PublishedConsumer" ["PublishedSeed","PublishedSibling"] publishedWork publishedFixture
+      copyFile ("test-source-boot/fixtures" </> name) (publishedSources </> name)
+    (publishedScope,publishedParcel) <- writeGenuinePublishedScopeWithContext
+      (FixtureCompilerInput
+        { fixtureWorkRoot = publishedWork
+        , fixtureSourcePath = publishedSources </> "PublishedConsumer.hs"
+        , fixtureIncludeRoots = [publishedSources] })
+      "PublishedConsumer" "__prepared" ["PublishedSeed","PublishedSibling"]
     publishedOwned <- ownedFixtureScope handles publishedScope
     semanticWorldInputControls (Just ["PublishedSeed","PublishedSibling"]) handles publishedWork publishedOwned publishedParcel
     missingOwnedPartsRefuse firstPath

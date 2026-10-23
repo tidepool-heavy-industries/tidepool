@@ -24,7 +24,7 @@ import Data.Text qualified as T
 import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module (moduleName, moduleNameString)
 import System.Environment (lookupEnv)
-import System.FilePath ((</>))
+import System.FilePath ((</>), isAbsolute)
 import Tidepool.Test.FixturePacket
   ( PacketProducer(..), PacketCompletion, completedPacketOutput, newPacketDirectory, runPacketProducer )
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
@@ -68,7 +68,8 @@ data FixtureDelivery
   | ScopeDelivery { fixtureDeliveryRoot :: FilePath }
   | WorldContextDelivery { fixtureDeliveryRoot :: FilePath }
   | PublishedContextDelivery
-      { fixtureDeliveryRoot :: FilePath, fixtureCompletedTarget :: String, fixturePublicationRoots :: [String] }
+      { fixtureDeliveryRoot :: FilePath, fixturePublishedInput :: FixtureCompilerInput
+      , fixtureCompletedTarget :: String, fixtureTargetBinding :: String, fixturePublicationRoots :: [String] }
 
 data FixtureOutput
   = CandidateManifestOutput BS.ByteString
@@ -140,15 +141,18 @@ writeGenuineMetadataScopeWithContext interfaces lexicalRoots work capture = do
     ScopeContextOutput path bytes -> pure (path,bytes)
     _ -> fail "metadata fixture delivery omitted its scope and context parcel"
 
--- Explicit publication intent is consumed by the Rust completed-source issuer.
--- Ordinary fixture selection never silently endorses a source original.
-writeGenuinePublishedScopeWithContext :: String -> [String] -> FilePath -> CapturedCompilerFixture -> IO (FilePath,BS.ByteString)
-writeGenuinePublishedScopeWithContext target roots work capture = do
-  unless (not (null target) && not (null roots) && all (not . null) roots
+-- The Rust production entry owner performs the sole compilation and publishes
+-- from that sealed output. There is no earlier products-only capture to endorse.
+writeGenuinePublishedScopeWithContext :: FixtureCompilerInput -> String -> String -> [String] -> IO (FilePath,BS.ByteString)
+writeGenuinePublishedScopeWithContext input target binding roots = do
+  unless (isAbsolute (fixtureSourcePath input) && all isAbsolute (fixtureIncludeRoots input)
+      && not (null target) && binding == "__prepared"
+      && not (null roots) && all (not . null) roots
       && Set.size (Set.fromList roots) == length roots)
-    (fail "published fixture requires one completed target and unique nonempty publication roots")
-  output <- deliverCapturedFixture capture (FixtureSelection [] [] [] [])
-    (PublishedContextDelivery work target roots)
+    (fail "published fixture requires original source inputs, the prepared entry and unique nonempty publication roots")
+  output <- writePacket
+    (PublishedContextDelivery (fixtureWorkRoot input) input target binding roots)
+    Nothing (FixtureSelection [] [] [] [])
   case output of
     ScopeContextOutput path bytes -> pure (path,bytes)
     _ -> fail "published fixture delivery omitted its scope and context parcel"
@@ -203,14 +207,18 @@ writePacket delivery input selection = do
   let text = encodeString . T.pack
       names values = encodeListLen (fromIntegral (length values)) <> foldMap text values
       optional = maybe encodeNull text
-      includes = maybe [] (fixtureIncludeRoots . capturedInput) input
-      source = (fixtureSourcePath . capturedInput) <$> input
+      includes = case delivery of
+        PublishedContextDelivery _ original _ _ _ -> fixtureIncludeRoots original
+        _ -> maybe [] (fixtureIncludeRoots . capturedInput) input
+      source = case delivery of
+        PublishedContextDelivery _ original _ _ _ -> Just (fixtureSourcePath original)
+        _ -> (fixtureSourcePath . capturedInput) <$> input
       capture = capturedPacket <$> input
       wantsScope = case delivery of CandidateDelivery _ -> False; _ -> True
       intent = case delivery of
-        PublishedContextDelivery _ target roots ->
-          encodeListLen 12 <> text "TPSOURCEBOOTPUBLISHED1"
-            <> common <> text target <> names roots
+        PublishedContextDelivery _ _ target binding roots ->
+          encodeListLen 13 <> text "TPSOURCEBOOTPUBLISHED2"
+            <> common <> text target <> names roots <> text binding
         _ -> encodeListLen 10 <> text "TPSOURCEBOOTFIXTURE4" <> common
       common = optional source
         <> names includes <> names (fixtureCandidates selection) <> names (fixtureInterfaces selection)

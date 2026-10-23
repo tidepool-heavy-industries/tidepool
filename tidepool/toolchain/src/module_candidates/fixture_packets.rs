@@ -125,6 +125,7 @@ enum FixtureIntent {
     Ordinary,
     Published {
         target: ExactModuleIdentity,
+        binding: String,
         roots: Vec<ExactModuleIdentity>,
     },
 }
@@ -135,13 +136,14 @@ fn fixture_intent(fields: &[Value]) -> FixtureIntent {
             assert_eq!(fields.len(), 10, "ordinary fixture request tuple");
             FixtureIntent::Ordinary
         }
-        Some("TPSOURCEBOOTPUBLISHED1") => {
-            assert_eq!(fields.len(), 12, "published fixture request tuple");
+        Some("TPSOURCEBOOTPUBLISHED2") => {
+            assert_eq!(fields.len(), 13, "published fixture request tuple");
             assert!(
-                fields[1].as_text().is_some_and(|path| !path.is_empty())
-                    && fields[9].as_text().is_some_and(|path| !path.is_empty())
+                fields[1].as_text().is_some_and(|path| Path::new(path).is_absolute())
+                    && names(&fields[2]).iter().all(|path| Path::new(path).is_absolute())
+                    && matches!(fields[9], Value::Null)
                     && fields[6].as_bool() == Some(true),
-                "published fixture requires source, capture and scope delivery"
+                "published fixture requires original source inputs and scope delivery without a capture"
             );
             assert!(
                 [3, 4, 5, 8].into_iter().all(|index| names(&fields[index]).is_empty()),
@@ -149,6 +151,11 @@ fn fixture_intent(fields: &[Value]) -> FixtureIntent {
             );
             let target = text_field(&fields[10]);
             let roots = names(&fields[11]);
+            let binding = text_field(&fields[12]);
+            assert_eq!(
+                binding, "__prepared",
+                "published fixture requires the production entry target"
+            );
             assert!(
                 !target.is_empty()
                     && !roots.is_empty()
@@ -161,6 +168,7 @@ fn fixture_intent(fields: &[Value]) -> FixtureIntent {
                     unit: "main".into(),
                     module: target.into(),
                 },
+                binding: binding.into(),
                 roots: roots
                     .into_iter()
                     .map(|module| ExactModuleIdentity {
@@ -570,7 +578,44 @@ fn source_boot_candidate_packet_producer() {
             || fields[6].as_bool().expect("fixture scope selection"),
         "retained interface/native custody requires an actual delivered scope"
     );
-    let context = if !matches!(fields[1], Value::Null) {
+    let context = if let FixtureIntent::Published {
+        target,
+        binding,
+        roots,
+    } = &intent
+    {
+        let source_path = PathBuf::from(text_field(&fields[1]));
+        let sources = crate::artifacts::FrozenEntrySources::capture(&include, &source_path)
+            .expect("published fixture requires its actual original source inputs");
+        assert_eq!(binding, "__prepared");
+        let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            &packet,
+            &packet.join("published-entry"),
+        )
+        .expect("the production entry owner performs the publication fixture's sole compile");
+        let execution = entry
+            .products()
+            .original_execution_evidence()
+            .expect("the actual entry retains its issued completion");
+        assert_eq!(
+            execution.completed().unwrap().target(),
+            target,
+            "published target must be the actual completed source owner"
+        );
+        let revision = hex(&Sha256::digest(entry.source().as_bytes()));
+        let mut published = empty_fixture_scope(producer_sha);
+        for root in roots {
+            let issued = entry
+                .products()
+                .published_source_original_selection(&revision, root)
+                .expect("publication root must be a genuine direct import of the completed target");
+            published = published
+                .with_published_source_originals(&issued)
+                .expect("actual published fixture selections must compose");
+        }
+        published
+    } else if !matches!(fields[1], Value::Null) {
         let source_path = PathBuf::from(text_field(&fields[1]));
         assert!(source_path.is_absolute());
         let capture = PathBuf::from(text_field(&fields[9]));
@@ -631,71 +676,13 @@ fn source_boot_candidate_packet_producer() {
                 "completed originals cannot acquire an ordinary source replay recipe"
             );
         }
-        let context = match &intent {
-            FixtureIntent::Ordinary => admit_fixture_scope(
-                producer_sha,
-                &certified,
-                &exact_owners,
-                &native_owners,
-                &lexical_roots,
-            ),
-            FixtureIntent::Published { target, roots } => {
-                let completed_targets = evidence
-                    .modules
-                    .iter()
-                    .filter(|module| {
-                        !module.boot && module.source == Path::new(crate::cache::GENERATED_SOURCE)
-                    })
-                    .map(|module| ExactModuleIdentity {
-                        unit: module.unit.clone(),
-                        module: module.module.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    completed_targets.as_slice(),
-                    std::slice::from_ref(target),
-                    "published target must be the authenticated completed source owner"
-                );
-                let output =
-                    crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)
-                        .expect(
-                            "published fixture products retain their completed compiler output",
-                        );
-                let view = output.artifacts();
-                let surface = crate::declaration_join::source_lexical_closure(
-                    std::slice::from_ref(target),
-                    &fixture_source_imports(&certified),
-                    &[],
-                    &view.retained_source_implementations(),
-                )
-                .expect("published fixture requires its certified target lexical closure");
-                let required = surface
-                    .lexical
-                    .iter()
-                    .map(|node| node.owner.clone())
-                    .collect::<Vec<_>>();
-                let source_context = ExactDeclarationContext::from_issued_output(
-                    producer_sha,
-                    &output,
-                    &source_admission,
-                    target.clone(),
-                    &required,
-                )
-                .expect("published fixture requires actual completed source selection");
-                let revision = hex(&Sha256::digest(source.as_bytes()));
-                let input_identity = hex(&completion.request_sha);
-                let mut published = empty_fixture_scope(producer_sha);
-                for root in roots {
-                    let issued = source_context.issue_published_source_original(
-                        &revision, &input_identity, root,
-                    ).expect("publication root must be a genuine direct import of the completed target");
-                    published = published
-                        .with_published_source_originals(&issued)
-                        .expect("actual published fixture selections must compose");
-                }
-                published
-            }
-        };
+        let context = admit_fixture_scope(
+            producer_sha,
+            &certified,
+            &exact_owners,
+            &native_owners,
+            &lexical_roots,
+        );
         if !requested.is_empty() {
             let manifest = publish_fixture_candidates(
                 producer,
@@ -866,17 +853,19 @@ fn published_fixture_intent_refuses_malformed_or_combined_selections() {
     ];
     assert!(matches!(fixture_intent(&ordinary), FixtureIntent::Ordinary));
     let mut published = ordinary.clone();
-    published[0] = Value::Text("TPSOURCEBOOTPUBLISHED1".into());
+    published[0] = Value::Text("TPSOURCEBOOTPUBLISHED2".into());
     published[1] = Value::Text("/fixture/source.hs".into());
+    published[2] = Value::Array(vec![Value::Text("/fixture".into())]);
     published[6] = Value::Bool(true);
-    published[9] = Value::Text("/fixture/capture".into());
     published.extend([
         Value::Text("CompletedTarget".into()),
         Value::Array(vec![Value::Text("PublishedRoot".into())]),
+        Value::Text("__prepared".into()),
     ]);
     assert!(
-        matches!(fixture_intent(&published), FixtureIntent::Published { target, roots }
+        matches!(fixture_intent(&published), FixtureIntent::Published { target, binding, roots }
         if target == (ExactModuleIdentity { unit: "main".into(), module: "CompletedTarget".into() })
+        && binding == "__prepared"
         && roots == vec![ExactModuleIdentity { unit: "main".into(), module: "PublishedRoot".into() }])
     );
     let mut mutations = Vec::new();
@@ -887,10 +876,28 @@ fn published_fixture_intent_refuses_malformed_or_combined_selections() {
     let mut ordinary_extra = published.clone();
     ordinary_extra[0] = ordinary[0].clone();
     mutations.push(ordinary_extra);
-    for index in [1, 9] {
+    let mut legacy = published.clone();
+    legacy[0] = Value::Text("TPSOURCEBOOTPUBLISHED1".into());
+    mutations.push(legacy);
+    mutations.push(published[..12].to_vec());
+    for index in [1, 10, 12] {
         let mut missing = published.clone();
         missing[index] = Value::Null;
         mutations.push(missing);
+    }
+    let mut captured = published.clone();
+    captured[9] = Value::Text("/fixture/capture".into());
+    mutations.push(captured);
+    let mut relative_source = published.clone();
+    relative_source[1] = Value::Text("source.hs".into());
+    mutations.push(relative_source);
+    let mut relative_include = published.clone();
+    relative_include[2] = Value::Array(vec![Value::Text("relative".into())]);
+    mutations.push(relative_include);
+    for binding in ["", "answer"] {
+        let mut unsupported_target = published.clone();
+        unsupported_target[12] = Value::Text(binding.into());
+        mutations.push(unsupported_target);
     }
     let mut no_scope = published.clone();
     no_scope[6] = Value::Bool(false);
