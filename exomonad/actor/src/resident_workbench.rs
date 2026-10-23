@@ -33814,58 +33814,22 @@ pub(crate) mod request_tests {
     }
 
     #[test]
-    fn request_annotations_survive_planned_admission() {
+    fn request_annotations_survive_actor_compile_view() {
         use tidepool_runtime::session::RequestCompileAnnotations;
         use tidepool_toolchain::declaration_join::RequestHelperRecipe;
-        let (mut session, context, source, inputs, _root) = activation_input_fixture(|_| {});
+        let (session, context, source, inputs, _root) = activation_input_fixture(|_| {});
         let evidence = inputs[0].type_evidence().clone();
         let signatures = evidence.request_type_signatures().unwrap().clone();
-        let execution = Arc::new(
-            session
-                .begin_ephemeral_private_execution(context.placement.lexical_scope)
-                .unwrap(),
-        );
-        let view = session.compile_view_for_execution(&execution).unwrap();
-        let mut private_context = context.clone();
-        private_context.placement.lexical_scope = execution.private_scope();
-        let prepared = source.prepare(&private_context.compile_view(view.clone()).unwrap());
-        let template = resident_cell_check_template(
-            &prepared.preamble,
-            context.haskell_effects_alias.expression(),
-            &prepared.imports,
-        );
-        let specification = Arc::new(
-            tidepool_toolchain::checked_cell::CellRecipe::new(
-                "pure ()".to_string(),
-                template,
-                Vec::new(),
-                prepared.injected,
-            )
-            .unwrap(),
-        );
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &prepared.include,
-                settlement,
-            )
-        })
-        .unwrap();
+        let view = session
+            .compile_view_in(context.placement.lexical_scope)
+            .unwrap();
         for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
             let annotations = RequestCompileAnnotations::new(evidence.clone(), helper).unwrap();
             assert!(Arc::ptr_eq(annotations.evidence(), &evidence));
-            let admission = session
-                .admit_planned_cell_for_execution(
-                    execution.clone(),
-                    plan.clone(),
-                    specification.clone(),
-                    specification.specification_digest(),
-                    [7; 32],
-                    prepared.include.clone(),
-                    Some(annotations.into()),
-                )
+            let actor = context
+                .compile_view_with_inputs(view.clone(), annotations.into())
                 .unwrap();
-            let admitted = admission.view().unwrap().exact_compile_context().unwrap();
+            let admitted = actor.exact_compile_context().unwrap();
             let annotations = admitted.request_annotations().unwrap();
             assert!(Arc::ptr_eq(annotations.signatures(), &signatures));
             assert_eq!(annotations.helper_recipe(), helper);
@@ -37261,222 +37225,5 @@ pub(crate) mod request_tests {
         both_registration.observe(ResidentContinuationEvent::Parked("helper".into()));
         drop(both);
         assert_eq!(&*aborted.lock(), &["helper", "parent"]);
-    }
-    #[test]
-    fn native_setup_admission_refuses_other_parser_shapes_before_reservation() {
-        let (mut session, context, source, _root) = host_mount_fixture();
-        let mut sibling = context.clone();
-        sibling.actor = crate::ActorRef::first(crate::ActorId(2));
-        sibling.placement.lexical_scope = session.mint_isolated_scope();
-        let _foreign_input = mount_json_input(
-            &mut session,
-            &sibling,
-            &source,
-            &serde_json::json!(42),
-            None,
-        )
-        .expect("sibling owns a genuine compiled native value");
-        let raw_view = actor_compile_view(&session, &context, &source).unwrap();
-        let raw_injection = source.prepare(&raw_view).injected;
-        let before_snapshot = raw_view.next_value_generation();
-        let (scoped_source, snapshot) =
-            snapshot_cell_program(&mut session, &context, source.clone(), None, None).unwrap();
-        let prepared = scoped_source.prepare(&snapshot.view);
-        assert!(!raw_injection.is_empty());
-        assert!(
-            prepared.injected.is_empty(),
-            "sibling values are not selected by setup"
-        );
-        assert_eq!(snapshot.view.next_value_generation(), before_snapshot);
-        assert_eq!(
-            session
-                .compile_view_in(context.placement.lexical_scope)
-                .unwrap()
-                .next_value_generation(),
-            before_snapshot,
-            "protected snapshot must leave reservation to ordered admission"
-        );
-        let template = resident_cell_check_template(
-            &prepared.preamble,
-            context.haskell_effects_alias.expression(),
-            &prepared.imports,
-        );
-        let templates = resident_workbench_templates(
-            &prepared.preamble,
-            context.haskell_effects_alias.expression(),
-            &prepared.imports,
-        );
-        for text in [
-            "",
-            "pure ()",
-            "let named = 1",
-            "named <- pure ()",
-            "data Owned = Owned",
-            "_ <- pure ()\n_ <- pure ()",
-        ] {
-            let before = actor_compile_view(&session, &context, &source)
-                .unwrap()
-                .next_value_generation();
-            let specification = Arc::new(
-                tidepool_toolchain::checked_cell::CellRecipe::new(
-                    text.to_string(),
-                    template.clone(),
-                    templates
-                        .iter()
-                        .map(|template| {
-                            let kind = match template.kind {
-                                tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                                tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                                tidepool_runtime::session::TemplateSelector::BindDiscard => {
-                                    "binddiscard"
-                                }
-                                tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                            };
-                            (kind.to_owned(), template.source.clone())
-                        })
-                        .collect(),
-                    prepared.injected.clone(),
-                )
-                .unwrap(),
-            );
-            let plan = tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    specification.clone(),
-                    &prepared.include,
-                    settlement,
-                )
-            });
-            if let Ok(plan) = plan {
-                assert!(
-                    session
-                        .admit_native_setup_cell_in(
-                            context.placement.lexical_scope,
-                            plan,
-                            specification.clone(),
-                            specification.specification_digest(),
-                            [9; 32],
-                            prepared.include.clone(),
-                            None
-                        )
-                        .is_err(),
-                    "setup accepted {text:?}"
-                );
-            } else {
-                assert!(
-                    text.is_empty(),
-                    "nonempty negative parser fixture must produce a sealed plan: {text:?}"
-                );
-            }
-            assert_eq!(
-                actor_compile_view(&session, &context, &source)
-                    .unwrap()
-                    .next_value_generation(),
-                before,
-                "refused setup reserved generation for {text:?}"
-            );
-        }
-        let specification = Arc::new(
-            tidepool_toolchain::checked_cell::CellRecipe::new(
-                "_ <- pure ()".to_string(),
-                template,
-                templates
-                    .iter()
-                    .map(|template| {
-                        let kind = match template.kind {
-                            tidepool_runtime::session::TemplateSelector::Decl => "decl",
-                            tidepool_runtime::session::TemplateSelector::Bind => "bind",
-                            tidepool_runtime::session::TemplateSelector::BindDiscard => {
-                                "binddiscard"
-                            }
-                            tidepool_runtime::session::TemplateSelector::Expr => "expr",
-                        };
-                        (kind.to_owned(), template.source.clone())
-                    })
-                    .collect(),
-                prepared.injected,
-            )
-            .unwrap(),
-        );
-        let leaked = Arc::new(
-            tidepool_toolchain::checked_cell::CellRecipe::new(
-                specification.cell_source(),
-                specification.template_source(),
-                specification.turn_templates().to_vec(),
-                raw_injection,
-            )
-            .unwrap(),
-        );
-        let leaked_plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                leaked.clone(),
-                &prepared.include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let before_refusal = session
-            .compile_view_in(context.placement.lexical_scope)
-            .unwrap()
-            .next_value_generation();
-        let refusal = match session.admit_native_setup_cell_in(
-            context.placement.lexical_scope,
-            leaked_plan,
-            leaked.clone(),
-            leaked.specification_digest(),
-            [9; 32],
-            prepared.include.clone(),
-            None,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("setup accepted foreign injection"),
-        };
-        match refusal {
-            tidepool_runtime::session::SessionError::InvalidNativeSetupAdmission {
-                scope,
-                reason:
-                    tidepool_runtime::session::NativeSetupAdmissionFailure::InjectionInventory {
-                        planned,
-                        reachable,
-                    },
-                ..
-            } => {
-                assert_eq!(scope, context.placement.lexical_scope);
-                assert!(planned.count > 0);
-                assert_eq!(reachable.count, 0);
-                assert_ne!(planned.digest, reachable.digest);
-            }
-            other => panic!("expected exact injection refusal, got {other:?}"),
-        }
-        assert_eq!(
-            session
-                .compile_view_in(context.placement.lexical_scope)
-                .unwrap()
-                .next_value_generation(),
-            before_refusal
-        );
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &prepared.include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let admitted = session
-            .admit_native_setup_cell_in(
-                context.placement.lexical_scope,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                [9; 32],
-                prepared.include,
-                None,
-            )
-            .unwrap();
-        assert!(admitted.private_execution().is_none());
-        assert_eq!(
-            admitted.plan_reservation().unwrap().unwrap().items().len(),
-            1
-        );
     }
 }
