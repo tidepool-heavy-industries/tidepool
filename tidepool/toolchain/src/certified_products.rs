@@ -28025,10 +28025,7 @@ pub(crate) mod tests {
             ),
             [7; 32],
         );
-        let mut fixture_validation = PackageInterfaceValidation::default();
-        let originals = [first, second].map(|original| {
-            finalize_original_for_inventory(original, &mut fixture_validation).unwrap()
-        });
+        let originals = [first, second];
         let root = tempfile::tempdir().unwrap();
         let references = crate::recovery_artifacts::materialize_certified_products(
             root.path(),
@@ -28129,13 +28126,6 @@ pub(crate) mod tests {
         ];
         let source = tempfile::tempdir().unwrap();
         originals.push(recovery_graph_original(source.path()));
-        let mut fixture_validation = PackageInterfaceValidation::default();
-        let originals = originals
-            .into_iter()
-            .map(|original| {
-                finalize_original_for_inventory(original, &mut fixture_validation).unwrap()
-            })
-            .collect::<Vec<_>>();
         let root = tempfile::tempdir().unwrap();
         let references = crate::recovery_artifacts::materialize_certified_products(
             root.path(),
@@ -28222,9 +28212,6 @@ pub(crate) mod tests {
                     interface_digest: sha(package_bytes),
                 }])], 9, &packages, b"retained-original-interface".to_vec(),
             ), [1; 32]);
-            let original = finalize_original_for_inventory(
-                original, &mut PackageInterfaceValidation::default(),
-            ).unwrap();
             let references = crate::recovery_artifacts::materialize_certified_products(
                 root.path(), [1; 32], std::slice::from_ref(&original),
             ).unwrap();
@@ -28312,9 +28299,6 @@ pub(crate) mod tests {
             ),
             [5; 32],
         );
-        let fixture =
-            finalize_original_for_inventory(fixture, &mut PackageInterfaceValidation::default())
-                .unwrap();
         let cold = recovered_witness_fixtures(std::slice::from_ref(&fixture))
             .remove(0)
             .product;
