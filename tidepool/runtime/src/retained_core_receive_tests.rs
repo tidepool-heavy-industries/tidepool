@@ -215,9 +215,14 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .descriptors()
         .iter()
         .any(|descriptor| descriptor.owner == support));
-    let refusal = missing
-        .extend(&[], &[], lexical.values().cloned().collect())
-        .unwrap_err();
+    let refusal = ExactDeclarationContext::capture_recovery(
+        durable.path(),
+        &[],
+        &support_interfaces,
+        &[],
+        lexical.values().cloned().collect(),
+    )
+    .unwrap_err();
     assert!(matches!(&refusal, CompileError::ExtractFailed(_)));
     assert!(refusal
         .to_string()
