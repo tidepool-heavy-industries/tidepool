@@ -3,9 +3,9 @@
 -- post-optimization Core for ALL bindings including workers, loop-breakers,
 -- and internal helpers that don't get normal unfoldings.
 --
--- Uses findAndReadIface to read .hi files directly from disk, bypassing the
--- PIT (Package Interface Table) cache. The PIT replaces mi_extra_decls with
--- a panic thunk to save memory, so loadSysInterface can't be used here.
+-- HOME reads consume the installed interface owner. Package reads bypass the
+-- PIT (Package Interface Table), which replaces mi_extra_decls with a panic
+-- thunk; package loadSysInterface therefore cannot supply defining bodies.
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
