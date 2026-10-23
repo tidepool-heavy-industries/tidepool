@@ -726,6 +726,24 @@ impl std::fmt::Debug for PreparedCellProgram {
 }
 
 impl PreparedCellProgram {
+    #[cfg(test)]
+    pub(crate) fn assert_world_cursor_controls(
+        &self,
+        program: &Arc<crate::compiler_world::CheckedWorldCellProgram>,
+    ) {
+        let outputs = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(ordinal, item)| {
+                item.native
+                    .as_ref()
+                    .map(|native| (ordinal, native.output.clone()))
+            })
+            .collect::<Vec<_>>();
+        crate::declaration_context::assert_world_program_cursor_refusals(program, &outputs);
+    }
+
     pub fn checked_cell(&self) -> &Arc<crate::checked_cell::ExactCheckedCell> {
         &self.checked
     }
@@ -3245,7 +3263,7 @@ impl SelectedModuleCandidateOffer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ProgramNativeOutput {
     directory: PathBuf,
     target: Arc<PreparedProgram>,
