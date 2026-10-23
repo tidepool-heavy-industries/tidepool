@@ -294,6 +294,9 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         // Hold both real native graphs in the mutated selection. The selected
         // slot changes issuer; it must not fail merely from an absent binding
         // or a missing dependency node in the recorded DATA graph.
+        graph.selections.extend(foreign.selections.iter().cloned());
+        graph.selections.sort_by_key(|scope| scope.selection);
+        graph.selections.dedup_by_key(|scope| scope.selection);
         graph.bindings.extend(foreign.bindings.iter().copied());
         graph.bindings.sort();
         graph.bindings.dedup();
