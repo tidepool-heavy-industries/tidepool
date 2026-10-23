@@ -165,7 +165,7 @@ pub struct AcceptedDeclarationPublication {
 /// A publication keeps the compiler's nominal interface identity. Reusing a
 /// projection binds it to a new logical publication generation, not a new
 /// compiler request or a renamed interface.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum PublicationEvidence {
     NewJoin(PublicationComposition),
     ReusedProjection {

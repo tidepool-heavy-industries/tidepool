@@ -425,7 +425,14 @@ impl AdmittedInspectionInputs {
 
     fn matches_request(&self, request: &InspectionRequest<'_>) -> bool {
         request.session_root == self.view.session_root()
-            && request.exact_context == self.view.exact_compile_context()
+            && match (
+                &request.exact_context,
+                self.view.exact_compile_context().as_ref(),
+            ) {
+                (Some(request), Some(current)) => request.same_authenticated_context(current),
+                (None, None) => true,
+                _ => false,
+            }
             && request.inject_modules == self.view.injected_module_names()
     }
 }
@@ -1116,7 +1123,11 @@ fn validate_inspection_view(
     if view.session() != inputs.view.session()
         || view.lexical_scope() != inputs.view.lexical_scope()
         || !view.is_current_for(&inputs.view)
-        || *exact_context != view.exact_compile_context()
+        || !match (exact_context, view.exact_compile_context().as_ref()) {
+            (Some(request), Some(current)) => request.same_authenticated_context(current),
+            (None, None) => true,
+            _ => false,
+        }
     {
         return Err(invalid("inspection inputs belong to another compile view"));
     }

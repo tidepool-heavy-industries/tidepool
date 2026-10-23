@@ -336,7 +336,7 @@ impl DeclarationRetraction {
 
 /// The sparse generation-addressed declaration graph. A reserved identity
 /// has no lexical meaning until a certified join commits it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct DeclLog {
     /// Changes when committed declaration facts are installed or restored.
     /// Zero records exhaustion of the fact revision space.
@@ -349,7 +349,7 @@ pub struct DeclLog {
     turns: BTreeMap<Generation, DeclarationSlot>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum DeclarationSlot {
     Reserved,
     Committed(DeclTurn),
@@ -364,7 +364,7 @@ enum DeclarationSlot {
 /// A compiler-certified merged declaration interface with a public lexical
 /// parent and exact private module provenance. Its interface artifact is
 /// retained by the toolchain cache; there is deliberately no source renderer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct JoinedDeclaration {
     pub turn: DeclTurn,
     pub evidence: super::paired_publication::PublicationEvidence,
@@ -373,7 +373,7 @@ pub(crate) struct JoinedDeclaration {
 
 /// A source-free public tip restored from the compiler's retained-artifact
 /// readback. Its original module identity is never allocated again.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct RecoveredDeclaration {
     pub turn: DeclTurn,
     pub evidence: Arc<tidepool_toolchain::declaration_join::RecoveredDeclarationTip>,
