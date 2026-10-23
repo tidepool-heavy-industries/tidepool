@@ -4176,6 +4176,17 @@ impl ArtifactInventory {
         self.index_admitted_segment(physical, &selection)
     }
 
+    pub(crate) fn bind_captured_segment(
+        &self,
+        physical: Arc<crate::declaration_context::CapturedCompilerStage>,
+    ) -> Result<BoundArtifactSelection, CompileError> {
+        if !Arc::ptr_eq(&self.0, &physical.issued_artifacts().lease.inventory.0) {
+            return Err(failure("physical segment belongs to another inventory"));
+        }
+        let selection = physical.source_selection().clone();
+        self.index_admitted_segment(physical, &selection)
+    }
+
     fn index_admitted_segment(
         &self,
         captured_stage: Arc<crate::declaration_context::CapturedCompilerStage>,

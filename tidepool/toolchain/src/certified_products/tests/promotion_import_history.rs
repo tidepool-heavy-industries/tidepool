@@ -468,7 +468,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
     )
     .unwrap();
-    let prior = initial.recovery_products.clone();
+    let prior = initial.data().recovery_products.clone();
     assert_eq!(prior.len(), 2);
     let initial_a = prior.iter().find(|p| p.owner().module == A).unwrap();
     let initial_b = prior.iter().find(|p| p.owner().module == B).unwrap();
@@ -973,16 +973,16 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .unwrap();
         assert!(globals.is_empty() && additions.is_empty());
         assert!(
-            Arc::ptr_eq(&selected.groups, &shared.products.groups),
+            Arc::ptr_eq(&selected.data().groups, &shared.products.data().groups),
             "item {item} shares module groups"
         );
         assert!(Arc::ptr_eq(
-            &selected.recovery_products,
-            &shared.products.recovery_products
+            &selected.data().recovery_products,
+            &shared.products.data().recovery_products
         ));
         assert!(Arc::ptr_eq(
-            &selected.module_interfaces,
-            &shared.products.module_interfaces
+            &selected.data().module_interfaces,
+            &shared.products.data().module_interfaces
         ));
         assert!(Arc::ptr_eq(
             &selected.source_selection().modules,
@@ -1443,7 +1443,10 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .collect::<BTreeSet<_>>(),
         owner_history
     );
-    assert_eq!(certified.recovery_products.len(), owner_history.len());
+    assert_eq!(
+        certified.data().recovery_products.len(),
+        owner_history.len()
+    );
     let completed = crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
         output.compiler_inputs(),
     )
@@ -1504,7 +1507,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .artifact_view()
         .selected_native_groups()
         .is_empty());
-    let mut latest_recovery = certified.recovery_products.clone();
+    let mut latest_recovery = certified.data().recovery_products.clone();
     for (index, body_tag) in [0, 1, 0].into_iter().enumerate() {
         let product_bytes = raw_products(body_tag);
         let parsed = ParsedModuleProducts::decode(&product_bytes, &package_bundle()).unwrap();
@@ -1575,13 +1578,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         owner_history.insert(current_a.owner().clone());
         owner_history.insert(current_b.owner().clone());
         assert_eq!(
-            next.recovery_products
+            next.data()
+                .recovery_products
                 .iter()
                 .map(|product| product.owner().clone())
                 .collect::<BTreeSet<_>>(),
             owner_history
         );
-        assert_eq!(next.recovery_products.len(), owner_history.len());
+        assert_eq!(next.data().recovery_products.len(), owner_history.len());
         // This is a new interface-only compiler request, not growth of the
         // previous native offer. Retain every old carrier while choosing the
         // newly certified native version for each owner.
@@ -1671,7 +1675,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
                 .collect::<BTreeSet<_>>(),
             owner_history,
         );
-        latest_recovery = next.recovery_products.clone();
+        latest_recovery = next.data().recovery_products.clone();
     }
     assert_eq!(owner_history.len(), 6);
     let retained_owners = latest_recovery

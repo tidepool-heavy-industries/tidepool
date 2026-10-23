@@ -1023,7 +1023,7 @@ fn prepare_world_cell_program_inner(
                         index,
                         &target,
                         &generated,
-                        &certified.recovery_products,
+                        &certified.data().recovery_products,
                     )?;
                     let prefix_artifacts = segment.native_prefix_artifacts()?;
                     let cursor = SegmentItemDemand {
@@ -1058,8 +1058,8 @@ fn prepare_world_cell_program_inner(
                         original_compile_input: None,
                         checked: None,
                         certified_groups: admitted.certified_groups,
-                        recovery_products: certified.recovery_products,
-                        retained_core_products: certified.retained_core_products,
+                        recovery_products: certified.data().recovery_products.clone(),
+                        retained_core_products: certified.data().retained_core_products.clone(),
                         package_interfaces: admitted.package_interfaces,
                     });
                     let output = ProgramNativeOutput {
@@ -4257,12 +4257,12 @@ fn seal_turn_outputs_with_validation(
                 validation,
             )
             .map_err(compiler_evidence_failure)?;
-            crate::declaration_context::issue_certified_product_native_availability(
+            let products = crate::declaration_context::issue_certified_product_native_availability(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &offer.producer,
                 )
                 .sha256(),
-                &mut products,
+                products,
                 request_admission.map(|request| request.compiler_inputs().artifacts()),
                 validation,
             )?;
@@ -4292,7 +4292,9 @@ fn seal_turn_outputs_with_validation(
         .expect("admitted package selection");
     let package_catalog = match segment_originals {
         Some(originals) => segment_package_availability(originals, receipt_packages),
-        None => package_availability_with_validation(receipt_packages, &certified, validation)?,
+        None => {
+            package_availability_with_validation(receipt_packages, certified.data(), validation)?
+        }
     };
     let typed_entry = match typed_item {
         Some((plans, index, admission_digest)) => {
@@ -4308,7 +4310,7 @@ fn seal_turn_outputs_with_validation(
                 source,
                 prepared,
                 &admission.source().generated_source_owner(),
-                &certified.recovery_products,
+                &certified.data().recovery_products,
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
                     &offer.producer,
                 )
@@ -4463,7 +4465,7 @@ fn seal_turn_outputs_with_validation(
             publication_products,
             source,
             version_origin,
-            &certified.recovery_products,
+            &certified.data().recovery_products,
         );
         module_candidates::publish_prepared(publication)?;
     } else if source_segment.is_none() && publication == OriginalOutputPublication::Transaction {
@@ -4481,8 +4483,8 @@ fn seal_turn_outputs_with_validation(
         original_compile_input,
         checked,
         certified_groups: admitted.certified_groups,
-        recovery_products: certified.recovery_products.clone(),
-        retained_core_products: certified.retained_core_products,
+        recovery_products: certified.data().recovery_products.clone(),
+        retained_core_products: certified.data().retained_core_products.clone(),
         package_interfaces: admitted.package_interfaces,
     }))
 }
@@ -4541,7 +4543,7 @@ impl AdmittedNativeTargetProducts {
 #[allow(clippy::too_many_arguments)]
 fn admit_native_target_products(
     output: &invocation_output::CapturedNativeOutput<'_>,
-    certified: &certified_products::CertifiedProducts,
+    certified: &certified_products::CapturedProducts,
     packages: &[Arc<certified_products::CertifiedPackageCodeProduct>],
     package_selection: certified_products::BoundPackageSelection,
     inherited: &crate::artifact_inventory::CompilerSourceSupport,
@@ -4553,7 +4555,7 @@ fn admit_native_target_products(
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
     let prepared = package_selection.prepared_program();
-    let physical = certified.physical_cohort()?;
+    let physical = certified.physical_cohort();
     let target_admission_start = Instant::now();
     let observed = package_selection.authenticated_imports().clone();
     let selected_target = match segment_originals {
@@ -4561,10 +4563,10 @@ fn admit_native_target_products(
             let cursor = segment_cursor.as_mut().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
-            let cohort = certified.physical_cohort()?;
+            let cohort = certified.physical_cohort();
             let physical = cohort.artifacts();
             let values = originals
-                .selected_value_entries(&certified.value_interfaces)
+                .selected_value_entries(&certified.data().value_interfaces)
                 .cloned()
                 .collect::<Vec<_>>();
             physical.inventory().select_native_target(
@@ -4578,7 +4580,7 @@ fn admit_native_target_products(
             )?
         }
         None => {
-            let physical = certified.physical_cohort()?;
+            let physical = certified.physical_cohort();
             physical.artifacts().inventory().select_native_target(
                 physical,
                 observed,
@@ -4599,7 +4601,7 @@ fn admit_native_target_products(
         });
     let selected_groups = Arc::new(physical.certify_groups(
         &artifact_view,
-        &certified.groups,
+        &certified.data().groups,
         baseline,
         validation,
     )?);
@@ -4625,13 +4627,7 @@ fn admit_native_target_products(
     let issued_output = if segment_originals.is_some() {
         crate::declaration_context::IssuedOriginalOutput::from_segment_item(certified)?
     } else {
-        certified
-            .captured_stage()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("compiler output lacks its captured stage owner".into())
-            })?
-            .output()
-            .clone()
+        certified.captured_stage().output().clone()
     };
     Ok(AdmittedNativeTargetProducts {
         output: issued_output,
@@ -6299,7 +6295,7 @@ fn compile_invocation_inner(
             )
             .map_err(compiler_evidence_failure)?;
             if let Some((output, selection)) = inventory_export {
-                catalog_inventory::inventory(output, selection, valid, &certified)?;
+                catalog_inventory::inventory(output, selection, valid, certified.data())?;
             }
             ensure_ready_module_inventory(&receipt.modules, valid)?;
             certified
@@ -6315,17 +6311,7 @@ fn compile_invocation_inner(
                     "module or target owner lacks valid final dependency evidence".into(),
                 ));
             }
-            certified_products::CertifiedProducts {
-                home_contracts: None,
-                issued: None,
-                groups: certified_products::IssuedGroupCandidates::empty(),
-                recovery_products: Arc::from([]),
-                module_interfaces: Arc::from([]),
-                value_interfaces: Arc::from([]),
-                retained_core_products: Default::default(),
-                unissued_source_selection:
-                    certified_products::CertifiedSourceSelection::empty_product_output(),
-            }
+            certified_products::PendingProducts::empty()
         };
         invocation_timing.advance("output_assembly");
         let extra_products: Vec<_> = cached_receipts
@@ -6366,7 +6352,7 @@ fn compile_invocation_inner(
                         semantic_sha256: admission.product_context_digest(),
                     },
                 ),
-                &certified.recovery_products,
+                &certified.data().recovery_products,
             );
             (products, Some(publication))
         } else {
@@ -6379,7 +6365,7 @@ fn compile_invocation_inner(
             extra_products,
             evidence_facts,
             exact_request.as_ref(),
-            Some(&certified.retained_core_products),
+            Some(&certified.data().retained_core_products),
             &mut on_stage,
         )?;
         if valid_evidence.is_none() {
@@ -6393,20 +6379,21 @@ fn compile_invocation_inner(
         let compiler_inputs = exact_request
             .as_ref()
             .map(|request| request.compiler_inputs());
-        let physical_inputs =
-            crate::declaration_context::issue_certified_product_native_availability(
-                crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                    &producer,
-                )
+        let certified = crate::declaration_context::issue_certified_product_native_availability(
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer)
                 .sha256(),
-                &mut certified,
-                compiler_inputs.as_ref().map(|input| input.artifacts()),
-                &mut validation,
-            )?;
+            certified,
+            compiler_inputs.as_ref().map(|input| input.artifacts()),
+            &mut validation,
+        )?;
+        let physical_inputs = certified.captured_stage();
         let target_admission_start = Instant::now();
         invocation_timing.advance("target_admission");
-        let package_catalog =
-            package_availability_with_validation(&receipt.packages, &certified, &mut validation)?;
+        let package_catalog = package_availability_with_validation(
+            &receipt.packages,
+            certified.data(),
+            &mut validation,
+        )?;
         let physical = physical_inputs.issued_artifacts();
         artifacts.artifact_view = physical.clone();
         let mut inherited_completion_support = compiler_inputs
@@ -6421,7 +6408,7 @@ fn compile_invocation_inner(
                 let package_selection = native_output.ordinary_package_selection(
                     name,
                     &target.prepared.bind_package_program(),
-                    &certified,
+                    certified.data(),
                 )?;
                 let observed = package_selection.authenticated_imports().clone();
                 let selected_target = physical.inventory().select_native_target(
@@ -6435,7 +6422,7 @@ fn compile_invocation_inner(
                 )?;
                 let selected_groups = Arc::new(physical_inputs.physical_cohort().certify_groups(
                     selected_target.artifacts(),
-                    &certified.groups,
+                    &certified.data().groups,
                     exact_request.as_ref().map(|request| {
                         crate::declaration_context::CertifiedNativeGroupBaseline::Target(
                             request.groups.as_ref(),
@@ -6487,7 +6474,7 @@ fn compile_invocation_inner(
         invocation_timing.advance("candidate_publication");
         artifacts.issued_output = Some(physical_inputs.output().clone());
         artifacts.certified_groups = physical_inputs.physical_cohort().demanded_products()?;
-        artifacts.recovery_products = certified.recovery_products.to_vec();
+        artifacts.recovery_products = certified.data().recovery_products.to_vec();
         artifacts.completed_source_evidence = valid_evidence.cloned();
         artifacts.producer_identity = Some(producer.as_slice().try_into().map_err(|_| {
             CompileError::ExtractFailed("bound compiler producer identity length".into())
@@ -10140,9 +10127,6 @@ mod module_product_tests {
             module_interfaces: Arc::from([]),
             value_interfaces: Arc::from([]),
             retained_core_products: Default::default(),
-            unissued_source_selection:
-                certified_products::CertifiedSourceSelection::empty_product_output(),
-            issued: None,
         };
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
         let receipt = BTreeMap::from([(owner.clone(), observed.clone())]);

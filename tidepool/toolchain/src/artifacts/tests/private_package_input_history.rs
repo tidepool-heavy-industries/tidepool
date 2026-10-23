@@ -296,9 +296,9 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         ),
     ]);
     let issued = issue_original(directory.path(), &packages);
-    assert_eq!(issued.recovery_products.len(), 1);
-    assert_eq!(issued.groups.len(), 1);
-    assert!(matches!(issued.groups[0].imports(),
+    assert_eq!(issued.data().recovery_products.len(), 1);
+    assert_eq!(issued.data().groups.len(), 1);
+    assert!(matches!(issued.data().groups[0].imports(),
         [ReceiptImportOwner::Package { unit, module, binder, interface_digest }]
         if unit == PACKAGE_UNIT && module == PACKAGE_MODULE
             && binder == &literal() && *interface_digest == witness.sha256));
@@ -328,7 +328,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     let signature = target_wire.signatures[0].clone();
     let mut late_wire = target_wire.clone();
     let target = Arc::new(testing::prepare(target_wire).unwrap());
-    let original = &issued.recovery_products[0];
+    let original = &issued.data().recovery_products[0];
     let accepted = vec![AcceptedGlobal {
         identity: reader(),
         rep: RuntimeRep::LiftedRef,
@@ -883,7 +883,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
     );
     assert_eq!(subset.groups.len(), 2);
     let selected_validation = &mut PackageInterfaceValidation::default();
-    let selected_groups = select_original_groups(&subset, selected_validation).unwrap();
+    let selected_groups = select_original_groups(subset.data(), selected_validation).unwrap();
     let all_groups = selected_package_closure(
         &BTreeMap::new(),
         &subset,

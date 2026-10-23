@@ -25,30 +25,38 @@ fn planned_history_property_config() -> Config {
     config
 }
 
+pub(super) struct PendingOriginal {
+    pub(super) request: ExactCompilationRequest,
+    pub(super) source: ExactSourceAdmission,
+    pub(super) certified: PendingProducts,
+}
+
 pub(super) struct IssuedOriginal {
     pub(super) request: ExactCompilationRequest,
     pub(super) source: ExactSourceAdmission,
-    pub(super) certified: CertifiedProducts,
-    completed_output: Option<crate::declaration_context::IssuedOriginalOutput>,
+    pub(super) certified: CapturedProducts,
 }
 
-impl IssuedOriginal {
-    pub(super) fn complete_native_availability(mut self, producer: &[u8]) -> Self {
-        let stage = crate::declaration_context::issue_certified_product_native_availability(
+impl PendingOriginal {
+    pub(super) fn complete_native_availability(self, producer: &[u8]) -> IssuedOriginal {
+        let certified = crate::declaration_context::issue_certified_product_native_availability(
             CanonicalProducerIdentity::from_producer_bytes(producer).sha256(),
-            &mut self.certified,
+            self.certified,
             Some(self.request.compiler_inputs().artifacts()),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
         .unwrap();
-        self.completed_output = Some(stage.output().clone());
-        self
+        IssuedOriginal {
+            request: self.request,
+            source: self.source,
+            certified,
+        }
     }
+}
 
+impl IssuedOriginal {
     pub(super) fn completed_output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
-        self.completed_output
-            .as_ref()
-            .expect("this fixture completed the physical issuer")
+        self.certified.captured_stage().output()
     }
 }
 
@@ -177,7 +185,7 @@ pub(super) fn issue_planned_original_with_retained_child(
     defined_occurrence: &str,
     child_product: &CertifiedRecoveryProduct,
     child_occurrence: &str,
-) -> Result<IssuedOriginal, crate::CompileError> {
+) -> Result<PendingOriginal, crate::CompileError> {
     assert!(child_product
         .original_native()
         .matches_original(child_product));
@@ -357,11 +365,10 @@ pub(super) fn issue_planned_original_with_retained_child(
         Some(&authored),
     )
     .map_err(|error| crate::CompileError::CompilerEvidence(Box::new(error)))?;
-    Ok(IssuedOriginal {
+    Ok(PendingOriginal {
         request,
         source: source_admission,
         certified,
-        completed_output: None,
     })
 }
 
@@ -372,7 +379,7 @@ fn issue_planned_original(
     include: &[PathBuf],
     source_tag: u8,
     body_tag: u8,
-) -> IssuedOriginal {
+) -> PendingOriginal {
     issue_planned_original_with_source_value(
         root, module, producer, include, source_tag, body_tag, 3,
     )
@@ -387,7 +394,7 @@ pub(super) fn issue_planned_original_with_source_value(
     source_tag: u8,
     body_tag: u8,
     source_value: u8,
-) -> IssuedOriginal {
+) -> PendingOriginal {
     let module_name = module.module_name();
     let source = format!("module {module_name} where\nentry_7 = {source_value}\nentry_11 = 4\n");
     let source_root = root.join(format!("source-{source_tag}"));
@@ -499,16 +506,17 @@ pub(super) fn issue_planned_original_with_source_value(
     )
     .unwrap();
     assert_eq!(
-        certified.recovery_products[0].module_interface().origin(),
+        certified.data().recovery_products[0]
+            .module_interface()
+            .origin(),
         CanonicalOrigin::NativeAuthoredDeclaration {
             generation: module.gen.0
         }
     );
-    IssuedOriginal {
+    PendingOriginal {
         request,
         source: source_admission,
         certified,
-        completed_output: None,
     }
 }
 
@@ -530,27 +538,29 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
     let current = history.last().unwrap();
     let custody = history
         .iter()
-        .flat_map(|issued| issued.certified.recovery_products.iter().cloned())
+        .flat_map(|issued| issued.certified.data().recovery_products.iter().cloned())
         .collect::<Vec<CertifiedRecoveryProduct>>();
     let all_owners = custody
         .iter()
         .map(|product| product.owner().clone())
         .collect::<BTreeSet<_>>();
-    let selected_owner = current.certified.recovery_products[0].owner().clone();
+    let selected_owner = current.certified.data().recovery_products[0]
+        .owner()
+        .clone();
     assert_eq!(all_owners.len(), 3);
     assert!(all_owners
         .iter()
         .all(|owner| { owner.unit == "main" && owner.module == module_name }));
-    let canonical_interface = history[0].certified.recovery_products[0].module_interface();
+    let canonical_interface = history[0].certified.data().recovery_products[0].module_interface();
     assert!(history.iter().all(|issued| {
-        issued.certified.recovery_products[0].module_interface() == canonical_interface
+        issued.certified.data().recovery_products[0].module_interface() == canonical_interface
     }));
 
     let artifact = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
         CanonicalProducerIdentity::from_producer_bytes(&producer).sha256(),
-        &current.certified.recovery_products[0],
+        &current.certified.data().recovery_products[0],
     );
-    let required = original_available_groups(&current.certified.recovery_products[0])
+    let required = original_available_groups(&current.certified.data().recovery_products[0])
         .unwrap()
         .map(|group| group.original_ordinal())
         .collect::<BTreeSet<_>>();
@@ -755,12 +765,12 @@ fn selected_planned_original_matches_generated_issue_and_retention_history() {
                 issued_by_tag.insert(*tag, issued);
             }
             let selected_issue = issued_by_tag.get(&current).unwrap();
-            let selected_owner = selected_issue.certified.recovery_products[0]
+            let selected_owner = selected_issue.certified.data().recovery_products[0]
                 .owner()
                 .clone();
             let mut custody = issued_by_tag
                 .values()
-                .map(|issued| issued.certified.recovery_products[0].clone())
+                .map(|issued| issued.certified.data().recovery_products[0].clone())
                 .collect::<Vec<_>>();
             if reverse_custody {
                 custody.reverse();

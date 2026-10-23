@@ -939,15 +939,12 @@ pub(crate) struct PhysicalCohortInputs<'a> {
 
 impl<'a> PhysicalCohortInputs<'a> {
     pub(crate) fn from_issued_products(
-        products: &'a crate::certified_products::CertifiedProducts,
-    ) -> Result<Self, CompileError> {
-        let stage = products
-            .captured_stage()
-            .ok_or_else(|| failure("compiler products lack their captured stage owner"))?;
-        Ok(Self {
-            stage,
+        products: &'a crate::certified_products::CapturedProducts,
+    ) -> Self {
+        Self {
+            stage: products.captured_stage(),
             selection: products.source_selection(),
-        })
+        }
     }
 
     pub(crate) fn compiler_inputs(&self) -> &'a Arc<OriginalCompilerInputs> {
@@ -1160,21 +1157,14 @@ pub(crate) struct IssuedOriginalOutput {
 
 impl IssuedOriginalOutput {
     pub(crate) fn from_segment_item(
-        products: &crate::certified_products::CertifiedProducts,
+        products: &crate::certified_products::CapturedProducts,
     ) -> Result<Self, CompileError> {
-        let inputs = products
-            .compiler_inputs()
-            .ok_or_else(|| failure("item lacks its issued compiler prefix owner"))?;
+        let inputs = products.compiler_inputs();
         Ok(Self {
             selection: products.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
             inputs: Arc::clone(inputs),
-            physical_inputs: Arc::clone(
-                products
-                    .captured_stage()
-                    .ok_or_else(|| failure("item lacks its physical compiler cohort"))?
-                    .compiler_inputs(),
-            ),
+            physical_inputs: Arc::clone(products.captured_stage().compiler_inputs()),
         })
     }
 
@@ -17339,30 +17329,14 @@ pub(crate) fn certified_product_artifact_view_with_validation(
 
 pub(crate) fn issue_certified_product_native_availability(
     producer: [u8; 32],
-    products: &mut crate::certified_products::CertifiedProducts,
+    products: crate::certified_products::PendingProducts,
     baseline: Option<&ArtifactView>,
     validation: &mut PackageInterfaceValidation,
-) -> Result<Arc<CapturedCompilerStage>, CompileError> {
-    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
-    let entries = certified_product_artifact_entries(
-        producer,
-        &products.recovery_products,
-        &products.module_interfaces,
-        &products.value_interfaces,
-        &view,
-        validation,
-    )?;
-    let inputs = Arc::new(crate::declaration_context::CapturedCompilerStage::issue(
-        &mut products.unissued_source_selection,
-        &view,
-        entries,
-        validation,
-    )?);
-    products.bind_captured_stage(Arc::clone(&inputs));
-    Ok(inputs)
+) -> Result<crate::certified_products::CapturedProducts, CompileError> {
+    products.capture(producer, baseline, validation)
 }
 
-fn certified_product_artifact_entries(
+pub(crate) fn certified_product_artifact_entries(
     producer: [u8; 32],
     products: &[CertifiedRecoveryProduct],
     interfaces: &[crate::certified_products::CertifiedModuleInterface],
