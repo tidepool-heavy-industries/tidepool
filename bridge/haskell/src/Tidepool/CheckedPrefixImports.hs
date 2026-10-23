@@ -309,12 +309,12 @@ refineProgramDeclarationImports originals captured env = mapPrefixImports $ \par
         | owner <- completed, name <- refinementNames owner])
   verified <- refineImports owners completed env parsed
   let select located = case [owner | owner <- owners
-          , unLoc (ideclName (unLoc located)) == moduleName (refinementOwner owner)
-          , ideclQualified (unLoc located) == NotQualified] of
+          , directRefinementImport owner located] of
         [] -> pure KeepImport
         [owner] -> do
           original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
-          selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original)) Nothing)
+          selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original))
+            (ideclImportList (unLoc located)))
           let retained = [name | name <- selected
                 , Map.lookup (key (exportIdentity name)) winners == Just (refinementOwner owner)]
           pure (NarrowUnqualified (map importName retained))
@@ -379,17 +379,22 @@ parsedConstructorOccurrences (LConsWithFields constructors fields) =
         (rdrNameOcc (unLoc (foLabel (unLoc field)))) | field <- IntMap.elems fields]
     [] -> []
 
+-- This syntax identifies the unique direct import whose exact HOME owner and
+-- interface are checked by refineImports. Aliased/package imports keep their
+-- own selection and full-parent qualified clone from the ordinary pass.
+directRefinementImport :: RefinementOwner -> LImportDecl GhcPs -> Bool
+directRefinementImport owner imported = let declaration = unLoc imported in
+  unLoc (ideclName declaration) == moduleName (refinementOwner owner)
+    && ideclQualified declaration == NotQualified
+    && ideclAs declaration == Nothing
+    && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
+    && ideclSource declaration == NotBoot
+
 refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
 refineImports [] [] _ parsed = pure parsed
 refineImports owners protected env parsed = do
   let syntax = unLoc (pm_parsed_source (refinedParsedModule parsed))
       originalImports = hsmodImports syntax
-      direct owner imported = let declaration = unLoc imported in
-        unLoc (ideclName declaration) == moduleName (refinementOwner owner)
-          && ideclQualified declaration == NotQualified
-          && ideclAs declaration == Nothing
-          && (case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
-          && ideclSource declaration == NotBoot
   forM_ (owners ++ protected) $ \owner -> do
     original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
     case refinementReadback owner of
@@ -399,7 +404,7 @@ refineImports owners protected env parsed = do
         actual <- evaluate (hm_iface original) >>= makeStableName
         unless (actual == expected) $
           fail "completed value import lost its exact installed interface allocation"
-    case filter (direct owner) originalImports of
+    case filter (directRefinementImport owner) originalImports of
       [imported] -> case refinementSelection owner of
         OriginalDeclarations -> unless (ideclImportList (unLoc imported) == Nothing) $
           fail "planned declaration requires one direct original wildcard import"
@@ -416,7 +421,7 @@ refineImports owners protected env parsed = do
       namespace _ = ValueNamespace
       key identity = (namespace (exportNamespace identity), exportOccurrence identity)
       shadowKeys = map key (concatMap refinementNames owners)
-  refineUnqualifiedImports (\located -> any (`direct` located) (owners ++ protected))
+  refineUnqualifiedImports (\located -> any (`directRefinementImport` located) (owners ++ protected))
     ((`notElem` shadowKeys) . key . exportIdentity) env parsed
 
 -- Narrow only the unqualified view. The qualified clone keeps the submitted
