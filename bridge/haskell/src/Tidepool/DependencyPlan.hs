@@ -4,13 +4,17 @@
 -- | The request owns dependency observations separately from executable demand.
 -- A retained terminal keeps its exact defining-use and ordered import occurrence.
 module Tidepool.DependencyPlan
-  ( DependencyOrigin(..), NativeOriginalUse, DependencyUseReply(..)
+  ( DependencyOrigin(..), NativeOriginalUse
+  , SourceDependencyQuery, sourceDependencyQuery, NativeDependencyQuery, nativeDependencyQuery
+  , SourceDependencyReply, sourceDependencyRetained
+  , NativeDependencyReply, nativeDependencyPackages, nativeDependencyRetained
+  , exchangeSourceDependencies, exchangeNativeDependencies
   , RetainedOccurrence, DependencyTerminal, terminalBinding
   , CompilerDependencyBasis, FrozenDependencyBasis
   , newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis
   , frozenDependencyGenerations, selectDependencyTerminals
   , requireUnambiguousDependencySymbols
-  , nativeDependencyTerminals, encodeDependencyTerminal, encodeDependencyUses, readDependencyReply
+  , nativeDependencyTerminals, encodeDependencyTerminal
   , NativePreparationFailure(..)
   ) where
 
@@ -41,17 +45,48 @@ originTag NativeOriginal = 1
 data RetainedOccurrence = RetainedOccurrence
   !(BS.ByteString,BS.ByteString,Word32) !Word32 !(BS.ByteString,BS.ByteString)
   !SymbolIdentity !Word64 deriving (Eq,Ord,Show)
-data DependencyUseReply = DependencyUseReply
-  { dependencyPackages :: !(Map.Map SymbolIdentity BS.ByteString)
-  , dependencyRetained :: ![RetainedOccurrence]
+newtype SourceDependencyQuery = SourceDependencyQuery [NativeOriginalUse]
+newtype NativeDependencyQuery = NativeDependencyQuery [NativeOriginalUse]
+
+sourceDependencyQuery :: [NativeOriginalUse] -> SourceDependencyQuery
+sourceDependencyQuery = SourceDependencyQuery . Set.toAscList . Set.fromList
+
+nativeDependencyQuery :: [NativeOriginalUse] -> NativeDependencyQuery
+nativeDependencyQuery = NativeDependencyQuery . Set.toAscList . Set.fromList
+
+newtype SourceDependencyReply = SourceDependencyReply
+  { sourceDependencyRetained :: [RetainedOccurrence] }
+data NativeDependencyReply = NativeDependencyReply
+  { nativeDependencyPackages :: !(Map.Map SymbolIdentity BS.ByteString)
+  , nativeDependencyRetained :: ![RetainedOccurrence]
   }
+
+-- Only the private wire decoder carries both fields. Semantic consumers
+-- receive the branch-specific reply, and SOURCE has no package surface.
+data DecodedDependencyReply = DecodedDependencyReply
+  !(Map.Map SymbolIdentity BS.ByteString) ![RetainedOccurrence]
+
+exchangeSourceDependencies :: NativeDemandExchange -> Word64 -> SourceDependencyQuery
+  -> IO (Map.Map NativeOriginalUse SourceDependencyReply)
+exchangeSourceDependencies exchange stage (SourceDependencyQuery uses) = do
+  decoded <- exchangeNativeDemand exchange stage (encodeDependencyUses SourceDefinition uses)
+    >>= readDependencyReply SourceDefinition uses
+  pure (Map.map (\(DecodedDependencyReply _ retained) -> SourceDependencyReply retained) decoded)
+
+exchangeNativeDependencies :: NativeDemandExchange -> Word64 -> NativeDependencyQuery
+  -> IO (Map.Map NativeOriginalUse NativeDependencyReply)
+exchangeNativeDependencies exchange stage (NativeDependencyQuery uses) = do
+  decoded <- exchangeNativeDemand exchange stage (encodeDependencyUses NativeOriginal uses)
+    >>= readDependencyReply NativeOriginal uses
+  pure (Map.map (\(DecodedDependencyReply packages retained) -> NativeDependencyReply packages retained) decoded)
+
 data DependencyTerminal = DependencyTerminal !DependencyOrigin !NativeOriginalUse !RetainedOccurrence
   deriving (Eq,Ord)
 
 -- Mutable only during the issuing compiler operation. The exchange enforces
 -- its thread/lifetime and request owner; the stage is supplied by that owner.
 data CompilerDependencyBasis = CompilerDependencyBasis !NativeDemandExchange !Word64
-  !(IORef (Map.Map NativeOriginalUse DependencyUseReply))
+  !(IORef (Map.Map NativeOriginalUse SourceDependencyReply))
 data FrozenDependencyBasis = FrozenDependencyBasis [DependencyTerminal]
   (Map.Map SymbolIdentity (Set.Set ((BS.ByteString,BS.ByteString),Word64)))
 
@@ -63,21 +98,20 @@ captureSourceDependencies (CompilerDependencyBasis exchange stage state) uses = 
   known <- readIORef state
   let pending = Set.toAscList (Set.fromList uses `Set.difference` Map.keysSet known)
   unless (null pending) $ do
-    reply <- exchangeNativeDemand exchange stage (encodeDependencyUses SourceDefinition pending)
-      >>= readDependencyReply SourceDefinition pending
+    reply <- exchangeSourceDependencies exchange stage (sourceDependencyQuery pending)
     let combined = Map.union known reply
     writeIORef state combined
 
-sourceTerminals :: Map.Map NativeOriginalUse DependencyUseReply -> [DependencyTerminal]
+sourceTerminals :: Map.Map NativeOriginalUse SourceDependencyReply -> [DependencyTerminal]
 sourceTerminals replies = [DependencyTerminal SourceDefinition use occurrence
-  | (use,reply) <- Map.toAscList replies, occurrence <- dependencyRetained reply]
+  | (use,reply) <- Map.toAscList replies, occurrence <- sourceDependencyRetained reply]
 
-nativeDependencyTerminals :: Map.Map NativeOriginalUse DependencyUseReply -> Set.Set NativeOriginalUse -> IO [DependencyTerminal]
+nativeDependencyTerminals :: Map.Map NativeOriginalUse NativeDependencyReply -> Set.Set NativeOriginalUse -> IO [DependencyTerminal]
 nativeDependencyTerminals replies uses = fmap concat $ mapM select (Set.toAscList uses)
   where
     select use = case Map.lookup use replies of
       Nothing -> throwIO (NativeReplyCorrupt "selected native use lacks its issued reply")
-      Just reply -> pure [DependencyTerminal NativeOriginal use occurrence | occurrence <- dependencyRetained reply]
+      Just reply -> pure [DependencyTerminal NativeOriginal use occurrence | occurrence <- nativeDependencyRetained reply]
 
 freezeDependencyBasis :: CompilerDependencyBasis -> IO FrozenDependencyBasis
 freezeDependencyBasis (CompilerDependencyBasis _ _ state) = do
@@ -183,7 +217,7 @@ nativeUseCoordinate (identity,reference) =
   in (unit,name,interface,original,identity)
 
 readDependencyReply :: DependencyOrigin -> [NativeOriginalUse] -> NativeDemandReply
-  -> IO (Map.Map NativeOriginalUse DependencyUseReply)
+  -> IO (Map.Map NativeOriginalUse DecodedDependencyReply)
 readDependencyReply origin expected reply = case reply of
   NativeRefused bytes -> decode bytes refusal >>= \(reason,diagnostic) ->
     throwIO (NativeDemandRejected reason diagnostic)
@@ -225,7 +259,7 @@ readDependencyReply origin expected reply = case reply of
       original <- binding
       identity <- symbol
       pure (unit,name,interface,original,identity)
-    resolved :: Int -> D.Decoder s (Map.Map NativeOriginalUse DependencyUseReply)
+    resolved :: Int -> D.Decoder s (Map.Map NativeOriginalUse DecodedDependencyReply)
     resolved bound = do
       require 3
       magic "TPDEPENDENCYREPLY1"
@@ -264,7 +298,7 @@ readDependencyReply origin expected reply = case reply of
           pure (RetainedOccurrence (artifact,selection,ordinal) index retained identity generation)
         unless (terminals == Set.toAscList (Set.fromList terminals))
           (fail "dependency terminal order or duplicate")
-        pure (coordinate,DependencyUseReply (Map.fromList roots) terminals)
+        pure (coordinate,DecodedDependencyReply (Map.fromList roots) terminals)
       unless (map fst rows == map fst expectedRows)
         (fail "native reply missing, foreign, duplicate or reordered use")
       pure (Map.fromList [(entry,roots) | ((_,entry),(_,roots)) <- zip expectedRows rows])
