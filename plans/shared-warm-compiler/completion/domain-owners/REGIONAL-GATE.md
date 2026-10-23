@@ -12,8 +12,10 @@ later G2 failure does not by itself locate a defect in this region.
 ## Sequence
 
 1. Compile the joined production and test consumers with the pinned toolchain.
-   The current 32-target queue includes Rust runtime, toolchain, actor and
+   The initial 32-target queue includes Rust runtime, toolchain, actor and
    extractor consumers plus the changed Haskell worker and three test binaries.
+   Ordinary-turn API deletion adds host library and unit consumers (34 total);
+   SOURCE-borrow controls also require the worker-response test target.
    Compile any additional target selected by the regional matrix before execution.
 2. Run the existing 15-case repair shortlist for fast feedback. Then execute the
    nonoverlapping regional controls, retaining discovered, selected and executed

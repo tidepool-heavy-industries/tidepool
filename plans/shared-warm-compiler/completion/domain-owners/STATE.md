@@ -1,236 +1,123 @@
 # Current implementation and qualification
 
-Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
-Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
-`integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `33ae06028c`: 32 requested consumers stopped on five
-Haskell compile diagnostics in three targets; zero tests ran. Repair candidate
-`aeff15a6e0` has freshly generated Cabal metadata and is running the same joined
-compile. `REGIONAL-GATE.md` owns the invariant-based regional execution and
-adversarial closeout before the next G2 run. The previous `2de0e83ee2` pin
-compiled 17 consumers and executed nine tests: five passed and four failed.
-These are bounded review checkpoints, not a release.
+Updated 2026-10-23. **Regional closeout is open; G2 and G3 are unqualified.**
+Integration: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
+`integration/g2-domain-runtime-20261023`. `LIVE-COMPLETION.md` owns accepted
+boundaries; `REGIONAL-GATE.md` owns qualification before the next G2 run.
 
-## Integrated boundaries
+## Observed checkpoint
 
-- Selected compiler rows retain their issuing acquisitions through certification,
-  continuation and demand. Broad catalogs retain certified byte custody; catalog
-  object identity cannot choose a request's selected acquisition.
-- Pending drafts are consumed into captured products with mandatory stage/prefix
-  ownership. Item projection shares the physical stage and advances its prefix.
-- Native input, pending-current, completed-current and completed-prior states
-  carry actual owners. Carried availability is independent of executable demand;
-  equal compiler roles preserve whole-row Receiving precedence.
-- Checked extensions bind their receiver and decide row selection once. Strict
-  same-namespace append and independent reconciliation remain separate.
-- Prepared transport owns exact inputs, metadata, backing and delivery mode;
-  packet and arena cleanup lifetimes remain distinct.
-- Terminal SOURCE projection keeps actual output roles and consumed obligations.
-  Persistent source extension stays strict.
-- The checked-value installer restores actual operand interfaces before demand
-  renaming and across compiler phases; both actual operand cases passed at cf62.
-- Target value permission follows exact executable native dependency bindings,
-  separately from TYPE visibility and retained byte custody. The real three-item
-  history now refuses premature use and succeeds after publication.
+At `3e177d665a`, all 32 selected production/test consumers compiled. The regional
+queue subsequently attempted **120 distinct leaves across `3e177d665a` and
+`4967e50f31`: 101 passed, 19 failed** (89 Rust and 31 Haskell). One failure was an
+invalid compiler-diagnostics setting in a lifetime measurement; its corrected
+retry is pending. These counts describe a mixed-revision investigative sweep,
+not a single passing joined candidate. All 13 distinct paired compile contracts
+have positive/refusal evidence across recorded pins, including the repaired
+mutable-session pair at `4967e50f31`.
 
-Deleted production surfaces include live projection-to-receipt reconstruction,
-optional captured-product fallback, unchecked stage attachment and the native
-origin/version/availability cross-product. The unused
-`from_certified_continuation` route is also deleted. Test-only alternatives
-require the cross-language closeout below.
+Exact commands, discovered/executed counts, artifacts, hashes and failures:
+`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/4967-regional-checkpoint.json`.
+Rust process and resident compiler cleanup were confirmed. Haskell launcher exits
+were retained; they do not provide a separate teardown receipt. The validator
+released `4967e50f31` cleanly with no active clients.
 
-## Finite-path retirement is incomplete
+The next warm checkpoint is `35e077d2c5`: 34-consumer compilation (previous 32,
+plus host library and unit tests) and the package refusal diagnostic. Later
+reviewed repairs are integrated through `73f68b0d56`; they require a subsequent
+immutable validation pin. Do not relabel older artifacts with the current HEAD.
 
-The live actor notebook is World-only. The former finite notebook entry points
-and their implementation are deleted (`23128ec4fa`, 1,513 removed lines).
-Ordinary native sealing now requires the completed output witness and receipt;
-the unreachable finite segment branches and fallback reads are deleted. The
-test-only unsealed native-output constructor is also deleted; its tests now
-exercise data capture and assembly without claiming execution authority.
+## Purge and preserved boundaries
 
-The source purge now also removes the checked-cell DTOs, finite ownership
-variants, runtime `check_cell`, Rust/Haskell `--cell` transport, request field 31,
-finite recipe/state/item-receipt machinery and their exclusive tests. Checked
-cells retain the actual World owner directly; checked native entries require
-their sealed typed proof. No optional finite fallback survives in these owners.
-Meaningful tests use actual World issuance or test certified data at its own
-boundary. Missing/corrupt staged-output controls enter actual World publication.
+The live notebook is World-only. The finite notebook entry points, checked-cell
+DTOs and runtime check path, Rust/Haskell `--cell` transport, request field 31,
+finite recipe/state/item receipts, fallback reconstruction and exclusive test
+issuers are deleted. The fabricated successful SOURCE promotion factory was
+removed after its real replacement passed. The bounded joined source audits
+found no surviving finite notebook route; regional qualification remains open.
 
-`f16cecf8e8` removes the old fabricated SOURCE promotion history and successful
-SOURCE-authority factory after the real replacement history passed at `2de0`.
-The real promotion body and its assertion helpers are preserved. Other inline
-fixture families are not covered by that bounded deletion claim.
+Ordinary native compilation for bootstrap, unprepared installers and package
+Original entries, parser-only `--cell-plan`, and activation preview are supported
+production consumers. They do not restore the deleted notebook implementation.
+`TurnRequest.target` was an unsupported leftover and is now deleted, including
+47 empty caller fields. Target selection is restricted to Source requests at
+request admission; the legacy CLI option is explicitly refused.
 
-Remaining closeout work:
+The immutable-session compile fixture was a stale caller, not an alternate API.
+Both session facade and state owner require `&mut self` and `SettledCellProgram`.
+The positive pair now compiles and the negative pair still refuses raw
+`Arc<CellProgram>` at the intended boundary.
 
-- Compile both language consumers at the repaired joined revision. Fresh pinned
-  Cabal metadata and Rust generated targets are integrated; 75 registration and
-  source-participation checks pass at the test-mode repair. Two actual checked-value authority cases
-  retain their resident compiler resources.
-- Execute the four repaired ownership controls. The joined materialization
-  bypass now checks actual issuance, with shared-owner and competing-owner cases;
-  the other repairs distinguish root permission and compiler roles from custody.
-- Execute the independently reviewed scaffold retirement and two restored
-  real-compiler World regression contracts: qualified equality under the custom
-  Prelude, and authored versus imported missing-record warnings. Both are
-  integrated through `33ae06028c`; the finite entry point remains deleted.
-- Execute the initial 15 controls, then the additional regional invariant matrix
-  and repeat independent source/coverage review. The initial shortlist alone does
-  not qualify the rebuilt region. Only after that closeout run G2 and record its
-  actual progression or failure boundary; see `REGIONAL-GATE.md`.
+## Regional failure disposition
 
-Preserve parser-only `--cell-plan` and ordinary native compilation for bootstrap,
-unprepared installers and packaged Original entries. Those are distinct live
-consumers, not the deleted notebook path. `ProgramNativeOutputOrigin::Ordinary`
-now names that distinction. Cross-language compilation and independent joined
-review are required before claiming retirement complete.
+These are source-reviewed repairs unless execution is explicitly stated.
 
-## Adversarial findings and disposition
-
-| Finding | Disposition | Remaining proof |
+| Boundary | Finding and repair | Remaining evidence |
 |---|---|---|
-| Demand conflated selected acquisition with catalog object identity | Repaired `dfd09fd83d`; actual acquisition case passed at cf62 | Bounded independent source review accepted |
-| Producer-B test equated ordinary and World identity domains | Actual RetainedCore B and cold-request A control passed at `791f` | No new global identity equivalence claimed |
-| Target guard treated private custody as executable permission | Reproduced at `3559`; repaired `d098d86d40`; actual three-item case passed at `791f` | Historical scope component control still being repaired |
-| Physical test used full-stage cohort at item-target boundary | Synthetic tail retired; foreign-inventory refusal moved to actual item | Actual three-item test passed through terminal sealing at `2de0` |
-| Test-only `program_request` allowed absent transport backing | Deleted; actual request owner carries backing; lifetime/FD/merge cases passed at `791f` | Two remaining SOURCE oracle repairs integrated for `186ec` |
-| Helpers and inline receipts fabricated successful SOURCE authority | Actual native handoff passed at `4a19`; promotion and its refusal tail passed at `2de0`; bounded old factory deleted | Joined compilation after deletion; other inline fixture families remain separately scoped |
-| Focused compiler tests do not execute runtime values | Explicit qualification limit | Joined runtime/actor execution and observed values before G2 |
+| Parallel SOURCE discovery | Live Make child threads hit the handler-only ThreadId check. Request/stage-bound SOURCE-only borrowing serializes complete frames and basis union; native acquisition stays handler-owned. | Compile; transport/cancellation controls; real-row memo coalescing; mixed-stage, preview and cached-HOME histories with jobs=2 |
+| Authored warnings | Pipeline completion lost structured warnings and WorldPrepare returned an empty list. Paired rendered/structured diagnostics now survive actual completion; concurrent collection is atomic. | Actual authored-warning positive and imported-warning exclusion |
+| Ordinary request targets | Unsupported target fields and stale CLI/input assumptions removed. | Joined host/test compile; ordinary positive and Source-only target refusal |
+| Package occurrence refusal | Test expected deleted rendered wording and may choose an invalid counterfactual too early. Diagnostic now retains the actual error. | Observe exact refusal before repairing the oracle; preserve a discriminating target-slot control |
+| Typed Haskell fixtures | Stale protocol golden and bare generated-template purposes. Fixtures now use the production recipe issuer. | Seven affected leaves, with exact negative tag refusal |
+| Authored SourceBoot resources | Raw child invocation lacked its owned compiler service. Authored producer now uses existing counted isolated libtest runner and declared resources. | Owned bootstrap, count, cleanup and SOURCE reuse execution |
+| Scaffold/preview fixture roles | Tests conflated available groups with selection, and SOURCE refusal with orphan-instance isolation. Both contracts now have separate controls. | Two SourceBoot leaves |
+| Checked-value inspection codec | Nonempty value rows were paired with empty injected-owner inventory. Derive owners from the same rows; retain ordered/duplicate baseline rows. | Empty/one/two-owner positive, exact duplicate refusal and two neighboring real consumers |
+| Cancellation materialization | Fixture prepared another view but expected the old cache owner. It now consumes the actual issued inputs, checks exact identity/bytes and final cleanup. | Interrupted/fresh recovery test |
+| Selected-custody lifetime | A live selection legitimately retained its payload. Test now proves retention, then exact last-owner release without graph traversal. | Lifetime/work-count test |
+| Empty source fixture | Empty Target incorrectly claimed native readiness although only Fresh emitted a native product. Target stays interface-only with source evidence; false Ready claim must refuse. | Both exact-source component histories |
+| Repeated RetainedCore | Sharing compared current SOURCE admission with immutable source identity. Repair compares canonical identity while retaining absent admission. | Repeated-promotion test and adjacent refusal controls; independently source-reviewed and integrated; execution pending |
+| Native history oracle | Model dropped exact peer carriers once one same-ID carrier existed. Full nominal dependency custody requires all prior exact providers, without adding executable roots. | Deterministic six-binding history, generated histories and mutation controls; independently source-reviewed and integrated; execution pending |
+| Test registration | Two renamed index selectors were stale. Source generator and generated target now match actual discovery. | Counted native cohort; 86 lightweight generator checks passed |
 
-The transport review found a missed nested caller, stale producer constants,
-invalid wrong-producer setup, missing source-search context and an admission
-issued for another request. Repairs preserve owner checks; these failures are
-not permission to relax request identity or source admission.
+Actual checked-value authority, initial ownership controls, capture/materialization,
+promotion, 11 FatIface cases and many SOURCE/selection controls passed in the
+recorded sweep. Their exact source and scope remain in the checkpoint. Source
+acceptance of a repair does not replace its execution, and additional controls
+added by repairs increase the next queue beyond the original 120 leaves.
 
-The first actual test wrongly equated retained bytes with visible values. After
-correcting that oracle, it exposed a real permission defect: the target guard
-used broad graph custody to authorize a later executable dependency. The repair
-uses exact native binding edges for both current demand and prior authorization.
-The real counterexample now passes through final three-item sealing. TYPE-only
-reachability and equal payloads from another issuing scope do not authorize use.
+## Next actions and ownership
 
-Raw malformed receipt bytes remain valid input to decoder/refusal tests. They
-must not issue successful source authority for publication or continuation.
-Each repaired join receives another independent bounded adversarial review.
+1. Validator finishes the immutable `35e077d2c5` compile and package diagnostic,
+   then releases it. Root reviews the observed package refusal with its owner.
+2. Integrate the remaining reviewed SOURCE concurrency and promotion/oracle
+   controls; compile every affected owner and cfg consumer at one next pin.
+3. Execute affected failures and their meaningful neighbor/refusal controls;
+   repeat scoped adversarial review of the consolidated changes. Preserve
+   independent raw-data oracles without claiming they issue compiler authority.
+4. Close the rebuilt region only when its required checks pass and no in-scope
+   finding remains. Then run maintained G2 histories and record actual progress
+   and first failure. No frozen bundle or Persona launch is claimed.
 
-## Evidence and pending checks
+Root owns architectural judgment and integration. `interface_backing_impl` owns
+SOURCE borrowing and actual-row tests; `astra_selection_spine_design` owns
+RetainedCore identity and independent custody-model repair; `validation_resume`
+owns warm compilation/execution. Completed fixture owners remain available for
+failures and review. Auditors challenge authority, obsolete routes and sensitivity.
 
-- At **`33ae06028c`**, the **32-consumer compile failed**, with **zero tests
-  executed**. Two production activation-preview calls still referred to a helper
-  deleted with the finite recipe module; the planned-declaration test imported
-  `eqType` from the wrong pinned GHC module and omitted its direct schema
-  dependency; a migrated test treated a typed interface failure as a string.
-  `09abf29e7f` uses the existing template owner, correct imports and direct package
-  dependencies, and preserves the typed failure in both affected test consumers.
-  Independent review accepted that source repair. Fresh Cabal generation and its
-  check passed at `aeff15a6e0`; native compilation and execution remain pending.
-- The regional registration audit found **18 of 24** World semantic cases lacked
-  the resident-mode declaration when selected through the generic runner.
-  `7a44233756` shares the existing case declaration between cohort and generic
-  selection. Its relational test fails before the repair and passes afterward;
-  the lightweight registration/participation suite passes **75/75**. This is test
-  routing evidence, not native execution evidence.
-- At **`65e2eb4ae0`**, the **32-consumer compile failed** on two undefined
-  `scaffold` variables; **zero tests executed**. The earlier decoder and layout
-  blockers are repaired. Both new failures came from a broad text substitution
-  changing consumers of still-present local `imports` producers. `f6ef9e337f`
-  restores those graph/receipt edges. A bounded audit of the original replacement
-  found exactly these two unintended sites and the one intended normalization
-  rename; no authority factory or missing producer is required. `33ae06028c`
-  adds the two independently reviewed World coverage replacements to that repair.
-- At **`831d96eea1`**, the **32-consumer compile failed** at the first Haskell
-  error: activation-preview parsing still called a local signature-decoder alias
-  deleted with the old cell branch. **Zero tests executed.** Independent review
-  also found a dangling old-recipe variable and malformed layout in the retained
-  generated-scaffold consumer. `65e2eb4ae0` calls the existing signature decoder
-  directly and removes the obsolete planned-Original parameter, branch and owner
-  variant instead of retaining a constant-`Nothing` compatibility path. Live
-  template and activation-preview graph/occurrence checks remain. The same
-  joined compile and focused tests are pending on that repair.
-- The bounded joined Rust source audit found no surviving finite notebook route.
-  Its two coverage findings are being ported to actual World preparation. The
-  Haskell source audit found the scaffold compile defect above; other traced
-  World/ordinary routes and 627 generated source paths remained connected.
-  Source audits do not establish execution or qualification.
-- At **`2de0e83ee2`**, **17 consumers compiled** and **nine tests executed:
-  five passed, four failed**, with cleanup confirmed. Actual promotion and its
-  0→1→0 history/refusal tail, three-item ordered sealing, typed cycle refusal,
-  current-cohort ownership and wrapper demand passed. Two native-wire cases
-  reach `RootChoiceMissing`: private availability is not an explicit Original
-  root choice. The Full-borrow test asserted compiler namespace policy on an
-  intermediate physical-custody view; `382ac0b781` moves that assertion to
-  actual request and completed-stage owners. The alias-positive fixture used
-  independently materialized issuers; equal bytes did not establish the claimed
-  shared issuance. Its repair must retain an actual shared-owner positive and
-  an independent-issuer refusal. An adjacent structural-equality path in
-  `certify_artifact_view_groups` is under investigation for the same invariant.
-- The wider source join deletes legacy Rust/Haskell routes and counterfeit
-  checked-output fixtures. Its generated metadata, compilation and focused
-  execution are still pending; it does not inherit the `2de0` passing results.
-- At **`c27c53a877`**, toolchain production/cfg compiled; **10 tests executed,
-  6 passed and 4 failed**, with cleanup confirmed. Actual retained-Core promotion,
-  three-item selection/sealing, historical native permission, custody and two
-  transport controls passed. Failures were invalid test owner/demand premises;
-  repairs are integrated, preserving the production refusal boundaries.
-- At **`f7588c7e2e`**, the 17-consumer compilation attempt failed on two cfg
-  type errors in those repaired history assertions. **Zero tests executed.**
-  Runtime/actor cfg artifacts were rebuilt, but this is not a passing joined
-  compile claim. `96c43de6ff` fixes the two errors.
-- At **`4a1958226c`**, **17 consumers compiled** and **18 tests executed:
-  13 passed, five failed**, with cleanup confirmed. Actual SOURCE handoff,
-  three-item counter/refusal checks and capture cases passed. Subsequent
-  repairs and remaining failures are recorded at `2de0` above. The actual
-  promotion replacement and lower-owner controls now permit the bounded
-  synthetic SOURCE fixture deletion, integrated as `f16cecf8e8`.
-  Positive NEW package additions through full item selection are not covered by
-  the current three-item workload; it only observes stage-owned package witnesses.
-  The lower reconciliation control is retained. No equivalence claim covers that
-  unexecuted branch, and it does not justify a fake SOURCE authority factory.
-- Last full production/cfg compile: **25 consumers passed at `051e6b7e1c`**.
-  Later changes do not inherit a new full25 passing claim.
-- At **`cf62ac30f1`**, matched Haskell worker and toolchain production/cfg
-  **3 targets compiled** in 79.46s. **5 tests ran: 3 passed, 2 failed.** Actual
-  operand used/unused and package-later-cell paths passed, as did acquisition.
-  The old custody and B identity assertions failed and have since been replaced.
-- At **`791f7498a4`**, production/cfg **2 targets compiled**;
-  **12 tests ran: 9 passed, 3 failed**, with process/resident cleanup confirmed.
-  Passes include real three-item refusal/selection/sealing, both actual SOURCE
-  fixtures, actual B ownership, receiver support, sparse private history, and
-  three physical-row lifetime/merge controls. Remaining failures: an invalid
-  historical-value component setup, empty-output lexical expectation, and a
-  string oracle for an actual typed Original conflict. The latter two repairs
-  and further source-backed test migrations were integrated afterward; the
-  current candidate and pending work are recorded above.
-- Earlier evidence includes four transport controls across recorded checkpoints
-  and FatIface11/sourceboot4 at9db5. Newly changed owners require current checks.
-
-Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`, including
-`791f-checkpoint.json` and subsequent checkpoint files. Audits and caller
-classifications: `/srv/swarm/evidence/inanna/c-ownership-20261023/audits/`.
-
-Warm checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
-The validator owns its immutable source pin until commands settle. Use admitted
-local-only pinned workflows; preserve100GiB scratch plus prospective growth.
-Current warm forecast3GiB; recheck actual resources before admission.
+Warm checkout:
+`/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
+Do not change its source while its validator has active commands. Preserve
+100 GiB scratch plus prospective growth; the last observation left only about
+4.5 GiB above that floor. Use warmed, bounded admitted commands, not cold workers.
 
 ## Separate G2 frontier
 
-Actual World capture/declaration/publication succeeds, then
-`segmentRecord historyCaptured` fails with `UnavailableOriginalHomeDependencies`
-for `Val.G1.historyValue0`. Structured evidence shows no exact retained Original
-reference survives into final demand. The responsible GHC transformation remains
-unproven. `NATIVE-REUSE-FRONTIER.md` retains competing explanations and rejected
-shortcuts: do not grant SOURCE authority, match owners by name or eagerly acquire
-all pre-optimization native references to conceal this boundary.
+The earlier World history passed capture/declaration/publication, then
+`segmentRecord historyCaptured` failed with `UnavailableOriginalHomeDependencies`
+for `Val.G1.historyValue0`. Exact retained Original references were absent at
+final demand; the responsible transformation was not established.
+`NATIVE-REUSE-FRONTIER.md` preserves the evidence and competing explanations.
+This investigation resumes after regional closeout with a current reproduction.
+No SOURCE grants, name matching or eager broad acquisition may hide the failure.
 
-After tranche closeout: refresh affected joined compilation, resolve native reuse
-with discriminating execution, run maintained G2 gates and freeze one matched
-bundle. G3 and fresh Persona remain pending. No new bundle or deployment exists.
+## Deferred adjacent findings
 
-## Bounded adjacent finding
+- `CertifiedRecoveryProduct.source_sha256()` means current admission, unlike the
+  canonical interface accessor. An explicit admitted-source name with old-name
+  deletion is a bounded followup; approximately 40 callers need classification.
+- Joined-interface materialization keys `.hi`/`.packages` by the interface digest
+  alone despite committing both. Existing mismatch refusal prevents overwrite;
+  a real same-owner witness and paired key should precede a repair. No live
+  collision has been reproduced.
 
-The joined-interface materializer keys `.hi` and `.packages` by only the `.hi`
-digest although the artifact descriptor commits both. This is a source-level
-contract gap, not a reproduced live collision. Writes refuse mismatches without
-overwriting. A later repair should first retain a real same-owner witness and
-key the pair by both digests; canonical/native collision variants are unproven.
+Historical checkpoints remain in Git and private evidence, not the active plan.

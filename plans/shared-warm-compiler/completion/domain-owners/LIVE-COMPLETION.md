@@ -96,30 +96,20 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The last settled validation candidate is `33ae06028c`: the 32-consumer compile
-stopped on five Haskell diagnostics; no tests executed. `aeff15a6e0` repairs the
-surviving helper consumers, imports, declared dependencies and typed-error callers,
-and includes fresh Cabal metadata. Generic and cohort World test selection now
-share their resident-mode declaration. Joined compilation is running; regional
-execution and independent closeout follow `REGIONAL-GATE.md`. See `STATE.md` for
-exact evidence and qualification limits.
-Adversarial closeout found a demand/catalog identity conflation and surviving
-test-only transport and SOURCE-authority issuers. The demand repair is integrated;
-test migrations and independent review remain open. The actual future-value
-permission defect is fixed and its three-item regression passed at `791f`.
-Delete alternate issuers,
-preserve refusal controls and execute the repaired join before completion. The actual
-World history previously passed initial capture/declaration/publication, then
-failed at retained-value reuse through an authored native declaration. That
-investigation is parked until the rebuilt region is qualified; the next G2 run
-must establish the frontier on the current revision. G2/G3 remain unqualified.
-Finite notebook retirement now deletes the Rust/Haskell transport, ownership
-variants, recipes and exclusive tests. The actual World promotion test passed;
-the obsolete SOURCE fixture issuer is deleted. Cross-language compilation,
-remaining ownership controls and independent joined review still gate completion.
-`STATE.md` distinguishes the ordinary bootstrap/parser paths that remain live.
-Test-only consumers are not grounds to retain obsolete authority issuers.
-Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
+The 32-consumer compile passed at `3e177d665a`. The regional investigative sweep
+attempted 120 distinct leaves across `3e177d665a` and `4967e50f31`: 101 passed,
+19 failed, including one invalid measurement setup requiring retry. All 13 paired
+compile contracts have passing positive/refusal evidence across recorded pins.
+This is not single-revision qualification. `STATE.md` records active repairs and
+exact evidence; `REGIONAL-GATE.md` defines closure before a current G2 run.
+
+Finite notebook production/test alternatives are deleted, including the later
+unsupported ordinary-turn target field. Source audits and prior passes do not
+substitute for execution after these deletions. Actual SOURCE borrowing across
+parallel Make tasks, warning retention, immutable-identity sharing and repaired
+fixture/oracle relationships still require joined validation. The native-reuse
+G2 investigation remains parked until this region is solid. No G2/G3, bundle or
+deployment claim exists.
 
 Warm validation checkout: /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020.
 The validator owns its immutable source pin while commands run. Recheck actual
