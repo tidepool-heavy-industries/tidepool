@@ -697,9 +697,9 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           let pendingUses = Set.toAscList (uses `Set.difference` Map.keysSet answered)
           unless (null pendingUses) $ do
             inputs <- maybe (throwIO WorldCellUnsupported) pure prior
-            received <- exchangeWorldNativeDemand inputs (encodeDependencyUses NativeOriginal pendingUses) >>= readDependencyReply NativeOriginal pendingUses
+            received <- exchangeWorldNativeDemand inputs (nativeDependencyQuery pendingUses)
             known <- readIORef nativePackageObligations
-            combined <- foldM mergePackageObligations known (map (Map.toAscList . dependencyPackages) (Map.elems received))
+            combined <- foldM mergePackageObligations known (map (Map.toAscList . nativeDependencyPackages) (Map.elems received))
             writeIORef nativePackageObligations combined
             -- Acquisition is stage-wide; each final projection below selects
             -- only the entries reached from this target's actual native roots.
@@ -707,10 +707,10 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           acquired <- readIORef nativeUseObligations
           obligations <- foldM (\selected use -> do
             rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
-            mergePackageObligations selected (Map.toAscList (dependencyPackages rows))) Map.empty (Set.toAscList uses)
+            mergePackageObligations selected (Map.toAscList (nativeDependencyPackages rows))) Map.empty (Set.toAscList uses)
           originalImports <- Map.fromList <$> forM (Set.toAscList uses) (\use@(identity,reference) -> do
             rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
-            pure ((reference,identity),Map.keys (dependencyPackages rows)))
+            pure ((reference,identity),Map.keys (nativeDependencyPackages rows)))
           let additions = Set.toAscList ((packages `Set.union` Map.keysSet obligations)
                 `Set.difference` Set.fromList roots)
           if null additions then do
