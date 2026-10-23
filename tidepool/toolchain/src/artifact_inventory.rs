@@ -21042,7 +21042,7 @@ mod tests {
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         )
-        .with_module_interface(product.module_interface().unwrap().clone())
+        .with_module_interface(product.module_interface().clone())
         .unwrap();
         assert!(
             matches!(
