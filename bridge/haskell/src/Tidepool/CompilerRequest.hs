@@ -41,7 +41,7 @@ import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
-  ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
+  ( writeCertifiedSegmentItemProductsWithInputs
   , CompletedWorldProducts, stageWorldProducts, pendingWorldNative
   , completeWorldProducts
   , WorldStageInputs, exchangeWorldNativeDemand, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, withWorldStageBasis, worldStagePriorOriginals, withWorldStageBindings, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts

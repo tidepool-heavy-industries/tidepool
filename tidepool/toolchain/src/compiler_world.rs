@@ -5980,8 +5980,7 @@ impl WorldInputRef {
             }
             WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand => {
                 let seal = ParsedWorldRowSeal {
-                    cid: cid::Cid::try_from(bytes)
-                        .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
+                    cid: cid::Cid::try_from(bytes).map_err(world_response_decode_error)?,
                     encoded: bytes.to_vec(),
                 };
                 if origin == WorldCellRuntimeInputOrigin::BaseWorld {

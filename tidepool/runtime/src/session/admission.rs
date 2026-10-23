@@ -3882,7 +3882,7 @@ impl RuntimeCellAdmission {
                 },
                 RuntimeCellCompilerBasis::World { reservation, .. } => {
                     use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-                    match reservation.slots().get(index) {
+                    match reservation.items().get(index).map(|item| item.slot()) {
                         Some(
                             Slot::Prologue { declaration } | Slot::Declaration { declaration },
                         ) => Some(Generation(declaration)),
@@ -4285,8 +4285,9 @@ impl PersistentSession {
         let (generation, observation_name) =
             if let Some(reservation) = prefix.admission.world_reservation() {
                 let slot = reservation
-                    .slots()
+                    .items()
                     .get(item.index())
+                    .map(|item| item.slot())
                     .ok_or(SessionError::StaleStagedDeclaration)?;
                 let (generation, observation) = match (slot, item.kind()) {
                     (
@@ -4421,7 +4422,11 @@ impl PersistentSession {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         let generation = if let Some(reservation) = prefix.admission.world_reservation() {
             use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-            match reservation.slots().get(item.index()) {
+            match reservation
+                .items()
+                .get(item.index())
+                .map(|item| item.slot())
+            {
                 Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
                     Generation(declaration)
                 }
@@ -7262,7 +7267,7 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.slots().iter().any(|slot| {
+                declaration_baseline: if !reservation.slots().any(|slot| {
                     matches!(slot,
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
