@@ -189,7 +189,7 @@ impl WorldDependencyObservations {
             &'a crate::certified_products::ReceiptImportOwner,
         );
         self.operation
-            .reserve::<(UseKey, Vec<usize>)>(references.len())
+            .reserve::<(UseKey<'_>, Vec<usize>)>(references.len())
             .and_then(|_| {
                 self.operation
                     .reserve::<SealedDependencyRow>(references.len())
@@ -198,8 +198,9 @@ impl WorldDependencyObservations {
                 self.operation
                     .reserve::<Option<RetainedValueEvidence>>(references.len())
             })
+            .and_then(|_| self.operation.reserve::<usize>(references.len()))
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let mut uses = BTreeMap::<UseKey, Vec<usize>>::new();
+        let mut uses = BTreeMap::<UseKey<'_>, Vec<usize>>::new();
         for (index, reference) in references.iter().enumerate() {
             uses.entry((reference.origin, &reference.original_use))
                 .or_default()
@@ -252,6 +253,18 @@ impl WorldDependencyObservations {
                             }
                         }
                     }
+                    self.operation
+                        .reserve::<(usize, Vec<usize>)>(requested.len())
+                        .and_then(|_| self.operation.reserve::<usize>(requested.len()))
+                        .and_then(|_| {
+                            self.operation
+                                .reserve::<Option<RetainedValueEvidence>>(requested.len())
+                        })
+                        .and_then(|_| {
+                            self.operation
+                                .reserve::<NativeRetainedOccurrence<'_>>(requested.len())
+                        })
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                     let mut by_basis = BTreeMap::<usize, Vec<usize>>::new();
                     for (index, occurrence) in requested.iter().enumerate() {
                         let basis = issued.get(occurrence).ok_or_else(|| {
