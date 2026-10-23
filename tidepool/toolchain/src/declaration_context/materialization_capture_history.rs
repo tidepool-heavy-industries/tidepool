@@ -341,7 +341,7 @@ proptest::proptest! {
 
 #[test]
 fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
-    let (context, producer) = metadata_fixture();
+    let (mut context, producer) = metadata_fixture();
     let scratch = tempfile::tempdir().unwrap();
     let request = context
         .prepare_compilation(&scratch.path().join("full"), &producer)
@@ -349,12 +349,20 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
     let directory = request.materialization.directory().path().to_path_buf();
     let before = private_directory_census(&directory);
     let before_files = private_directory_file_bytes(&directory);
+    context = Arc::new(
+        context
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(request.compiler_inputs().compiler_source_support())
+            .unwrap(),
+    );
     let selected = context.compiler_metadata_snapshot().unwrap().entries
         [&identity("fixture", "Beta")]
         .descriptor
         .id;
     let capture = captured_materialization_context(&context, vec![selected]);
     let weak = Arc::downgrade(&request.materialization);
+    let issued_row = Arc::downgrade(&request.materialization.rows[&selected]);
     drop(request);
     drop(context);
     assert!(weak.upgrade().is_none());
@@ -368,6 +376,16 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
         .prepare_compilation(&scratch.path().join("selected"), &producer)
         .unwrap();
     assert_eq!(request.artifacts.len(), 1);
+    assert!(
+        std::ptr::eq(
+            request
+                .materialization
+                .selected_rows(&request.transport_metadata)[&selected],
+            issued_row.as_ptr(),
+        ),
+        "selected capture keeps the exact issued physical row"
+    );
+
     assert!(request.artifacts[0].interface.path.starts_with(&directory));
     let interface = &request.artifacts[0].interface.path;
     assert_eq!(
@@ -385,8 +403,9 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
 #[test]
 fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
     use crate::host_work::{HostWorkCounter, HostWorkObservation};
-    let (first, producer) = metadata_fixture();
-    let (second, _) = metadata_fixture();
+    use std::os::unix::fs::FileExt;
+    let (mut first, producer) = metadata_fixture();
+    let (mut second, _) = metadata_fixture();
     let scratch = tempfile::tempdir().unwrap();
     let first_request = first
         .prepare_compilation(&scratch.path().join("first"), &producer)
@@ -394,6 +413,24 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
     let second_request = second
         .prepare_compilation(&scratch.path().join("second"), &producer)
         .unwrap();
+    first = Arc::new(
+        first
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(
+                first_request.compiler_inputs().compiler_source_support(),
+            )
+            .unwrap(),
+    );
+    second = Arc::new(
+        second
+            .as_ref()
+            .clone()
+            .extend_issued_compiler_support(
+                second_request.compiler_inputs().compiler_source_support(),
+            )
+            .unwrap(),
+    );
     let first_owner = &first_request.materialization;
     let second_owner = &second_request.materialization;
     let metadata = first.compiler_metadata_snapshot().unwrap();
@@ -501,6 +538,14 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
         0
     );
     assert!(!files.is_empty());
+    let read_file = |file: &std::fs::File| {
+        let mut bytes = vec![0; file.metadata().unwrap().len() as usize];
+        file.read_exact_at(&mut bytes, 0).unwrap();
+        bytes
+    };
+    let expected_file_bytes = files.iter().map(|file| read_file(file)).collect::<Vec<_>>();
+    assert!(expected_file_bytes.iter().all(|bytes| !bytes.is_empty()));
+
     let weak_files = files.iter().map(Arc::downgrade).collect::<Vec<_>>();
     drop(expected);
     drop(selected_request);
@@ -513,9 +558,10 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
     drop(second_request);
     drop(first);
     drop(second);
-    assert!(
-        files.iter().all(|file| file.metadata().unwrap().len() > 0),
-        "exact exported leases outlive their issuing row owners"
+    assert_eq!(
+        files.iter().map(|file| read_file(file)).collect::<Vec<_>>(),
+        expected_file_bytes,
+        "exact exported leases preserve bytes after their issuing row owners are released"
     );
     drop(files);
     assert!(weak_files.iter().all(|file| file.upgrade().is_none()));
