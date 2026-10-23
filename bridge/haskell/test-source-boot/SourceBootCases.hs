@@ -230,6 +230,7 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), JoinRejection(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..))
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
+import Tidepool.ImportAdmission (ExactCompilation(..), writeCheckedExactCompilation)
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
@@ -239,11 +240,11 @@ import Tidepool.ExactScope
   , ExactScopeRequestFailure(..)
   , scopeModuleInterfaceProofs, scopeCanonicalInterfaces, admittedInterfaceSourceSha256, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
-  , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
+  , ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
   , extendSourceSelectedOriginals, validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof, canonicalSourceImports
   , originalGroupFromCandidate, originalGroupFromProjected, normalizeInterfaceEvidence
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget, scopeExecutionNativeOwners
-  , writeCheckedExactCompilation )
+  )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)

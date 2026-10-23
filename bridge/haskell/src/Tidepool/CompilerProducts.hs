@@ -82,16 +82,18 @@ import Tidepool.OriginalProductRoots
 import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
+import Tidepool.ImportAdmission
+  ( ExactCompilation(..), compilationSource, captureFinalizedSourceOriginals
+  , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
+  , writeRetainedExactCompilationWithOutputsAndPublication )
 import Tidepool.ExactScope
-  ( WorldOriginalReference, WorldInputFacts, worldInputsProducer, worldInputsProfile, ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), compilationSource, ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
+  ( WorldOriginalReference, WorldInputFacts, worldInputsProducer, worldInputsProfile, ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeRecipeOriginals, scopeExecutionOwners, scopeInterfaces, ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
-  , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
-  , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
   , CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), captureCanonicalMetadata, canonicalOrigin, isSourceOriginal
-  , captureFinalizedSourceOriginals, originalGroupFromProjected, originalGroupFromCandidate
+  , originalGroupFromProjected, originalGroupFromCandidate
   , extendSourceSelectedOriginals, extendExactScopeGeneration, extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeLexical, scopeInterfaceEvidence, scopeExecutionGraphs, ExactInterfaceEvidence(..), canonicalCertificateSha256, canonicalCertificateBytes, canonicalCertificatePath, canonicalSourceSha256 )
 import Tidepool.ExecutionEncode

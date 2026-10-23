@@ -4,15 +4,15 @@
 
 module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
-  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), compilationSource, SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
+  , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactScopeOriginal(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), encodeSourceSelectedOriginals, revalidateSourceSelectedOriginals
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
-  , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, bindCanonicalProofInputs, CanonicalCoreArtifact
+  , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalSourceImport, bindCanonicalProofInputs, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
   , admittedInterfaceHomeUnits, admittedInterfaceSourceSha256, resolveShippedHomeModule, resolveShippedHomeModuleWithEvidence, ShippedHomeModuleRefusal(..), ShippedHomeModuleOrigin(..), CanonicalAdmissionKind(..)
   , admittedInterfaceRequirements, admittedInterfaceCore, captureCanonicalProofs, CanonicalInterfaceUse(..), CapturedCanonicalMetadata, captureCanonicalMetadata, capturedCanonicalMetadataProof, canonicalProofInterfaceBytes, canonicalProofInterfaceBody, canonicalProofOriginalBytes, canonicalProofOriginalBody, relocateCanonicalInterfaceProof, revalidateCanonicalProofInputs
-  , captureFinalizedSourceOriginals, captureSourceOriginals, compilationOriginalSourceImports
+  , captureCheckedSourceOriginals, captureSourceOriginals, originalSourceImports
   , validateCanonicalInterfaceProof, validateCandidateCanonicalInterfaceProof
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCertificateBytes, canonicalCoreArtifact, canonicalInterfaceInput
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalSourceSha256
@@ -24,11 +24,7 @@ module Tidepool.ExactScope
   , exactInputRetentionLimits, commitWorldInputRetention
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes, admittedInterfaceCoreBody
-  , ExactCompilationPublication(..)
-  , writeExactCompilation, writeCheckedExactCompilation
-  , writeRetainedExactCompilation
-  , writeRetainedExactCompilationWithOutputsAndPublication, extendSourceSelectedOriginals
-  , writeCheckedExactCompilationWithOutputsAndPublication
+  , extendSourceSelectedOriginals
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals, freshOutputSealFacts
   , revalidateExactScopesAtWithOutputs
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
@@ -91,13 +87,13 @@ import GHC.Unit.Module.Location (ml_hs_file)
 import GHC.Unit.Types (unitString)
 import Data.Word (Word32, Word64)
 import Numeric (showHex)
-import System.Directory (createDirectory, createDirectoryIfMissing, makeAbsolute, doesFileExist)
+import System.Directory (doesFileExist)
 import System.FilePath (isAbsolute, normalise, hasTrailingPathSeparator, takeDirectory, splitDirectories, (</>))
 import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), withFileObservations, observeFile, fileObservationTotals)
-import System.IO.Error (isAlreadyExistsError, isUserError)
+import System.IO.Error (isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope, IssuedSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
@@ -1429,18 +1425,6 @@ extendSourceSelectedOriginals (Just selected) scope = do
     { ownedScopeLexical=Map.toAscList (Map.union (Map.fromList lexical) existing)
     , ownedScopeSourceSelectedOwners=Set.union selectedKeys (scopeSourceSelectedOwners scope) }
 
-data ExactCompilation = ExactCompilation
-  { compilationScope :: ExactScope
-  , compilationTransaction :: Word64
-  , compilationSourceImports :: IssuedSourceImports
-  -- | Direct imports to retained exact owners, excluded from fresh source lookup.
-  , compilationExactImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
-  , compilationSourceSelection :: Maybe SourceSelectedOriginals
-  } deriving (Eq, Show)
-
-compilationSource :: ExactCompilation -> FilePath
-compilationSource = fst . sourceImportsSnapshot . compilationSourceImports
-
 scopeValueInterfaces :: ExactScope -> [ExactIfaceArtifact]
 scopeValueInterfaces scope = case scopePurpose scope of
   NoCheckedPurpose -> []
@@ -1708,17 +1692,10 @@ validateInterfaceEvidenceUsing readInput verifiedInput readCertificate producer 
 -- The current target is retained by its own checked/native declaration owner.
 -- Only checked cells retain supporting source originals between their segments.
 -- Other requests keep finalization evidence for its independent origin issuer.
-captureFinalizedSourceOriginals
-  :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
-  -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureFinalizedSourceOriginals compilation accepted target finalized evidence
-  | Nothing <- scopeCheckedCell (compilationScope compilation) = pure Map.empty
-  | otherwise = captureCheckedSourceOriginals compilation accepted target finalized evidence
-
 captureCheckedSourceOriginals
-  :: ExactCompilation -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
+  :: ExactScope -> [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])] -> [ModuleCandidate] -> (String,String) -> FinalizedModuleArtifacts
   -> DependencyEvidence -> IO (Map.Map (String,String) CanonicalInterfaceProof)
-captureCheckedSourceOriginals compilation accepted target finalized evidence =
+captureCheckedSourceOriginals scope exactImports accepted target finalized evidence =
   captureSourceOriginals (scopeProducerSha256 scope) (scopeInterfaces scope)
     [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
         (candidateInterface candidate) (candidateInterfaceSha256 candidate)
@@ -1726,8 +1703,7 @@ captureCheckedSourceOriginals compilation accepted target finalized evidence =
         candidatePackageImportsSha256 candidate) | candidate <- accepted]
     (Map.fromList [((T.unpack unit,T.unpack name),T.unpack sha)
       | ((unit,name),sha) <- finalizedValueInterfaceSeals finalized])
-    (compilationExactImports compilation) target finalized evidence
-  where scope = compilationScope compilation
+    exactImports target finalized evidence
 
 -- Both admitted routes issue the same canonical certificate from actual local
 -- captures. The route owns the producer, inherited interfaces and import facts.
@@ -1776,13 +1752,6 @@ captureSourceOriginals producer inherited additional inputSeals exactImports tar
     pure (key,CanonicalInterfaceDescriptor path seal
       (uncurry CanonicalCoreArtifact <$> core) (ScopeInterface SourceOriginalRole))
   validateCanonicalInterfacesWithValueSeals producer interfaces inputSeals descriptors
-
--- The completed source graph and exact-import graph jointly own original
--- authored adjacency, for both canonical issuance and same-cell retention.
-compilationOriginalSourceImports
-  :: ExactCompilation -> DependencyEvidence -> (String,String)
-  -> Either String [CanonicalSourceImport]
-compilationOriginalSourceImports compilation = originalSourceImports (compilationExactImports compilation)
 
 originalSourceImports
   :: [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
@@ -2164,127 +2133,6 @@ revalidateExactScopesAtWithOutputs reason env scopes (FreshOutputSeals outputs) 
           :: IO (Either IOException ())
         pure $ either (Left . show) Right result
   withValidationTiming summary "exact_scope" (validationReasonName reason) readCounts validate
-
--- Every successful compile owns a distinct immutable source snapshot. Check,
--- fold and inspection requests can consume several generated modules, so a
--- later successful transaction must not replace an earlier witness.
-writeExactCompilation
-  :: ExactCompilation -> DependencyEvidence -> IO ()
-writeExactCompilation compilation evidence =
-  captureExactCompilationReceipt compilation evidence >>= publishExactCompilationReceipt
-
--- Publication is data, so no compiler work or caller callback can intervene
--- between the terminal observations and the receipt. Certified bytes are
--- supplied by their product writer; this operation grants no artifact authority.
-data ExactCompilationPublication
-  = ReceiptOnly
-  | PublishCertificate FilePath BS.ByteString
-
--- Metadata has completed all compiler work at this boundary. Capture and
--- validate every consumed source before the terminal current scope/package
--- proof; publishing the receipt afterwards consumes only captured bytes.
-writeCheckedExactCompilation
-  :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
-  CheckedReceiptPublication env [] emptyFreshOutputSeals ReceiptOnly
-
-writeCheckedExactCompilationWithOutputsAndPublication
-  :: HscEnv -> ExactCompilation -> DependencyEvidence -> FreshOutputSeals -> ExactCompilationPublication -> IO ()
-writeCheckedExactCompilationWithOutputsAndPublication env compilation evidence outputs publish =
-  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] outputs publish compilation evidence
-
--- Retention and the checked receipt share this final publication boundary.
--- Capture source evidence first, then check selected scopes and fresh outputs
--- in one proof. No observation or validation token reaches the publisher.
-writeRetainedExactCompilation
-  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
-writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
-  RetainedReceiptPublication env [retained] emptyFreshOutputSeals ReceiptOnly
-
-writeRetainedExactCompilationWithOutputsAndPublication
-  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence
-  -> FreshOutputSeals -> ExactCompilationPublication -> IO ()
-writeRetainedExactCompilationWithOutputsAndPublication env retained compilation evidence outputs publish =
-  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] outputs publish compilation evidence
-
-writeCheckedExactCompilationWithScopes
-  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> FreshOutputSeals
-  -> ExactCompilationPublication -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilationWithScopes reason env retained outputs publishCertificate compilation evidence = do
-  selected <- either fail pure (extendSourceSelectedOriginals
-    (compilationSourceSelection compilation) (compilationScope compilation))
-  receipt <- captureExactCompilationReceipt compilation evidence
-  revalidateExactScopesAtWithOutputs reason env (retained ++ [selected]) outputs >>= either fail pure
-  case publishCertificate of
-    ReceiptOnly -> pure ()
-    PublishCertificate path bytes -> BS.writeFile path bytes
-  publishExactCompilationReceipt receipt
-
--- Kept private so a receipt cannot be constructed from unobserved inputs.
-data ExactCompilationReceipt = ExactCompilationReceipt
-  FilePath Word64 BS.ByteString (FilePath -> BS.ByteString)
-
-captureExactCompilationReceipt
-  :: ExactCompilation -> DependencyEvidence -> IO ExactCompilationReceipt
-captureExactCompilationReceipt compilation evidence = do
-  let scope = compilationScope compilation
-      transaction = compilationTransaction compilation
-      (source,sourceSha) = sourceImportsSnapshot (compilationSourceImports compilation)
-      imports = compilationExactImports compilation
-  path <- makeAbsolute source
-  bytes <- BS.readFile path
-  unless (SHA.hash bytes == sourceSha)
-    (fail "exact compile source differs from its issued import origins")
-  unless (any (\item -> dependencySourcePath item == path
-      && dependencySourceSha256 item == digest bytes) (dependencySources evidence))
-    (fail "exact compile source differs from consumed source")
-  unchanged <- revalidateDependencyEvidence evidence
-  unless unchanged (fail "exact compile consumed source changed before receipt")
-  forM_ (compilationSourceSelection compilation) $ \selected -> do
-    unchangedSelection <- revalidateSourceSelectedOriginals selected
-    unless unchangedSelection
-      (fail "current original source selection changed before receipt")
-  let parent = takeDirectory path </> ".exact-compilations"
-      encodeArray values = E.encodeListLen (fromIntegral (length values)) <> mconcat values
-      text = E.encodeString . T.pack
-      importRow (qualifier, name, boot, unit) = encodeArray
-        [text (renderDependencyQualifier qualifier), text name, E.encodeBool boot, text unit]
-      moduleRow ((unit, name, boot), edges) = encodeArray
-        [text unit, text name, E.encodeBool boot, encodeArray (map importRow edges)]
-      receipt snapshot = toStrictByteString $ encodeArray
-        [text "TPEXACTCOMPILE", text "4", text (scopeRequestSha256 scope)
-        , text (scopeSemanticSha256 scope), text path, text (digest bytes)
-        , text snapshot, text (renderDependencyEvidence evidence)
-        , encodeArray (map moduleRow imports)
-        , encodeSourceSelectedOriginals (compilationSourceSelection compilation)
-        , encodeArray [encodeArray [text qualifier,text name,E.encodeBool boot,text unit,E.encodeInt role]
-            | (qualifier,name,boot,unit,role) <- sourceImportsHomeRoles (compilationSourceImports compilation)]]
-  pure (ExactCompilationReceipt parent transaction bytes receipt)
-
-publishExactCompilationReceipt :: ExactCompilationReceipt -> IO ()
-publishExactCompilationReceipt (ExactCompilationReceipt parent transaction bytes receipt) = do
-  createDirectoryIfMissing True parent
-  directory <- reserveCompilationDirectory parent transaction
-  let snapshot = directory </> "source.hs"
-  BS.writeFile snapshot bytes
-  BS.writeFile (directory </> "receipt.cbor") (receipt snapshot)
-
--- One worker request can check, refine and compile several sources. The
--- request identity correlates diagnostics; it cannot identify one immutable
--- compilation snapshot. Atomic directory creation also keeps concurrent
--- writers from replacing an earlier successful receipt.
-reserveCompilationDirectory :: FilePath -> Word64 -> IO FilePath
-reserveCompilationDirectory parent transaction = attempt (0 :: Int)
-  where
-    attempt ordinal
-      | ordinal >= 4096 = fail "excessive exact compilations in one request"
-      | otherwise = do
-          let path = parent </> (show transaction ++ "-" ++ show ordinal)
-          reserved <- try (createDirectory path) :: IO (Either IOException ())
-          case reserved of
-            Right () -> pure path
-            Left failure | isAlreadyExistsError failure -> attempt (ordinal + 1)
-            Left failure -> throwIO failure
 
 data OfferedScope = OfferedScope String String [(ExactIfaceArtifact,FilePath,String)]
   [((String,String),[(String,String)])] [ExactProduct] [ExecutionSourceRef]
