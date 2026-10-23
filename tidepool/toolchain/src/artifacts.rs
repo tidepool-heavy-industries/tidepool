@@ -1010,7 +1010,6 @@ fn prepare_world_cell_program_inner(
                     )?;
                     let prefix_artifacts = segment.native_prefix_artifacts()?;
                     let cursor = SegmentItemDemand {
-                        selection: &mut artifacts,
                         view: &prefix_artifacts,
                         groups: segment.group_baseline(),
                     };
@@ -1121,7 +1120,6 @@ fn prepare_world_cell_program_inner(
 }
 
 struct SegmentItemDemand<'a> {
-    selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
     view: &'a crate::artifact_inventory::ArtifactView,
     groups: crate::declaration_context::CertifiedNativeGroupBaseline<'a>,
 }
@@ -2193,9 +2191,8 @@ impl SelectedModuleCandidateOffer {
             &output.program,
             "__prepared",
             issue_identity.then_some((&table, sites.as_slice())),
-            None,
             OriginalOutputPublication::Transaction,
-            Some((&native.native_output(), &native.receipt)),
+            (&native.native_output(), &native.receipt),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
                 native.bundle.operation(),
             )),
@@ -2945,12 +2942,11 @@ fn seal_turn_outputs_with_validation(
     program: &crate::prepared_artifact::BoundPackageProgram,
     target: &str,
     identity_metadata: Option<(&DataConTable, &[YieldSite])>,
-    authored: Option<&crate::declaration_join::NativeAuthoredDeclarationAdmission>,
     publication: OriginalOutputPublication,
-    native_output: Option<(
+    native_output: (
         &invocation_output::CapturedNativeOutput<'_>,
         &certified_products::CertifiedReceipt,
-    )>,
+    ),
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     let prepared = program.prepared();
@@ -2959,11 +2955,6 @@ fn seal_turn_outputs_with_validation(
             "turn source changed after worker compile".into(),
         ));
     }
-    let receipt_bytes = if native_output.is_some() {
-        Vec::new()
-    } else {
-        CompilerSidecar::CertifiedProducts.read_observed(output_dir, validation)?
-    };
     let product_bytes = CompilerSidecar::ModuleProducts.read_observed(output_dir, validation)?;
     let packages = CompilerSidecar::ModulePackageImports.read_observed(output_dir, validation)?;
     let evidence_bytes = CompilerSidecar::Dependencies.read_observed(output_dir, validation)?;
@@ -3008,46 +2999,20 @@ fn seal_turn_outputs_with_validation(
         || !fresh_products.products().is_empty()
         || !prepared.globals().is_empty()
         || has_ready_home_module(evidence);
-    if native_output.is_none() && receipt_bytes.is_empty() {
-        if needs_certificate {
-            return Err(CompileError::ExtractFailed(
-                "turn required product certificate unavailable".into(),
-            ));
-        }
-        return Ok(None);
-    }
-    let ordinary_receipt = match native_output {
-        Some((_, receipt)) => std::borrow::Cow::Borrowed(receipt),
-        None => std::borrow::Cow::Owned(
-            certified_products::decode_receipt_with_validation(
-                &receipt_bytes,
-                output_dir,
-                validation,
-            )
-            .map_err(compiler_evidence_failure)?,
-        ),
-    };
-    let captured_package_interfaces = native_output
-        .map(|(output, receipt)| {
-            certified_products::PackageInterfaceCustody::from_native_output(
-                output, receipt, validation,
-            )
-            .map_err(compiler_evidence_failure)
-        })
-        .transpose()?;
-    let package_products = native_output
-        .map(|(output, receipt)| {
-            certify_native_package_products(
-                output,
-                receipt,
-                captured_package_interfaces
-                    .as_ref()
-                    .expect("captured native output custody"),
-                validation,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let (physical_native_output, ordinary_receipt) = native_output;
+    let captured_package_interfaces =
+        certified_products::PackageInterfaceCustody::from_native_output(
+            physical_native_output,
+            ordinary_receipt,
+            validation,
+        )
+        .map_err(compiler_evidence_failure)?;
+    let package_products = certify_native_package_products(
+        physical_native_output,
+        ordinary_receipt,
+        &captured_package_interfaces,
+        validation,
+    )?;
     let Some(valid) = evidence.revalidate(source).is_ok().then_some(evidence) else {
         if needs_certificate
             || ordinary_receipt
@@ -3061,32 +3026,19 @@ fn seal_turn_outputs_with_validation(
         }
         return Ok(None);
     };
-    let independent_package_interfaces;
-    let package_interfaces = match &captured_package_interfaces {
-        Some(interfaces) => interfaces,
-        None => {
-            independent_package_interfaces =
-                certified_products::capture_independent_package_interfaces(
-                    &ordinary_receipt,
-                    validation,
-                )
-                .map_err(compiler_evidence_failure)?;
-            &independent_package_interfaces
-        }
-    };
     timing::record_inventory_work("products.certify.before", output_dir, &validation.inventory);
     let products = certified_products::certify_products_with_validation(
         offer.selected.as_deref(),
-        &ordinary_receipt,
+        ordinary_receipt,
         fresh_products,
         &source_admission,
         output_dir,
         &offer.producer,
         &offer.include,
-        authored,
+        None,
         &offer.selected_session_values,
         None,
-        package_interfaces,
+        &captured_package_interfaces,
         validation,
     )
     .map_err(compiler_evidence_failure)?;
@@ -3113,9 +3065,6 @@ fn seal_turn_outputs_with_validation(
         certified.data(),
         validation,
     )?;
-    let physical_native_output = native_output.map(|(output, _)| output).ok_or_else(|| {
-        CompileError::ExtractFailed("native target lacks completed output authority".into())
-    })?;
     let inherited_inputs = request_admission.map(|request| request.compiler_inputs());
     let no_inherited_inputs = crate::artifact_inventory::CompilerSourceSupport::empty();
     let inherited_support = inherited_inputs
@@ -3331,7 +3280,7 @@ fn admit_native_target_products(
     segment_originals: Option<&certified_products::CertifiedSegmentOriginals>,
     typed_entry: Option<crate::checked_cell::CheckedTypedEntry>,
     inherited_groups: Option<&crate::declaration_context::CertifiedArtifactGroupBindings>,
-    mut segment_cursor: Option<SegmentItemDemand<'_>>,
+    segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<AdmittedNativeTargetProducts, CompileError> {
     let prepared = package_selection.prepared_program();
@@ -3340,7 +3289,7 @@ fn admit_native_target_products(
     let observed = package_selection.authenticated_imports().clone();
     let selected_target = match segment_originals {
         Some(originals) => {
-            let cursor = segment_cursor.as_mut().ok_or_else(|| {
+            let cursor = segment_cursor.as_ref().ok_or_else(|| {
                 CompileError::ExtractFailed("segment item lacks its demand cursor".into())
             })?;
             let cohort = certified.physical_cohort();

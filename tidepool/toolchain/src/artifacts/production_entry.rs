@@ -270,9 +270,8 @@ fn admit_original_entry(
                     &program,
                     "__prepared",
                     Some((&table, &sites)),
-                    None,
                     OriginalOutputPublication::RetainedEntry,
-                    Some((&native.native_output(), &native.receipt)),
+                    (&native.native_output(), &native.receipt),
                     validation,
                 )?
                 .ok_or_else(|| invalid("original native custody unavailable"))?;
