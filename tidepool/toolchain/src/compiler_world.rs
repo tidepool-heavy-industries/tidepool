@@ -3434,7 +3434,7 @@ impl WorldColdRows {
         let iface = find(K::Interface)?;
         let packages = find(K::Packages)?;
         let canonical = match &entry.payload {
-            ArtifactPayload::Original(product) => product.module_interface(),
+            ArtifactPayload::Original(product) => Some(product.module_interface()),
             ArtifactPayload::Canonical(interface) => Some(interface),
             ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
         };

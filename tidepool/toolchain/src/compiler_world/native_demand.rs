@@ -795,6 +795,8 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 for row in basis.rows() {
                     let crate::certified_products::ReceiptImportOwner::OriginalBinding {
                         binder,
+                        interface,
+                        original,
                         ..
                     } = row.reference()
                     else {
