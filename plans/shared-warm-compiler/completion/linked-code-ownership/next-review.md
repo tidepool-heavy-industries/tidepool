@@ -120,6 +120,24 @@ TYPE and body custody do not grant SOURCE. Inherited scope must actually exist;
 protected dependency adjacency must not publish unrelated lexical roots.
 Legitimate historical issued dependencies remain valid alongside newer bodies.
 
+### Remaining completion correction
+
+The checked-value history exposes a domain mismatch: selected GHC HOME imports
+include source-less checked values, while consumed SOURCE edges intentionally do
+not. Keep terminal source-role rows and exact source adjacency on their existing
+SOURCE domain. Classify the actual selected checked-value imports using their
+existing admitted/installed authority during preparation; retain that distinction
+through completion. Require every remaining selected HOME edge to match the
+consumed SOURCE census exactly. Do not silently intersect away unexplained HOME
+owners, add all available TYPE inputs, or insert value imports into canonical
+source adjacency. Ordinary-session and World injection must use their actual
+owners rather than a namesake or source inventory fallback.
+
+The current compiler and affected test executables compile. Restricted-alias,
+physical-span (including 24 generated cases), and planned-declaration lifecycle
+controls pass. Checked-value completion remains failed; broader joined histories
+are pending. Exact revisions and counts live in V's retained checkpoint records.
+
 ## Parallel corrections
 
 Preserve World query failure constructor/phase/detail in bounded, filterable
