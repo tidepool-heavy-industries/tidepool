@@ -52,7 +52,8 @@ data DependencyTerminal = DependencyTerminal !DependencyOrigin !NativeOriginalUs
 -- its thread/lifetime and request owner; the stage is supplied by that owner.
 data CompilerDependencyBasis = CompilerDependencyBasis !NativeDemandExchange !Word64
   !(IORef (Map.Map NativeOriginalUse DependencyUseReply))
-newtype FrozenDependencyBasis = FrozenDependencyBasis [DependencyTerminal]
+data FrozenDependencyBasis = FrozenDependencyBasis [DependencyTerminal]
+  (Map.Map SymbolIdentity (Set.Set ((BS.ByteString,BS.ByteString),Word64)))
 
 newCompilerDependencyBasis :: NativeDemandExchange -> Word64 -> IO CompilerDependencyBasis
 newCompilerDependencyBasis exchange stage = CompilerDependencyBasis exchange stage <$> newIORef Map.empty
@@ -79,17 +80,32 @@ nativeDependencyTerminals replies uses = fmap concat $ mapM select (Set.toAscLis
       Just reply -> pure [DependencyTerminal NativeOriginal use occurrence | occurrence <- dependencyRetained reply]
 
 freezeDependencyBasis :: CompilerDependencyBasis -> IO FrozenDependencyBasis
-freezeDependencyBasis (CompilerDependencyBasis _ _ state) = FrozenDependencyBasis . sourceTerminals <$> readIORef state
+freezeDependencyBasis (CompilerDependencyBasis _ _ state) = do
+  terminals <- sourceTerminals <$> readIORef state
+  let choices = Map.fromListWith Set.union
+        [(identity,Set.singleton (binding,generation))
+          | DependencyTerminal _ _ (RetainedOccurrence _ _ binding identity generation) <- terminals]
+  pure (FrozenDependencyBasis terminals choices)
 
 dependencyGenerations :: CompilerDependencyBasis -> IO (Map.Map SymbolIdentity Word64)
 dependencyGenerations basis = freezeDependencyBasis basis >>= frozenDependencyGenerations
 
 frozenDependencyGenerations :: FrozenDependencyBasis -> IO (Map.Map SymbolIdentity Word64)
-frozenDependencyGenerations (FrozenDependencyBasis terminals) = pure (Map.mapMaybe unique candidates)
-  where
-    candidates = Map.fromListWith Set.union [(identity,Set.singleton generation)
-      | terminal <- terminals, let (identity,generation) = terminalBinding terminal]
-    unique values = case Set.toList values of [value] -> Just value; _ -> Nothing
+frozenDependencyGenerations basis@(FrozenDependencyBasis _ choices) = pure (Map.fromList
+  [(identity,generation) | identity <- Map.keys choices
+    , SourceDependencyUnique generation <- [resolveSourceDependencyUse basis identity]])
+
+-- Absence and conflicting historical owners are separate outcomes. Consumers
+-- must check reached references against this owner before attempting recovery.
+data ResolvedSourceDependencyUse = SourceDependencyAbsent
+  | SourceDependencyUnique Word64 | SourceDependencyConflict
+
+resolveSourceDependencyUse :: FrozenDependencyBasis -> SymbolIdentity -> ResolvedSourceDependencyUse
+resolveSourceDependencyUse (FrozenDependencyBasis _ choices) requested =
+  case maybe [] Set.toList (Map.lookup requested choices) of
+    [] -> SourceDependencyAbsent
+    [(_,generation)] -> SourceDependencyUnique generation
+    _ -> SourceDependencyConflict
 
 terminalBinding :: DependencyTerminal -> (SymbolIdentity,Word64)
 terminalBinding (DependencyTerminal _ _ (RetainedOccurrence _ _ _ identity generation)) = (identity,generation)
@@ -107,13 +123,14 @@ terminalGenerations terminals = do
 -- A generation projection cannot turn a known conflict into absent evidence.
 -- Both recovery front doors call this with their actual reached references.
 requireUnambiguousDependencySymbols :: FrozenDependencyBasis -> Set.Set SymbolIdentity -> IO ()
-requireUnambiguousDependencySymbols (FrozenDependencyBasis terminals) reached = do
-  _ <- terminalGenerations [terminal | terminal <- terminals
-    , fst (terminalBinding terminal) `Set.member` reached]
-  pure ()
+requireUnambiguousDependencySymbols basis reached = forM_ (Set.toAscList reached) $ \identity ->
+  case resolveSourceDependencyUse basis identity of
+    SourceDependencyConflict -> throwIO (DependencyTerminalConflict identity)
+    SourceDependencyAbsent -> pure ()
+    SourceDependencyUnique _ -> pure ()
 
 selectDependencyTerminals :: Set.Set (SymbolIdentity,Word64) -> FrozenDependencyBasis -> IO [DependencyTerminal]
-selectDependencyTerminals needed (FrozenDependencyBasis terminals) = do
+selectDependencyTerminals needed (FrozenDependencyBasis terminals _) = do
   let selected = filter ((`Set.member` needed) . terminalBinding) terminals
   _ <- terminalGenerations selected
   pure selected

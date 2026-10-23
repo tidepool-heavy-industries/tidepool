@@ -4315,6 +4315,9 @@ impl RequestCompilerInputs {
         packet: &crate::certified_products::NativeDemandPacket,
         validation: &mut PackageInterfaceValidation,
     ) -> Result<ResolvedNativeDemand, CompileError> {
+        if packet.kind() != crate::certified_products::native_demand::DependencyQueryKind::NativeOriginal {
+            return Err(failure("SOURCE dependency observation cannot acquire native groups"));
+        }
         let resolved = crate::certified_products::ResolvedOriginalBindings::issue(
             Arc::clone(&self.source_support),
             Arc::clone(&validation.inventory),
@@ -24113,6 +24116,15 @@ mod tests {
         let packet =
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap();
+        let mut source_packet: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let Value::Array(fields) = &mut source_packet else { unreachable!() };
+        fields[1] = Value::Integer(0u64.into());
+        let mut source_bytes = Vec::new();
+        ciborium::ser::into_writer(&source_packet, &mut source_bytes).unwrap();
+        let source_packet = crate::certified_products::NativeDemandPacket::decode(
+            &source_bytes, &validation.inventory).unwrap();
+        assert!(cold.resolve_native_demand(&source_packet, &mut validation).is_err(),
+            "a source observation cannot enter the executable acquisition owner");
         let acquired = cold
             .resolve_native_demand(&packet, &mut validation)
             .unwrap();
