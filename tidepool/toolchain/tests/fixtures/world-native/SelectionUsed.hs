@@ -1,2 +1,2 @@
 let currentSelection = PackageText.length (PackageText.pack "current")
-let laterSelection = OperandEvidence.{{OPERAND_BINDER}} + currentSelection
+let laterSelection = input + currentSelection

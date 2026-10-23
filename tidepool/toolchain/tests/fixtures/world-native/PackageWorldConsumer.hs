@@ -1,1 +1,1 @@
-let laterValue = length OperandEvidence.{{OPERAND_BINDER}} + 1
+let laterValue = length input + 1

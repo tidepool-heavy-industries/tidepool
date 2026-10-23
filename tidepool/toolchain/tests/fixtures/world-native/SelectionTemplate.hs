@@ -3,10 +3,8 @@
 {{CELL_PRAGMAS}}
 module CellCheck where
 import Control.Monad.Freer (Eff)
-import qualified {{OPERAND_MODULE}} as OperandEvidence
 import qualified Data.Text as PackageText
 {{CELL_IMPORTS}}
-unusedOperand = OperandEvidence.{{OPERAND_BINDER}}
 __tidepoolInEffectRow :: Eff '[] value -> Eff '[] value
 __tidepoolInEffectRow = id
 {{CELL_DECLS}}

@@ -278,13 +278,12 @@ fn real_world_package_item_keeps_exact_roots_for_a_later_cell() {
     )
     .expect("the package result is captured by the later-cell operand owner");
     let (prepared, admission) = settle(|| {
-        let body = include_str!("../../tests/fixtures/world-native/PackageWorldConsumer.hs")
-            .replace("{{OPERAND_BINDER}}", &operand.symbol().occurrence);
+        let body = include_str!("../../tests/fixtures/world-native/PackageWorldConsumer.hs");
         let checked = prepare_checked(
             &endpoint,
             &world,
             &source,
-            &body,
+            body,
             Some(operand),
             &[(51, "laterValue")],
         )?;
@@ -904,22 +903,21 @@ fn prepare_checked(
     operand: Option<Arc<CompilerWorldCellOperand>>,
     values: &[(u64, &str)],
 ) -> Result<Arc<CheckedWorldCellProgram>, CompileError> {
-    let (body, template) = match operand.as_ref() {
-        Some(operand) => {
-            let symbol = operand.symbol();
-            (
-                body.replace("{{OPERAND_BINDER}}", &symbol.occurrence),
-                include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs")
-                    .replace("{{OPERAND_MODULE}}", &symbol.module)
-                    .replace("{{OPERAND_BINDER}}", &symbol.occurrence),
-            )
-        }
-        None => (
-            body.into(),
-            include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
-        ),
+    let template = match operand.as_ref() {
+        // The actual operand owner exposes `input`; its source-less module
+        // remains an acquired interface rather than an authored source import.
+        Some(_) => include_str!("../../tests/fixtures/world-native/SelectionTemplate.hs"),
+        None => include_str!("../../tests/fixtures/world-native/CellTemplate.hs"),
     };
-    prepare_checked_with_template(endpoint, world, source, body, operand, values, template)
+    prepare_checked_with_template(
+        endpoint,
+        world,
+        source,
+        body.into(),
+        operand,
+        values,
+        template.into(),
+    )
 }
 
 fn prepare_package_checked(
@@ -1054,7 +1052,7 @@ fn assert_physical_selection(
             .value_entries()
             .iter()
             .any(|entry| entry.descriptor.id == input),
-        "the actual helper RHS must select its operand interface before item projection"
+        "the actual operand owner retains its interface before item projection"
     );
     let relative = PathBuf::from("item-0");
     let path = checked
