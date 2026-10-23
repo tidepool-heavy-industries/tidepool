@@ -87,7 +87,7 @@ import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Data.Maybe qualified as MaybeErr
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt, emptyHomePackageTable, filterHpt)
 import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLogHook)
-import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
+import GHC.Unit.Finder (initFinderCache, addHomeModuleToFinder, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
 import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
@@ -96,7 +96,7 @@ import GHC.Types.SourceText (sl_fs)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
 import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
-import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
+import GHC.Unit.Module.Graph (ModuleGraph, ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager, OneShot), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
@@ -189,7 +189,7 @@ import Tidepool.DependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier
   , selectedFreshHomeRequirements, renderDependencyEvidence, validateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, CheckedValueImportAuthority, noGeneratedScaffoldImports, projectExactLexicalGraph, exactInterfaceSummary
   , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
@@ -594,16 +594,16 @@ checkedValueImports = withScratch $ \work -> do
   let artifact = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2" hi (digest bytes) []
   fresh <- freshExactState producer
   verified <- readCheckedValueImportAuthority fresh [artifact] >>= either fail pure
-  present <- installExactLexicalGraph sourceGraph [] verified producer >>= either fail pure
-  absent <- installExactLexicalGraph sourceGraph [] verified fresh >>= either fail pure
+  present <- either fail (pure . fst) (projectExactLexicalGraph sourceGraph [] verified noGeneratedScaffoldImports producer)
+  absent <- either fail (pure . fst) (projectExactLexicalGraph sourceGraph [] verified noGeneratedScaffoldImports fresh)
   unless ([ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph present)]
       == [mkModuleName "CheckedValueConsumer"]
       && case lookupHpt (hsc_HPT absent) valueName of Nothing -> True; Just _ -> False) $
     fail "checked value import authority installed a value or added a lexical implementation"
-  unverified <- installExactLexicalGraph sourceGraph [] noCheckedValueImports producer
+  let unverified = projectExactLexicalGraph sourceGraph [] noCheckedValueImports noGeneratedScaffoldImports producer
   unless (case unverified of Left _ -> True; Right _ -> False) $
     fail "an HPT value without checked import authority became importable"
-  collision <- installExactLexicalGraph (hsc_mod_graph producer) [] verified producer
+  let collision = projectExactLexicalGraph (hsc_mod_graph producer) [] verified noGeneratedScaffoldImports producer
   unless (case collision of Left _ -> True; Right _ -> False) $
     fail "checked value authority admitted a fresh source owner"
   forM_ [artifact { exactModule = "Tidepool.Session.Val.G3" }
@@ -6989,7 +6989,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
     Right _ -> fail "selected home receipt accepted an unmatched source owner"
   libdir <- getLibdir
   runGhc (Just libdir) $ do
-    rebuilt <- liftIO (installExactLexicalGraph (mkModuleGraph consumers) lexical noCheckedValueImports producer)
+    rebuilt <- liftIO (ghcOracleLexicalEnvironment (mkModuleGraph consumers) lexical noCheckedValueImports producer)
     setSession =<< either (liftIO . fail) pure rebuilt
     case consumers of
       [ModuleNode _ summary] -> do
@@ -7890,7 +7890,7 @@ lazyHomePackageInstances = withScratch $ \work -> do
       && isJust (lookupHpt (hsc_HPT hydrated) helperName)
       && not (Set.null homeDfuns) && Set.null (Set.intersection homeDfuns externalDfuns)) $
     fail "home table replacement changed the retained original's visibility"
-  lexical <- installExactLexicalGraph consumerGraph [(artifact,[])] noCheckedValueImports selected
+  lexical <- ghcOracleLexicalEnvironment consumerGraph [(artifact,[])] noCheckedValueImports selected
     >>= either fail pure
   removeFile helperSource
   libdir <- getLibdir
@@ -7948,3 +7948,19 @@ lazyHomePackageInstances = withScratch $ \work -> do
 -- Fixture requests pass the production pure admission before compiler binding.
 admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
 admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)
+
+-- Independent GHC oracle: preserve the hydrated HMI, including lazy closures,
+-- while giving GHC the lexical graph used to consume it. A deleted interface
+-- path stays deleted; the retained HPT must suffice. This is not a production
+-- interface installer or a source/native permission issuer.
+ghcOracleLexicalEnvironment :: ModuleGraph -> [(ExactIfaceArtifact, [(String,String)])]
+  -> CheckedValueImportAuthority -> HscEnv -> IO (Either String HscEnv)
+ghcOracleLexicalEnvironment graph lexical checked environment =
+  case projectExactLexicalGraph graph lexical checked noGeneratedScaffoldImports environment of
+    Left failure -> pure (Left failure)
+    Right (projected,rows) -> do
+      forM_ rows $ \(artifact,_) ->
+        addHomeModuleToFinder (hsc_FC projected) (hsc_home_unit projected)
+          (GWIB (mkModuleName (exactModule artifact)) NotBoot)
+          (ms_location (exactInterfaceSummary projected artifact))
+      pure (Right projected)
