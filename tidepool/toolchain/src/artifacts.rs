@@ -11154,6 +11154,56 @@ mod module_product_tests {
                 .is_some(),
             "the real sealed output issues original template custody"
         );
+        let original_identity = original.identity();
+        let captured =
+            crate::declaration_context::CapturedTemplateImports::capture(&original, &template)
+                .unwrap()
+                .unwrap();
+        let (mut retained, template_evidence) = captured
+            .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
+            .unwrap();
+        let expected_graph = retained.artifacts().capture_graph_selection();
+        let expected_roles = retained.projection().roles();
+        let expected_offers = retained.native_offers().to_vec();
+        assert!(
+            !expected_roles.is_empty(),
+            "actual template capture selects canonical interfaces"
+        );
+        assert!(
+            expected_graph.roots.iter().all(|root| matches!(
+                root,
+                crate::artifact_inventory::ArtifactBindingNode::Artifact(_)
+            )),
+            "template availability must not create executable group demand"
+        );
+        for _ in 0..3 {
+            let capture =
+                crate::declaration_context::CapturedTemplateImports::capture(&original, &template)
+                    .unwrap()
+                    .unwrap();
+            let (next, evidence) = capture.into_value_support(retained).unwrap();
+            assert_eq!(*evidence, *template_evidence);
+            assert_eq!(next.artifacts().capture_graph_selection(), expected_graph);
+            assert_eq!(next.projection().roles(), expected_roles);
+            assert_eq!(next.native_offers(), expected_offers);
+            retained = next;
+        }
+        assert_eq!(original.identity(), original_identity);
+        let retained_context = crate::declaration_context::ExactDeclarationContext::empty()
+            .extend_issued_compiler_support(&retained)
+            .unwrap();
+        assert!(
+            retained_context.source_scope().rows().is_empty(),
+            "template custody cannot issue SOURCE permission"
+        );
+        drop(retained);
+        drop(template_evidence);
+        assert_eq!(
+            retained_context.artifact_view().capture_graph_selection(),
+            expected_graph,
+            "the retained owner preserves exact roots after temporary captures are released"
+        );
+        drop(retained_context);
         let compiled_executions = std::fs::read_to_string(&counter).unwrap();
         let _restore = RestoreEnvironment(
             ["TIDEPOOL_EXTRACT", tidepool_extract_cmd::DAEMON_SOCKET_ENV]
