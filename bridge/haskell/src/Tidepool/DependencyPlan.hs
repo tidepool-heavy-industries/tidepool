@@ -13,6 +13,7 @@ module Tidepool.DependencyPlan
   , CompilerDependencyBasis, FrozenDependencyBasis
   , newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis
   , frozenDependencyGenerations, selectDependencyTerminals
+  , FinalizedSourceDependencies, finalizeSourceDependencies, finalizedSourceTerminals, finalizedSourceUses
   , requireUnambiguousDependencySymbols
   , nativeDependencyTerminals, encodeDependencyTerminal
   , NativePreparationFailure(..)
@@ -171,6 +172,23 @@ selectDependencyTerminals needed (FrozenDependencyBasis terminals _) = do
   let selected = filter ((`Set.member` needed) . terminalBinding) terminals
   _ <- terminalGenerations selected
   pure selected
+
+-- A completed stage borrows only SOURCE decisions selected from its own
+-- frozen operation. Native terminals cannot enter the inherited source route.
+newtype FinalizedSourceDependencies = FinalizedSourceDependencies [DependencyTerminal]
+
+finalizeSourceDependencies :: Maybe FrozenDependencyBasis -> Set.Set (SymbolIdentity,Word64)
+  -> IO FinalizedSourceDependencies
+finalizeSourceDependencies Nothing _ = pure (FinalizedSourceDependencies [])
+finalizeSourceDependencies (Just basis) needed =
+  FinalizedSourceDependencies <$> selectDependencyTerminals needed basis
+
+finalizedSourceTerminals :: FinalizedSourceDependencies -> [DependencyTerminal]
+finalizedSourceTerminals (FinalizedSourceDependencies terminals) = terminals
+
+finalizedSourceUses :: FinalizedSourceDependencies -> [NativeOriginalUse]
+finalizedSourceUses (FinalizedSourceDependencies terminals) = Set.toAscList (Set.fromList
+  [use | DependencyTerminal SourceDefinition use _ <- terminals])
 
 encodeDependencyTerminal :: DependencyTerminal -> Encoding
 encodeDependencyTerminal (DependencyTerminal origin use (RetainedOccurrence (artifact,scope,ordinal) index retained identity generation)) =
