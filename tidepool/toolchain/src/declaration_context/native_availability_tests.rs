@@ -11569,6 +11569,7 @@ fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody() {
+    use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
     let fixture = compiled_publication_fixture();
@@ -11599,23 +11600,41 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
     let (_, evidence) = captured
         .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
         .unwrap();
-    let inventory = source.artifact_view().inventory();
     let initial_support = source
         .compiler_source_support()
-        .select_support_roots(
+        .selected_interfaces()
+        .unwrap()
+        .type_interfaces_for_owners(
             source
                 .compiler_input_projection()
-                .roles()
-                .iter()
-                .map(CompilerInputRole::interface)
+                .snapshot_roles()
+                .keys()
+                .cloned()
                 .collect(),
         )
         .unwrap()
-        .finalize_namespace()
+        .retain_custody(source.artifact_view())
         .unwrap();
-    let initial = initial_support.artifacts();
-    let projection = initial_support.projection().clone();
-    assert_eq!(&projection, source.compiler_input_projection());
+    let baseline = ExactDeclarationContext::empty()
+        .extend_issued_compiler_support(&initial_support)
+        .unwrap();
+    assert!(baseline.source_scope().rows().is_empty());
+    assert!(baseline.lexical_graph().is_empty());
+    let initial = baseline.artifact_view();
+    let inventory = initial.inventory();
+    let projection = baseline.compiler_input_projection().clone();
+    assert_eq!(
+        projection.roles().len(),
+        source.compiler_input_projection().roles().len()
+    );
+    for (owner, role) in projection.snapshot_roles() {
+        assert!(role.original().is_none());
+        assert_eq!(
+            role.interface(),
+            source.compiler_input_projection().snapshot_roles()[owner].interface()
+        );
+    }
+    assert!(initial.selected_native_groups().is_empty());
     let full_support = source.compiler_source_support();
     assert!(full_support
         .native_offers()
@@ -11638,7 +11657,16 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         let chosen = inventory
             .admit_recovery_selection(initial, vec![], &selected)
             .unwrap();
-        let support = fixture_compiler_support(projection.clone(), chosen)
+        // The selected groups issue this mode. Broader Full proofs are retained
+        // afterward without widening the normalized permission row.
+        let offer = IssuedNativeOffer::issue(
+            entry.descriptor.id,
+            &chosen,
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen).unwrap(),
+        )
+        .unwrap();
+        let support = fixture_support_with_issued_offers(projection.clone(), chosen, [offer])
+            .unwrap()
             .retain_offers(full_support.native_offers().iter().cloned())
             .unwrap();
         assert!(support.native_offers().iter().any(|offer| offer.is_full()));
@@ -11655,6 +11683,13 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .rebuild(|facts| facts.template_imports = Some(evidence.clone()))
             .finish()
             .unwrap();
+        assert!(exported.source_scope().rows().is_empty());
+        assert!(exported.lexical_graph().is_empty());
+        assert!(exported
+            .compiler_input_roles()
+            .iter()
+            .all(|role| role.original().is_none()));
+        assert!(exported.artifact_view().selected_native_groups().is_empty());
         if let Some((prior_evidence, prior_context)) = &previous {
             assert_eq!(
                 &evidence, prior_evidence,
