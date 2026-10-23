@@ -12370,7 +12370,7 @@ mod tests {
                     .extend_issued_compiler_support(&chosen)
                     .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
                 .unwrap();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -12392,7 +12392,7 @@ mod tests {
                         .extend_issued_compiler_support(&selected)
                         .unwrap();
                 let inputs = context
-                    .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                    .capture_world_primary_inputs(native.descriptor.producer_sha256)
                     .unwrap();
                 let selection =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -12522,7 +12522,7 @@ mod tests {
                 .extend_issued_compiler_support(&selected)
                 .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
                 .unwrap();
             let selected_receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
@@ -12575,7 +12575,7 @@ mod tests {
                 .extend_issued_compiler_support(&unselected)
                 .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(native.descriptor.producer_sha256)
+                .capture_world_primary_inputs(native.descriptor.producer_sha256)
                 .unwrap();
             let receipt =
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
@@ -12786,7 +12786,7 @@ mod tests {
                     .extend_issued_compiler_support(&joined)
                     .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs(roots[0].0.descriptor.producer_sha256)
+                .capture_world_primary_inputs(roots[0].0.descriptor.producer_sha256)
                 .unwrap();
             let selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -15985,7 +15985,7 @@ mod tests {
             .unwrap();
             let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
             let inputs = issuer_context
-                .capture_world_primary_compiler_inputs([2; 32])
+                .capture_world_primary_inputs([2; 32])
                 .unwrap();
             let certified =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -16965,7 +16965,7 @@ mod tests {
                 let before_edges = parent.binding_dependencies();
                 let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let inputs = issuer_context
-                    .capture_world_primary_compiler_inputs([2; 32])
+                    .capture_world_primary_inputs([2; 32])
                     .unwrap();
                 let receipt =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(

@@ -1933,7 +1933,7 @@ fn complete_output_and_support_merge_keep_issued_custody_distinct_from_demand() 
                     .extend_issued_compiler_support(admitted)
                     .unwrap();
             let inputs = context
-                .capture_world_primary_compiler_inputs([2; 32])
+                .capture_world_primary_inputs([2; 32])
                 .unwrap();
             let continuation =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(

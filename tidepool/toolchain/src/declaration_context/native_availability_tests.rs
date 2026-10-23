@@ -4372,7 +4372,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             .admit_producer(producer.sha256())
             .unwrap();
         let cold = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
         let error = NativeCompilerTransport::lower_metadata(&cold)
@@ -4402,7 +4402,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
             .admit_producer(producer.sha256())
             .unwrap();
         let initial = initial_context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         assert_eq!(
             initial
@@ -4871,7 +4871,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         if !dependency_in_roles {
             let owner = &entries[0].descriptor.owner;
             let initial = context
-                .capture_world_primary_compiler_inputs(producer.sha256())
+                .capture_world_primary_inputs(producer.sha256())
                 .unwrap();
             assert_eq!(
                 initial
@@ -4897,7 +4897,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
             assert_eq!(advanced.changed_owners, vec![owner.clone()]);
             let cold = advanced
                 .context
-                .capture_world_primary_compiler_inputs(producer.sha256())
+                .capture_world_primary_inputs(producer.sha256())
                 .unwrap();
             assert_eq!(
                 advanced.inputs.native_selection.candidates.0,

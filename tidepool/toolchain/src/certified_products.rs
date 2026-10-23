@@ -25769,7 +25769,7 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&support)
             .unwrap();
         let request = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         assert!(!request
             .projection()
@@ -26014,7 +26014,7 @@ pub(crate) mod tests {
             .extend_issued_compiler_support(&selected)
             .unwrap();
         let inputs = context
-            .capture_world_primary_compiler_inputs(producer.sha256())
+            .capture_world_primary_inputs(producer.sha256())
             .unwrap();
         let mut uses = Vec::new();
         for (entry, product, ordinal) in [(&g_entry, &g, 7), (&j_entry, &j, 9)] {

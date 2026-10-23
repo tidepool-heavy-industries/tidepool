@@ -1699,7 +1699,7 @@ enum BindingInterfaceEvidence {
 pub struct ExactHostBindingPrototype {
     signature: ExactCheckedSignature,
     evidence: BindingInterfaceEvidence,
-    context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    type_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
     producer: [u8; 32],
     digest: [u8; 32],
 }
@@ -1717,8 +1717,8 @@ impl ExactHostBindingPrototype {
         &self.signature
     }
 
-    pub fn context(&self) -> &Arc<crate::declaration_context::ExactDeclarationContext> {
-        &self.context
+    pub fn type_interfaces(&self) -> &Arc<crate::declaration_context::SelectedTypeInterfaces> {
+        &self.type_interfaces
     }
     pub fn producer(&self) -> [u8; 32] {
         self.producer
@@ -1776,7 +1776,7 @@ impl ExactHostBindingPrototype {
             evidence: BindingInterfaceEvidence::HostBuilt {
                 original_binder: binder.clone(),
             },
-            context,
+            type_interfaces: context,
             producer,
             digest: hash.finalize().into(),
         }))
@@ -1786,15 +1786,15 @@ impl ExactHostBindingPrototype {
     /// runtime pairs this proof with that site's separately owned live payload.
     pub fn from_original_input(
         witness: CanonicalInputTypeWitness,
-        original_context: Arc<crate::declaration_context::ExactDeclarationContext>,
+        original_type_interfaces: Arc<crate::declaration_context::SelectedTypeInterfaces>,
     ) -> Result<Arc<Self>, CompileError> {
-        let producer = original_context.toolchain_identity_sha256();
+        let producer = original_interfaces.toolchain_identity_sha256();
         if producer == [0; 32] {
             return Err(failure(
                 "original input context lacks its compiler producer",
             ));
         }
-        let context = Arc::new(original_context.select_original_type_interfaces(&[&witness], &[])?);
+        let context = Arc::new(original_interfaces.select(&[&witness], &[])?);
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&encode_signature(witness.signature()), &mut encoded)
             .expect("signature encodes to memory");
@@ -1808,7 +1808,7 @@ impl ExactHostBindingPrototype {
         Ok(Arc::new(Self {
             signature: witness.signature().clone(),
             evidence: BindingInterfaceEvidence::OriginalLiveInput { witness },
-            context,
+            type_interfaces: context,
             producer,
             digest: digest.finalize().into(),
         }))
@@ -1868,7 +1868,7 @@ impl ExactHostBindingPrototype {
                 .tempdir()?,
         ));
         let request = self
-            .context
+            .type_interfaces
             .prepare_compilation(&directory.0.path().join("inputs"), producer)?;
         let value = array([
             text("TPHOSTBINDINGINTERFACE"),
@@ -2029,9 +2029,8 @@ impl HostBindingInterfaceOffer {
                 string(&fields[10])?,
             ]),
         )?;
-        let context = (*self.prototype.context)
-            .clone()
-            .project_host_type_interfaces(std::slice::from_ref(&certificate))?;
+        let context = self.prototype.type_interfaces
+            .with_host_value_interfaces(std::slice::from_ref(&certificate))?;
         let row =
             crate::declaration_context::RetainedArtifactMaterialization::capture_checked_value(
                 context.compiler_source_support(),
@@ -2170,12 +2169,12 @@ impl CheckedValueImportAuthority {
 
     /// Borrow the selected values' exact thin TYPE rows and their dependencies.
     /// Their historical source and native support stays with the checked value.
-    pub(crate) fn type_interface_contexts(
+    pub(crate) fn selected_type_interfaces(
         &self,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
-    ) -> Result<Vec<Arc<crate::declaration_context::ExactDeclarationContext>>, CompileError> {
+    ) -> Result<Vec<Arc<crate::declaration_context::SelectedTypeInterfaces>>, CompileError> {
         operation
-            .reserve::<Arc<crate::declaration_context::ExactDeclarationContext>>(self.values.len())
+            .reserve::<Arc<crate::declaration_context::SelectedTypeInterfaces>>(self.values.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         let mut contexts = Vec::with_capacity(self.values.len());
         for value in self.values.values() {

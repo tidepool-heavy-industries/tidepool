@@ -280,7 +280,7 @@ pub(crate) fn validate_original_display_context(
     let _ = context
         .as_ref()
         .clone()
-        .extend_interface_context(prototype.context())?;
+        .extend_type_interfaces(prototype.type_interfaces())?;
     if prototype.original_input_type().is_none() {
         return Err(failure(
             "activation preview requires original live input authority",
