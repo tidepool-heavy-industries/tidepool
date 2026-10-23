@@ -513,7 +513,6 @@ pub(crate) struct CheckedItem {
     kind: CheckedItemKind,
     source: String,
     binders: Vec<String>,
-    pins: Vec<Value>,
     expression: Option<Value>,
     signatures: Vec<ExactCheckedSignature>,
 }
@@ -3479,11 +3478,6 @@ impl ExactCheckedItem {
             .cell
             .checked_item_observation(self.index)
             .expect("exact checked item belongs to its World output");
-        let expected_pins = self
-            .cell
-            .checked_items()
-            .flat_map(|item| &item.pins)
-            .collect::<Vec<_>>();
         let expected_expressions = self
             .cell
             .checked_items()
@@ -3492,7 +3486,7 @@ impl ExactCheckedItem {
         if source != expected.source
             || kind != expected.kind
             || binders != expected.binders
-            || !matches_inventory(pins, &expected_pins, 3)?
+            || !pins.is_empty()
             || !matches_inventory(expressions, &expected_expressions, 4)?
         {
             return Err(failure(
@@ -3828,22 +3822,17 @@ fn decode_checked_items<'a>(
     output: &[Value],
     typed_segments: impl Clone + Iterator<Item = &'a CheckedTypedSegmentPlan>,
     signatures: impl Clone + Iterator<Item = &'a ExactCheckedSignature>,
-    ordered: bool,
 ) -> Result<Vec<CheckedItem>, CompileError> {
     let mut signature_keys = BTreeSet::new();
     if signatures
         .clone()
         .any(|signature| !signature_keys.insert(&signature.key))
     {
-        return Err(if ordered {
-            typed_metadata_failure()
-        } else {
-            failure("duplicate signature authority")
-        });
+        return Err(typed_metadata_failure());
     }
     let pins = list(&output[1], 65536)?;
     let expressions = list(&output[4], 65536)?;
-    if ordered && !pins.is_empty() {
+    if !pins.is_empty() {
         return Err(typed_metadata_failure());
     }
     let items = list(&output[0], 65536)?
@@ -3862,7 +3851,7 @@ fn decode_checked_items<'a>(
                 .iter()
                 .map(|value| string(value).map(str::to_owned))
                 .collect::<Result<Vec<_>, _>>()?;
-            let typed_item = if ordered && kind != CheckedItemKind::Declaration {
+            let typed_item = if kind != CheckedItemKind::Declaration {
                 Some(
                     typed_segments
                         .clone()
@@ -3873,28 +3862,12 @@ fn decode_checked_items<'a>(
             } else {
                 None
             };
-            let item_pins = if !ordered && kind == CheckedItemKind::Bind {
-                binders
-                    .iter()
-                    .map(|binder| {
-                        unique_key(pins, &format!("__tidepool_cell_pin_{index}_{binder}"), 3)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                Vec::new()
-            };
             let expression = if kind == CheckedItemKind::Expression {
-                let key = typed_item.map_or_else(
-                    || format!("__tidepool_cell_expr_{index}"),
-                    |item| item.entry.clone(),
-                );
-                Some(unique_key(expressions, &key, 4).map_err(|error| {
-                    if ordered {
-                        typed_metadata_failure()
-                    } else {
-                        error
-                    }
-                })?)
+                let item = typed_item.ok_or_else(typed_metadata_failure)?;
+                Some(
+                    unique_key(expressions, &item.entry, 4)
+                        .map_err(|_| typed_metadata_failure())?,
+                )
             } else {
                 None
             };
@@ -3914,20 +3887,7 @@ fn decode_checked_items<'a>(
                         }
                     }
                 }
-                None => {
-                    let mut keys = item_pins
-                        .iter()
-                        .map(|value| {
-                            row(value, 3)
-                                .and_then(|row| string(&row[0]))
-                                .map(str::to_owned)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(expression) = &expression {
-                        keys.push(string(&row(expression, 4)?[0])?.to_owned());
-                    }
-                    keys
-                }
+                None => Vec::new(),
             };
             let item_signatures = keys
                 .iter()
@@ -3936,20 +3896,13 @@ fn decode_checked_items<'a>(
                         .clone()
                         .find(|signature| &signature.key == key)
                         .cloned()
-                        .ok_or_else(|| {
-                            if ordered {
-                                typed_metadata_failure()
-                            } else {
-                                failure("checked item lacks complete signature Name authority")
-                            }
-                        })
+                        .ok_or_else(typed_metadata_failure)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CheckedItem {
                 kind,
                 source: string(&fields[2])?.to_owned(),
                 binders,
-                pins: item_pins,
                 expression,
                 signatures: item_signatures,
             })
@@ -3961,18 +3914,13 @@ fn decode_checked_items<'a>(
         .map(|signature| &signature.key)
         .collect::<BTreeSet<_>>();
     if used.len() != signatures.clone().count()
-        || pins.len() != items.iter().map(|item| item.pins.len()).sum::<usize>()
         || expressions.len()
             != items
                 .iter()
                 .filter(|item| item.expression.is_some())
                 .count()
     {
-        return Err(if ordered {
-            typed_metadata_failure()
-        } else {
-            failure("whole-cell authority contains an unowned pin, plan or signature")
-        });
+        return Err(typed_metadata_failure());
     }
     Ok(items)
 }
@@ -4029,7 +3977,7 @@ pub(crate) fn admit_world_checked_items(
         }
     }
     let signatures = proofs.iter().flat_map(|proof| proof.signatures());
-    let items = decode_checked_items(output, segments.iter().map(AsRef::as_ref), signatures, true)?;
+    let items = decode_checked_items(output, segments.iter().map(AsRef::as_ref), signatures)?;
     if items.len() != reservation.plan().items().len() || items.len() != proofs.len() {
         return Err(failure(
             "world observations differ from the reserved item inventory",
@@ -7577,7 +7525,7 @@ mod tests {
             }],
         };
         let decode = |output: &[Value], segments: &[CheckedTypedSegmentPlan]| {
-            decode_checked_items(output, segments.iter(), std::iter::empty(), true)
+            decode_checked_items(output, segments.iter(), std::iter::empty())
         };
         let segments = [segment];
         let items = decode(&output, &segments).unwrap();
