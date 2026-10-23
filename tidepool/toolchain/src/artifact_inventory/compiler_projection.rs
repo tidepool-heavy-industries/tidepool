@@ -7390,10 +7390,10 @@ mod tests {
                 demanded.source_support().input_decisions().recorded_facts(),
                 support.input_decisions().recorded_facts()
             );
-            assert_eq!(
-                demanded.source_support().native_availability(),
-                support.native_availability()
-            );
+            assert!(demanded
+                .source_support()
+                .native_availability()
+                .same_acquisition(support.native_availability()));
         }
     }
 
@@ -8313,7 +8313,11 @@ mod tests {
                 source.native_offers.iter().rev().cloned(),
             )
             .unwrap();
-        assert_ne!(source.native_offers, reversed.native_offers);
+        assert!(!source
+            .native_offers
+            .iter()
+            .zip(reversed.native_offers.iter())
+            .all(|(left, right)| left.same_issuance(right)));
         assert_eq!(source.native_offer_facts, reversed.native_offer_facts);
         assert_eq!(source.projection, reversed.projection);
         assert_eq!(source.artifacts, reversed.artifacts);
@@ -8570,7 +8574,8 @@ mod tests {
                     .collect()
             };
             for (receiving, incoming) in receiving_entries.iter().zip(&incoming_entries) {
-                assert!(receiving.same_recorded_facts(&incoming));
+                assert_eq!(receiving.descriptor, incoming.descriptor);
+                assert_eq!(receiving.requirements, incoming.requirements);
                 assert!(!Arc::ptr_eq(receiving, incoming));
                 let (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =
                     (&receiving.payload, &incoming.payload)
@@ -8671,7 +8676,7 @@ mod tests {
                         .contributions
                         .insert(identity, contribution.clone())
                     {
-                        assert!(prior.same_recorded_facts(contribution));
+                        assert_eq!(prior, contribution);
                     }
                 }
             }
@@ -9599,7 +9604,10 @@ mod tests {
                 merge_work.descriptor_serializations, 0,
                 "joining acquired rows must not reencode their certified products"
             );
-            assert_eq!(merge_work.census_rows, joined.projection.roles.len());
+            assert_eq!(
+                merge_work.census_rows, 0,
+                "persistent merge preserves the receiver's home-unit index"
+            );
             assert!(!joined.selected.rows.is_empty());
             let (kernel, kernel_projection, kernel_decisions) = winner
                 .artifacts
@@ -9674,10 +9682,9 @@ mod tests {
                 joined.input_decisions.recorded_facts(),
                 prior_support.input_decisions.recorded_facts()
             );
-            assert_eq!(
-                joined.native_availability,
-                prior_support.native_availability
-            );
+            assert!(joined
+                .native_availability
+                .same_recorded_facts(&prior_support.native_availability));
             let current_metadata = joined.artifacts.metadata_snapshot();
             let prior_metadata = prior_support.artifacts.metadata_snapshot();
             assert_eq!(current_metadata.entries, prior_metadata.entries);
@@ -10028,12 +10035,10 @@ mod tests {
                     work.canonical_checks, 0,
                     "custody does not revalidate selected interfaces"
                 );
-                assert_eq!(custody, custody_oracle);
-                assert_eq!(offers.len(), offers_oracle.len());
-                assert!(offers
-                    .iter()
-                    .zip(&offers_oracle)
-                    .all(|(actual, expected)| actual.same_recorded_facts(expected)));
+                assert!(custody.same_recorded_facts(&custody_oracle));
+                assert!(offers.same_recorded_facts(&offers_oracle));
+                assert!(custody.same_selected_acquisitions(&support));
+                assert!(offers.same_selected_acquisitions(&support));
                 drop(custody_oracle);
                 drop(offers_oracle);
                 for retained in [custody, offers] {
