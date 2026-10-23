@@ -130,13 +130,48 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
             ));
             assert_narrowing_keeps_selected_acquisition(support, owner, expected);
         }
-        assert_whole_row_precedence(&issued[0], &issued[1], owner);
+        assert_reconciled_whole_row_precedence(&issued[0], &issued[1], owner);
     }
     for (first, second) in [
         (&checked_inputs[0], &checked_inputs[1]),
         (&checked_inputs[1], &checked_inputs[0]),
     ] {
-        assert_whole_row_precedence(&first[0], &second[1], owner);
+        assert_reconciled_whole_row_precedence(&first[0], &second[1], owner);
+    }
+    let shared_inputs = acquisitions.map(|entry| {
+        let inventory = ArtifactInventory::default();
+        let entries = vec![Arc::clone(entry)];
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let groups = entry
+            .native_group_ordinals
+            .iter()
+            .map(|ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal: *ordinal,
+            })
+            .collect();
+        let full = inventory
+            .admit_recovery_selection(&base, Vec::new(), &groups)
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        [base, full].map(|view| {
+            CompilerSourceSupport::from_selected_issuance(projection.clone(), view).unwrap()
+        })
+    });
+    for inputs in &shared_inputs {
+        assert_strict_append_whole_row_precedence(&inputs[0], &inputs[1], owner);
+    }
+    for (first, second) in [
+        (&shared_inputs[0], &shared_inputs[1]),
+        (&shared_inputs[1], &shared_inputs[0]),
+    ] {
+        assert_strict_append_whole_row_precedence(&first[0], &second[1], owner);
     }
     assert_interface_extension_preserves_native_topology(
         &checked_inputs[0][1],
@@ -222,7 +257,7 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
                 products.source_selection(),
             );
             assert_narrowing_keeps_selected_acquisition(&promoted, owner, selected);
-            assert_whole_row_precedence(&promoted, supports[retained], owner);
+            assert_reconciled_whole_row_precedence(&promoted, supports[retained], owner);
             let repeated = source
                 .retain_offers([offers[offered].clone(), offers[offered].clone()])
                 .unwrap()
@@ -331,42 +366,113 @@ fn assert_same_native_decision(
     }
 }
 
-fn assert_whole_row_precedence(
+fn assert_whole_selected_row(
+    expected: &CompilerSourceSupport,
+    actual: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+) {
+    let expected_row = &expected.selected[owner];
+    let actual_row = &actual.selected[owner];
+    assert_eq!(actual_row.interface().0, expected_row.interface().0);
+    assert!(Arc::ptr_eq(
+        &actual_row.interface().1,
+        &expected_row.interface().1
+    ));
+    match (expected_row.original(), actual_row.original()) {
+        (Some((expected_binding, expected)), Some((actual_binding, actual))) => {
+            assert_eq!(actual_binding, expected_binding);
+            assert!(Arc::ptr_eq(actual, expected));
+        }
+        (None, None) => {}
+        _ => panic!("the selected whole row changed its Original policy"),
+    }
+    match (expected_row.publication(), actual_row.publication()) {
+        (Some(expected), Some(actual)) => assert!(Arc::ptr_eq(&actual.birth, &expected.birth)),
+        (None, None) => {}
+        _ => panic!("the selected whole row changed its publication provenance"),
+    }
+    assert_eq!(
+        actual.recorded_rows()[owner],
+        expected.recorded_rows()[owner]
+    );
+    assert_same_native_decision(expected, actual, owner);
+}
+
+fn assert_reconciled_whole_row_precedence(
     first: &CompilerSourceSupport,
     second: &CompilerSourceSupport,
     owner: &ExactModuleIdentity,
 ) {
     for (receiving, incoming) in [(first, second), (second, first)] {
-        // Equal Original policy chooses Receiving, including when the other
-        // completed acquisition was retained first as transport custody.
         let receiving = receiving.retain_custody(incoming.artifacts()).unwrap();
-        let expected = receiving
-            .compiler_roles()
-            .original_acquisition(owner)
-            .unwrap();
-        let appended = receiving.append_program_fragment(incoming).unwrap().support;
-        assert!(Arc::ptr_eq(
-            appended
-                .compiler_roles()
-                .original_acquisition(owner)
-                .unwrap(),
-            expected,
-        ));
-        assert_same_native_decision(&receiving, &appended, owner);
-        // A TYPE receiver chooses the complete Incoming Original row.
+        let receiving_row = &receiving.selected[owner];
+        let incoming_row = &incoming.selected[owner];
+        let different_pair = receiving_row.interface().0 != incoming_row.interface().0
+            || receiving_row.original().map(|(binding, _)| binding)
+                != incoming_row.original().map(|(binding, _)| binding);
+        if different_pair {
+            let reason = if receiving_row.interface().0 != incoming_row.interface().0 {
+                ProgramExtensionRefusal::InterfaceBinding {
+                    receiving: receiving_row.interface().0,
+                    incoming: incoming_row.interface().0,
+                }
+            } else {
+                ProgramExtensionRefusal::OriginalBinding {
+                    receiving: receiving_row.original().unwrap().0,
+                    incoming: incoming_row.original().unwrap().0,
+                }
+            };
+            assert!(
+                matches!(receiving.checked_program_extension(incoming),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::ProgramExtension {
+                        owner: refused_owner, reason: refused_reason,
+                    } if &refused_owner == owner && refused_reason == reason)),
+                "independent scopes refuse strict append with the exact conflicting binding pair"
+            );
+        }
+        // Independent reconciliation chooses the whole Receiving Original,
+        // retaining the other issuer's exact graph only as custody.
+        let joined = receiving.merge(incoming).unwrap();
+        assert_whole_selected_row(&receiving, &joined, owner);
         let types = receiving.for_source_owners(&BTreeSet::new()).unwrap();
-        let appended = types.append_program_fragment(incoming).unwrap().support;
-        assert!(Arc::ptr_eq(
-            appended
-                .compiler_roles()
-                .original_acquisition(owner)
-                .unwrap(),
-            incoming
-                .compiler_roles()
-                .original_acquisition(owner)
-                .unwrap(),
-        ));
-        assert_same_native_decision(incoming, &appended, owner);
+        let joined = types.merge(incoming).unwrap();
+        assert_whole_selected_row(incoming, &joined, owner);
+    }
+}
+
+fn assert_strict_append_whole_row_precedence(
+    first: &CompilerSourceSupport,
+    second: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+) {
+    assert_eq!(
+        first.selected[owner].interface().0,
+        second.selected[owner].interface().0,
+        "strict append controls share their actual admitted canonical binding"
+    );
+    assert_eq!(
+        first.selected[owner].original().unwrap().0,
+        second.selected[owner].original().unwrap().0,
+        "adding executable group roots against one base preserves its Original carrier"
+    );
+    for (receiving, incoming) in [(first, second), (second, first)] {
+        let receiving = receiving.retain_custody(incoming.artifacts()).unwrap();
+        let appended = receiving
+            .checked_program_extension(incoming)
+            .unwrap()
+            .apply()
+            .unwrap()
+            .support;
+        assert_whole_selected_row(&receiving, &appended, owner);
+        let types = receiving.for_source_owners(&BTreeSet::new()).unwrap();
+        let appended = types
+            .checked_program_extension(incoming)
+            .unwrap()
+            .apply()
+            .unwrap()
+            .support;
+        assert_whole_selected_row(incoming, &appended, owner);
     }
 }
 
