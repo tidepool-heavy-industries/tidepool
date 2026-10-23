@@ -124,7 +124,6 @@ async fn run_record_case(source: &str, discriminator: u32) {
                 inject_modules: &[],
                 gen: 1,
                 verdict: None,
-                target: None,
                 retained_imports: &retained,
             },
             settlement,

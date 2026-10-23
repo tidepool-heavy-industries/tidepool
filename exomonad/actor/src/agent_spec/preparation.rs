@@ -1575,7 +1575,6 @@ fn compile_unprepared_installer(
                 binders: Vec::new(),
                 items: Vec::new(),
             }),
-            target: None,
             retained_imports: &[],
         },
         settlement,

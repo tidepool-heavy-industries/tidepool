@@ -3335,7 +3335,6 @@ fn compile_driver(
                 inject_modules: &[],
                 gen: 1,
                 verdict: None,
-                target: None,
                 // The driver is the session's first turn, so there is nothing
                 // retained to link against yet.
                 retained_imports: &[],

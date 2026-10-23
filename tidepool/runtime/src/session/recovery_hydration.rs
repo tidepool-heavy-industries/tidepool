@@ -771,7 +771,6 @@ mod lazy_tests {
                     inject_modules: &[],
                     gen: generation,
                     verdict: None,
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,

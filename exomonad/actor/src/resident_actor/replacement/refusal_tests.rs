@@ -64,7 +64,6 @@ impl Fixture {
                     inject_modules: &[],
                     gen: 1,
                     verdict: None,
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,

@@ -936,7 +936,6 @@ async fn native_mailbox_compiler_lifecycle_history() {
                     inject_modules: &[],
                     gen,
                     verdict: None,
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,

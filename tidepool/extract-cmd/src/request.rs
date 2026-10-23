@@ -943,6 +943,13 @@ impl ExtractRequest {
                 "compiler request selects conflicting operations",
             ));
         }
+        if mode != RequestMode::Source
+            && has(|field| matches!(field, Field::Target(_) | Field::Targets(_)))
+        {
+            return Err(CliError::new(
+                "source targets require source compilation mode",
+            ));
+        }
         if has(|field| matches!(field, Field::PortableOutput))
             && (mode != RequestMode::Source
                 || self
@@ -1024,7 +1031,10 @@ impl ExtractRequest {
                     request.cell_template(Path::new(value(&mut args, "--cell-template")?))
                 }
                 Some("--cell-out") => request.cell_out(value(&mut args, "--cell-out")?),
-                Some(option @ ("--cell" | "--cell-fold-turn" | "--turn-pin")) => {
+                Some(
+                    option
+                    @ ("--cell" | "--cell-fold-turn" | "--turn-pin" | "--target-module-only"),
+                ) => {
                     return Err(CliError::new(format!("retired compiler option: {option}")));
                 }
                 Some("--build-products-dir") => {
@@ -3272,6 +3282,19 @@ mod tests {
                 error.to_string(),
                 format!("retired compiler option: {option}")
             );
+            for recipe in [
+                vec!["input.hs", "--turn"],
+                vec!["input.hs", "--cell-plan"],
+                vec!["input.hs", "--target", "result"],
+            ] {
+                let mut args = recipe.into_iter().map(OsString::from).collect::<Vec<_>>();
+                args.push(option.into());
+                let error = ExtractRequest::from_cli(&args).unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("retired compiler option: {option}")
+                );
+            }
         }
         for args in [
             ["input.hs", "--cell", "--turn"],
@@ -3281,6 +3304,52 @@ mod tests {
                 ExtractRequest::from_cli(&args.into_iter().map(OsString::from).collect::<Vec<_>>())
                     .unwrap_err();
             assert_eq!(error.to_string(), "retired compiler option: --cell");
+        }
+    }
+
+    #[test]
+    fn source_targets_cannot_be_attached_to_turn_operations() {
+        for target in [vec!["--target", "entry"], vec!["--targets", "first,second"]] {
+            let mut source = vec!["input.hs"];
+            source.extend_from_slice(&target);
+            let source = ExtractRequest::from_cli(
+                &source.into_iter().map(OsString::from).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(source.mode(), RequestMode::Source);
+            assert!(!source.target_names().is_empty());
+            for (recipe, mode) in [
+                (
+                    vec!["input.hs", "--turn", "--turn-out", "turn.cbor"],
+                    RequestMode::Turn,
+                ),
+                (
+                    vec![
+                        "input.hs",
+                        "--turn",
+                        "--activation-preview",
+                        "--turn-out",
+                        "turn.cbor",
+                    ],
+                    RequestMode::ActivationPreview,
+                ),
+            ] {
+                let valid = ExtractRequest::from_cli(
+                    &recipe
+                        .iter()
+                        .copied()
+                        .map(OsString::from)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+                assert_eq!(valid.mode(), mode);
+                let mut invalid = recipe;
+                invalid.extend_from_slice(&target);
+                assert!(ExtractRequest::from_cli(
+                    &invalid.into_iter().map(OsString::from).collect::<Vec<_>>(),
+                )
+                .is_err());
+            }
         }
     }
 

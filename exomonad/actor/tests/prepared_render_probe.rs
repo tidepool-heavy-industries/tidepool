@@ -31,7 +31,6 @@ fn probe(label: &str, text: &str, gen: u64) {
                 inject_modules: &[],
                 gen,
                 verdict: None,
-                target: None,
                 retained_imports: &[],
             },
             settlement,

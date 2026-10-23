@@ -1117,7 +1117,6 @@ mod tests {
             command
                 .input(&input)
                 .turn()
-                .target("__prepared")
                 .turn_template(kind, &template_path)
                 .turn_verdict(kind)
                 .turn_out(scratch.path().join("turn.cbor"))

@@ -986,7 +986,6 @@ pub(crate) mod tests {
                     inject_modules: &[],
                     gen: 1,
                     verdict: None,
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,

@@ -647,7 +647,6 @@ fn compile_turn(
                 inject_modules: &injected,
                 gen: view.next_value_generation().0,
                 verdict: None,
-                target: None,
                 retained_imports: retained,
             },
             settlement,

@@ -175,7 +175,6 @@ impl Notebook {
                     inject_modules: &self.injected,
                     gen: self.generation,
                     verdict: None,
-                    target: None,
                     retained_imports: &retained,
                 },
                 settlement,

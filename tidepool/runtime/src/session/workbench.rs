@@ -1635,7 +1635,6 @@ mod tests {
                         inject_modules: &[],
                         gen: 0,
                         verdict: None,
-                        target: None,
                         retained_imports: &[],
                     },
                     settlement,

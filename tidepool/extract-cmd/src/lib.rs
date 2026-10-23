@@ -641,14 +641,14 @@ impl ExtractCmd {
         self
     }
 
-    /// `--target <name>` — compile one named top-level binder.
+    /// Source compilation: `--target <name>` compiles one named top-level binder.
     pub fn target(&mut self, name: impl AsRef<OsStr>) -> &mut Self {
         self.request.target(name);
         self
     }
 
-    /// `--targets a,b,c` — compile N named binders in ONE spawn against a
-    /// shared merged `meta.cbor`.
+    /// Source compilation: `--targets a,b,c` compiles named binders in one spawn
+    /// against a shared merged `meta.cbor`.
     pub fn targets<I, S>(&mut self, names: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,

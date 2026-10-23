@@ -555,15 +555,6 @@ pub struct TurnRequest<'a> {
     /// ([`classify_block`]). Forwarded as `--turn-verdict`, skipping the
     /// extract's internal re-parse.
     pub verdict: Option<TurnClassification>,
-    /// The binding a compiling template names as its target. `None`
-    /// means the extract's scaffold-reserved default (`__result`), which is
-    /// what a template authored for this path should use. Supply it only when
-    /// a template's target binder is fixed by a builder shared with another
-    /// path — `exomonad-harness`'s expression wrapper comes from
-    /// `tidepool_mcp::template_haskell`, which the stateless eval server also
-    /// uses and which names its target `result`. Forwarded as `--target`; the
-    /// output file base is `result.cbor` either way.
-    pub target: Option<&'a str>,
     /// Executable imports retained by this turn. Empty for declarations and
     /// for the first turn in a machine session.
     pub retained_imports: &'a [(SymbolIdentity, u64)],
@@ -3643,9 +3634,6 @@ fn compile_turn(
         .bind_gen(req.gen);
     if let Some(session_id) = req.session_id {
         cmd.session_incarnation(session_id.0.to_string());
-    }
-    if let Some(target) = req.target {
-        cmd.target(target);
     }
     if let Some(arg) = verdict_arg {
         cmd.turn_verdict(arg);
@@ -8439,7 +8427,6 @@ mod tests {
                 binders: Vec::new(),
                 items: Vec::new(),
             }),
-            target: None,
             retained_imports: &[],
         };
         let err =
@@ -8493,7 +8480,6 @@ mod tests {
                         binders: Vec::new(),
                         items: Vec::new(),
                     }),
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,
@@ -8553,7 +8539,6 @@ mod tests {
                             binders: Vec::new(),
                             items: Vec::new(),
                         }),
-                        target: None,
                         retained_imports: &[],
                     },
                     settlement,
@@ -8614,7 +8599,6 @@ mod tests {
                         binders: Vec::new(),
                         items: Vec::new(),
                     }),
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,
@@ -8663,7 +8647,6 @@ mod tests {
                         binders: vec![],
                         items: vec![],
                     }),
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,
@@ -9127,7 +9110,6 @@ mod compiler_packet_replay {
                     inject_modules: &[],
                     gen: generation,
                     verdict: None,
-                    target: None,
                     retained_imports: &[],
                 },
                 settlement,

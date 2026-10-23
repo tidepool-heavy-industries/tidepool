@@ -6339,7 +6339,6 @@ mod module_product_tests {
         );
         command
             .turn()
-            .target("__prepared")
             .turn_out(scratch.path().join("old-turn.cbor"))
             .output_dir(scratch.path())
             .inject_val("Tidepool.Session.Val.G1");

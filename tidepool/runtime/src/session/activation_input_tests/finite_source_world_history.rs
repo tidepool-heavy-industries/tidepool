@@ -260,7 +260,6 @@ fn finite_source_original_feeds_public_world_cells_after_prior_cutoff() {
                 inject_modules: &[],
                 gen: 1,
                 verdict: None,
-                target: None,
                 retained_imports: &[],
             },
             settlement,

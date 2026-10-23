@@ -128,7 +128,6 @@ async fn prepare_callback_fixture(
                 inject_modules: &[],
                 gen: view.next_value_generation().0,
                 verdict: None,
-                target: None,
                 retained_imports: &[],
             },
             settlement,
