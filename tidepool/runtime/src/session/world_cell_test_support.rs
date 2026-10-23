@@ -376,3 +376,6 @@ where
 
 #[path = "world_cell_test_support/source_hidden_join.rs"]
 mod source_hidden_join;
+
+#[path = "world_cell_test_support/publication_linearization.rs"]
+mod publication_linearization;
