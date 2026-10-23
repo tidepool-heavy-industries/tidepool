@@ -63,12 +63,12 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
-  readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs,
+  readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor,
   InterfaceInputFailure(..))
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
   , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings
-  , capturedSessionInterfaceBody, capturedSessionCompilerProduct )
+  , capturedSessionInterfaceBody, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner )
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import qualified Data.ByteString as BS
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -151,6 +151,9 @@ verifyCompletedInterfaceMerges libdir work environment = do
   actualIdentity <- evaluate actualHome >>= makeStableName
   forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
+    reused <- either throwIO pure (capturedSessionInterfaceFor merged artifact)
+    assert (maybe False (sameCapturedSessionInterfaceOwner capture) reused)
+      "another selected role lost its actual completed session issuer"
     fresh <- freshExactContext environment
     owner <- hydrateInterfaceInputs fresh merged
     retained <- maybe (fail "completed interface merge lost its HMI") pure

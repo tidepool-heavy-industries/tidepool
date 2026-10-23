@@ -24,6 +24,7 @@ module Tidepool.ExactHydration
   , readCheckedValueImportAuthority
   , CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs
   , selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs
+  , capturedSessionInterfaceFor
   , InterfaceInputFailure(..)
   , readVerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
@@ -318,6 +319,17 @@ selectCapturedInterfaceOwners inputs@(CapturedInterfaceInputs captured) owners =
     Just (verified,_) -> Right (fst (verifiedExactInterface verified))
     Nothing -> Left (InterfaceInputMissing owner)
   selectCapturedInterfaceInputs inputs roots
+
+-- Borrow the actual successful session issuer when another selected role
+-- refers to the same value. A decoded copy cannot issue this association.
+capturedSessionInterfaceFor :: CapturedInterfaceInputs -> ExactIfaceArtifact
+  -> Either InterfaceInputFailure (Maybe CapturedSessionInterface)
+capturedSessionInterfaceFor inputs artifact = do
+  CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs inputs [artifact]
+  case Map.lookup (exactUnit artifact,exactModule artifact) selected of
+    Just (VerifiedExactInterface _ (CompletedHomeInterface (SessionHomeInterface capture)) _ _,_) -> Right (Just capture)
+    Just _ -> Right Nothing
+    Nothing -> Left (InterfaceInputMissing (exactUnit artifact,exactModule artifact))
 
 mergeCapturedInterfaceInputs :: [CapturedInterfaceInputs] -> Either InterfaceInputFailure CapturedInterfaceInputs
 mergeCapturedInterfaceInputs inputs = do

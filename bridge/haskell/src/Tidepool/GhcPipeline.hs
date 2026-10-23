@@ -273,7 +273,7 @@ import Tidepool.ExtractRequest
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
   , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence
-  , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceBody, renderSessionModule
+  , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceBody, capturedSessionCompilerProduct, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName
   , injectCapturedSessionIfaceWithBindings )
 import Tidepool.Timing
@@ -315,7 +315,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, VerifiedExactInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, VerifiedExactInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -3113,7 +3113,6 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldCellSource _ _ prefix _ _ _ -> restoreWorldCellPrefixHomes initialBase prefix
     WorldObservationSource {} -> pure initialBase
     WorldCellNameSource {} -> pure initialBase
-  (withOperand,operandProjection) <- liftIO (hydrateWorldCellOperand initial operand)
   operandInputs <- liftIO $ case operand of
     Nothing -> either throwIO pure (capturedInterfaceInputs [])
     Just value -> pure (worldCellOperandCapturedInputs value)
@@ -3121,6 +3120,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldCellSource _ _ (WorldCellPrefix _ (PrefixHomeInterfaces _ captures) _ _ _ _ _ _) _ _ _ -> pure captures
     _ -> either throwIO pure (capturedInterfaceInputs [])
   privateInputs <- either (liftIO . throwIO) pure (mergeCapturedInterfaceInputs [priorInputs,operandInputs])
+  (withOperand,operandProjection) <- liftIO (hydrateWorldCellOperand privateInputs initial operand)
   setSession withOperand
   declarationInputs <- liftIO (hydrateWorldDeclarationInputs (universeOriginalInputs universe) withOperand facts)
   (current,verifiedDeclaration) <- either (\reason -> liftIO $ do
@@ -3715,8 +3715,8 @@ advanceWorldCellPrefix executor facts question offset current result completion 
     when (Map.member owner known) (throwIO WorldCellCorrupt)
     pure (Map.insert owner ordinal known)) Map.empty (worldCellPrepareSlots question)
   additions <- fmap concat $ forM captures $ \capture -> do
-    let (owner,bytes) = capturedSessionInterface capture
-    selected <- evaluate (lookupHpt (hsc_HPT environment) (moduleName owner)) >>= maybe (throwIO WorldCellCorrupt) evaluate
+    let (owner,body) = capturedSessionInterfaceBody capture
+        (_,selected) = capturedSessionCompilerProduct capture
     unless (mi_module (hm_iface selected) == owner) (throwIO WorldCellCorrupt)
     selectedModule <- maybe (throwIO WorldCellCorrupt) pure
       (parseSessionModule (moduleNameString (moduleName owner)))
@@ -3728,12 +3728,12 @@ advanceWorldCellPrefix executor facts question offset current result completion 
     let requirements = maybe [] (\(_,_,required) -> required) (capturedSessionInterfaceEvidence capture)
         artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
           (worldCellPrepareDirectory question </> "item-" ++ show ordinal </> "value.hi")
-          (hexBytes (SHA256.hash bytes)) requirements
+          (artifactSha256 body) requirements
     forM (Set.toList (Set.fromList (concatMap availNames (mi_exports (hm_iface selected))))) $ \name -> do
       symbol <- maybe (throwIO WorldCellCorrupt) pure (nameSymbolIdentity "value" name)
       let alias = occNameString (nameOccName name)
       pure (alias,WorldStagedValue ordinal symbol (stableVarId name) (worldCellPrepareDefiningScope question) generation
-        artifact (hm_iface selected) capture selected)
+        artifact capture)
   (nextHomes,nextGraph,nextInventories) <- case worldCompilerCompletionPlannedDeclaration completion of
     Nothing -> pure (homes,graph,inventories)
     Just (planned,inventory) -> do
@@ -3792,7 +3792,7 @@ encodeWorldCellInputReference (WorldCellInputReference origin occurrence symbol 
   <> WorldEncoding.encodeBytes seal
 
 data WorldStagedValue = WorldStagedValue Word64 SymbolIdentity Word64 Word64 Word64
-  ExactIfaceArtifact ModIface CapturedSessionInterface HomeModInfo
+  ExactIfaceArtifact CapturedSessionInterface
 data WorldDemandBinding = WorldBaseBinding WorldBinding | WorldPriorBinding WorldStagedValue
   | WorldOperandBinding WorldCellOperandProjection
 
@@ -3812,20 +3812,26 @@ worldNeedsAlias _ = True
 -- Source-less type availability is required even when the helper is unused.
 -- The exact exported Name is only a reverse demand association; no GRE or
 -- executable input obligation is issued by installing this interface.
-hydrateWorldCellOperand :: HscEnv -> Maybe WorldCellOperandInputs
+hydrateWorldCellOperand :: CapturedInterfaceInputs -> HscEnv -> Maybe WorldCellOperandInputs
   -> IO (HscEnv,Maybe WorldCellOperandProjection)
-hydrateWorldCellOperand environment Nothing = pure (environment,Nothing)
-hydrateWorldCellOperand environment (Just operand) = do
+hydrateWorldCellOperand _ environment Nothing = pure (environment,Nothing)
+hydrateWorldCellOperand available environment (Just operand) = do
   let artifact = worldCellOperandInterface operand
-  selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
-  dependencies <- either throwIO pure (selectCapturedInterfaceOwners
-    (worldCellOperandCapturedInputs operand) (exactRequirements artifact))
-  typedOwner <- hydrateInterfaceInputs environment dependencies
-  let typed = hydratedExactEnvironment typedOwner
-  (ready,_,capture) <- injectCapturedSessionIfaceWithBindings selected (worldCellOperandBody operand)
-    (worldCellOperandPackages operand) (exactRequirements artifact) typed
-  captured <- captureCompletedInterfaceInputs ready dependencies [(artifact,capture)] []
-  owner <- hydrateInterfaceInputs ready captured
+  selectedInputs <- either throwIO pure (selectCapturedInterfaceInputs available [artifact])
+  retained <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact)
+  (owner,capture) <- case retained of
+    Just actual -> do
+      hydrated <- hydrateInterfaceInputs environment selectedInputs
+      pure (hydrated,actual)
+    Nothing -> do
+      selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
+      dependencies <- either throwIO pure (selectCapturedInterfaceOwners selectedInputs (exactRequirements artifact))
+      typedOwner <- hydrateInterfaceInputs environment dependencies
+      (ready,_,actual) <- injectCapturedSessionIfaceWithBindings selected (worldCellOperandBody operand)
+        (worldCellOperandPackages operand) (exactRequirements artifact) (hydratedExactEnvironment typedOwner)
+      captured <- captureCompletedInterfaceInputs ready selectedInputs [(artifact,actual)] []
+      hydrated <- hydrateInterfaceInputs ready captured
+      pure (hydrated,actual)
   home <- either (const (throwIO WorldCellCorrupt)) (pure . snd) (hydratedInterfaceProduct owner artifact)
   unless (mi_module (hm_iface home) == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact)))
     (throwIO WorldCellCorrupt)
@@ -3838,15 +3844,15 @@ hydrateWorldCellOperand environment (Just operand) = do
 worldDemandSymbol :: WorldDemandBinding -> SymbolIdentity
 worldDemandSymbol (WorldBaseBinding binding) = worldBindingSymbol binding
 worldDemandSymbol (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldBindingSymbol (worldCellOperandBinding operand)
-worldDemandSymbol (WorldPriorBinding (WorldStagedValue _ symbol _ _ _ _ _ _ _)) = symbol
+worldDemandSymbol (WorldPriorBinding (WorldStagedValue _ symbol _ _ _ _ _)) = symbol
 worldDemandGeneration :: WorldDemandBinding -> Word64
 worldDemandGeneration (WorldBaseBinding binding) = worldBindingGeneration binding
 worldDemandGeneration (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldBindingGeneration (worldCellOperandBinding operand)
-worldDemandGeneration (WorldPriorBinding (WorldStagedValue _ _ _ _ generation _ _ _ _)) = generation
+worldDemandGeneration (WorldPriorBinding (WorldStagedValue _ _ _ _ generation _ _)) = generation
 worldDemandArtifact :: WorldDemandBinding -> ExactIfaceArtifact
 worldDemandArtifact (WorldBaseBinding binding) = worldBindingInterfaceArtifact binding
 worldDemandArtifact (WorldOperandBinding (WorldCellOperandProjection operand _ _ _)) = worldCellOperandInterface operand
-worldDemandArtifact (WorldPriorBinding (WorldStagedValue _ _ _ _ _ artifact _ _ _)) = artifact
+worldDemandArtifact (WorldPriorBinding (WorldStagedValue _ _ _ _ _ artifact _)) = artifact
 
 -- A request-local result of actual demand under the target's dependency HPT.
 -- It owns only selected immutable input products, never a saved HscEnv. Every
@@ -3878,7 +3884,7 @@ worldResolvedReferences (WorldCellResolvedInputs inputs consumer _ _ _ _) = map 
       WorldCellInputReference WorldOperandInput name
         (worldBindingSymbol binding) (worldBindingSessionVar binding) (worldBindingScope binding)
         (worldBindingGeneration binding) (worldBindingRowFactCID (worldBindingRow binding))
-    reference (name,WorldPriorBinding (WorldStagedValue producer symbol variable scope generation _ _ capture _)) =
+    reference (name,WorldPriorBinding (WorldStagedValue producer symbol variable scope generation _ capture)) =
       WorldCellInputReference (WorldPriorInput producer (fromIntegral consumer)) name symbol variable scope generation
         (SHA256.hash (snd (capturedSessionInterface capture)))
 
@@ -3916,7 +3922,7 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
       operands = [value | (_,WorldOperandBinding value) <- inputs]
       typeContributions = typeInputs:[worldCellOperandTypes value | WorldCellOperandProjection value _ _ _ <- operands]
       allTypes = Map.unions typeContributions
-  unless (all (\(WorldStagedValue producer _ _ _ _ _ _ _ _) -> producer < fromIntegral consumer) prior)
+  unless (all (\(WorldStagedValue producer _ _ _ _ _ _) -> producer < fromIntegral consumer) prior)
     (reject "prior value is not before the consuming stage")
   -- Value owners must never be source summaries: adding their retained policy
   -- at the target cannot change a dependency's earlier memo fingerprint.
@@ -3939,7 +3945,7 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
   available <- either throwIO pure (mergeCapturedInterfaceInputs [primaryTypes,priorTypes])
   typeOwner <- hydrateInterfaceInputs environment available
   let withTypes = hydratedExactEnvironment typeOwner
-      priorCaptures = [capture | WorldStagedValue _ _ _ _ _ _ _ capture _ <- prior]
+      priorCaptures = [capture | WorldStagedValue _ _ _ _ _ _ capture <- prior]
       operandCaptures = [capture | WorldCellOperandProjection _ _ capture _ <- take 1 operands]
       existingCaptures = priorCaptures ++ operandCaptures
   (injected,reversedCaptures) <- foldM (\(current,captures) (artifact,body,packages) -> do
