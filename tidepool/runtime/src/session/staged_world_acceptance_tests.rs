@@ -35,6 +35,30 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                 assert_eq!(program.items().len(), 8);
                 for index in [1, 3] {
                     assert!(program.items()[index].native().is_none());
+                    let declaration = program.items()[index]
+                        .checked_item()
+                        .planned_declaration()
+                        .expect("each declaration retains its actual source certificate");
+                    let owner = declaration.product().owner();
+                    let (_, imports) = declaration
+                        .original_home_imports()
+                        .find(|(importer, _)| {
+                            importer.unit == owner.unit && importer.module == owner.module
+                        })
+                        .expect("the original keeps its authenticated compiler dependencies");
+                    assert!(
+                        imports.iter().any(|imported| {
+                            imported.unit == "main" && imported.module == "Tidepool.TextFormat"
+                        }),
+                        "protected TextFormat remains a compiler dependency at item {index}"
+                    );
+                    let source = declaration.shared_source_lexical_surface(&[]).unwrap();
+                    assert!(
+                        !source.roots.iter().any(|imported| {
+                            imported.unit == "main" && imported.module == "Tidepool.TextFormat"
+                        }),
+                        "compiler support must not become a lexical root at item {index}"
+                    );
                 }
                 let initial_context = program.items()[0]
                     .native_products()
