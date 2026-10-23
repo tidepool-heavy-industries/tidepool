@@ -38,6 +38,41 @@ fn package_module(acquired: &AcquiredNativeCode) -> &str {
     &body.owner().module
 }
 
+/// Compile and seal one real World value, retaining only its issued interface.
+/// Call once outside generated histories; independent issuers require separate
+/// calls. No cached program owner extends the returned artifact's lifetime.
+pub(crate) fn prepare_checked_value_fixture(
+    generation: u64,
+) -> (Arc<crate::checked_cell::CheckedValueArtifact>, Vec<u8>) {
+    let ((prepared, producer_bytes), admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world()?;
+        let producer_bytes = endpoint.identity().producer_bytes().to_vec();
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            "let supplied = (7 :: Int)",
+            None,
+            &[(generation, "supplied")],
+        )?;
+        Ok((prepare_world_cell_program(checked)?, producer_bytes))
+    });
+    let program = prepared
+        .seal(&admission)
+        .expect("actual value compiler END");
+    assert_eq!(program.items().len(), 1);
+    let value = program.items()[0]
+        .native()
+        .expect("actual value native evidence")
+        .value_interface_certificate()
+        .expect("actual World-issued value interface");
+    assert_eq!(
+        value.owner(),
+        tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+    );
+    (value, producer_bytes)
+}
+
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
 fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
