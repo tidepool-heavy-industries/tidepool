@@ -3281,7 +3281,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                 liftIO (restoreWorldCellPrefixFor directory observation summary environment {hsc_mod_graph=graph} prefix)
               WorldObservationSource {} -> pure environment {hsc_mod_graph=graph}
               WorldCellNameSource {} -> pure environment {hsc_mod_graph=graph}
-            ready <- liftIO (restoreWorldImportBasis directory observation importHydrated importBasis prefixEnvironment `catch` importFailure)
+            ready <- liftIO $ do
+              imported <- restoreWorldImportBasis directory observation importHydrated importBasis prefixEnvironment `catch` importFailure
+              restoreWorldCellOperandFor directory observation operandProjection imported
             setSession ready
             planned <- pvPlan variant directory enabled target observation exact resolved
             let sourceOwners = Set.fromList
@@ -3302,7 +3304,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                     WorldObservationSource {} -> pure ()
                     WorldCellNameSource {} -> pure ()
                   environment <- getSession
-                  ready <- liftIO (restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure)
+                  ready <- liftIO $ do
+                    imported <- restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure
+                    restoreWorldCellOperandFor directory observation operandProjection imported
                   setSession ready
               , cpBeforeModule = \phaseInputs summary -> do
                   cpBeforeModule planned phaseInputs summary
@@ -3314,7 +3318,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                     WorldObservationSource {} -> pure ()
                     WorldCellNameSource {} -> pure ()
                   environment <- getSession
-                  ready <- liftIO (restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure)
+                  ready <- liftIO $ do
+                    imported <- restoreWorldImportBasis directory observation importHydrated importBasis environment `catch` importFailure
+                    restoreWorldCellOperandFor directory observation operandProjection imported
                   setSession ready
                   when (ms_mod_name summary == target) $ do
                     environment <- getSession
@@ -3840,6 +3846,21 @@ hydrateWorldCellOperand available environment (Just operand) = do
     [actual] -> pure actual
     _ -> throwIO WorldCellCorrupt
   pure (hydratedExactEnvironment owner,Just (WorldCellOperandProjection operand owner capture name))
+
+-- The operand's held TYPE owner supplies its exact HMI, while explicit imports
+-- also need the active cycle's physical view. This installs only that checked
+-- row; the renamer still determines lexical names and actual value demand.
+restoreWorldCellOperandFor :: CycleInterfaceViews -> SourceGraphObservation
+  -> Maybe WorldCellOperandProjection -> HscEnv -> IO HscEnv
+restoreWorldCellOperandFor _ _ Nothing environment = pure environment
+restoreWorldCellOperandFor views observation
+    (Just (WorldCellOperandProjection operand previous _ _)) environment = do
+  owner <- restoreHydratedInterfaceEnvironment previous environment
+  installed <- installLexicalInterfaces views owner
+    (CheckedValueLexicalInputs observation (hsc_mod_graph environment)
+      [worldCellOperandInterface operand])
+    >>= either (throwIO . InterfaceCapturedSelectionFailure) pure
+  pure (installedLexicalEnvironment installed)
 
 worldDemandSymbol :: WorldDemandBinding -> SymbolIdentity
 worldDemandSymbol (WorldBaseBinding binding) = worldBindingSymbol binding
