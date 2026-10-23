@@ -11167,7 +11167,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let offer = IssuedNativeOffer::issue(native.descriptor.id, &selected, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
+            selected.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .unwrap();
         let held = carrier
             .retain_issued_offer_custody([offer.clone()])
             .unwrap();
@@ -11250,7 +11257,9 @@ mod tests {
             .unwrap();
         assert!(!partial.is_full());
         assert!(partial.proof().is_some());
-        let empty = IssuedNativeOffer::issue(native.descriptor.id, &selected, None).unwrap();
+        let empty = issuer
+            .issue_native_offer(&native.descriptor.owner, None)
+            .unwrap();
         for original in [&offer, &partial, &empty] {
             use crate::exact_context::NativeOfferSnapshotBody;
             let mut facts = original.snapshot_facts();
@@ -14990,7 +14999,7 @@ mod tests {
         let custody = inventory
             .issue_selected_custody(
                 &base,
-                vec![native],
+                vec![native.clone()],
                 BTreeSet::from([NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,
@@ -15025,7 +15034,16 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
         assert_eq!(issued.len(), 1);
-        let offer = IssuedNativeOffer::issue(id, &view, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
+            view.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .unwrap();
+        drop(issuer);
+        drop(native);
         drop(view);
         assert_eq!(inventory.node_count(), 0);
         assert!(
