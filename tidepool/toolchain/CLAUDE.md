@@ -331,7 +331,7 @@ those references and preserves the recorded mode, even when a partial graph can
 now qualify as complete. Recorded Full validates its complete exact carrier and
 canonical edge in its issuing graph, including proofs with no compiler namespace.
 Current request compatibility remains a separate check after restoration.
-Context snapshots use version 8 and persist normalized native availability plus
+Context snapshots use version 9 and persist selected source scope, normalized native availability plus
 references to the same linked native components and acquired occurrence records
 held by compiler prefixes. Restore authenticates exact product/source custody and
 ordered occurrence choices through the linked owner before returning usable code.
@@ -371,6 +371,10 @@ Histories assert demanded identities and edges, physical work, and lifetime
 through the real owner operation; internal parent counts or diagnostic rendering
 are observations, not the behavioral contract. Investigate a failing oracle
 against that producer-to-consumer contract before changing its expectation.
+When mutating serialized production evidence for refusal tests, first establish
+that an unchanged decode/re-encode preserves the original bytes. Generic Serde
+value types may use codec-specific protocols for tags and links; a mutation must
+not corrupt unrelated fields and mask the intended refusal.
 
 Fixture imports read exact binder identities from authenticated original-group
 definitions. Ordinals and naming patterns do not issue binder identity.

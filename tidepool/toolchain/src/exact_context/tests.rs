@@ -1801,23 +1801,36 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
     install(&store, writer.finish().unwrap());
     let descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
     assert_eq!(descriptor.version, 9);
+    let bytes = store.get(valid.root().cid()).unwrap().unwrap();
+    let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+    let encode = |value: &ciborium::Value| {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(value, &mut bytes).unwrap();
+        bytes
+    };
+    // Mutation must preserve untouched CID tags, including their wire encoding.
+    // Ciborium's Value tag protocol is not interchangeable with DAG-CBOR Serde.
+    assert_eq!(encode(&value), bytes);
     // Remove each required root from the actual current descriptor encoding.
     for field in ["native_components", "native_closures", "source_scope"] {
-        let bytes = store.get(valid.root().cid()).unwrap().unwrap();
-        let mut value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut value = value.clone();
         let ciborium::Value::Map(fields) = &mut value else {
             panic!("context descriptor map")
         };
         let before = fields.len();
         fields.retain(|(key, _)| key.as_text() != Some(field));
         assert_eq!(fields.len() + 1, before);
-        let mut writer = Materializer::new(&store);
-        let missing_field = ContextRoot(writer.materialize_value(&value).unwrap());
+        let writer = Materializer::new(&store);
+        let bytes = encode(&value);
+        let missing_field = ContextRoot(Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes)));
+        writer.put_keyed(missing_field.cid(), &bytes).unwrap();
         install(&store, writer.finish().unwrap());
         let outcome = hydrate_context(&store, &missing_field).err();
-        assert!(matches!(&outcome,
-            Some(SnapshotError::Malformed(message)) if message.contains(field)),
-            "removed {field}: {outcome:?}");
+        assert!(
+            matches!(&outcome,
+                Some(SnapshotError::Malformed(message)) if message.contains(field)),
+            "removed {field}: {outcome:?}"
+        );
 
         let mut descriptor = descriptor.clone();
         let absent = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(field.as_bytes()));
@@ -1832,9 +1845,11 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
         let missing_map = ContextRoot(writer.materialize_value(&descriptor).unwrap());
         install(&store, writer.finish().unwrap());
         let outcome = hydrate_context(&store, &missing_map).err();
-        assert!(matches!(&outcome,
-            Some(SnapshotError::MissingBlock(cid)) if *cid == absent),
-            "missing {field} block: {outcome:?}");
+        assert!(
+            matches!(&outcome,
+                Some(SnapshotError::MissingBlock(cid)) if *cid == absent),
+            "missing {field} block: {outcome:?}"
+        );
     }
     let restored = hydrate_context(&store, valid.root()).unwrap();
     assert!(restored.snapshot().native_components.is_empty());
