@@ -20603,7 +20603,7 @@ pub(crate) mod request_tests {
         );
     }
 
-    struct WorldQueryTestSource {
+    pub(crate) struct WorldQueryTestSource {
         issuer: crate::SourceLayerIssuer,
         evidence: crate::SourceGenerationEvidence,
         roots: Vec<tidepool_toolchain::compiler_world::CapturedCompilerSourceRoot>,
@@ -20714,7 +20714,7 @@ pub(crate) mod request_tests {
         world_query_test_source_files_with_support(files_by_root, &[])
     }
 
-    fn world_query_test_source_files_with_support(
+    pub(crate) fn world_query_test_source_files_with_support(
         files_by_root: &[Vec<(&str, &str)>],
         support: &[PathBuf],
     ) -> (crate::CheckpointSourceLayer, Arc<WorldQueryTestSource>) {

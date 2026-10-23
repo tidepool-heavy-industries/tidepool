@@ -1120,8 +1120,192 @@ mod tests {
         ));
         use std::sync::Arc;
         use tidepool_runtime::session::{turn, TemplateSelector};
-        use tidepool_toolchain::checked_cell::CellRecipe;
-        let execution = Arc::new(grandchild.begin_private_execution(scope).unwrap());
+        let source_owner = grandchild.mint_notebook_scope_with_lease(None).unwrap();
+        let public_scope = source_owner.scope();
+        descendant.placement.lexical_scope = public_scope;
+        let selected_projections = descendant.source_imports.declaration_projections().unwrap();
+        let initialized = grandchild
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    session
+                        .adopt_initial_notebook_facades(public_scope, selected_projections.clone())
+                },
+            )
+            .unwrap();
+        assert!(initialized.close().resources_retired());
+        initialized.into_outcome().action.unwrap();
+        let (captured, _captured_owner) =
+            crate::resident_workbench::request_tests::world_query_test_source_files_with_support(
+                &[],
+                effects.include_paths(),
+            );
+        descendant.source_layer = crate::ActorSourceRoots::Complete(captured.clone());
+        let reference = captured.generation_evidence().unwrap().reference.clone();
+        let admitted = grandchild
+            .capture_inspection_world_in(public_scope, &reference, source_owner.original_source())
+            .unwrap();
+        let settled = source_owner.with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(), None, |_| {},
+            |owner, _| tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
+                captured.capture_compiler_sources().map_err(|error| match error {
+                    crate::SourceInspectionError::Unavailable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnavailable(detail),
+                    crate::SourceInspectionError::Unreadable(detail) => tidepool_runtime::session::WorldInspectionError::SourceUnreadable(detail),
+                })
+            }),
+        ).unwrap();
+        let completed = tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap();
+        assert!(grandchild.install_compiler_world_if_current(
+            &completed,
+            &reference,
+            source_owner.original_source()
+        ));
+        let initialized_view = grandchild.compile_view_in(public_scope).unwrap();
+        let requests_before_repeat = tidepool_extract_cmd::extract_spawn_count();
+        let repeated = grandchild
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    session.adopt_initial_notebook_facades(public_scope, selected_projections)
+                },
+            )
+            .unwrap();
+        assert!(repeated.close().resources_retired());
+        repeated.into_outcome().action.unwrap();
+        assert!(initialized_view.is_current_for(&grandchild.compile_view_in(public_scope).unwrap()));
+        assert!(!grandchild
+            .capture_inspection_world_in(public_scope, &reference, source_owner.original_source())
+            .unwrap()
+            .needs_source_capture());
+        let different = crate::ActorSourceImports::from_exact_facades([&facade])
+            .declaration_projections()
+            .unwrap();
+        let refused = grandchild
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.adopt_initial_notebook_facades(public_scope, different),
+            )
+            .unwrap();
+        assert!(refused.close().resources_retired());
+        assert!(refused.into_outcome().action.is_err());
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            requests_before_repeat
+        );
+        assert!(initialized_view.is_current_for(&grandchild.compile_view_in(public_scope).unwrap()));
+
+        type FixtureSession =
+            tidepool_runtime::session::ResidentSession<frunk::HNil, tidepool_mcp::CapturedOutput>;
+        fn prepare_mixed_program(
+            session: &mut FixtureSession,
+            source: &Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
+            execution: Arc<tidepool_runtime::session::PrivateExecutionAdmission>,
+            specification: Arc<tidepool_extract_cmd::WorldCellRecipe>,
+        ) -> Result<
+            (
+                turn::CellCheck,
+                tidepool_runtime::session::SettledCellProgram,
+            ),
+            tidepool_toolchain::CompileError,
+        > {
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.prepare_private_execution(execution.clone(), None),
+                )
+                .unwrap();
+            assert!(settled.close().resources_retired());
+            let (snapshot, operand) = settled.into_outcome().action.unwrap().into_parts();
+            assert!(operand.is_none());
+            let settled = source
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |owner, _| {
+                        turn::prepare_world_cell_plan_admitted(
+                            owner,
+                            snapshot.world(),
+                            specification,
+                            None,
+                        )
+                    },
+                )
+                .unwrap();
+            let plan = match turn::finish_world_cell_plan_admitted(settled) {
+                Ok(plan) => plan,
+                Err(tidepool_runtime::session::WorldInspectionError::Runtime(
+                    tidepool_runtime::RuntimeError::Compile(error),
+                )) => return Err(error),
+                Err(other) => {
+                    panic!("mixed facade fixture must reach compiler planning: {other:?}")
+                }
+            };
+            let settled = session
+                .with_source_compiler_transaction(
+                    source.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| {
+                        session
+                            .admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
+                    },
+                )
+                .unwrap();
+            assert!(settled.close().resources_retired());
+            let admission = settled.into_outcome().action.unwrap();
+            let settled = source
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |owner, report| turn::prepare_cell_program_admitted(owner, admission, report),
+                )
+                .unwrap();
+            turn::finish_cell_program_admitted(settled).map_err(|failure| {
+                assert!(failure
+                    .compiler_close
+                    .as_ref()
+                    .is_some_and(|close| close.resources_retired()));
+                failure.error
+            })
+        }
+        let begin = |session: &mut FixtureSession| {
+            let settled = session
+                .with_source_compiler_transaction(
+                    source_owner.original_source().clone(),
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    tidepool_runtime::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |session, _| session.begin_ephemeral_private_execution(public_scope),
+                )
+                .unwrap();
+            assert!(settled.close().resources_retired());
+            Arc::new(settled.into_outcome().action.unwrap())
+        };
+        let execution = begin(&mut grandchild);
         let private_scope = execution.private_scope();
         assert!(matches!(
             descendant.compile_view(grandchild.compile_view_for_execution(&execution).unwrap()),
@@ -1143,81 +1327,112 @@ mod tests {
             "'[]",
             &imports,
         );
-        let specification = Arc::new(CellRecipe::new(
-            "mixedAnswer <- pure (case (Inherited 20, Local 22) of (Inherited x, Local y) -> x + y)"
-                .to_string(),
-            tidepool_runtime::session::resident_cell_check_template(
-                effects.preamble(),
-                "'[]",
-                &imports,
-            ),
-            templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        TemplateSelector::Decl => "decl",
-                        TemplateSelector::Bind => "bind",
-                        TemplateSelector::BindDiscard => "binddiscard",
-                        TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            Vec::new(),
-        )
-        .unwrap());
-        let includes = view.include_paths(effects.include_paths());
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &includes,
-                settlement,
+        let recipe = |text: &str| {
+            Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                source: text.to_owned(),
+                template: tidepool_runtime::session::resident_cell_check_template(
+                    effects.preamble(),
+                    "'[]",
+                    &imports,
+                ),
+                turn_templates: templates
+                    .iter()
+                    .map(|template| {
+                        let kind = match template.kind {
+                            TemplateSelector::Decl => "decl",
+                            TemplateSelector::Bind => "bind",
+                            TemplateSelector::BindDiscard => "binddiscard",
+                            TemplateSelector::Expr => "expr",
+                        };
+                        (kind.to_owned(), template.source.clone())
+                    })
+                    .collect(),
+            })
+        };
+        let withheld = begin(&mut grandchild);
+        let before_refusal = grandchild
+            .public_visibility_snapshot_in(public_scope)
+            .unwrap();
+        let refusal = prepare_mixed_program(
+            &mut grandchild,
+            &source_owner,
+            withheld.clone(),
+            recipe("withheld <- pure (Withheld 1)"),
+        );
+        match refusal {
+            Err(
+                tidepool_toolchain::CompileError::Diagnostics(diagnostics)
+                | tidepool_toolchain::CompileError::InputRejected(diagnostics),
+            ) => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.message.contains("Withheld")),
+                    "actual compiler refusal must identify the withheld constructor"
+                );
+            }
+            Err(other) => {
+                panic!("expected typed compiler lexical refusal for Withheld, got {other:?}")
+            }
+            Ok(_) => panic!("unselected Withheld cannot acquire lexical permission"),
+        }
+        assert_eq!(grandchild.scope_binding_count(withheld.private_scope()), 0);
+        assert_eq!(
+            grandchild
+                .public_visibility_snapshot_in(public_scope)
+                .unwrap(),
+            before_refusal
+        );
+        let (checked, program) = prepare_mixed_program(&mut grandchild, &source_owner, execution,
+            recipe("mixedAnswer <- pure (case (Inherited 20, Local 22) of (Inherited x, Local y) -> x + y)")).unwrap();
+        assert_eq!(checked.items.len(), 1);
+        let admitted = grandchild
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let prefix = session.begin_cell_program(program).unwrap().unwrap();
+                    session.admit_checked_item(prefix, checked.checked_item(0).unwrap())
+                },
             )
-        })
-        .unwrap();
-        let admission = grandchild
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                [0; 32],
-                includes,
-                Some(view.compile_inputs().clone()),
-            )
             .unwrap();
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            turn::compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap();
-        let prefix = grandchild
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
-        let item = grandchild
-            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
-            .unwrap();
+        assert!(admitted.close().resources_retired());
+        let item = admitted.into_outcome().action.unwrap();
         let turn::TurnResult::Bind {
             bound, compiled, ..
         } = turn::consume_cell_program_item(item.clone()).unwrap()
         else {
-            panic!("mixed consumer must be a checked bind")
+            panic!("mixed consumer must be a checked bind");
         };
+        let executed = grandchild
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, report| {
+                    session.run_bind_with_sites(
+                        "mixedAnswer",
+                        compiled.code(),
+                        &bound[0],
+                        item.generation(),
+                        report,
+                    )
+                },
+            )
+            .unwrap();
+        assert!(executed.close().resources_retired());
         let tidepool_runtime::session::ResidentOutcome::Completed { result, .. } =
-            tidepool_testing::with_settlement(|settlement| {
-                grandchild.run_bind_with_sites(
-                    "mixedAnswer",
-                    compiled.code(),
-                    &bound[0],
-                    item.generation(),
-                    settlement,
-                )
-            })
-            .unwrap()
+            executed.into_outcome().action.unwrap()
         else {
-            panic!("mixed consumer must complete")
+            panic!("mixed consumer must complete");
         };
         assert_eq!(result.to_json(), serde_json::json!(42));
+        assert_eq!(item.prefix().snapshot().compiler_prefix().next_item(), 1);
 
         tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_in(scope, &["data Inherited = Inherited Bool"], settlement)
