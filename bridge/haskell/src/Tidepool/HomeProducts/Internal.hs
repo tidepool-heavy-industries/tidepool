@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | Physical interface views borrowed by one active compiler cycle. Captured
 -- TYPE owners remain independent of these disposable filesystem adapters.
 module Tidepool.HomeProducts.Internal
@@ -21,7 +23,9 @@ import GHC.Types.SourceFile (HscSource(..))
 import GHC.Unit.Home (homeUnitAsUnit)
 import GHC.Utils.Fingerprint (Fingerprint, fingerprint0)
 import System.Mem.StableName (StableName, makeStableName)
-import GHC.Unit.Module.Location (ModLocation(..))
+import GHC.Unit.Module.Location
+  ( ModLocation, pattern ModLocation, ml_hs_file, ml_hi_file, ml_dyn_hi_file
+  , ml_obj_file, ml_dyn_obj_file, ml_hie_file )
 import GHC.Unit.Types (GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import System.Directory
