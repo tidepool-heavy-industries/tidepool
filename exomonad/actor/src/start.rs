@@ -1232,7 +1232,19 @@ mod tests {
             assert!(refused_view.exact_declaration_context().is_none());
             assert!(refused_view.persistent_imports().specs().is_empty());
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
-            fence.reopen(prerequisite.original_source()).unwrap();
+            fence
+                .reopen_with(prerequisite.original_source(), |reopen| {
+                    assert_eq!(
+                        grandchild
+                            .public_visibility_snapshot_in(probe.scope())
+                            .unwrap(),
+                        before
+                    );
+                    reopen.commit();
+                    Ok::<_, ()>(())
+                })
+                .unwrap()
+                .unwrap();
             crate::resident_workbench::adopt_initial_actor_facades(&mut grandchild, &captured)
                 .unwrap();
             let after = grandchild

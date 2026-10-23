@@ -1828,10 +1828,8 @@ mod tests {
         let first = session.compile_view_in(first_scope).unwrap();
         let second = session.compile_view_in(second_scope).unwrap();
         assert_eq!(first.session_root(), second.session_root());
-        assert_eq!(
-            first.exact_declaration_context(),
-            second.exact_declaration_context()
-        );
+        assert!(first.exact_declaration_context().is_none());
+        assert!(second.exact_declaration_context().is_none());
         assert_eq!(
             first.injected_module_names(),
             second.injected_module_names()

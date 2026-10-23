@@ -1366,7 +1366,7 @@ mod tests {
         assert!(Arc::ptr_eq(a.exact(), captured_a.exact()));
 
         let new_b = new_scoped_context();
-        assert!(new_a.exact() == new_b.exact());
+        assert!(new_a.exact().same_recorded_facts(new_b.exact()));
         assert!(!Arc::ptr_eq(new_a.exact(), new_b.exact()));
         let ((graph, b, b_root), independent) =
             observe_context_materialization(|| publish_scoped_context(&graph, &new_b, 3));

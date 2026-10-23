@@ -3745,10 +3745,11 @@ mod tests {
             Generation(1)
         );
         assert_eq!(lib.scope_tip(private), Generation(1));
-        assert_eq!(
-            lib.log.certified_authored_at(Generation(1)),
-            Some(exact_evidence.evidence.as_ref())
-        );
+        assert!(lib
+            .log
+            .certified_authored_at(Generation(1))
+            .expect("the actual staged certificate was published")
+            .same_selected_acquisitions(exact_evidence.evidence.as_ref()));
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         assert!(matches!(
             lib.adopt_staged_batch_with_receipt_and_vals_in(committed_copy.clone(), &[]),
