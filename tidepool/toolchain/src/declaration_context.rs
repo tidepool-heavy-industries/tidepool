@@ -9375,7 +9375,6 @@ struct ProductInputFacts<'a> {
     context: &'a Arc<ExactDeclarationContext>,
     compiler: ProductCompilerInputs<'a>,
     groups: &'a [PendingCertifiedGroup],
-    source_lexical: &'a [ExactLexicalNode],
     program_support: Option<&'a ProgramSourceSupport>,
     source_selected_support: imbl::OrdSet<Arc<ExactModuleIdentity>>,
     source_search_include: Option<&'a [PathBuf]>,
@@ -9396,7 +9395,6 @@ impl<'a> ProductInputFacts<'a> {
             compiler: ProductCompilerInputs::from_exact(inputs.compiler())
                 .with_program_support(program.program_support.as_ref()),
             groups,
-            source_lexical: &program.program_source_lexical,
             program_support: program.program_support.as_ref(),
             source_selected_support: program.source_selected_support.clone(),
             source_search_include: request.source_search_include.as_deref(),
@@ -9419,7 +9417,6 @@ impl<'a> ProductInputFacts<'a> {
             context,
             compiler,
             groups: groups.groups(),
-            source_lexical: &[],
             program_support,
             source_selected_support: imbl::OrdSet::new(),
             source_search_include: None,
@@ -9496,7 +9493,6 @@ impl DemandedWorldCompilerInputs {
         program: &'a ProgramSourceSupportState,
     ) -> ProductInputFacts<'a> {
         let mut facts = self.facts();
-        facts.source_lexical = &program.program_source_lexical;
         facts.source_selected_support = program.source_selected_support.clone();
         facts
     }
@@ -9832,10 +9828,6 @@ impl ExactSourceAdmission {
 impl<'a> ExactProductAdmission<'a> {
     pub(crate) fn compilation_binding(&self) -> ProductCompilationBinding<'a> {
         self.compilation_binding
-    }
-
-    pub(crate) fn program_source_lexical(&self) -> &'a [ExactLexicalNode] {
-        self.facts.source_lexical
     }
 
     /// Context for product versions and source graphs, never request authority.
