@@ -32,7 +32,7 @@ impl LinkedOriginal {
 /// declaration policy belongs to a runtime context, never an entry observation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum EntryCompilerRole {
+pub(super) enum EntryCompilerRole {
     InterfaceOnly {
         interface: ArtifactId,
     },
@@ -148,33 +148,32 @@ mod tests {
 
     #[test]
     fn original_entry_observations_refuse_runtime_context_policy() {
-        // The original-entry producer cannot issue this variant. Refuse it at
-        // decoding rather than importing a context graph from an observation.
+        // Durable publication facts remain observations. The entry decoder
+        // refuses this wider policy domain before any acquisition is attempted.
         let inventory = crate::artifact_inventory::ArtifactInventory::default();
-        let published = CompilerInputRole::PublishedSourceOriginal {
+        let published = crate::artifact_inventory::RecordedCompilerRole::PublishedSourceOriginal {
             interface: ArtifactId([7; 32]),
             original: ArtifactId([8; 32]),
             source_revision: "source revision".into(),
             original_input_identity: "input identity".into(),
             selection: ExactArtifactSelection::capture(&inventory.empty_view()),
             selection_sha256: [0; 32],
-            native_authority: crate::artifact_inventory::PublicationNativeAuthority::recorded(
-                crate::exact_context::PublicationNativeFacts::maintain(
-                    None,
-                    crate::exact_context::PublicationNativeMaps {
-                        roles: Default::default(),
-                        offers: Default::default(),
-                        native_availability: Default::default(),
-                        input_decisions: Default::default(),
-                    },
-                )
-                .unwrap(),
-            ),
+            native_authority: crate::exact_context::PublicationNativeFacts::maintain(
+                None,
+                crate::exact_context::PublicationNativeMaps {
+                    roles: Default::default(),
+                    offers: Default::default(),
+                    native_availability: Default::default(),
+                },
+            )
+            .unwrap(),
         };
         let wire = serde_json::to_value(&published).unwrap();
-        assert!(serde_json::from_value::<CompilerInputRole>(wire.clone()).is_ok());
+        assert!(
+            serde_json::from_value::<crate::artifact_inventory::RecordedCompilerRole>(wire.clone())
+                .is_ok()
+        );
         assert!(serde_json::from_value::<EntryCompilerRole>(wire).is_err());
-        assert!(EntryCompilerRole::try_from(published).is_err());
         let extra_policy = serde_json::json!({
             "kind": "interface_only",
             "interface": ArtifactId([9; 32]),

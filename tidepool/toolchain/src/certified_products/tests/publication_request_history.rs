@@ -63,19 +63,62 @@ fn acquire_recovery_inventory(
     (scratch, inventory)
 }
 
-fn restored_graph_roles(
+type RecordedRows = Vec<(
+    crate::declaration_join::ExactModuleIdentity,
+    crate::exact_context::RecordedCompilerRow,
+)>;
+
+fn recorded_rows(context: &ExactDeclarationContext) -> RecordedRows {
+    context
+        .snapshot()
+        .recorded_rows()
+        .iter()
+        .map(|(owner, row)| (owner.clone(), row.clone()))
+        .collect()
+}
+
+fn restore_recorded_rows(
     context: &ExactDeclarationContext,
-    roles: &[CompilerInputRole],
+    rows: &RecordedRows,
 ) -> Result<ExactDeclarationContext, CompileError> {
     let (_scratch, inventory) = acquire_recovery_inventory(context);
+    let mut snapshot = context.snapshot();
+    snapshot.roles = rows.iter().cloned().collect();
     let selection = context.artifact_view().capture_graph_selection();
-    let authenticated = inventory
-        .context_with_graph_selection(&selection, roles, context.lexical_graph().to_vec())
+    let artifacts = inventory
+        .authenticate_recorded_graph_selection(&selection, snapshot.recorded_rows())?
+        .recover_snapshot_scope_custody(snapshot.selection())?;
+    // Authenticate raw decoded transport before the writer can normalize maps.
+    drop(
+        crate::artifact_inventory::CompilerSourceSupport::authenticate_recorded_rows(
+            artifacts,
+            snapshot.recorded_rows(),
+            &snapshot.offers,
+            &snapshot.native_availability,
+        )?,
+    );
+    use fvm_ipld_blockstore::Blockstore;
+    let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+    let mut writer = crate::exact_context::Materializer::new(&store);
+    let persisted = writer
+        .materialize_context(None, &snapshot)
         .map_err(|error| {
-            eprintln!("history recovery stage=graph-role-authentication error={error:?}");
-            error
+            CompileError::ExtractFailed(format!("history recovery snapshot: {error}"))
         })?;
-    Ok(authenticated)
+    for (cid, bytes) in writer
+        .finish()
+        .map_err(|error| {
+            CompileError::ExtractFailed(format!("history recovery snapshot: {error}"))
+        })?
+        .into_blocks()
+    {
+        store.put_keyed(&cid, &bytes).unwrap();
+    }
+    let decoded =
+        crate::exact_context::hydrate_context(&store, persisted.root()).map_err(|error| {
+            CompileError::ExtractFailed(format!("history recovery snapshot: {error}"))
+        })?;
+    inventory.context_for_expected_snapshot(decoded.root(), &decoded)
 }
 
 fn restored(context: &ExactDeclarationContext) -> Result<ExactDeclarationContext, CompileError> {
@@ -271,14 +314,27 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         .into_iter()
         .find(CompilerInputRole::is_published_source_original)
         .unwrap();
+    assert!(matches!(
+        &expected_publication,
+        CompilerInputRole::PublishedSourceOriginal { .. }
+    ));
+    assert!(matches!(
+        crate::certified_products::entry_dependencies::EntryCompilerRole::try_from(
+            expected_publication.clone()
+        ),
+        Err(CertificationError::Mismatch(
+            "original entry cannot retain published declaration policy"
+        ))
+    ));
     let initial_groups = original.artifact_view().selected_native_groups();
     let wire_context = original;
     let wire_root = root;
     let wire_helper = helper;
-    let wire_roles: Vec<CompilerInputRole> =
-        serde_json::from_slice(&serde_json::to_vec(&wire_context.compiler_input_roles()).unwrap())
-            .unwrap();
-    let wire_owner = restored_graph_roles(wire_context, &wire_roles).unwrap();
+    let issued_rows = recorded_rows(wire_context);
+    let wire_bytes = serde_json::to_vec(&issued_rows).unwrap();
+    let wire_roles: RecordedRows = serde_json::from_slice(&wire_bytes).unwrap();
+    assert_eq!(serde_json::to_vec(&wire_roles).unwrap(), wire_bytes);
+    let wire_owner = restore_recorded_rows(wire_context, &wire_roles).unwrap();
     assert_eq!(
         wire_owner.artifact_view().capture_graph_selection(),
         wire_context.artifact_view().capture_graph_selection()
@@ -351,7 +407,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         ),
                     ]).remove(0).product;
                     let output = Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap());
-                    let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+                    let canonical = ArtifactEntry::canonical(product.module_interface().clone());
 
                     let request = ExactCompileContext::new(Arc::new(context.clone()))
                         .prepare_compilation(&request_scratch.path().join(format!("input-{step}")), producer_bytes).unwrap();
@@ -377,7 +433,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         CompilerInputRole::InterfaceOnly { interface: canonical.descriptor.id }
                     };
                     selection.admit_current(product.owner(), origin,
-                        product.module_interface().unwrap(), &operation).unwrap();
+                        product.module_interface(), &operation).unwrap();
                     selection.bind_produced_originals(
                         &IssuedGroupCandidates::bind(Arc::from([]), std::slice::from_ref(&product)).unwrap(),
                     ).unwrap();
@@ -491,27 +547,27 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 }
                 Operation::AlterSelection(partition) => {
                     observed[4].set(observed[4].get() + 1);
-                    let issued_roles = wire_context.compiler_input_roles();
+                    let issued_rows = recorded_rows(wire_context);
                     if partition == 6 {
-                        let mut altered = issued_roles.clone();
+                        let mut altered = issued_rows.clone();
                         let dependency = altered
                             .iter_mut()
-                            .find(|role| role.original() == Some(wire_helper.descriptor.id))
+                            .find(|(_, row)| row.original() == Some(wire_helper.descriptor.id))
                             .unwrap();
-                        *dependency = CompilerInputRole::InterfaceOnly {
-                            interface: dependency.interface(),
+                        dependency.1 = crate::exact_context::RecordedCompilerRow::InterfaceOnly {
+                            interface: dependency.1.interface(),
                         };
-                        prop_assert!(restored_graph_roles(wire_context, &altered).is_err());
+                        prop_assert!(restore_recorded_rows(wire_context, &altered).is_err());
                         refusals[6].set(refusals[6].get() + 1);
                         continue;
                     }
-                    let published = issued_roles
+                    let published = issued_rows
                         .iter()
-                        .position(CompilerInputRole::is_published_source_original)
+                        .position(|(_, row)| row.publication().is_some())
                         .unwrap();
-                    let mut roles = serde_json::to_value(&issued_roles).unwrap();
+                    let mut roles = serde_json::to_value(&issued_rows).unwrap();
                     let issued = roles[published].clone();
-                    let graph = &mut roles[published]["selection"]["graph"];
+                    let graph = &mut roles[published][1]["provenance"]["birth"]["selection"]["graph"];
                     match partition {
                         0 => graph["native_groups"].as_array_mut().unwrap().clear(),
                         1 => {
@@ -540,33 +596,33 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         4 => graph["namespace"].as_array_mut().unwrap().clear(),
                         5 => {
                             let digest =
-                                roles[published]["selection_sha256"].as_array_mut().unwrap();
+                                roles[published][1]["provenance"]["birth"]["selection_sha256"].as_array_mut().unwrap();
                             digest[0] = serde_json::json!(digest[0].as_u64().unwrap() ^ 1);
                         }
                         _ => unreachable!(),
                     }
                     prop_assert_ne!(&roles[published], &issued);
-                    let altered: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert!(restored_graph_roles(wire_context, &altered).is_err());
+                    let altered: RecordedRows = serde_json::from_value(roles).unwrap();
+                    prop_assert!(restore_recorded_rows(wire_context, &altered).is_err());
                     refusals[usize::from(partition)]
                         .set(refusals[usize::from(partition)].get() + 1);
                 }
                 Operation::DuplicateSelection => {
                     // Semantic equality does not admit a noncanonical wire selection.
-                    let issued_roles = wire_context.compiler_input_roles();
-                    let published = issued_roles
+                    let issued_rows = recorded_rows(wire_context);
+                    let published = issued_rows
                         .iter()
-                        .position(CompilerInputRole::is_published_source_original)
+                        .position(|(_, row)| row.publication().is_some())
                         .unwrap();
-                    let mut roles = serde_json::to_value(&issued_roles).unwrap();
-                    let baseline_wire: Vec<CompilerInputRole> = serde_json::from_value(roles.clone()).unwrap();
-                    let bindings = roles[published]["selection"]["graph"]["bindings"]
+                    let mut roles = serde_json::to_value(&issued_rows).unwrap();
+                    let baseline_wire: RecordedRows = serde_json::from_value(roles.clone()).unwrap();
+                    let bindings = roles[published][1]["provenance"]["birth"]["selection"]["graph"]["bindings"]
                         .as_array_mut()
                         .unwrap();
                     bindings.push(bindings[0].clone());
-                    let repeated: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
+                    let repeated: RecordedRows = serde_json::from_value(roles).unwrap();
                     prop_assert_eq!(&repeated, &baseline_wire);
-                    prop_assert!(restored_graph_roles(wire_context, &repeated).is_err());
+                    prop_assert!(restore_recorded_rows(wire_context, &repeated).is_err());
                     duplicate_refusals.set(duplicate_refusals.get() + 1);
                 }
             }
