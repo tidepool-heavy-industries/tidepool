@@ -473,14 +473,16 @@ impl PersistentSession {
         drop(scoped);
         // This is the existing binding owner's real dependency custody, issued
         // before a compiler owner can outlive the mutable session checkout.
-        let bindings = Arc::new(self.lease_binding_ids(selected_ids.values().copied()));
         let mut owner = ScopedResolvedInputs::empty(scope);
-        for id in selected_ids.into_values() {
-            let entry = self
-                .bindings()
-                .get(id)
-                .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
-            owner.insert(self.resolved_value(entry, Arc::clone(&bindings))?)?;
+        if !selected_ids.is_empty() {
+            let bindings = Arc::new(self.lease_binding_ids(selected_ids.values().copied()));
+            for id in selected_ids.into_values() {
+                let entry = self
+                    .bindings()
+                    .get(id)
+                    .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
+                owner.insert(self.resolved_value(entry, Arc::clone(&bindings))?)?;
+            }
         }
         let mut stages = BTreeMap::new();
         for (stage, terminals) in stage_terminals {
@@ -512,8 +514,11 @@ impl PersistentSession {
             .into_values()
             .map(|entry| entry.id)
             .collect::<Vec<_>>();
-        let bindings = Arc::new(self.lease_binding_ids(ids.iter().copied()));
         let mut owner = ScopedResolvedInputs::empty(scope);
+        if ids.is_empty() {
+            return Ok(owner);
+        }
+        let bindings = Arc::new(self.lease_binding_ids(ids.iter().copied()));
         for id in ids {
             let entry = self
                 .bindings()
