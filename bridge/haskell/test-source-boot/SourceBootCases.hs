@@ -800,7 +800,7 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   duplicatePurpose <- writeInspectionPurposeCodecFixture work includes [value,value] >>= readCodecTerm
   duplicateScope <- readScopeVariant base (\fields -> take 8 fields ++ [duplicatePurpose] ++ drop 9 fields)
   unless (case duplicateScope of
-      Left diagnostic -> "checked value interface owners" `isInfixOf` diagnostic
+      Left diagnostic -> "duplicate checked value interface owners" `isInfixOf` diagnostic
       Right _ -> False)
     (fail "inspection fixture deduplicated or admitted duplicate captured value owners")
   consumerSource <- T.unpack . TE.decodeUtf8 <$> BS.readFile consumerPath
