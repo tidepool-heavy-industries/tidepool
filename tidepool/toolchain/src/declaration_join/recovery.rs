@@ -93,7 +93,7 @@ pub fn certify_recovered_declaration_tip_in_context(
     {
         return Err(contract("recovered root lacks a certified lexical owner"));
     }
-    if context.lexical_graph() != selection.lexical {
+    if context.lexical_graph() != selection.lexical.as_slice() {
         return Err(contract(
             "recovered lexical selectors differ from the exact retained context",
         ));
