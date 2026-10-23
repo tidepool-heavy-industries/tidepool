@@ -1101,7 +1101,11 @@ impl DeclarationPublicationBase {
         selection: &PublicationSelection,
     ) -> Option<Arc<super::CertifiedDeclarationProjection>> {
         if self.public.semantic.expected_public != self.intent.admitted
-            || self.public_context != self.intent.admitted_context
+            || !match (&self.public_context, &self.intent.admitted_context) {
+                (Some(current), Some(admitted)) => current.same_authenticated_context(admitted),
+                (None, None) => true,
+                _ => false,
+            }
         {
             return None;
         }

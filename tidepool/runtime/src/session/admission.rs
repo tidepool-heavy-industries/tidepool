@@ -4155,7 +4155,7 @@ impl PersistentSession {
         let module = tidepool_repr::SessionModule::lib(generation);
         if prepared.generation != generation
             || prepared.parent != self.lib().scope_tip(scope)
-            || prepared.evidence.as_ref() != certificate.as_ref()
+            || !prepared.evidence.same_selected_acquisitions(certificate)
             || certificate.product().owner().unit != "main"
             || certificate.product().owner().module != module.module_name()
             || !self.lib().log.is_reserved(generation)
@@ -4717,7 +4717,14 @@ impl PersistentSession {
             .compile_view_in(target)
             .ok_or(SessionError::DeadScope(target))?;
         if captured.library() != derived.library()
-            || captured.exact_declaration_context() != derived.exact_declaration_context()
+            || !match (
+                captured.exact_declaration_context(),
+                derived.exact_declaration_context(),
+            ) {
+                (Some(captured), Some(derived)) => captured.same_authenticated_context(derived),
+                (None, None) => true,
+                _ => false,
+            }
         {
             return Err(SessionError::StaleStagedDeclaration);
         }

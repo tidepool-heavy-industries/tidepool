@@ -2336,7 +2336,7 @@ impl RuntimeActivationPreviewAdmission {
             .display
             .as_ref()
             .is_some_and(|display| {
-                display == proof.original_display_context()
+                display.same_authenticated_display(proof.original_display_context())
                     && display.matches_prototype(self.input_interface().prototype())
             })
     }
