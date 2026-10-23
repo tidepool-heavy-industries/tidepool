@@ -3436,6 +3436,56 @@ impl IssuedNativeOffer {
 }
 
 #[cfg(test)]
+pub(super) fn assert_actual_emitted_dependency_policy(
+    available: &CompilerSourceSupport,
+    missing: &CompilerSourceSupport,
+    parent: &ArtifactEntry,
+    helper: &ArtifactEntry,
+    expected_group: NativeGroupBinding,
+    expected_offer: &IssuedNativeOffer,
+) {
+    assert!(parent
+        .native_requirements
+        .values()
+        .flatten()
+        .any(|(owner, edge)| {
+            owner == &helper.descriptor.owner
+                && matches!(edge, ArtifactDependency::NativeGroup { required_ordinal, .. }
+                if *required_ordinal == expected_group.original_ordinal)
+        }));
+    let ArtifactPayload::Original(product) = &helper.payload else {
+        panic!("the dependency is an actual completed Original");
+    };
+    let key = NativeGroupKey {
+        artifact: helper.descriptor.id,
+        original_ordinal: expected_group.original_ordinal,
+    };
+    let catalog = NativeDependencyCatalog::from_source(available).unwrap();
+    assert!(matches!(catalog.decision(&helper.descriptor.owner),
+        InputNativeDecision::IssuedChoices(choices) if choices.is_empty()));
+    let supports = catalog.group_supports(key, product.owner());
+    assert_eq!(supports.len(), 1);
+    assert_eq!(supports[0].0, expected_group);
+    assert!(supports[0].1.same_issuance(expected_offer));
+    assert!(expected_offer.is_full());
+
+    let catalog = NativeDependencyCatalog::from_source(missing).unwrap();
+    assert!(matches!(catalog.decision(&helper.descriptor.owner),
+        InputNativeDecision::IssuedChoices(choices)
+            if choices.get(&expected_group.original_ordinal) == Some(&expected_group)));
+    assert!(matches!(
+        catalog.selected_support(&helper.descriptor.owner, expected_group),
+        Some(SelectedNativeSupport::Missing(_))
+    ));
+    assert!(missing
+        .native_offers()
+        .iter()
+        .any(|offer| offer.same_issuance(expected_offer)));
+    assert!(catalog.group_supports(key, product.owner()).is_empty(),
+        "an actual emitted dependency cannot repair a selected ordinal's missing acquisition from Full availability");
+}
+
+#[cfg(test)]
 mod normalized_dependency_tests {
     use super::*;
     use crate::certified_products::tests::{

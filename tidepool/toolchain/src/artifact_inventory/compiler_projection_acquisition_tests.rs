@@ -179,8 +179,13 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         owner,
         &fixture.root.descriptor.owner,
     );
+    let dependency_publication = fixture
+        .entry
+        .products()
+        .published_source_original_selection("dependency-source", owner)
+        .unwrap();
     assert_fresh_dependency_permission_boundary(
-        contexts[0].as_ref(),
+        dependency_publication.context().as_ref(),
         &checked_inputs[0][0],
         &checked_inputs[0][1],
         acquisitions[0],
@@ -548,12 +553,10 @@ fn assert_fresh_dependency_permission_boundary(
         ),
         "Full request-owned availability cannot override an explicit empty direct root decision"
     );
-    completed.assert_fresh_dependency_acquires_available_group(
-        &available,
-        helper,
-        expected_group,
-        true,
-    );
+    // Source import authority and native dependency permission are independent.
+    // Keep the actual publication for source compilation; reusable input-policy
+    // variants below cannot replace its completed source authority.
+    let parent = completed.assert_fresh_dependency_from_published_source(helper, ordinal);
 
     // Restore actual recorded choices through the production authentication
     // owner. Decoding authentic graph facts cannot restore their live grant.
@@ -575,11 +578,19 @@ fn assert_fresh_dependency_permission_boundary(
             .selected_native_support(owner, expected_group),
         Some(SelectedNativeSupport::Missing(_))
     ));
-    completed.assert_fresh_dependency_acquires_available_group(
+    let expected_offers = full
+        .native_offers()
+        .iter()
+        .filter(|offer| offer.is_full() && offer.contains_checked_group(expected_group))
+        .collect::<Vec<_>>();
+    assert_eq!(expected_offers.len(), 1);
+    super::super::native_availability::assert_actual_emitted_dependency_policy(
+        &available,
         &missing,
+        &parent,
         helper,
         expected_group,
-        false,
+        expected_offers[0],
     );
 }
 
@@ -872,6 +883,10 @@ fn assert_world_completed_output_keeps_actual_producer(
             declaration.compiler_source_support(),
             &fresh_owner,
         );
+        let closed_item_support = program.items()[0]
+            .compiler_context()
+            .compiler_source_support();
+        assert_fresh_world_original_selection(stage, closed_item_support, &fresh_owner);
         let continuation = program
             .items()
             .last()
@@ -1032,6 +1047,18 @@ fn assert_fresh_world_original_selection(
     );
     assert!(Arc::ptr_eq(actual, offer.original_acquisition()));
     let row = &selected.selected[owner];
+    let projected = selected
+        .projection()
+        .snapshot_roles()
+        .get(owner)
+        .expect("the closed output projection retains the newly selected owner");
+    assert_eq!(projected.interface(), row.interface().0.artifact);
+    assert_eq!(projected.original(), Some(producer.descriptor.id));
+    assert_eq!(
+        selected.recorded_rows().get(owner),
+        Some(&row.recorded_row()),
+        "the closed output's recorded index and acquired row share the same base"
+    );
     assert!(
         offer.matches_direct_canonical_binding(
             producer.descriptor.id,
@@ -1043,13 +1070,42 @@ fn assert_fresh_world_original_selection(
     assert!(offer
         .artifact_carriers()
         .contains(&row.original().unwrap().0));
-    let canonical = stage
-        .issued_artifacts()
-        .observed_payload(&row.interface().0.artifact)
-        .unwrap();
+    let mut canonical_producers = stage.producer_certificates().iter().filter(|entry| {
+        entry.descriptor.id == row.interface().0.artifact
+            && matches!(entry.payload, ArtifactPayload::Canonical(_))
+    });
+    let canonical = canonical_producers
+        .next()
+        .expect("the genuinely new owner has an actual canonical producer certificate");
+    assert!(canonical_producers.next().is_none());
     assert!(Arc::ptr_eq(&row.interface().1, canonical));
-    assert!(matches!(selected.compiler_roles().native_decision(owner), InputNativeDecision::UnissuedPolicy),
-        "physical production and private Full body availability do not issue a selected native root");
+    let expected_groups = offer
+        .proof()
+        .into_iter()
+        .flat_map(|proof| proof.selection.snapshot().roots.keys())
+        .filter_map(|root| match root {
+            ArtifactBindingNode::Group(group)
+                if group.binding.artifact() == producer.descriptor.id =>
+            {
+                Some((group.original_ordinal, *group))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let InputNativeDecision::IssuedChoices(groups) =
+        selected.compiler_roles().native_decision(owner)
+    else {
+        panic!("fresh capture issues its exact completed own-offer choices")
+    };
+    assert_eq!(groups, &expected_groups);
+    for group in groups.values() {
+        let support = selected
+            .compiler_roles()
+            .selected_native_support(owner, *group)
+            .expect("the fresh selected group keeps its actual acquisition");
+        assert_eq!(support.acquisitions().len(), 1);
+        assert!(support.acquisitions()[0].same_issuance(offer));
+    }
 }
 
 fn assert_interface_extension_preserves_native_topology(

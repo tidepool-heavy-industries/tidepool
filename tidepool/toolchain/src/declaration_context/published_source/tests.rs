@@ -1610,19 +1610,21 @@ impl ExactDeclarationContext {
 }
 
 impl ExactDeclarationContext {
-    pub(crate) fn assert_fresh_dependency_acquires_available_group(
+    pub(crate) fn assert_fresh_dependency_from_published_source(
         &self,
-        support: &crate::artifact_inventory::CompilerSourceSupport,
         helper: &Arc<ArtifactEntry>,
-        expected_group: crate::artifact_inventory::NativeGroupBinding,
-        permitted: bool,
-    ) {
-        let context = self
-            .published_context_for_root(&helper.descriptor.owner, helper.descriptor.id)
+        expected_ordinal: u32,
+    ) -> Arc<ArtifactEntry> {
+        assert!(self
+            .compiler_roles()
+            .get(&helper.descriptor.owner)
             .unwrap()
-            .rebuild(|facts| facts.compiler_support = support.clone())
-            .finish()
+            .is_published_source_original());
+        let selected_helper = self
+            .compiler_roles()
+            .original_acquisition(&helper.descriptor.owner)
             .unwrap();
+        assert!(Arc::ptr_eq(selected_helper, helper));
         let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
         let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(47));
         let path = directory.path().join(module.relative_hs_path());
@@ -1632,27 +1634,19 @@ impl ExactDeclarationContext {
             module.module_name(),
         );
         std::fs::write(&path, &source).unwrap();
-        // The full-home authored producer emits P's body while its literal
-        // probe demands no H root. H can only come from this request's captured
-        // exact input availability; no H source exists in the new include root.
+        // No H source exists in this new include root. This real publication
+        // supplies completed source authority independently of the native
+        // input-policy variants tested at their catalog owner.
         let result = crate::artifacts::test_support::certify_authored_declaration_in_context(
             module,
             &path,
             &source,
             &[directory.path().to_path_buf()],
             directory.path(),
-            Arc::new(context),
+            Arc::new(self.clone()),
         );
-        if !permitted {
-            assert!(matches!(result,
-                Err(CompileError::ArtifactInventory(error))
-                    if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable {
-                        artifact, original_ordinal,
-                    } if artifact == helper.descriptor.id && original_ordinal == expected_group.original_ordinal)),
-                "a selected ordinal with missing live acquisition cannot borrow a Full available offer");
-            return;
-        }
-        let declaration = result.expect("an actual fresh product may acquire its exact emitted H dependency from Full request-owned availability");
+        let declaration = result
+            .expect("an actual fresh product uses the untouched completed Helper publication");
         let issued = declaration.compiler_source_support();
         let parent_owner = identity("main", &module.module_name());
         let parent = issued
@@ -1667,16 +1661,31 @@ impl ExactDeclarationContext {
                 .any(|(owner, edge)| owner == &helper.descriptor.owner
                     && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
                     required_ordinal, ..
-                } if *required_ordinal == expected_group.original_ordinal)),
+                } if *required_ordinal == expected_ordinal)),
             "the actual fresh P body must emit the independently selected H dependency"
         );
         assert!(issued.artifacts().binding_dependencies().iter().any(|(from, to, edge)|
             matches!(from, crate::artifact_inventory::ArtifactBindingNode::Group(group)
                 if group.binding.artifact() == parent.descriptor.id)
-            && *to == crate::artifact_inventory::ArtifactBindingNode::Group(expected_group)
+            && matches!(to, crate::artifact_inventory::ArtifactBindingNode::Group(group)
+                if group.binding.artifact() == helper.descriptor.id
+                    && group.original_ordinal == expected_ordinal)
             && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
                 required_ordinal, ..
-            } if *required_ordinal == expected_group.original_ordinal)),
+            } if *required_ordinal == expected_ordinal)),
             "fresh P retains the exact actual offered H group edge");
+        assert!(Arc::ptr_eq(
+            issued
+                .compiler_roles()
+                .original_acquisition(&helper.descriptor.owner)
+                .unwrap(),
+            selected_helper,
+        ));
+        assert!(issued
+            .compiler_roles()
+            .get(&helper.descriptor.owner)
+            .unwrap()
+            .is_published_source_original());
+        Arc::clone(parent)
     }
 }
