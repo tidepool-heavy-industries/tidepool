@@ -3068,7 +3068,7 @@ mod tests {
                 .joined_at(generation)
                 .unwrap()
                 .surface
-                .lexical
+                .lexical_graph()
                 .len()
         );
         assert!(context
@@ -3388,7 +3388,7 @@ mod tests {
                 .joined_at(generation)
                 .unwrap()
                 .surface
-                .lexical
+                .lexical_graph()
                 .len()
         );
         assert!(context
