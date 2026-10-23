@@ -21786,7 +21786,20 @@ mod tests {
         assert_eq!(histories, 16);
 
         // A source import of the exact published original still selects its policy.
-        let product = publication.context().recovery_products().remove(0);
+        let selected_original = publication
+            .context()
+            .compiler_input_projection()
+            .snapshot_roles()[publication.public_root()]
+        .original()
+        .unwrap();
+        let entry = publication
+            .context()
+            .artifact_view()
+            .observed_payload(&selected_original)
+            .unwrap();
+        let ArtifactPayload::Original(product) = &entry.payload else {
+            panic!("the published role selects an original product")
+        };
         let owner = product.owner().clone();
         let import = PendingImportOwner::Source {
             binder: SymbolIdentity {
