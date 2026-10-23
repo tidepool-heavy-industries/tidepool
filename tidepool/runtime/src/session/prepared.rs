@@ -992,7 +992,13 @@ pub struct SiteTypeEvidence {
     constructors: Arc<[(ConstructorIdentity, DataConId)]>,
     input: TypeNodeId,
     answer: TypeNodeId,
-    request_context: Option<Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
+    request_context: Option<AuthenticatedRequestTypes>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthenticatedRequestTypes {
+    interfaces: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
+    signatures: Arc<tidepool_toolchain::checked_cell::RequestTypeSignatures>,
 }
 
 impl PartialEq for SiteTypeEvidence {
@@ -1115,28 +1121,32 @@ impl RequestCompileAnnotations {
 }
 
 impl SiteTypeEvidence {
-    /// Original authenticated request type owner; observation grants no execution.
-    pub fn original_request_context(
+    /// Original selected TYPE interfaces; observation grants no execution.
+    pub fn original_request_type_interfaces(
         &self,
-    ) -> Option<&Arc<tidepool_toolchain::declaration_join::ExactCompileContext>> {
-        self.request_context.as_ref()
+    ) -> Option<&Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>> {
+        self.request_context
+            .as_ref()
+            .map(|request| &request.interfaces)
     }
 
     pub fn request_type_signatures(
         &self,
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::RequestTypeSignatures>> {
-        self.request_context.as_ref()?.request_types()
+        self.request_context
+            .as_ref()
+            .map(|request| &request.signatures)
     }
 
     pub(crate) fn authenticate_request_types(
         mut self,
         signatures: tidepool_toolchain::checked_cell::RequestTypeSignatures,
-        declarations: &Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+        interfaces: &Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
     ) -> Result<Self, crate::CompileError> {
-        self.request_context = Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations.clone())
-                .with_request_types(Arc::new(signatures)),
-        ));
+        self.request_context = Some(AuthenticatedRequestTypes {
+            interfaces: interfaces.clone(),
+            signatures: Arc::new(signatures),
+        });
         self.commitment.take();
         Ok(self)
     }
@@ -1155,15 +1165,10 @@ impl SiteTypeEvidence {
             Some(declarations) => (**declarations).clone(),
             None => tidepool_toolchain::declaration_join::ExactDeclarationContext::empty(),
         };
-        let declarations = Arc::new(base.extend_interface_context(request.declarations())?);
+        let declarations = Arc::new(base.extend_type_interfaces(&request.interfaces)?);
         Ok(Arc::new(
             tidepool_toolchain::declaration_join::ExactCompileContext::new(declarations)
-                .with_request_types(
-                    request
-                        .request_types()
-                        .expect("authenticated request signatures")
-                        .clone(),
-                ),
+                .with_request_types(request.signatures.clone()),
         ))
     }
 
@@ -1207,7 +1212,7 @@ impl SiteTypeEvidence {
 
         let mut hash = blake3::Hasher::new();
         frame(&mut hash, b"Tidepool.SiteTypeEvidence");
-        frame(&mut hash, b"v4");
+        frame(&mut hash, b"v5");
         self.types.write_evidence(|bytes| {
             hash.update(bytes);
         });
@@ -1228,14 +1233,8 @@ impl SiteTypeEvidence {
         match &self.request_context {
             Some(request) => {
                 frame(&mut hash, &[1]);
-                frame(
-                    &mut hash,
-                    &request
-                        .request_types()
-                        .expect("authenticated signatures")
-                        .metadata_digest(),
-                );
-                frame(&mut hash, &request.declarations().semantic_sha256());
+                frame(&mut hash, &request.signatures.metadata_digest());
+                frame(&mut hash, &request.interfaces.semantic_sha256());
             }
             None => frame(&mut hash, &[0]),
         }
