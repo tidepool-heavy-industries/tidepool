@@ -79,6 +79,65 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
         ));
     }
     let owners = BTreeSet::from([owner.clone()]);
+    let checked_inputs = acquisitions.map(|entry| {
+        [
+            NativeArtifactDemand::ScopeInterfaces,
+            NativeArtifactDemand::AllGroups,
+        ]
+        .map(|demand| {
+            let inventory = ArtifactInventory::default();
+            let entries = vec![Arc::clone(entry)];
+            CompilerSourceSupport::from_selected_issuance(
+                CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+                inventory
+                    .admit_shared_with_demand(&inventory.empty_view(), entries, demand)
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+    });
+    for issued in &checked_inputs {
+        for (nonempty, support) in issued.iter().enumerate() {
+            let expected = support
+                .compiler_roles()
+                .original_acquisition(owner)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &expected.payload else {
+                unreachable!()
+            };
+            let canonical = support.compiler_roles().get(owner).unwrap().interface();
+            let decision = support
+                .checked_native_input_decision(original, canonical, product.owner())
+                .unwrap();
+            let InputNativeDecision::IssuedChoices(groups) = decision else {
+                panic!("the checked input issuer records explicit native choices");
+            };
+            assert_eq!(groups.is_empty(), nonempty == 0,
+                "actual ScopeInterfaces and AllGroups ingress distinguish issued-empty from nonempty");
+            let mut wrong_owner = product.owner().clone();
+            wrong_owner.product_sha256[0] ^= 1;
+            assert!(matches!(
+                support.checked_native_input_decision(original, canonical, &wrong_owner),
+                Err(crate::certified_products::InputDecisionRefusal::NativeOwnerMismatch),
+            ));
+            assert!(matches!(
+                support.checked_native_input_decision(
+                    fixture.root.descriptor.id,
+                    canonical,
+                    product.owner()
+                ),
+                Err(crate::certified_products::InputDecisionRefusal::ArtifactIdentityMismatch(_)),
+            ));
+            assert_narrowing_keeps_selected_acquisition(support, owner, expected);
+        }
+        assert_whole_row_precedence(&issued[0], &issued[1], owner);
+    }
+    for (first, second) in [
+        (&checked_inputs[0], &checked_inputs[1]),
+        (&checked_inputs[1], &checked_inputs[0]),
+    ] {
+        assert_whole_row_precedence(&first[0], &second[1], owner);
+    }
     for offered in 0..2 {
         let types = supports[offered]
             .selected_interfaces()
