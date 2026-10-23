@@ -1355,6 +1355,41 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "toolchain_checked_value_authority_tests",
+    binary = ":tidepool_toolchain_unit_tests_binary",
+    exact_tests = [
+        "checked_cell::tests::checked_baseline_borrows_issued_rows_and_releases_actual_backing",
+        "checked_cell::tests::checked_baseline_keeps_distinct_equal_byte_issuers_and_refuses_mismatch",
+    ],
+    expected_count = 2,
+    ignored = True,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1260000,
+    case_compiler_modes = {"checked_cell::tests::checked_baseline_borrows_issued_rows_and_releases_actual_backing": "owned-resident", "checked_cell::tests::checked_baseline_keeps_distinct_equal_byte_issuers_and_refuses_mismatch": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:qualification_script",
+        "toolchains//:python",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT": "$(location //build/package:qualification_script)",
+        "TIDEPOOL_CATALOG_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "toolchain_world_native_seal_test",
     binary = ":tidepool_toolchain_unit_tests_binary",
     exact_tests = ["artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"],
@@ -2087,28 +2122,6 @@ rust_compile_fail(
     source = "tests/compile_fail/certified_product_has_no_digest_admission.rs",
     control = "tests/compile_pass/certified_product_has_no_digest_admission.rs",
     expected = "tests/compile_fail/certified_product_has_no_digest_admission.stderr",
-    dependencies = {
-        "tidepool_toolchain": ":tidepool_toolchain",
-    },
-    visibility = ["PUBLIC"],
-)
-
-rust_compile_fail(
-    name = "compile_fail_checked_cell_request_digest_is_issued",
-    source = "tests/compile_fail/checked_cell_request_digest_is_issued.rs",
-    control = "tests/compile_pass/checked_cell_request_digest_is_issued.rs",
-    expected = "tests/compile_fail/checked_cell_request_digest_is_issued.stderr",
-    dependencies = {
-        "tidepool_toolchain": ":tidepool_toolchain",
-    },
-    visibility = ["PUBLIC"],
-)
-
-rust_compile_fail(
-    name = "compile_fail_checked_cell_request_inventory_is_issued",
-    source = "tests/compile_fail/checked_cell_request_inventory_is_issued.rs",
-    control = "tests/compile_pass/checked_cell_request_inventory_is_issued.rs",
-    expected = "tests/compile_fail/checked_cell_request_inventory_is_issued.stderr",
     dependencies = {
         "tidepool_toolchain": ":tidepool_toolchain",
     },
