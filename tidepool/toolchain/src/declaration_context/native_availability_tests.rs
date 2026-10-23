@@ -6704,12 +6704,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .artifacts()
         .selected_native_groups();
     let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
-        let before = context
-            .owner
-            .facts
-            .compiler_support
-            .artifacts()
-            .selected_native_groups();
+        let before = context.clone();
         let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
             producer_bytes,
             &[root.to_path_buf()],
@@ -6750,15 +6745,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 "custody or partial demand grants no full original offer"
             );
         }
-        assert_eq!(
-            context
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .selected_native_groups(),
-            before
-        );
+        assert_eq!(context, &before);
     };
     let authored_groups = selected_before
         .iter()
@@ -6910,8 +6897,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .is_empty());
     assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
     assert_eq!(captured, before_custody);
-    // Fresh request-type authentication extends only interfaces. The issued
-    // parent's complete body graph must survive that handoff as private custody.
+    // A fresh receiver gains TYPE evidence without the source's native owner.
     let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
         .unwrap()
         .extend_interface_context(&native_context)
@@ -6927,7 +6913,44 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .compiler_input_roles()
         .iter()
         .all(|role| role.original().is_none()));
-    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", true);
+    assert_eq!(
+        fresh.compiler_input_projection(),
+        native_context.compiler_input_projection()
+    );
+    assert!(fresh.compiler_source_support().native_offers().is_empty());
+    assert!(fresh
+        .compiler_source_support()
+        .native_availability()
+        .snapshot_facts()
+        .unwrap()
+        .is_empty());
+    assert!(OriginalCompilerInputs::reuse_selected_authored(&fresh)
+        .unwrap()
+        .is_none());
+    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", false);
+
+    // The same TYPE extension preserves availability already issued to its
+    // receiver without selecting any executable group.
+    let retained = captured
+        .clone()
+        .extend_interface_context(&native_context)
+        .unwrap();
+    assert_eq!(
+        retained
+            .compiler_source_support()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap(),
+        captured
+            .compiler_source_support()
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+    );
+    assert!(retained.artifact_view().selected_native_groups().is_empty());
+    assert_eq!(retained.lexical_graph(), captured.lexical_graph());
+    assert_eq!(retained.source_scope(), captured.source_scope());
+    assert_exact_offer(&retained, "retained-request-type-authored-offer", true);
     // Reuse the genuine certificate and independently remove execution
     // roots. Neither type custody nor an incomplete group selection can
     // supply the complete authored original to another compiler request.
