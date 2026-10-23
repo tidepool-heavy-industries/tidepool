@@ -17719,11 +17719,10 @@ fn certify_artifact_view_groups(
             }
             if let Some(position) = current_positions.get(&key) {
                 let candidate: &PendingCertifiedGroup = &current[*position];
-                if candidate.group() != group.group()
-                    || candidate.imports() != group.imports()
-                    || candidate.owner() != group.owner()
-                {
-                    return Err(failure("artifact view changed a previously selected group"));
+                if !candidate.same_issuance(group) {
+                    return Err(failure(
+                        "scoped aliases have competing physical row issuers",
+                    ));
                 }
             } else {
                 validation
@@ -27117,6 +27116,98 @@ mod tests {
             .1
             .into_iter()
             .collect::<BTreeSet<_>>();
+        // Equal recovered bytes earned independent physical issuances. Neither
+        // the shared payload nor the materialization key can choose between them.
+        {
+            let first_rows = RetainedArtifactMaterialization::selected_group_refs(
+                [first_owner.as_ref()],
+                &first_bindings,
+            );
+            let second_rows = RetainedArtifactMaterialization::selected_group_refs(
+                [second_owner.as_ref()],
+                &second_bindings,
+            );
+            let first_product = first_rows.values().next().unwrap().product();
+            let second_product = second_rows.values().next().unwrap().product();
+            assert_eq!(first_product.group(), second_product.group());
+            assert_eq!(first_product.imports(), second_product.imports());
+            assert_eq!(first_product.owner(), second_product.owner());
+            assert!(!first_product.same_issuance(second_product));
+        }
+        for parents in [
+            vec![first_owner.clone(), second_owner.clone()],
+            vec![second_owner.clone(), first_owner.clone()],
+        ] {
+            let error = context
+                .materialize_retained_artifacts(
+                    &joined,
+                    &joined_metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .err()
+                .expect("independent physical issuers cannot become one native row");
+            assert!(matches!(error, CompileError::ExtractFailed(detail)
+                if detail == "exact declaration context: scoped aliases have competing physical row issuers"));
+        }
+        // One actual issuer may supply both scoped aliases after their exact
+        // outgoing imports are checked by the materialization owner.
+        let shared_owner = Arc::new(
+            context
+                .materialize_retained_artifacts(
+                    &joined,
+                    &joined_metadata,
+                    vec![first_owner.clone()],
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .unwrap(),
+        );
+        {
+            let first_rows = RetainedArtifactMaterialization::selected_group_refs(
+                [first_owner.as_ref()],
+                &first_bindings,
+            );
+            let shared_rows = RetainedArtifactMaterialization::selected_group_refs(
+                [shared_owner.as_ref()],
+                &aliases,
+            );
+            assert_eq!(shared_rows.len(), 2);
+            let original = first_rows.values().next().unwrap().product();
+            assert!(shared_rows
+                .values()
+                .all(|row| original.same_issuance(row.product())));
+            let shared =
+                CertifiedArtifactGroupBindings::from_issued_rows(&joined, &shared_rows).unwrap();
+            assert_eq!(shared.groups().len(), 1);
+            let rebound = certify_selected_artifact_view_groups_with_validation(
+                &joined,
+                Some(&shared),
+                &mut PackageInterfaceValidation::default(),
+            )
+            .unwrap();
+            for binding in &aliases {
+                assert!(original.same_issuance(rebound.get(*binding).unwrap()));
+            }
+        }
+        for parents in [
+            vec![first_owner.clone(), shared_owner.clone()],
+            vec![shared_owner.clone(), first_owner.clone()],
+        ] {
+            let retained = context
+                .materialize_retained_artifacts(
+                    &joined,
+                    &joined_metadata,
+                    parents,
+                    tempfile::tempdir().unwrap(),
+                    &RequestInputTransport::OwnedArena,
+                )
+                .unwrap();
+            let rows = RetainedArtifactMaterialization::selected_group_refs([&retained], &aliases);
+            let rebound = CertifiedArtifactGroupBindings::from_issued_rows(&joined, &rows).unwrap();
+            assert_eq!(rebound.groups().len(), 1);
+        }
         let weak_first = Arc::downgrade(&first_owner);
         let weak_second = Arc::downgrade(&second_owner);
         let captured_artifacts = joined_metadata
@@ -27126,11 +27217,13 @@ mod tests {
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect::<BTreeMap<_, _>>();
         let captured = RetainedArtifactMaterialization::capture_custody(
-            &[first_owner, second_owner],
+            &[shared_owner],
             &captured_artifacts,
             &aliases,
         )
         .unwrap();
+        drop(first_owner);
+        drop(second_owner);
         let detached_rows =
             RetainedArtifactMaterialization::selected_group_refs([captured.as_ref()], &aliases);
         let detached =
