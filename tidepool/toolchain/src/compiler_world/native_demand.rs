@@ -17,7 +17,7 @@ pub(super) struct WorldDependencyObservations {
     identity: Arc<DependencyRequestIdentity>,
     acquisitions: Vec<Arc<ResolvedNativeDemand>>,
     acquired_uses: BTreeMap<crate::certified_products::ReceiptImportOwner, usize>,
-    stages: BTreeMap<u64, PendingStageDependencies>,
+    stages: BTreeMap<u64, StageDependencyState>,
 }
 
 pub(crate) struct WorldNativeDemandCompletion {
@@ -39,6 +39,50 @@ struct CompletedStageDependencies {
 struct PendingStageDependencies {
     source: Vec<Arc<crate::declaration_context::SourceDependencyBasis>>,
     native: Option<WorldNativeDemandStage>,
+}
+
+enum StageDependencyState {
+    Observed(PendingStageDependencies),
+    Sealed(CompletedStageDependencies),
+}
+
+impl Default for StageDependencyState {
+    fn default() -> Self {
+        Self::Observed(PendingStageDependencies::default())
+    }
+}
+
+impl StageDependencyState {
+    fn observed(&self) -> Result<&PendingStageDependencies, CompileError> {
+        match self {
+            Self::Observed(pending) => Ok(pending),
+            Self::Sealed(_) => Err(source_failure("dependency stage is already sealed")),
+        }
+    }
+
+    fn observed_mut(&mut self) -> Result<&mut PendingStageDependencies, CompileError> {
+        match self {
+            Self::Observed(pending) => Ok(pending),
+            Self::Sealed(_) => Err(source_failure("dependency stage is already sealed")),
+        }
+    }
+
+    fn seal(self, dependencies: Arc<SealedStageDependencies>) -> Result<Self, CompileError> {
+        match self {
+            Self::Observed(pending) => Ok(Self::Sealed(CompletedStageDependencies {
+                native: pending.native,
+                dependencies,
+            })),
+            Self::Sealed(_) => Err(source_failure("dependency stage is already sealed")),
+        }
+    }
+
+    fn into_completed(self) -> Result<CompletedStageDependencies, CompileError> {
+        match self {
+            Self::Sealed(completed) => Ok(completed),
+            Self::Observed(_) => Err(source_failure("dependency stage was not sealed")),
+        }
+    }
 }
 
 pub(crate) struct WorldNativeDemandStage {
@@ -179,7 +223,7 @@ impl WorldDependencyObservations {
     /// Bind only reached terminal rows, once per exact use, before the stage
     /// is admitted. Availability elsewhere in the ledger is not selected.
     pub(super) fn seal_stage_dependencies(
-        &self,
+        &mut self,
         first_ordinal: usize,
         references: Vec<DependencyTerminalReference>,
     ) -> Result<Arc<SealedStageDependencies>, CompileError> {
@@ -188,6 +232,13 @@ impl WorldDependencyObservations {
             DependencyTerminalOrigin,
             &'a crate::certified_products::ReceiptImportOwner,
         );
+        let offset = u64::try_from(first_ordinal)
+            .map_err(|_| source_failure("dependency stage offset is out of range"))?;
+        let pending = self
+            .stages
+            .get(&offset)
+            .map(StageDependencyState::observed)
+            .transpose()?;
         self.operation
             .reserve::<(UseKey<'_>, Vec<usize>)>(references.len())
             .and_then(|_| {
@@ -206,7 +257,6 @@ impl WorldDependencyObservations {
                 .or_default()
                 .push(index);
         }
-        let pending = self.stages.get(&(first_ordinal as u64));
         let mut selected = vec![None; references.len()];
         for ((origin, original_use), indices) in uses {
             crate::host_work::checkpoint()?;
@@ -310,11 +360,23 @@ impl WorldDependencyObservations {
                 })
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
-        Ok(Arc::new(SealedStageDependencies {
+        self.operation
+            .reserve::<SealedStageDependencies>(1)
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let dependencies = Arc::new(SealedStageDependencies {
             request: Arc::clone(&self.identity),
             first_ordinal,
             rows,
-        }))
+        });
+        if !self.stages.contains_key(&offset) {
+            self.operation
+                .reserve::<(u64, StageDependencyState)>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        }
+        let observed = self.stages.remove(&offset).unwrap_or_default();
+        let sealed = observed.seal(Arc::clone(&dependencies))?;
+        self.stages.insert(offset, sealed);
+        Ok(dependencies)
     }
 
     pub(super) fn bind_emitted_stages(
@@ -339,14 +401,15 @@ impl WorldDependencyObservations {
                     "dependency seal belongs to another request or stage",
                 ));
             }
-            let pending = self.stages.remove(&(first as u64)).unwrap_or_default();
-            completed.insert(
-                first as u64,
-                CompletedStageDependencies {
-                    native: pending.native,
-                    dependencies: Arc::clone(stage.dependencies()),
-                },
-            );
+            let issued = self
+                .stages
+                .remove(&(first as u64))
+                .ok_or_else(|| source_failure("emitted dependency stage has no seal"))?
+                .into_completed()?;
+            if !Arc::ptr_eq(&issued.dependencies, stage.dependencies()) {
+                return Err(source_failure("emitted dependency stage has another seal"));
+            }
+            completed.insert(first as u64, issued);
         }
         Ok(Arc::new(WorldNativeDemandCompletion {
             reservation: self.reservation,
@@ -380,6 +443,31 @@ fn require_emitted_stage_keys(
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+
+    #[test]
+    fn dependency_stage_seal_consumes_observation_and_refuses_a_second_seal() {
+        // Exercise the private ledger transition only; no checked stage,
+        // completed request, or runtime authority is issued by this control.
+        let dependencies = Arc::new(SealedStageDependencies {
+            request: Arc::new(DependencyRequestIdentity),
+            first_ordinal: 0,
+            rows: Vec::new(),
+        });
+        let observed = StageDependencyState::default();
+        assert!(observed.observed().is_ok());
+        let mut sealed = observed.seal(Arc::clone(&dependencies)).unwrap();
+        assert!(sealed.observed().is_err());
+        assert!(sealed.observed_mut().is_err());
+        assert!(sealed.seal(Arc::clone(&dependencies)).is_err());
+
+        assert!(StageDependencyState::default().into_completed().is_err());
+        let completed = StageDependencyState::default()
+            .seal(Arc::clone(&dependencies))
+            .unwrap()
+            .into_completed()
+            .unwrap();
+        assert!(Arc::ptr_eq(&completed.dependencies, &dependencies));
+    }
 
     #[test]
     fn dependency_completion_rejects_non_start_and_unemitted_query_keys() {
@@ -733,13 +821,14 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 if !self.completion.stages.contains_key(&demand.stage) {
                     self.validation
                         .inventory
-                        .reserve::<(u64, PendingStageDependencies)>(1)
+                        .reserve::<(u64, StageDependencyState)>(1)
                         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
                 }
                 self.completion
                     .stages
                     .entry(demand.stage)
                     .or_default()
+                    .observed_mut()?
                     .source
                     .push(basis);
                 return Ok(reply);
@@ -749,6 +838,8 @@ impl<'a> WorldNativeDemandResolver<'a> {
             .completion
             .stages
             .get(&demand.stage)
+            .map(StageDependencyState::observed)
+            .transpose()?
             .and_then(|stage| stage.native.as_ref());
         let fresh = packet
             .without_known(
@@ -882,7 +973,7 @@ impl<'a> WorldNativeDemandResolver<'a> {
         if prior.is_none() {
             self.validation
                 .inventory
-                .reserve::<(u64, PendingStageDependencies)>(1)
+                .reserve::<(u64, StageDependencyState)>(1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         }
         if acquired.is_some() {
@@ -905,7 +996,12 @@ impl<'a> WorldNativeDemandResolver<'a> {
                 self.completion.acquired_uses.insert(reference, new_index);
             }
         }
-        let stage = self.completion.stages.entry(demand.stage).or_default();
+        let stage = self
+            .completion
+            .stages
+            .entry(demand.stage)
+            .or_default()
+            .observed_mut()?;
         match &mut stage.native {
             Some(native) => {
                 native.batches.extend(batches);

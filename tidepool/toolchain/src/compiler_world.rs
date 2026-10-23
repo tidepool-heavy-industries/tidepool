@@ -6518,7 +6518,7 @@ fn admit_world_preparation_response(
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
-    native_demands: native_demand::WorldDependencyObservations,
+    mut native_demands: native_demand::WorldDependencyObservations,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
     if !Arc::ptr_eq(&reservation, &native_demands.reservation)
         || !Arc::ptr_eq(&validation.inventory, &native_demands.operation)
