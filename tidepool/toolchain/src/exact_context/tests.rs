@@ -1123,6 +1123,97 @@ fn context10_decodes_shared_publication_records_without_acquired_owners() {
 }
 
 #[test]
+fn recorded_publication_full_proof_changes_incremental_row_leaf() {
+    let native_facts = PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: OrdMap::new(),
+            offers: OrdMap::new(),
+            native_availability: OrdMap::new(),
+        },
+    )
+    .unwrap();
+    let owner = ExactModuleIdentity {
+        unit: "record".into(),
+        module: "Owner".into(),
+    };
+    let row = |extra_unselected_node| {
+        let scope = ArtifactSelectionId([1; 32]);
+        let binding = ArtifactBinding {
+            artifact: ArtifactId([2; 32]),
+            selection: scope,
+        };
+        let node = ArtifactBindingNode::Artifact(binding);
+        let mut nodes = vec![node];
+        if extra_unselected_node {
+            nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: scope,
+            }));
+        }
+        // These are contradictory untrusted DATA records, not live issuers.
+        let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+            selection: scope,
+            nodes,
+            dependencies: vec![],
+        }));
+        let selection = Arc::new(ExactSelectionSnapshot {
+            scopes: std::iter::once((scope, proof)).collect(),
+            roots: std::iter::once((node, ())).collect(),
+            namespace: std::iter::once((binding.artifact, binding)).collect(),
+            custody_roots: OrdMap::new(),
+        });
+        RecordedCompilerRow::Original {
+            interface: ArtifactId([4; 32]),
+            original: binding.artifact,
+            provenance: RecordedOriginalProvenance::Published(RecordedPublicationBirth {
+                source_revision: "recorded revision".into(),
+                original_input_identity: "recorded input".into(),
+                selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    selection,
+                ),
+                selection_sha256: [5; 32],
+                native_facts: Arc::clone(&native_facts),
+            }),
+            native_choices: RecordedNativeChoices::Unissued,
+        }
+    };
+    let first_row = row(false);
+    let second_row = row(true);
+    assert_eq!(
+        first_row.publication().unwrap().selection,
+        second_row.publication().unwrap().selection
+    );
+    assert_ne!(
+        first_row, second_row,
+        "record equality includes complete encoded proof facts"
+    );
+    let mut first = ExactContextSnapshot::empty();
+    first.roles.insert(owner.clone(), first_row);
+    let mut second = first.clone();
+    second.roles.insert(owner, second_row);
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let base = writer.materialize_context(None, &first).unwrap();
+    install(&store, writer.finish().unwrap());
+    let mut writer = Materializer::new(&store);
+    let incremental = writer.materialize_context(Some(&base), &second).unwrap();
+    let packet = writer.finish().unwrap();
+    assert_ne!(incremental.roles.root(), base.roles.root());
+    install(&store, packet);
+    let mut writer = Materializer::new(&store);
+    let cold = writer.materialize_context(None, &second).unwrap();
+    assert_eq!(incremental.root(), cold.root());
+    assert_ne!(incremental.root(), base.root());
+    assert_eq!(
+        hydrate_context(&store, incremental.root())
+            .unwrap()
+            .recorded_rows(),
+        second.recorded_rows()
+    );
+}
+
+#[test]
 fn context_version_gate_precedes_layout_and_child_hydration() {
     #[derive(Serialize)]
     struct ForeignContext {

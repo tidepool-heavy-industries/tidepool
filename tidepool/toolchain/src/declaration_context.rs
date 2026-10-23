@@ -21561,10 +21561,10 @@ mod tests {
                 proptest::prop_assert_eq!(result.root(),rebuilt.root());
                 let restored = hydrate_context(&store,result.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),snapshot.graph_selection().unwrap());
-                proptest::prop_assert_eq!(restored.snapshot().compiler_roles(),snapshot.compiler_roles());
+                proptest::prop_assert_eq!(restored.snapshot().recorded_rows(),snapshot.recorded_rows());
                 proptest::prop_assert_eq!(
-                    &restored.snapshot().input_decisions,
-                    next.compiler_source_support().recorded_input_decisions(),
+                    restored.snapshot().recorded_rows(),
+                    next.compiler_source_support().recorded_rows(),
                     "the real incremental writer/reader must preserve issued empty domains and exact Group references",
                 );
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),snapshot.lexical());
@@ -21581,8 +21581,8 @@ mod tests {
                 };
                 let mut recovered = inventory.context_for_expected_snapshot(restored.root(), &restored).unwrap();
                 proptest::prop_assert_eq!(
-                    recovered.compiler_source_support().recorded_input_decisions(),
-                    next.compiler_source_support().recorded_input_decisions(),
+                    recovered.compiler_source_support().recorded_rows(),
+                    next.compiler_source_support().recorded_rows(),
                     "authenticated context recovery must preserve the same issued choices without policy resurrection",
                 );
                 assert_context_observation_wire(&recovered);
@@ -21598,8 +21598,8 @@ mod tests {
                 let restored = hydrate_context(&store,receipt.root()).unwrap();
                 proptest::prop_assert_eq!(restored.snapshot().lexical(),context.lexical_graph());
                 proptest::prop_assert_eq!(
-                    &restored.snapshot().input_decisions,
-                    context.compiler_source_support().recorded_input_decisions(),
+                    restored.snapshot().recorded_rows(),
+                    context.compiler_source_support().recorded_rows(),
                 );
                 proptest::prop_assert_eq!(restored.snapshot().graph_selection().unwrap(),context.snapshot().graph_selection().unwrap());
             }
@@ -22320,24 +22320,28 @@ mod tests {
         assert_eq!(current_publication.revision(), publication.revision());
         let birth = publication.context().snapshot();
         let current = current_publication.context().snapshot();
-        let request_decision = context
-            .compiler_source_support()
-            .input_decisions()
-            .recorded_facts()
+        let request_snapshot = context.snapshot();
+        let request_row = request_snapshot
+            .recorded_rows()
             .get(&root)
-            .expect("the receiving request issued its published-root choice");
-        assert_eq!(request_decision.role, birth.roles[&root]);
-        assert!(request_decision.groups.is_empty());
-        let expected_decisions = std::iter::once((root.clone(), request_decision.clone()))
-            .collect::<imbl::OrdMap<_, _>>();
-        assert_eq!(current.input_decisions, expected_decisions);
-        assert_ne!(current.input_decisions, birth.input_decisions);
+            .expect("the receiving request issued its published-root row");
+        assert_eq!(request_row.interface(), birth.roles[&root].interface());
+        assert_eq!(request_row.original(), birth.roles[&root].original());
+        assert_eq!(request_row.publication(), birth.roles[&root].publication());
+        assert!(matches!(request_row.native_choices(),
+            Some(crate::exact_context::RecordedNativeChoices::Issued { groups }) if groups.is_empty()));
+        assert_ne!(
+            request_row.native_choices(),
+            birth.roles[&root].native_choices()
+        );
+        let expected_rows =
+            std::iter::once((root.clone(), request_row.clone())).collect::<imbl::OrdMap<_, _>>();
+        assert_eq!(current.recorded_rows(), &expected_rows);
         assert_eq!(current.producer, birth.producer);
         assert_eq!(
             current.graph_selection().unwrap(),
             birth.graph_selection().unwrap()
         );
-        assert_eq!(current.roles, birth.roles);
         assert_eq!(current.source_scope, birth.source_scope);
         assert_eq!(current.lexical, birth.lexical);
         assert_eq!(current.offers, birth.offers);
@@ -22570,14 +22574,11 @@ mod tests {
                 current_publication.context().semantic_sha256()
             );
             assert_eq!(
-                born.compiler_source_support()
-                    .input_decisions()
-                    .recorded_facts(),
+                born.compiler_source_support().recorded_rows(),
                 current_publication
                     .context()
                     .compiler_source_support()
-                    .input_decisions()
-                    .recorded_facts()
+                    .recorded_rows()
             );
             assert_eq!(
                 born.compiler_source_support()
@@ -22886,38 +22887,18 @@ mod tests {
             restored_birth_row.upgrade().is_some(),
             "the actual restored publication must retain its acquired birth row"
         );
-        // The closed fact constructor must strip the acquired wrapper even
-        // when its input is an actual live published role.
-        let live_role = restored.compiler_input_projection().snapshot_roles()[&root].clone();
-        let recorded_role = live_role.recorded_fact();
-        assert_eq!(recorded_role, live_role);
-        for role in [
-            CompilerInputRole::InterfaceOnly {
-                interface: live_role.interface(),
-            },
-            CompilerInputRole::ReusableOriginal {
-                interface: live_role.interface(),
-                original: live_role.original().unwrap(),
-            },
-            live_role.clone(),
-        ] {
-            let facts = role.recorded_fact();
-            let wire = fvm_ipld_encoding::to_vec(&role).unwrap();
-            assert_eq!(wire, fvm_ipld_encoding::to_vec(&facts).unwrap());
-            let decoded: crate::artifact_inventory::RecordedCompilerRole =
-                fvm_ipld_encoding::from_slice(&wire).unwrap();
-            assert_eq!(decoded, facts);
-        }
-        drop(live_role);
         let fact_only_snapshot = restored.snapshot();
+        let recorded_row = fact_only_snapshot.recorded_rows()[&root].clone();
+        let wire = fvm_ipld_encoding::to_vec(&recorded_row).unwrap();
+        let decoded: crate::exact_context::RecordedCompilerRow =
+            fvm_ipld_encoding::from_slice(&wire).unwrap();
+        assert_eq!(decoded, recorded_row);
+        assert!(decoded.publication().is_some());
         drop(restored);
         assert!(
             restored_birth_row.upgrade().is_none(),
             "pure fact roots cannot retain an acquired native row after its context drops"
         );
-        assert!(recorded_role
-            .to_recorded_role()
-            .is_published_source_original());
         let fact_store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&fact_store);
         writer
@@ -23422,11 +23403,6 @@ mod tests {
                         }
                         let observed_facts = context.snapshot();
                         proptest::prop_assert_eq!(
-                            &observed_facts.input_decisions,
-                            &expected_facts.input_decisions,
-                            "reimport preserves issued input decisions",
-                        );
-                        proptest::prop_assert_eq!(
                             &observed_facts.native_availability,
                             &expected_facts.native_availability,
                             "reimport preserves native permission facts",
@@ -23439,7 +23415,7 @@ mod tests {
                         proptest::prop_assert_eq!(
                             &observed_facts.roles,
                             &expected_facts.roles,
-                            "reimport preserves exact published roles",
+                            "reimport preserves exact published rows and native choices",
                         );
                         proptest::prop_assert_eq!(
                             &observed_facts.source_scope,
@@ -28043,56 +28019,37 @@ mod tests {
         });
         narrowed.normalize().unwrap();
         let snapshot = narrowed.snapshot();
-        let roles = projection.roles();
-        let mut graph = retained.capture_graph_selection();
-        graph.namespace = context
-            .artifact_view()
-            .capture_graph_selection()
-            .namespace
-            .into_iter()
-            .filter(|binding| graph.bindings.contains(binding))
-            .collect();
+        let narrowed_view = narrowed.artifact_view();
+        let graph = narrowed_view.capture_graph_selection();
         let inventory = RecoveredArtifactInventory {
             producer: context.owner.facts.producer,
-            entries: retained
+            entries: narrowed_view
                 .entries()
                 .into_iter()
                 .map(|entry| (entry.descriptor.id, entry))
                 .collect(),
             recorded_inventory: true,
             bindings: graph.bindings.iter().copied().collect(),
-            binding_edges: retained.binding_dependencies(),
-            interfaces: retained.interface_dependencies(),
+            binding_edges: narrowed_view.binding_dependencies(),
+            interfaces: narrowed_view.interface_dependencies(),
         };
-        let support = crate::artifact_inventory::CompilerSourceSupport::from_recovered_selection(
-            inventory
-                .authenticate_graph_selection(&graph, &roles)
-                .unwrap(),
-        )
-        .unwrap()
-        .retain_offers(
-            narrowed
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .cloned(),
-        )
-        .unwrap()
-        .retain_custody(&retained)
-        .unwrap()
-        .restore_snapshot_evidence(
-            &snapshot,
-            &BTreeMap::new(),
-            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-        )
-        .unwrap();
+        use fvm_ipld_blockstore::Blockstore;
+        let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let written = writer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
+        let acquired = inventory
+            .context_for_expected_snapshot(written.root(), &decoded)
+            .unwrap();
+        let support = acquired.compiler_source_support().clone();
         assert_eq!(
-            support.input_decisions().recorded_facts(),
-            narrowed
-                .compiler_source_support()
-                .input_decisions()
-                .recorded_facts()
+            support.recorded_rows(),
+            narrowed.compiler_source_support().recorded_rows()
         );
+        drop(acquired);
         support
             .native_availability()
             .validate_role_coverage(&projection)
@@ -33583,8 +33540,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(row.original_binding.is_none());
         assert_eq!(row.entry.descriptor.owner, owner);
         assert_eq!(
-            advanced.primary.context.snapshot().compiler_roles(),
-            advanced.primary.inputs.projection().roles()
+            advanced.primary.context.snapshot().recorded_rows(),
+            advanced
+                .primary
+                .inputs
+                .compiler_source_support()
+                .recorded_rows()
         );
         let repeated = advanced.primary.with_type_interfaces(&[incoming]).unwrap();
         assert!(repeated.changed_owners.is_empty());

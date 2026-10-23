@@ -2485,7 +2485,7 @@ pub(crate) enum RecordedOriginalProvenance {
     Published(RecordedPublicationBirth),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecordedPublicationBirth {
     pub(crate) source_revision: String,
@@ -2494,6 +2494,17 @@ pub(crate) struct RecordedPublicationBirth {
     pub(crate) selection_sha256: [u8; 32],
     pub(crate) native_facts: Arc<PublicationNativeFacts>,
 }
+impl PartialEq for RecordedPublicationBirth {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_revision == other.source_revision
+            && self.original_input_identity == other.original_input_identity
+            && self.selection_sha256 == other.selection_sha256
+            && self.native_facts == other.native_facts
+            && (Arc::ptr_eq(self.selection.snapshot(), other.selection.snapshot())
+                || self.selection.snapshot() == other.selection.snapshot())
+    }
+}
+impl Eq for RecordedPublicationBirth {}
 
 /// An absent choice and an issued empty choice are different recorded facts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
