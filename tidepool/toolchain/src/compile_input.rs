@@ -821,7 +821,7 @@ mod tests {
         let source = authored.join("PreparedOriginal.hs");
         std::fs::write(
             &source,
-            "module PreparedOriginal where\nentry :: Int\nentry = 42\n",
+            "module PreparedOriginal where\n__prepared :: Int\n__prepared = 42\n",
         )
         .unwrap();
         let sources =
