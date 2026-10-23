@@ -2604,7 +2604,33 @@ impl CheckedValueInputs {
         cell: &ExactCheckedCell,
         context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
-        original_execution: &crate::declaration_context::ExactDeclarationContext,
+        original_execution: &Arc<crate::declaration_context::OriginalExecutionEvidence>,
+        capture: CheckedValueCaptureInput<'_>,
+    ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+        let templates = cell.specification.template_sources();
+        let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
+            original_execution,
+            &templates,
+        )?;
+        self.capture_value_data(
+            generation,
+            cell,
+            context,
+            source_lexical,
+            template_imports,
+            capture,
+        )
+    }
+
+    /// Materialize already admitted value and template support. This operation
+    /// does not authenticate compiler execution or select template imports.
+    fn capture_value_data(
+        &self,
+        generation: u64,
+        cell: &ExactCheckedCell,
+        context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        template_imports: Option<crate::declaration_context::CapturedTemplateImports>,
         capture: CheckedValueCaptureInput<'_>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let mut timing = crate::timing::InvocationTiming::start_scoped(
@@ -2688,12 +2714,6 @@ impl CheckedValueInputs {
             )?
             .retain_output(&certificate)?,
         };
-        timing.advance("capture_templates");
-        let templates = cell.specification.template_sources();
-        let template_imports = crate::declaration_context::CapturedTemplateImports::capture(
-            original_execution,
-            &templates,
-        )?;
         timing.advance("admit_template_support");
         let (compiler_support, template_imports) = match template_imports {
             Some(captured) => {
@@ -3180,7 +3200,7 @@ enum CheckedExecutionAdmission {
 /// product-sealing entry point. Compiling alone makes no execution claim.
 #[derive(Debug)]
 pub struct ExactCompiledItem {
-    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
     item: ExactCheckedItem,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
@@ -3623,16 +3643,28 @@ impl ExactCompiledItem {
         self.typed_entry.as_ref().map(|issued| &issued.native_sites)
     }
 
-    /// Execution custody is available only for this exact validated output.
+    /// Execution evidence is available only for this exact validated output.
+    pub fn original_execution_evidence(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<Arc<crate::declaration_context::OriginalExecutionEvidence>, CompileError> {
+        self.original_source(target, table, sites)?;
+        Ok(Arc::clone(&self.original_execution))
+    }
+
+    /// Observe this output's retained facts without instance-completion authority.
     pub fn original_execution_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,
         table: &tidepool_repr::DataConTable,
         sites: &[crate::YieldSite],
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        Ok(self
-            .original_source(target, table, sites)?
-            .execution_context())
+        Ok(Arc::clone(
+            self.original_execution_evidence(target, table, sites)?
+                .context(),
+        ))
     }
 
     /// Validate the complete output before lending its requested type source.
@@ -4369,7 +4401,7 @@ pub(crate) struct PreparedCheckedItemOutput {
     generation: u64,
     observation_name: Option<String>,
     is_program: bool,
-    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
     target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
     table: tidepool_repr::DataConTable,
     warnings: tidepool_repr::serial::MetaWarnings,
@@ -4544,11 +4576,13 @@ impl PreparedCheckedItemOutput {
         let groups = resolved.groups();
         timing.advance("select_source_publications");
         let source_originals = original_execution
+            .context()
             .published_source_original_selections_for_target(groups, resolved.imports())?;
         timing.advance("select_native_sites");
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
+                    .context()
                     .artifact_view()
                     .native_sites_for_groups(&groups)?;
                 timing.advance("entry_native_requirements");
@@ -6317,15 +6351,14 @@ mod tests {
         reuse: bool,
         generation: u64,
     ) -> Arc<super::CheckedValueArtifact> {
-        capture_test_value_with_template(original, demands_epoch, reuse, generation, "")
+        capture_test_value_data(original, demands_epoch, reuse, generation)
     }
 
-    fn capture_test_value_with_template(
+    fn capture_test_value_data(
         original: &Arc<crate::declaration_context::ExactDeclarationContext>,
         demands_epoch: bool,
         reuse: bool,
         generation: u64,
-        template: &str,
     ) -> Arc<super::CheckedValueArtifact> {
         use super::*;
         let producer = [2; 32];
@@ -6333,7 +6366,7 @@ mod tests {
         let cell = ExactCheckedCell {
             specification: CheckedCellSpecification::Finite(fixture_request(
                 String::new(),
-                template,
+                "",
                 vec![],
                 vec![],
             )),
@@ -6364,12 +6397,12 @@ mod tests {
             produced
         });
         let captured = inputs
-            .capture_output(
+            .capture_value_data(
                 generation,
                 &cell,
                 original,
                 &[],
-                original,
+                None,
                 super::CheckedValueCaptureInput::Ordinary {
                     produced: produced.as_ref(),
                 },
@@ -6389,12 +6422,12 @@ mod tests {
             )
             .unwrap();
             let prepared = inputs
-                .capture_output(
+                .capture_value_data(
                     1,
                     &cell,
                     &prepared_context,
                     &[],
-                    original,
+                    None,
                     super::CheckedValueCaptureInput::Prepared {
                         support: &support,
                         produced: &produced,
@@ -6421,12 +6454,12 @@ mod tests {
             );
             assert!(
                 inputs
-                    .capture_output(
+                    .capture_value_data(
                         generation,
                         &cell,
                         original,
                         &[],
-                        original,
+                        None,
                         super::CheckedValueCaptureInput::Prepared {
                             support: &support,
                             produced: &produced
@@ -6440,12 +6473,12 @@ mod tests {
                     .unwrap();
             assert!(
                 inputs
-                    .capture_output(
+                    .capture_value_data(
                         generation,
                         &cell,
                         original,
                         &[],
-                        original,
+                        None,
                         super::CheckedValueCaptureInput::Prepared {
                             support: &empty_support,
                             produced: &produced
@@ -6802,12 +6835,12 @@ mod tests {
             value_inputs: inputs.clone(),
         };
         let value = inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &context,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Prepared {
                     support: &support,
                     produced: &produced,
@@ -6926,12 +6959,12 @@ mod tests {
                 .unwrap();
         let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
         let value = inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &context,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Prepared {
                     support: &support,
                     produced: &produced,
@@ -6991,12 +7024,12 @@ mod tests {
                 .unwrap();
         let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
         let value = inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &context,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Prepared {
                     support: &support,
                     produced: &produced,
@@ -7059,12 +7092,12 @@ mod tests {
             .map(|(index, (inputs, _, produced))| {
                 let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
                 inputs
-                    .capture_output(
+                    .capture_value_data(
                         index as u64 + 1,
                         &cell,
                         &original,
                         &[],
-                        &original,
+                        None,
                         CheckedValueCaptureInput::Ordinary {
                             produced: Some(produced),
                         },
@@ -7085,12 +7118,12 @@ mod tests {
         for (index, (inputs, owner, produced)) in staged.iter().enumerate() {
             let cell = empty_test_checked_cell(producer, original.clone(), inputs.clone());
             let value = inputs
-                .capture_output(
+                .capture_value_data(
                     index as u64 + 1,
                     &cell,
                     &context,
                     &[],
-                    &original,
+                    None,
                     CheckedValueCaptureInput::Prepared {
                         support: &support,
                         produced,
@@ -7167,12 +7200,12 @@ mod tests {
             let ordinary = scope.spawn(|| {
                 barrier.wait();
                 inputs
-                    .capture_output(
+                    .capture_value_data(
                         1,
                         &cell,
                         &original,
                         &[],
-                        &original,
+                        None,
                         CheckedValueCaptureInput::Ordinary {
                             produced: Some(&produced),
                         },
@@ -7182,12 +7215,12 @@ mod tests {
             let typed = scope.spawn(|| {
                 barrier.wait();
                 inputs
-                    .capture_output(
+                    .capture_value_data(
                         1,
                         &cell,
                         &context,
                         &[],
-                        &original,
+                        None,
                         CheckedValueCaptureInput::Prepared {
                             support: &prepared,
                             produced: &produced,
@@ -7225,12 +7258,12 @@ mod tests {
                 .unwrap();
         let cell = empty_test_checked_cell([2; 32], original.clone(), inputs.clone());
         assert!(inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &context,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Prepared {
                     support: &support,
                     produced: &produced
@@ -7239,12 +7272,12 @@ mod tests {
             .is_err());
         assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
         let value = inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &original,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Ordinary {
                     produced: Some(&produced),
                 },
@@ -7272,12 +7305,12 @@ mod tests {
             cancellation,
             |_| {},
             || {
-                inputs.capture_output(
+                inputs.capture_value_data(
                     1,
                     &cell,
                     &original,
                     &[],
-                    &original,
+                    None,
                     CheckedValueCaptureInput::Ordinary {
                         produced: Some(&produced),
                     },
@@ -7287,12 +7320,12 @@ mod tests {
         assert!(refused.action.is_err());
         assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 0);
         let value = inputs
-            .capture_output(
+            .capture_value_data(
                 1,
                 &cell,
                 &original,
                 &[],
-                &original,
+                None,
                 CheckedValueCaptureInput::Ordinary {
                     produced: Some(&produced),
                 },
@@ -7329,10 +7362,10 @@ mod tests {
     #[test]
     fn checked_value_support_materializes_with_one_survivor_after_issuer_drop() {
         let mut histories = capture_value_custody_histories();
-        // The final matrix case has the changed child and retained template.
+        // The final matrix case retains the changed child issuer.
         // Sibling captures must not supply the survivor's physical byte custody.
         let (captured, expected_native, expected_child) = histories.pop().unwrap();
-        assert!(captured.template_imports().is_some());
+        assert!(captured.template_imports().is_none());
         drop(histories);
         let receiving = Arc::new(
             crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
@@ -7914,7 +7947,7 @@ mod tests {
     fn checked_value_leaf_preserves_preexisting_dependency_rows_through_next_request() {
         assert_eq!(
             capture_value_custody_histories_with_materialized_source(true).len(),
-            16
+            8
         );
     }
 
@@ -8103,17 +8136,12 @@ mod tests {
                     [old.clone(), old],
                 )
                 .unwrap();
-                let original = ExactDeclarationContext::from_authenticated_execution(
-                    producer,
-                    &views[selected],
-                    projection.clone(),
-                    original_lexical.clone(),
-                    epoch.clone(),
-                    &[],
-                )
-                .unwrap()
-                .extend_issued_compiler_support(&support)
-                .unwrap();
+                let original = ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(&support)
+                    .unwrap()
+                    .extend(&[], &[], original_lexical.clone())
+                    .unwrap();
                 let original = Arc::new(original);
                 let source_scratch = tempfile::tempdir().unwrap();
                 let inherited_path = materialize_source.then(|| {
@@ -8174,198 +8202,196 @@ mod tests {
                         "genuinely differing selected roles must still refuse"
                     );
                 }
-                for template in [false, true] {
-                    let (inputs, owner, path) = prepare_test_value_interface_files(1, true);
-                    let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
-                    let interface = produced.output(owner).unwrap().interface.clone();
-                    let cell = ExactCheckedCell {
-                        specification: CheckedCellSpecification::Finite(fixture_request(
-                            String::new(),
-                            if template {
-                                "import Epoch\nimport TemplateOnly\n".to_string()
-                            } else {
-                                String::new()
+
+                let (inputs, owner, path) = prepare_test_value_interface_files(1, true);
+                let produced = capture_test_produced_value_interface(producer, owner, &path, 0);
+                let interface = produced.output(owner).unwrap().interface.clone();
+                let cell = ExactCheckedCell {
+                    specification: CheckedCellSpecification::Finite(fixture_request(
+                        String::new(),
+                        String::new(),
+                        vec![],
+                        vec![],
+                    )),
+                    producer,
+                    context: original.semantic_sha256(),
+                    declaration_context: original.clone(),
+                    retained_projections: vec![],
+                    receipt_digest: [4; 32],
+                    checked_source: "".into(),
+                    evidence: vec![],
+                    observations: vec![].into(),
+                    items: vec![].into(),
+                    include: vec![],
+                    planned_declaration: None,
+                    planned_declarations: BTreeMap::new(),
+                    typed_segments: vec![],
+                    value_inputs: inputs.clone(),
+                };
+                // The immutable expected selections above precede the real producer call.
+                // Prepared capture receives the physically admitted output; Ordinary admits it itself.
+                let prepared_context = Arc::new(
+                    (*original)
+                        .clone()
+                        .extend_program_value_interface(interface.clone())
+                        .unwrap(),
+                );
+                let prepared_support =
+                    PreparedValueSourceSupport::new(prepared_context.clone(), &lexical).unwrap();
+                for prepared in [false, true] {
+                    let result = if prepared {
+                        inputs.capture_value_data(
+                            1,
+                            &cell,
+                            &prepared_context,
+                            &lexical,
+                            None,
+                            CheckedValueCaptureInput::Prepared {
+                                support: &prepared_support,
+                                produced: &produced,
                             },
-                            vec![],
-                            vec![],
-                        )),
-                        producer,
-                        context: original.semantic_sha256(),
-                        declaration_context: original.clone(),
-                        retained_projections: vec![],
-                        receipt_digest: [4; 32],
-                        checked_source: "".into(),
-                        evidence: vec![],
-                        observations: vec![].into(),
-                        items: vec![].into(),
-                        include: vec![],
-                        planned_declaration: None,
-                        planned_declarations: BTreeMap::new(),
-                        typed_segments: vec![],
-                        value_inputs: inputs.clone(),
-                    };
-                    // The immutable expected selections above precede the real producer call.
-                    // Prepared capture receives the physically admitted output; Ordinary admits it itself.
-                    let prepared_context = Arc::new(
-                        (*original)
-                            .clone()
-                            .extend_program_value_interface(interface.clone())
-                            .unwrap(),
-                    );
-                    let prepared_support =
-                        PreparedValueSourceSupport::new(prepared_context.clone(), &lexical)
-                            .unwrap();
-                    for prepared in [false, true] {
-                        let result = if prepared {
-                            inputs.capture_output(
-                                1,
-                                &cell,
-                                &prepared_context,
-                                &lexical,
-                                &original,
-                                CheckedValueCaptureInput::Prepared {
-                                    support: &prepared_support,
-                                    produced: &produced,
-                                },
-                            )
-                        } else {
-                            inputs.capture_output(
-                                1,
-                                &cell,
-                                &original,
-                                &lexical,
-                                &original,
-                                CheckedValueCaptureInput::Ordinary {
-                                    produced: Some(&produced),
-                                },
-                            )
-                        };
-                        let captured = match result {
-                            Ok(captured) => captured,
-                            Err(error) => {
-                                failures.push(format!("changed_child={changed_child} selected={selected} template={template} prepared={prepared}: {error}"));
-                                continue;
-                            }
-                        };
-                        assert_eq!(
-                            captured.compiler_input_projection().snapshot_roles()[&child_owner]
-                                .interface(),
-                            children[selected].descriptor.id
-                        );
-                        assert!(captured
-                            .compiler_input_projection()
-                            .roles()
-                            .iter()
-                            .any(|role| role.interface() == interface.artifact_id()));
-                        assert_eq!(captured.compiler_input_projection().snapshot_roles().contains_key(&template_owner), template,
-                        "the template-only interface is selected exactly when the template requires it");
-                        assert!(
-                            captured
-                                .compiler_input_projection()
-                                .snapshot_roles()
-                                .keys()
-                                .all(|owner| owner == &epoch
-                                    || owner == &child_owner
-                                    || owner == &template_owner
-                                    || owner.module == interface.interface().module()),
-                            "unrelated sibling custody cannot issue compiler roles"
-                        );
-                        assert_eq!(captured.source_lexical(), lexical);
-                        let graph = captured.compiler_artifact_view().capture_graph_selection();
-                        assert!(expected_edges.iter().all(|edge| captured
-                            .compiler_artifact_view()
-                            .binding_dependencies()
-                            .contains(edge)));
-                        let expected_groups = views[selected]
-                            .capture_graph_selection()
-                            .roots
-                            .into_iter()
-                            .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
-                            .collect::<BTreeSet<_>>();
-                        let actual_groups = graph
-                            .roots
-                            .into_iter()
-                            .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
-                            .collect::<BTreeSet<_>>();
-                        assert_eq!(
-                            actual_groups, expected_groups,
-                            "historical custody cannot add executable roots"
-                        );
-                        let next = ExactDeclarationContext::new(&[], &[], vec![])
-                            .unwrap()
-                            .extend_retained_value_artifacts(&[captured.clone()])
-                            .unwrap();
-                        if let Some(inherited_path) = &inherited_path {
-                            let scratch = tempfile::tempdir().unwrap();
-                            let request = Arc::new(next.clone())
-                                .prepare_compilation(
-                                    &scratch.path().join("descendant"),
-                                    VALUE_CUSTODY_PRODUCER,
-                                )
-                                .unwrap();
-                            let parent = request
-                                .artifacts
-                                .iter()
-                                .find(|artifact| artifact.interface.module == "Epoch")
-                                .unwrap();
-                            assert_eq!(
-                                &parent.interface.path, inherited_path,
-                                "value leaf cannot hide or recopy inherited A"
-                            );
-                            let value_row = request
-                                .artifacts
-                                .iter()
-                                .find(|artifact| {
-                                    artifact.interface.module == captured.owner().module_name()
-                                })
-                                .unwrap();
-                            assert_eq!(
-                                value_row.interface.path, captured.interface.path,
-                                "next request borrows the exact V leaf"
-                            );
-                        }
-                        assert_eq!(
-                            next.compiler_input_projection().snapshot_roles()[&child_owner]
-                                .interface(),
-                            children[selected].descriptor.id
-                        );
-                        let requirements = NativeOriginalRequirement::for_projection(
-                            next.compiler_input_projection(),
-                            next.artifact_view(),
-                            &[],
                         )
+                    } else {
+                        inputs.capture_value_data(
+                            1,
+                            &cell,
+                            &original,
+                            &lexical,
+                            None,
+                            CheckedValueCaptureInput::Ordinary {
+                                produced: Some(&produced),
+                            },
+                        )
+                    };
+                    let captured = match result {
+                        Ok(captured) => captured,
+                        Err(error) => {
+                            failures.push(format!("changed_child={changed_child} selected={selected} prepared={prepared}: {error}"));
+                            continue;
+                        }
+                    };
+                    assert_eq!(
+                        captured.compiler_input_projection().snapshot_roles()[&child_owner]
+                            .interface(),
+                        children[selected].descriptor.id
+                    );
+                    assert!(captured
+                        .compiler_input_projection()
+                        .roles()
+                        .iter()
+                        .any(|role| role.interface() == interface.artifact_id()));
+                    assert!(
+                        !captured
+                            .compiler_input_projection()
+                            .snapshot_roles()
+                            .contains_key(&template_owner),
+                        "unselected template-only custody cannot supply value compiler roles"
+                    );
+                    assert!(
+                        captured
+                            .compiler_input_projection()
+                            .snapshot_roles()
+                            .keys()
+                            .all(|owner| owner == &epoch
+                                || owner == &child_owner
+                                || owner == &template_owner
+                                || owner.module == interface.interface().module()),
+                        "unrelated sibling custody cannot issue compiler roles"
+                    );
+                    assert_eq!(captured.source_lexical(), lexical);
+                    let graph = captured.compiler_artifact_view().capture_graph_selection();
+                    assert!(expected_edges.iter().all(|edge| captured
+                        .compiler_artifact_view()
+                        .binding_dependencies()
+                        .contains(edge)));
+                    let expected_groups = views[selected]
+                        .capture_graph_selection()
+                        .roots
+                        .into_iter()
+                        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+                        .collect::<BTreeSet<_>>();
+                    let actual_groups = graph
+                        .roots
+                        .into_iter()
+                        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        actual_groups, expected_groups,
+                        "historical custody cannot add executable roots"
+                    );
+                    let next = ExactDeclarationContext::new(&[], &[], vec![])
+                        .unwrap()
+                        .extend_retained_value_artifacts(&[captured.clone()])
                         .unwrap();
-                        let issued = requirements
-                            .iter()
-                            .find(|proof| proof.original == native.descriptor.id)
+                    if let Some(inherited_path) = &inherited_path {
+                        let scratch = tempfile::tempdir().unwrap();
+                        let request = Arc::new(next.clone())
+                            .prepare_compilation(
+                                &scratch.path().join("descendant"),
+                                VALUE_CUSTODY_PRODUCER,
+                            )
                             .unwrap();
-                        let observed = issued
-                            .selection
-                            .graph_selection()
-                            .bindings
+                        let parent = request
+                            .artifacts
                             .iter()
-                            .filter(|binding| {
-                                children
-                                    .iter()
-                                    .any(|child| binding.artifact == child.descriptor.id)
-                            })
-                            .copied()
-                            .collect::<Vec<_>>();
+                            .find(|artifact| artifact.interface.module == "Epoch")
+                            .unwrap();
                         assert_eq!(
-                            observed,
-                            vec![selected_child],
-                            "compiler demand uses its current exact child issuer"
+                            &parent.interface.path, inherited_path,
+                            "value leaf cannot hide or recopy inherited A"
                         );
-                        let metadata = next.artifact_view().metadata_snapshot();
-                        let mut selected_source = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        let value_row = request
+                            .artifacts
+                            .iter()
+                            .find(|artifact| {
+                                artifact.interface.module == captured.owner().module_name()
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            value_row.interface.path, captured.interface.path,
+                            "next request borrows the exact V leaf"
+                        );
+                    }
+                    assert_eq!(
+                        next.compiler_input_projection().snapshot_roles()[&child_owner].interface(),
+                        children[selected].descriptor.id
+                    );
+                    let requirements = NativeOriginalRequirement::for_projection(
+                        next.compiler_input_projection(),
+                        next.artifact_view(),
+                        &[],
+                    )
+                    .unwrap();
+                    let issued = requirements
+                        .iter()
+                        .find(|proof| proof.original == native.descriptor.id)
+                        .unwrap();
+                    let observed = issued
+                        .selection
+                        .graph_selection()
+                        .bindings
+                        .iter()
+                        .filter(|binding| {
+                            children
+                                .iter()
+                                .any(|child| binding.artifact == child.descriptor.id)
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        observed,
+                        vec![selected_child],
+                        "compiler demand uses its current exact child issuer"
+                    );
+                    let metadata = next.artifact_view().metadata_snapshot();
+                    let mut selected_source = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         next.compiler_input_projection(), &metadata,
                         &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
                     ).unwrap();
-                        selected_source
-                            .with_new_product_dependencies(&metadata, &requirements)
-                            .unwrap();
-                        histories.push((captured, expected_native.clone(), selected_child));
-                    }
+                    selected_source
+                        .with_new_product_dependencies(&metadata, &requirements)
+                        .unwrap();
+                    histories.push((captured, expected_native.clone(), selected_child));
                 }
             }
         }
@@ -8374,223 +8400,8 @@ mod tests {
             "capture histories: {}",
             failures.join("\n")
         );
-        assert_eq!(histories.len(), 16);
+        assert_eq!(histories.len(), 8);
         histories
-    }
-
-    #[test]
-    fn repeated_template_values_keep_exact_custody_and_private_permissions() {
-        use super::*;
-        use crate::artifact_inventory::{
-            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CompilerInputProjection,
-            NativeGroupKey,
-        };
-        use crate::declaration_context::ExactDeclarationContext;
-        use crate::declaration_join::ExactLexicalNode;
-
-        for ordinals in [vec![7, 9001], vec![7], vec![]] {
-            let producer = [2; 32];
-            let child = Arc::new(ArtifactEntry::canonical(
-                crate::certified_products::fixture_module_interface(
-                    producer,
-                    "fixture",
-                    "Child",
-                    BTreeMap::new(),
-                ),
-            ));
-            let template_only = Arc::new(ArtifactEntry::canonical(
-                crate::certified_products::fixture_module_interface(
-                    producer,
-                    "fixture",
-                    "TemplateOnly",
-                    BTreeMap::new(),
-                ),
-            ));
-            let product = crate::certified_products::fixture_finalized_product_with_requirements(
-                crate::certified_products::tests::original_groups_fixture(
-                    "Epoch",
-                    vec![(7, vec![]), (9001, vec![])],
-                    1,
-                    &BTreeMap::new(),
-                ),
-                producer,
-                Some(BTreeMap::from([(
-                    ("fixture".into(), "Child".into()),
-                    child.descriptor.interface_sha256,
-                )])),
-            );
-            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
-                .remove(0)
-                .product;
-            let native = Arc::new(ArtifactEntry::original(producer, product).unwrap());
-            let native_id = native.descriptor.id;
-            let crate::artifact_inventory::ArtifactPayload::Original(product) = &native.payload
-            else {
-                unreachable!()
-            };
-            let native_owner = product.owner().clone();
-            let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
-                .descriptor
-                .id;
-            let owner = native.descriptor.owner.clone();
-            let entries = vec![native.clone(), child, template_only.clone()];
-            let inventory = ArtifactInventory::default();
-            let full = inventory
-                .admit_shared(&inventory.empty_view(), entries.clone())
-                .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-            let full_support = crate::declaration_context::issue_fixture_compiler_support(
-                projection.clone(),
-                full,
-            )
-            .unwrap();
-            let groups = ordinals
-                .iter()
-                .map(|ordinal| NativeGroupKey {
-                    artifact: native.descriptor.id,
-                    original_ordinal: *ordinal,
-                })
-                .collect();
-            let selected = inventory
-                .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &groups)
-                .unwrap();
-            let original = Arc::new(
-                ExactDeclarationContext::from_authenticated_execution(
-                    producer,
-                    &selected,
-                    projection.clone(),
-                    vec![
-                        ExactLexicalNode {
-                            owner: owner.clone(),
-                            imports: vec![],
-                        },
-                        ExactLexicalNode {
-                            owner: template_only.descriptor.owner.clone(),
-                            imports: vec![],
-                        },
-                    ],
-                    owner.clone(),
-                    std::slice::from_ref(&owner),
-                )
-                .unwrap()
-                .retain_issued_native_offers(full_support.native_offers().iter().cloned())
-                .unwrap(),
-            );
-            // Observe the expected canonical closure from the original issuer,
-            // independently of the checked values whose transfer is under test.
-            let issuer_graph = original.artifact_view().capture_graph_selection();
-            let issuer_edges = original.artifact_view().binding_dependencies();
-            let mut pending = [canonical, template_only.descriptor.id]
-                .into_iter()
-                .map(|id| {
-                    ArtifactBindingNode::Artifact(
-                        *issuer_graph
-                            .namespace
-                            .iter()
-                            .find(|binding| binding.artifact == id)
-                            .unwrap(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut expected_nodes = BTreeSet::new();
-            while let Some(node) = pending.pop() {
-                if expected_nodes.insert(node) {
-                    pending.extend(
-                        issuer_edges
-                            .iter()
-                            .filter_map(|(from, target, _)| (*from == node).then_some(*target)),
-                    );
-                }
-            }
-            let bindings = expected_nodes
-                .iter()
-                .filter_map(|node| match node {
-                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
-                    ArtifactBindingNode::Group(_) => None,
-                })
-                .collect::<BTreeSet<_>>();
-            let edges = issuer_edges
-                .into_iter()
-                .filter(|(from, _, _)| expected_nodes.contains(from))
-                .collect::<BTreeSet<_>>();
-            assert!(
-                !edges.is_empty(),
-                "the issuer records a canonical dependency edge"
-            );
-            let first =
-                capture_test_value_with_template(&original, false, false, 1, "import Epoch\n");
-            let second = capture_test_value_with_template(
-                &original,
-                false,
-                false,
-                2,
-                "import TemplateOnly\n",
-            );
-            let values = [first, second];
-            let mut directories = Vec::new();
-            for value in &values {
-                assert!(
-                    value.template_imports().is_some(),
-                    "actual template capture"
-                );
-                directories.push(
-                    value
-                        .row
-                        .checked_value_interface()
-                        .path
-                        .parent()
-                        .unwrap()
-                        .to_owned(),
-                );
-            }
-            let context = ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_retained_value_artifacts(&[
-                    values[0].clone(),
-                    values[1].clone(),
-                    values[0].clone(),
-                ])
-                .unwrap();
-            drop(values);
-            drop(original);
-            drop(selected);
-            drop(full_support);
-            drop(projection);
-            drop(entries);
-            drop(template_only);
-            drop(native);
-            drop(inventory);
-            assert!(
-                directories.iter().all(|path| !path.exists()),
-                "captured input directories release independently"
-            );
-            let view = context.artifact_view();
-            let graph = view.capture_graph_selection();
-            assert!(bindings
-                .iter()
-                .all(|binding| graph.bindings.contains(binding)));
-            assert!(edges
-                .iter()
-                .all(|edge| view.binding_dependencies().contains(edge)));
-            assert!(view.selected_native_groups().is_empty());
-            assert!(context.lexical_graph().is_empty());
-            assert!(context
-                .compiler_input_projection()
-                .roles()
-                .iter()
-                .all(|role| role.original().is_none()));
-            let row = context
-                .compiler_source_support()
-                .native_availability()
-                .rows()
-                .find(|row| {
-                    row.target_original(&native_owner)
-                        .is_some_and(|entry| entry.descriptor.id == native_id)
-                })
-                .expect("private native row survives without an Original role");
-            assert_eq!(row.permits(7), ordinals.contains(&7));
-            assert_eq!(row.permits(9001), ordinals.contains(&9001));
-        }
     }
 
     #[test]
@@ -8659,18 +8470,24 @@ mod tests {
                 CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
                     .unwrap();
             Arc::new(
-                ExactDeclarationContext::from_authenticated_execution(
-                    producer,
-                    &view,
-                    projection,
-                    vec![ExactLexicalNode {
-                        owner: owner.clone(),
-                        imports: vec![],
-                    }],
-                    owner.clone(),
-                    &[],
-                )
-                .unwrap(),
+                ExactDeclarationContext::new(&[], &[], vec![])
+                    .unwrap()
+                    .extend_issued_compiler_support(
+                        &crate::declaration_context::issue_fixture_compiler_support(
+                            projection, view,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .extend(
+                        &[],
+                        &[],
+                        vec![ExactLexicalNode {
+                            owner: owner.clone(),
+                            imports: vec![],
+                        }],
+                    )
+                    .unwrap(),
             )
         });
         let captured = std::array::from_fn::<_, 2, _>(|index| {

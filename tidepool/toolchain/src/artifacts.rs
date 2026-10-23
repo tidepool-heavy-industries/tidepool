@@ -1024,14 +1024,8 @@ fn prepare_world_cell_program_inner(
                     Some(cursor),
                     &mut validation,
                 )?;
-                let output = crate::declaration_context::IssuedOriginalOutput::from_segment_item(
-                    &certified,
-                )?;
-                let original = SealedOriginalEvidence::issue_exact(
-                    &segment.product_admission(),
-                    output,
-                    &admitted.target,
-                )?;
+                let original =
+                    SealedOriginalEvidence::issue_exact(&segment.product_admission(), &admitted)?;
                 let products = Arc::new(SealedTurnProducts {
                     prepared: target.clone(),
                     original,
@@ -2206,12 +2200,11 @@ impl ModuleCandidateOffer {
         let offer = ActivationPreviewOffer {
             specification,
             prototype,
-            original_execution: declarations.clone(),
             display_context,
         };
         let original_interfaces = Value::Array(
             offer
-                .original_execution
+                .display_context
                 .original_preview_interface_graph()?
                 .into_iter()
                 .map(|(owner, node)| {
@@ -2237,7 +2230,7 @@ impl ModuleCandidateOffer {
         let authorization =
             checked_search_authorization(offer.authorization(original_interfaces)?, include)?;
         let private = crate::activation_preview::original_native_declaration_inputs(
-            &offer.original_execution,
+            &offer.display_context,
             producer,
         )?;
         let exact = crate::declaration_context::ExactCompileContext::new(declarations)
@@ -3418,10 +3411,10 @@ pub struct SealedTurnProducts {
 enum SealedOriginalEvidence {
     Exact {
         output: crate::declaration_context::IssuedOriginalOutput,
-        execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+        execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
     },
     Ordinary {
-        execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+        execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
         artifacts: crate::artifact_inventory::ArtifactView,
         selection: certified_products::CertifiedSourceSelection,
     },
@@ -3434,25 +3427,16 @@ enum SealedOriginalEvidence {
 impl SealedOriginalEvidence {
     fn issue_exact(
         admission: &crate::declaration_context::ExactProductAdmission<'_>,
-        output: crate::declaration_context::IssuedOriginalOutput,
-        target: &crate::artifact_inventory::CertifiedTargetNativeInputs,
+        issued: &AdmittedNativeTargetProducts,
     ) -> Result<Self, CompileError> {
-        let context = admission.original_execution_context(output.compiler_inputs())?;
-        let completed = target.linked_native_target().ok_or_else(|| {
-            CompileError::ExtractFailed("exact native target lacks its issued completion".into())
-        })?;
-        let execution = Arc::new(
-            Arc::unwrap_or_clone(context)
-                .retain_native_target_custody(target)?
-                .retain_linked_native_target(completed)?,
-        );
-        target
-            .resolve()?
-            .ensure_original_execution_custody(&execution)?;
-        Ok(Self::Exact { output, execution })
+        let execution = admission.issue_original_execution(issued)?;
+        Ok(Self::Exact {
+            output: issued.output.clone(),
+            execution,
+        })
     }
 
-    fn execution(&self) -> Option<&Arc<crate::declaration_context::ExactDeclarationContext>> {
+    fn execution(&self) -> Option<&Arc<crate::declaration_context::OriginalExecutionEvidence>> {
         match self {
             Self::Exact { execution, .. } | Self::Ordinary { execution, .. } => Some(execution),
             Self::Absent { .. } => None,
@@ -3705,6 +3689,13 @@ impl SealedTurnProducts {
     pub fn original_execution_context(
         &self,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+        self.original_execution()
+            .map(|evidence| Arc::clone(evidence.context()))
+    }
+
+    pub fn original_execution_evidence(
+        &self,
+    ) -> Result<Arc<crate::declaration_context::OriginalExecutionEvidence>, CompileError> {
         self.original_execution().map(Arc::clone)
     }
 
@@ -3719,16 +3710,18 @@ impl SealedTurnProducts {
                 "published source output lacks original input authority".into(),
             )
         })?;
-        self.original_execution()?.issue_published_source_original(
-            revision,
-            original.original_input_identity(),
-            public_root,
-        )
+        self.original_execution()?
+            .completed()?
+            .issue_published_source_original(
+                revision,
+                original.original_input_identity(),
+                public_root,
+            )
     }
 
     pub fn native_source_products(&self) -> Result<ResolvedNativeSourceProducts<'_>, CompileError> {
         let resolved = self.target.resolve_sources()?;
-        resolved.ensure_original_execution_custody(self.original_execution()?)?;
+        resolved.ensure_original_execution_custody(self.original_execution()?.context())?;
         ResolvedNativeSourceProducts::issue(resolved, &self.prepared)
     }
 
@@ -3767,7 +3760,7 @@ impl SealedTurnProducts {
     }
     pub(crate) fn original_execution(
         &self,
-    ) -> Result<&Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
+    ) -> Result<&Arc<crate::declaration_context::OriginalExecutionEvidence>, CompileError> {
         self.original.execution().ok_or_else(|| {
             CompileError::ExtractFailed("program output lacks original execution evidence".into())
         })
@@ -3781,7 +3774,7 @@ impl SealedTurnProducts {
         );
         let resolved = self.target.resolve()?;
         timing.advance("original_execution_custody");
-        resolved.ensure_original_execution_custody(self.original_execution()?)?;
+        resolved.ensure_original_execution_custody(self.original_execution()?.context())?;
         timing.finish(true);
         Ok(resolved)
     }
@@ -4313,23 +4306,10 @@ fn seal_turn_outputs_with_validation(
         segment_cursor.take(),
         validation,
     )?;
-    let AdmittedNativeTargetProducts {
-        target: target_native,
-        certified_groups,
-        package_interfaces,
-    } = admitted;
+    let target_native = &admitted.target;
     let artifact_view = target_native.artifacts();
-    let issued_output = if segment_originals.is_some() {
-        crate::declaration_context::IssuedOriginalOutput::from_segment_item(&certified)?
-    } else {
-        certified
-            .captured_stage()
-            .ok_or_else(|| {
-                CompileError::ExtractFailed("compiler output lacks its captured stage owner".into())
-            })?
-            .output()
-            .clone()
-    };
+    let certified_groups = &admitted.certified_groups;
+    let package_interfaces = &admitted.package_interfaces;
     let post_target_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.post_target", inclusive = true).entered();
     let original_compile_input = if let Some((table, sites)) =
         identity_metadata.filter(|_| offer.exact.is_none())
@@ -4362,8 +4342,8 @@ fn seal_turn_outputs_with_validation(
                     &package_interfaces,
                     table.clone(),
                     sites.to_vec(),
-                    &issued_output,
                     target_native.resolve()?.native_sites()?,
+                    &admitted,
                 )
             })
             .transpose()?
@@ -4374,21 +4354,10 @@ fn seal_turn_outputs_with_validation(
     };
     let original_execution_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.original_execution", inclusive = true).entered();
     let original = match exact.as_ref() {
-        Some(admission) => {
-            SealedOriginalEvidence::issue_exact(admission, issued_output, &target_native)?
-        }
+        Some(admission) => SealedOriginalEvidence::issue_exact(admission, &admitted)?,
         None => match original_compile_input.as_ref() {
             Some(proof) => {
-                let completed = target_native.linked_native_target().ok_or_else(|| {
-                    CompileError::ExtractFailed(
-                        "ordinary native target lacks its issued completion".into(),
-                    )
-                })?;
-                let execution = Arc::new(
-                    Arc::unwrap_or_clone(proof.issued_original_execution())
-                        .retain_native_target_custody(&target_native)?
-                        .retain_linked_native_target(completed)?,
-                );
+                let execution = proof.issued_original_execution();
                 SealedOriginalEvidence::Ordinary {
                     execution,
                     artifacts: artifact_view.clone(),
@@ -4463,13 +4432,13 @@ fn seal_turn_outputs_with_validation(
     Ok(Some(SealedTurnProducts {
         prepared: prepared.clone(),
         original,
-        target: target_native,
+        target: admitted.target,
         original_compile_input,
         checked,
-        certified_groups,
+        certified_groups: admitted.certified_groups,
         recovery_products: certified.recovery_products.clone(),
         retained_core_products: certified.retained_core_products,
-        package_interfaces,
+        package_interfaces: admitted.package_interfaces,
     }))
 }
 
@@ -4503,10 +4472,23 @@ fn certify_native_package_products(
         .collect()
 }
 
-struct AdmittedNativeTargetProducts {
+/// The sole native target issuer pairs its actual output projection and target.
+/// Consumers cannot assemble or rebind these fields independently.
+pub(crate) struct AdmittedNativeTargetProducts {
+    output: crate::declaration_context::IssuedOriginalOutput,
     target: crate::artifact_inventory::CertifiedTargetNativeInputs,
     certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     package_interfaces: certified_products::CertifiedTargetPackageInterfaces,
+}
+
+impl AdmittedNativeTargetProducts {
+    pub(crate) fn output(&self) -> &crate::declaration_context::IssuedOriginalOutput {
+        &self.output
+    }
+
+    pub(crate) fn target(&self) -> &crate::artifact_inventory::CertifiedTargetNativeInputs {
+        &self.target
+    }
 }
 
 /// The native target issuer shared by physical finite and held-World outputs.
@@ -4595,7 +4577,19 @@ fn admit_native_target_products(
         0,
         1,
     );
+    let issued_output = if segment_originals.is_some() {
+        crate::declaration_context::IssuedOriginalOutput::from_segment_item(certified)?
+    } else {
+        certified
+            .captured_stage()
+            .ok_or_else(|| {
+                CompileError::ExtractFailed("compiler output lacks its captured stage owner".into())
+            })?
+            .output()
+            .clone()
+    };
     Ok(AdmittedNativeTargetProducts {
+        output: issued_output,
         target: selected_target
             .with_certified_groups(Arc::clone(&selected_groups))?
             .link_native_target(
@@ -11156,7 +11150,7 @@ mod module_product_tests {
         );
         let proof = first.products().original_compile_input.as_ref().unwrap();
         assert!(proof.replay_eligible_identity().is_none());
-        let original = first.products().original_execution_context().unwrap();
+        let original = first.products().original_execution_evidence().unwrap();
         let template = ["module Protected where\nimport QuotedOriginal\n".to_owned()];
         assert!(
             crate::declaration_context::CapturedTemplateImports::capture(&original, &template)
@@ -11175,7 +11169,7 @@ mod module_product_tests {
             std::env::set_var("TIDEPOOL_EXTRACT", root.path().join("unavailable-compiler"));
             std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
         }
-        let snapshot = original.snapshot();
+        let snapshot = original.context().snapshot();
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let published = materializer.materialize_context(None, &snapshot).unwrap();
@@ -11193,6 +11187,7 @@ mod module_product_tests {
         let recovery = root.path().join("recovered-original");
         std::fs::create_dir(&recovery).unwrap();
         let references = original
+            .context()
             .materialize_recovery_artifacts(&recovery, &artifacts)
             .unwrap();
         let descriptors = references
@@ -11225,20 +11220,16 @@ mod module_product_tests {
             .unwrap()
             .context_for_expected_snapshot(published.root(), &restored)
             .unwrap();
-        assert_eq!(recovered.lexical_graph(), original.lexical_graph());
-        let refusal = match crate::declaration_context::CapturedTemplateImports::capture(
-            &recovered, &template,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("restored retained facts cannot recreate original completion"),
-        };
-        assert!(
-            matches!(&refusal, CompileError::ExtractFailed(detail)
-            if detail == "exact declaration context: retained template imports require complete original compiler execution evidence"),
-            "unexpected template-capture refusal: {refusal:?}"
+        assert_eq!(
+            recovered.lexical_graph(),
+            original.context().lexical_graph()
+        );
+        assert_eq!(
+            recovered.semantic_sha256(),
+            original.context().semantic_sha256()
         );
         assert!(
-            crate::declaration_context::CapturedTemplateImports::capture(&recovered, &[])
+            crate::declaration_context::CapturedTemplateImports::capture(&original, &[])
                 .unwrap()
                 .is_none(),
             "no selected template roots require no original completion"

@@ -24,7 +24,7 @@ use crate::CompileError;
 pub struct SealedOriginalCompileInput {
     identity: String,
     source: Arc<str>,
-    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+    original_execution: Arc<crate::declaration_context::OriginalExecutionEvidence>,
     target: Arc<PreparedProgram>,
     groups: Arc<[PendingCertifiedGroup]>,
     target_owners: Arc<[PendingImportOwner]>,
@@ -79,7 +79,7 @@ impl SealedOriginalCompileInput {
 
     pub(crate) fn issued_original_execution(
         &self,
-    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
+    ) -> Arc<crate::declaration_context::OriginalExecutionEvidence> {
         self.original_execution.clone()
     }
 
@@ -119,6 +119,29 @@ impl SealedOriginalCompileInput {
         )
     }
 
+    /// Borrow execution evidence only after authenticating this output bundle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn original_execution_evidence(
+        &self,
+        prepared: &PreparedProgram,
+        groups: &[PendingCertifiedGroup],
+        target_owners: &[PendingImportOwner],
+        package_interfaces: &CertifiedTargetPackageInterfaces,
+        table: &DataConTable,
+        yield_sites: &[YieldSite],
+    ) -> Result<Arc<crate::declaration_context::OriginalExecutionEvidence>, CompileError> {
+        self.validated_original_source(
+            prepared,
+            groups,
+            target_owners,
+            package_interfaces,
+            table,
+            yield_sites,
+        )?;
+        Ok(Arc::clone(&self.original_execution))
+    }
+
+    /// Observe retained facts without claiming complete instance capture.
     #[allow(clippy::too_many_arguments)]
     pub fn original_execution_context(
         &self,
@@ -129,8 +152,8 @@ impl SealedOriginalCompileInput {
         table: &DataConTable,
         yield_sites: &[YieldSite],
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {
-        Ok(self
-            .validated_original_source(
+        Ok(Arc::clone(
+            self.original_execution_evidence(
                 prepared,
                 groups,
                 target_owners,
@@ -138,31 +161,8 @@ impl SealedOriginalCompileInput {
                 table,
                 yield_sites,
             )?
-            .execution_context())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn published_source_original_selection(
-        &self,
-        prepared: &PreparedProgram,
-        groups: &[PendingCertifiedGroup],
-        target_owners: &[PendingImportOwner],
-        package_interfaces: &CertifiedTargetPackageInterfaces,
-        table: &DataConTable,
-        yield_sites: &[YieldSite],
-        revision: &str,
-        public_root: &crate::declaration_join::ExactModuleIdentity,
-    ) -> Result<Arc<crate::declaration_context::PublishedSourceOriginalSelection>, CompileError>
-    {
-        self.original_execution_context(
-            prepared,
-            groups,
-            target_owners,
-            package_interfaces,
-            table,
-            yield_sites,
-        )?
-        .issue_published_source_original(revision, &self.identity, public_root)
+            .context(),
+        ))
     }
 
     pub fn matches_bundle(
@@ -705,8 +705,8 @@ pub(crate) fn seal(
     package_interfaces: &CertifiedTargetPackageInterfaces,
     table: DataConTable,
     sites: Vec<YieldSite>,
-    output: &crate::declaration_context::IssuedOriginalOutput,
     native_sites: crate::checked_cell::SelectedNativeSites,
+    issued: &crate::artifacts::AdmittedNativeTargetProducts,
 ) -> Result<Option<SealedOriginalCompileInput>, CompileError> {
     let evidence = admission.completed();
     if admission.exact().is_some() {
@@ -731,7 +731,11 @@ pub(crate) fn seal(
         return Ok(None);
     }
     let completed = evidence.validate_expected_source(source);
-    if producer.is_empty() || completed.is_err() || !package_interfaces.matches_target(prepared) {
+    if producer.is_empty()
+        || completed.is_err()
+        || !package_interfaces.matches_target(prepared)
+        || !issued.target().matches_prepared(prepared)
+    {
         return Err(CompileError::ExtractFailed(
             "compile input identity lacks validated input or output ownership".into(),
         ));
@@ -742,39 +746,10 @@ pub(crate) fn seal(
         .iter()
         .map(std::path::absolute)
         .collect::<Result<Vec<_>, _>>()?;
-    let original_targets = evidence
-        .modules
-        .iter()
-        .filter(|module| !module.boot && module.source == Path::new(crate::cache::GENERATED_SOURCE))
-        .map(|module| crate::declaration_join::ExactModuleIdentity {
-            unit: module.unit.clone(),
-            module: module.module.clone(),
-        })
-        .collect::<Vec<_>>();
-    let [original_target] = original_targets.as_slice() else {
-        return Err(CompileError::ExtractFailed(
-            "original input lacks one authenticated generated target owner".into(),
-        ));
-    };
-    let required_instance_owners = evidence
-        .modules
-        .iter()
-        .filter(|module| !module.boot)
-        .map(|module| crate::declaration_join::ExactModuleIdentity {
-            unit: module.unit.clone(),
-            module: module.module.clone(),
-        })
-        .collect::<Vec<_>>();
-    let original_execution = Arc::new(
-        crate::declaration_context::ExactDeclarationContext::from_issued_output(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
-                .sha256(),
-            output,
-            admission,
-            original_target.clone(),
-            &required_instance_owners,
-        )?,
-    );
+    let original_execution =
+        crate::declaration_context::OriginalExecutionEvidence::issue_ordinary_output(
+            producer, admission, issued,
+        )?;
     Ok(Some(SealedOriginalCompileInput {
         identity: input_identity(producer, &include, evidence, packages, source, target)?,
         source: source.into(),
@@ -816,137 +791,8 @@ mod tests {
         )
     }
 
-    fn package_context_proof(producer: &[u8]) -> SealedOriginalCompileInput {
-        package_context_proof_with_eligibility(producer, true, true)
-    }
-
-    fn package_context_proof_with_eligibility(
-        producer: &[u8],
-        cache_safe: bool,
-        selection_complete: bool,
-    ) -> SealedOriginalCompileInput {
-        use tidepool_repr::execution_schema::testing;
-        let source = "module Root where root = 42";
-        let evidence = DependencyEvidence {
-            version: 4,
-            cache_safe,
-            selection_complete,
-            sources: vec![SourceEvidence {
-                path: "@generated-source".into(),
-                sha256: format!("{:x}", Sha256::digest(source)),
-            }],
-            modules: vec![ModuleEvidence {
-                unit: "main".into(),
-                module: "Root".into(),
-                boot: false,
-                source: "@generated-source".into(),
-                product: ProductAvailability::Ready,
-                imports: vec![],
-            }],
-            resolutions: vec![],
-            packages: vec![],
-        };
-        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
-        let package_interfaces =
-            crate::certified_products::certify_target_package_interfaces(&target, &BTreeMap::new())
-                .unwrap();
-        let artifacts = crate::artifact_inventory::ArtifactInventory::default().empty_view();
-        let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        let entries = vec![Arc::new(
-            crate::artifact_inventory::ArtifactEntry::canonical(
-                crate::certified_products::fixture_source_module_interface(
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                        producer,
-                    )
-                    .sha256(),
-                    "main",
-                    "Root",
-                    Sha256::digest(source).into(),
-                    BTreeMap::new(),
-                    None,
-                ),
-            ),
-        )];
-        let artifacts = artifacts
-            .inventory()
-            .admit_shared(&artifacts, entries.clone())
-            .unwrap();
-        let projection =
-            crate::artifact_inventory::CompilerInputProjection::from_issued_entries(&entries)
-                .unwrap();
-        let mut selection =
-            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                &projection,
-                &artifacts.metadata_snapshot(),
-                &validation.inventory,
-            )
-            .unwrap();
-        let physical = crate::declaration_context::CapturedCompilerStage::issue(
-            &mut selection,
-            &artifacts,
-            entries,
-            &mut validation,
-        )
-        .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let input = directory.path().join("Root.hs");
-        std::fs::write(&input, source).unwrap();
-        let worker_bytes = serde_json::to_vec(&evidence).unwrap();
-        let admission = crate::artifacts::admit_compiler_source(
-            &validation.inventory,
-            &worker_bytes,
-            &input,
-            source,
-        )
-        .unwrap();
-        let proof = seal(
-            producer,
-            &[],
-            &admission,
-            &ValidatedInputPackages::fixture(BTreeMap::new()),
-            source,
-            "root",
-            &target,
-            &Arc::from([]),
-            &[],
-            &package_interfaces,
-            DataConTable::new(),
-            vec![],
-            physical.output(),
-            Default::default(),
-        )
-        .unwrap()
-        .expect("ordinary compiler issuer admits complete fixture inputs");
-        let roots = proof.original_execution.source_scope().rows();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].owner.unit, "main");
-        assert_eq!(roots[0].owner.module, "Root");
-        assert!(roots[0].imports.is_empty());
-        proof
-    }
-
-    fn original_context(
-        proof: &SealedOriginalCompileInput,
-    ) -> Arc<crate::declaration_context::ExactDeclarationContext> {
-        let context = proof
-            .validated_original_source(
-                &proof.target,
-                &proof.groups,
-                &proof.target_owners,
-                &proof.package_interfaces,
-                &proof.table,
-                &proof.sites,
-            )
-            .unwrap()
-            .project_type_interfaces(&[], &[])
-            .map(Arc::new)
-            .unwrap();
-        assert!(context.source_scope().rows().is_empty());
-        context
-    }
-
     #[test]
-    fn completed_original_custody_preserves_each_source_replay_refusal() {
+    fn source_replay_eligibility_preserves_each_refusal() {
         for (cache_safe, selection_complete, eligibility) in [
             (true, true, SourceReplayEligibility::Eligible),
             (false, true, SourceReplayEligibility::UntrackedInputs),
@@ -957,33 +803,39 @@ mod tests {
                 SourceReplayEligibility::UntrackedInputsAndIncompleteSelection,
             ),
         ] {
-            let proof = package_context_proof_with_eligibility(
-                b"original compiler producer",
-                cache_safe,
-                selection_complete,
-            );
-            assert_eq!(proof.source_replay_eligibility(), eligibility);
+            let mut observed = evidence();
+            observed.cache_safe = cache_safe;
+            observed.selection_complete = selection_complete;
             assert_eq!(
-                proof.replay_eligible_identity().is_some(),
-                cache_safe && selection_complete
+                SourceReplayEligibility::from_evidence(&observed),
+                eligibility
             );
-            original_context(&proof);
-            assert!(proof.matches_bundle(
-                &proof.target,
-                &proof.groups,
-                &proof.target_owners,
-                &proof.package_interfaces,
-                &proof.table,
-                &proof.sites,
-            ));
         }
     }
 
     #[test]
-    fn sealed_input_missing_generated_owner_cannot_prove_absent_instances() {
-        let proof = package_context_proof(b"original compiler producer");
-        let execution = proof
-            .original_execution_context(
+    fn sealed_original_source_lends_evidence_only_for_its_actual_output() {
+        let root = crate::artifacts::test_support::compiler_input_directory().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        let source = authored.join("PreparedOriginal.hs");
+        std::fs::write(
+            &source,
+            "module PreparedOriginal where\nentry :: Int\nentry = 42\n",
+        )
+        .unwrap();
+        let sources =
+            crate::artifacts::FrozenEntrySources::capture(&[authored], &source)
+                .unwrap();
+        let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            root.path(),
+            &root.path().join("entry"),
+        )
+        .unwrap();
+        let proof = entry.products().original_compile_input.as_ref().unwrap();
+        let validated = proof
+            .validated_original_source(
                 &proof.target,
                 &proof.groups,
                 &proof.target_owners,
@@ -992,120 +844,39 @@ mod tests {
                 &proof.sites,
             )
             .unwrap();
-        assert_eq!(
-            execution.original_instance_environment(),
-            &crate::declaration_context::OriginalInstanceEnvironment::MissingOriginalOwners(
-                vec![crate::declaration_join::ExactModuleIdentity {
-                    unit: "main".into(),
-                    module: "Root".into()
-                },]
-                .into()
-            ),
-            "a consumed generated owner without its original interface is missing evidence",
-        );
-        let projected = execution.select_original_type_interfaces(&[], &[]).unwrap();
-        assert_eq!(
-            projected.original_instance_environment(),
-            &crate::declaration_context::OriginalInstanceEnvironment::Unknown
-        );
-        assert_ne!(
-            execution.semantic_sha256(),
-            projected.semantic_sha256(),
-            "original scope completeness is part of the authenticated context commitment"
-        );
-        assert_eq!(
-            original_context(&proof).original_instance_environment(),
-            &crate::declaration_context::OriginalInstanceEnvironment::Unknown,
-            "type-only original interface custody cannot prove instance absence"
-        );
-    }
-
-    #[test]
-    fn validated_original_source_preserves_issuer_and_individual_observations() {
-        for producer in [
-            b"first compiler producer".as_slice(),
-            b"second compiler producer".as_slice(),
-        ] {
-            let proof = package_context_proof(producer);
-            let source = proof
-                .validated_original_source(
-                    &proof.target,
-                    &proof.groups,
-                    &proof.target_owners,
-                    &proof.package_interfaces,
-                    &proof.table,
-                    &proof.sites,
-                )
-                .unwrap();
-            let interfaces = Arc::new(source.project_type_interfaces(&[], &[]).unwrap());
-            let execution = source.execution_context();
-            assert_eq!(interfaces, original_context(&proof));
-            assert_eq!(
-                execution,
-                proof
-                    .original_execution_context(
-                        &proof.target,
-                        &proof.groups,
-                        &proof.target_owners,
-                        &proof.package_interfaces,
-                        &proof.table,
-                        &proof.sites
-                    )
-                    .unwrap()
-            );
-            assert_ne!(interfaces.semantic_sha256(), execution.semantic_sha256());
-        }
-    }
-
-    #[test]
-    fn sealed_package_context_preserves_original_producer_after_empty_projection() {
-        let proof = package_context_proof(b"original compiler producer");
-        let original = original_context(&proof);
-        let selected = original.select_original_type_interfaces(&[], &[]).unwrap();
-        assert!(selected.artifact_view().descriptors().is_empty());
-        assert_eq!(selected, *original);
-        let expected = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-            b"original compiler producer",
-        )
-        .sha256();
-        assert_eq!(selected.toolchain_identity_sha256(), expected);
-        let empty =
-            crate::declaration_context::ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap();
-        let merged = empty.clone().extend_interface_context(&selected).unwrap();
-        assert_eq!(merged, selected);
-        assert_ne!(merged.semantic_sha256(), empty.semantic_sha256());
-        let directory = tempfile::tempdir().unwrap();
-        Arc::new(merged)
-            .prepare_compilation(directory.path(), b"original compiler producer")
-            .unwrap();
-    }
-
-    #[test]
-    fn sealed_zero_input_source_refuses_different_producer_and_edited_output() {
-        let first_proof = package_context_proof(b"first compiler producer");
+        let crate::declaration_context::OriginalExecutionSource::Original(original) =
+            validated.execution()
+        else {
+            panic!("ordinary output must retain actual original execution");
+        };
+        assert!(Arc::ptr_eq(&original, &proof.original_execution));
+        assert!(Arc::ptr_eq(
+            &original,
+            &entry.products().original_execution_evidence().unwrap()
+        ));
         assert!(
-            first_proof.sites.is_empty(),
-            "the output gate must run without input demand"
+            crate::declaration_context::CapturedTemplateImports::capture(&original, &[])
+                .unwrap()
+                .is_none()
         );
-        let second_proof = package_context_proof(b"second compiler producer");
-        let first = original_context(&first_proof)
-            .select_original_type_interfaces(&[], &[])
-            .unwrap();
-        let second = original_context(&second_proof)
-            .select_original_type_interfaces(&[], &[])
-            .unwrap();
-        assert_ne!(first, second);
-        assert_ne!(first.semantic_sha256(), second.semantic_sha256());
-        assert!(first.clone().extend_interface_context(&second).is_err());
-        let directory = tempfile::tempdir().unwrap();
-        let output = directory.path().join("refused");
-        assert!(Arc::new(first)
-            .prepare_compilation(&output, b"second compiler producer")
-            .is_err());
-        assert!(
-            !output.exists(),
-            "producer refusal precedes interface materialization"
+        let projected = validated.project_type_interfaces(&[], &[]).unwrap();
+        assert!(projected.source_scope().rows().is_empty());
+        assert_eq!(
+            projected.toolchain_identity_sha256(),
+            original.context().toolchain_identity_sha256()
         );
+        assert_eq!(
+            proof.source_replay_eligibility(),
+            SourceReplayEligibility::Eligible
+        );
+        assert!(proof.matches_bundle(
+            &proof.target,
+            &proof.groups,
+            &proof.target_owners,
+            &proof.package_interfaces,
+            &proof.table,
+            &proof.sites,
+        ));
         let mut changed = tidepool_repr::execution_schema::testing::wire_program();
         changed
             .globals
@@ -1117,14 +888,14 @@ mod tests {
                 required_generation: None,
             });
         let changed = tidepool_repr::execution_schema::testing::prepare(changed).unwrap();
-        assert!(first_proof
+        assert!(proof
             .validated_original_source(
                 &changed,
-                &first_proof.groups,
-                &first_proof.target_owners,
-                &first_proof.package_interfaces,
-                &first_proof.table,
-                &first_proof.sites,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
+                &proof.sites,
             )
             .is_err());
         let mut edited_table = DataConTable::new();
@@ -1147,14 +918,14 @@ mod tests {
                 type_name: "Edited".into(),
             })
             .expect("valid fixture metadata");
-        assert!(first_proof
+        assert!(proof
             .validated_original_source(
-                &first_proof.target,
-                &first_proof.groups,
-                &first_proof.target_owners,
-                &first_proof.package_interfaces,
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
                 &edited_table,
-                &first_proof.sites,
+                &proof.sites,
             )
             .is_err());
         let sites = vec![YieldSite {
@@ -1169,13 +940,13 @@ mod tests {
             reply_declaration: None,
             request_type_signatures: None,
         }];
-        assert!(first_proof
+        assert!(proof
             .validated_original_source(
-                &first_proof.target,
-                &first_proof.groups,
-                &first_proof.target_owners,
-                &first_proof.package_interfaces,
-                &first_proof.table,
+                &proof.target,
+                &proof.groups,
+                &proof.target_owners,
+                &proof.package_interfaces,
+                &proof.table,
                 &sites,
             )
             .is_err());

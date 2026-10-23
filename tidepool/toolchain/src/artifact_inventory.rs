@@ -437,6 +437,7 @@ struct IssuedTargetSlots {
 /// Exact target occurrences are selected from completed physical proofs.
 #[derive(Debug)]
 pub(crate) struct TargetNativeInputs {
+    physical_inputs: Arc<crate::declaration_context::OriginalCompilerInputs>,
     admitted: AdmittedTargetArtifacts,
     entry: Option<(crate::checked_cell::CheckedTypedEntry, NativeGroupBinding)>,
     slots: IssuedTargetSlots,
@@ -616,6 +617,21 @@ impl std::ops::Deref for CertifiedTargetNativeInputs {
 }
 
 impl CertifiedTargetNativeInputs {
+    /// Both owners must originate in the same once-issued physical cohort.
+    pub(crate) fn matches_original_output(
+        &self,
+        output: &crate::declaration_context::IssuedOriginalOutput,
+    ) -> bool {
+        output.owns_physical_inputs(&self.target.physical_inputs)
+    }
+
+    pub(crate) fn matches_prepared(
+        &self,
+        prepared: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    ) -> bool {
+        Arc::ptr_eq(self.target.slots.observed.target(), prepared)
+    }
+
     /// Complete this exact physical target without changing its selected HOME
     /// roots or compiler roles. Missing package code remains a refusal.
     pub(crate) fn link_native_target(
@@ -4029,6 +4045,7 @@ impl ArtifactInventory {
         }
         artifacts.attach_projected_materializations(&materializations);
         Ok(TargetNativeInputs {
+            physical_inputs: Arc::clone(cohort.compiler_inputs()),
             admitted: AdmittedTargetArtifacts {
                 artifacts,
                 selection: IssuedTargetNativeSelection {
@@ -14507,11 +14524,13 @@ mod tests {
                     .unwrap();
                 let excluded = Arc::downgrade(&broad.lease.payloads[&excluded_id]);
                 let view = broad.select_roots(roots).unwrap();
-                assert!(view.selection_snapshot().scopes.values().any(|scope| scope
-                    .proof()
-                    .nodes
-                    .iter()
-                    .any(|node| node.artifact() == excluded_id)));
+                assert!(view.selection_snapshot().scopes.values().any(|scope| {
+                    scope
+                        .proof()
+                        .nodes
+                        .iter()
+                        .any(|node| node.artifact() == excluded_id)
+                }));
                 drop(broad);
                 assert!(
                     excluded.upgrade().is_none(),
@@ -14589,10 +14608,12 @@ mod tests {
                 .iter()
                 .all(|root| actual.roots().contains(root)));
         } else {
-            assert!(actual.roots().iter().all(|root| actual
-                .namespace()
-                .values()
-                .any(|binding| *root == InventoryNodeKey::Artifact(*binding))));
+            assert!(actual.roots().iter().all(|root| {
+                actual
+                    .namespace()
+                    .values()
+                    .any(|binding| *root == InventoryNodeKey::Artifact(*binding))
+            }));
         }
         for id in actual.artifact_ids() {
             assert!(Arc::ptr_eq(
