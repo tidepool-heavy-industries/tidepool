@@ -10,24 +10,13 @@ pub struct PublicationNativeAuthority(PublicationNativeState);
 #[derive(Clone, Debug)]
 enum PublicationNativeState {
     Recorded(Arc<crate::exact_context::PublicationNativeFacts>),
-    Acquired(Arc<PublicationNativeInputs>),
-}
-#[derive(Debug)]
-struct PublicationNativeInputs {
-    facts: Arc<crate::exact_context::PublicationNativeFacts>,
-    offers: Arc<[IssuedNativeOffer]>,
-    availability: crate::declaration_context::RequestNativeAvailability,
-    completions: AcquiredNativeClosures,
-    decisions: IssuedInputNativeDecisions,
-    artifacts: ArtifactView,
-    projection: CompilerInputProjection,
-    selected: Arc<AdmittedCompilerRoles>,
+    Acquired(Arc<CompilerSourceSupport>),
 }
 impl PublicationNativeAuthority {
     pub(crate) fn facts(&self) -> &Arc<crate::exact_context::PublicationNativeFacts> {
         match &self.0 {
             PublicationNativeState::Recorded(facts) => facts,
-            PublicationNativeState::Acquired(inputs) => &inputs.facts,
+            PublicationNativeState::Acquired(inputs) => inputs.native_fact_owner(),
         }
     }
     pub(crate) fn recorded(facts: Arc<crate::exact_context::PublicationNativeFacts>) -> Self {
@@ -35,16 +24,7 @@ impl PublicationNativeAuthority {
     }
     pub(crate) fn capture(source: &CompilerSourceSupport) -> Result<Self, CompileError> {
         Ok(Self(PublicationNativeState::Acquired(Arc::new(
-            PublicationNativeInputs {
-                facts: Arc::clone(source.native_fact_owner()),
-                offers: Arc::clone(&source.native_offers),
-                availability: source.native_availability.clone(),
-                completions: source.native_closures.clone(),
-                decisions: source.input_decisions.clone(),
-                artifacts: source.artifacts.clone(),
-                projection: source.projection.clone(),
-                selected: Arc::clone(&source.selected),
-            },
+            source.clone(),
         ))))
     }
     fn bind(
@@ -91,26 +71,15 @@ impl PublicationNativeAuthority {
         )?;
         if let PublicationNativeState::Acquired(inputs) = &self.0 {
             let mut draft = restored.reopen();
-            draft.append_acquired_closures(&inputs.completions)?;
+            draft.append_acquired_closures(&inputs.native_closures)?;
             draft.input_decisions = inputs
-                .decisions
+                .input_decisions
                 .with_recorded_facts(draft.input_decisions.facts.clone());
             restored = draft.close()?;
         }
-        Ok(Self(PublicationNativeState::Acquired(Arc::new(
-            PublicationNativeInputs {
-                facts,
-                offers: Arc::clone(&restored.native_offers),
-                availability: restored.native_availability,
-                completions: restored.native_closures,
-                decisions: restored.input_decisions,
-                artifacts: restored.artifacts,
-                projection: prior,
-                selected: restored.selected,
-            },
-        ))))
+        Ok(Self(PublicationNativeState::Acquired(Arc::new(restored))))
     }
-    fn acquired(&self) -> Result<&PublicationNativeInputs, CompileError> {
+    fn acquired(&self) -> Result<&CompilerSourceSupport, CompileError> {
         match &self.0 {
             PublicationNativeState::Acquired(inputs) => Ok(inputs),
             _ => Err(failure(
@@ -4905,18 +4874,7 @@ impl CompilerSourceSupport {
                 "publication native owner differs from its issued selection",
             ));
         }
-        Ok(SupportDraft {
-            projection: saved.projection.clone(),
-            artifacts: saved.artifacts.clone(),
-            native_fact_owner: Some(Arc::clone(&saved.facts)),
-            native_offers: Arc::clone(&saved.offers),
-            native_offer_facts: saved.facts.offers.clone(),
-            native_closures: saved.completions.clone(),
-            native_availability: saved.availability.clone(),
-            selected: Arc::clone(&saved.selected),
-            input_decisions: saved.decisions.clone(),
-        }
-        .close()?)
+        Ok(saved.clone())
     }
 
     pub(crate) fn select_publication_graph(
@@ -5016,13 +4974,13 @@ impl CompilerSourceSupport {
         };
         // The exact fact domain and the acquired admission owners are separate
         // obligations. Equal IDs/graphs cannot substitute another birth's mode.
-        if self.native_fact_owner().commitment() != birth.facts.commitment()
+        if self.native_fact_owner().commitment() != birth.native_fact_owner().commitment()
             || !Arc::ptr_eq(&self.selected, &birth.selected)
             || !Arc::ptr_eq(&self.artifacts.lease, &birth.artifacts.lease)
-            || !Arc::ptr_eq(&self.native_offers, &birth.offers)
+            || !Arc::ptr_eq(&self.native_offers, &birth.native_offers)
             || !self
                 .native_availability
-                .same_acquisition(&birth.availability)
+                .same_acquisition(&birth.native_availability)
         {
             return Err(admission_failure(
                 ArtifactInventoryFailure::PublicationNativeDomainMismatch {
