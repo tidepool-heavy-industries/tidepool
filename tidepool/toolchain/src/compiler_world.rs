@@ -5296,7 +5296,7 @@ impl CheckedWorldCellProgram {
         {
             if proof.index() != ordinal
                 || proof.ordinal() != ordinal as u64
-                || proof.generation() != world_cell_generation(slot)
+                || proof.generation() != world_cell_generation(&slot)
             {
                 return Err(source_failure(
                     "world cell item proof differs from its reservation",
@@ -5610,25 +5610,11 @@ fn prepare_world_cell_outputs(
             plan.recipe(),
             plan.operand().map(|operand| operand.request()),
             plan.receipt(),
-            reservation.slots().enumerate().map(|(ordinal, slot)| {
-                use crate::checked_cell::CheckedPlannedCellSlot as S;
-                use tidepool_extract_cmd::PlannedCellSlotRef as P;
-                (
-                    ordinal as u64,
-                    match slot {
-                        S::Prologue { declaration } => P::Prologue(*declaration),
-                        S::Declaration { declaration } => P::Declaration(*declaration),
-                        S::Bind { value } => P::Bind(*value),
-                        S::Expression {
-                            capture,
-                            observation_name,
-                        } => P::Expression {
-                            generation: *capture,
-                            observation: observation_name,
-                        },
-                    },
-                )
-            }),
+            reservation
+                .items()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, item)| (ordinal as u64, item.request_slot())),
             directory.path(),
             &output,
         )
@@ -5721,15 +5707,15 @@ fn world_cell_slots(
             (
                 index as u64,
                 match slot {
-                    S::Prologue { declaration } => P::Prologue(*declaration),
-                    S::Declaration { declaration } => P::Declaration(*declaration),
-                    S::Bind { value } => P::Bind(*value),
+                    S::Prologue { declaration } => P::Prologue(declaration),
+                    S::Declaration { declaration } => P::Declaration(declaration),
+                    S::Bind { value } => P::Bind(value),
                     S::Expression {
                         capture,
                         observation_name,
                     } => P::Expression {
-                        generation: *capture,
-                        observation: observation_name.clone(),
+                        generation: capture,
+                        observation: observation_name,
                     },
                 },
             )
@@ -6331,7 +6317,7 @@ fn admit_world_preparation_response(
     let common_files = world_output_manifest(&fields[6], &validation.inventory)?;
     let stages = decode_world_stages(
         &fields[8],
-        &reservation.slots().cloned().collect::<Vec<_>>(),
+        &reservation.slots().collect::<Vec<_>>(),
         &segments,
         &common_files,
         &validation.inventory,
@@ -6365,7 +6351,7 @@ fn admit_world_preparation_response(
         crate::host_work::checkpoint()?;
         let completed = answer_array(completed, 3)?;
         if answer_u64(&completed[0])? != index as u64
-            || answer_u64(&completed[1])? != world_cell_generation(slot)
+            || answer_u64(&completed[1])? != world_cell_generation(&slot)
         {
             return Err(world_response_error(
                 CompilerResponseRejection::ProvenanceMismatch,
@@ -6403,7 +6389,7 @@ fn admit_world_preparation_response(
             || answer_hash(&observed[2])? != plan_digest
             || answer_hash(&observed[3])? != *reservation.admission_digest()
             || answer_u64(&observed[4])? != index as u64
-            || answer_u64(&observed[5])? != world_cell_generation(slot)
+            || answer_u64(&observed[5])? != world_cell_generation(&slot)
             || answer_hash(&observed[source_index])?
                 != world_digest(plan.items()[index].source().as_bytes())
         {
@@ -6547,7 +6533,7 @@ fn admit_world_preparation_response(
         item_proofs.push(Arc::new(WorldItemProof {
             index,
             ordinal: index as u64,
-            generation: world_cell_generation(slot),
+            generation: world_cell_generation(&slot),
             stage,
             kind,
         }));

@@ -266,36 +266,54 @@ pub enum WorldCellReservationRequest {
 /// One item admitted against the actual parser plan. Its slot and binders are
 /// retained together; neither projection can independently issue a reservation.
 #[derive(Debug)]
-pub struct ReservedWorldItem {
-    slot: crate::checked_cell::CheckedPlannedCellSlot,
-    bindings: Vec<(String, tidepool_repr::SessionVarId)>,
-}
+pub struct ReservedWorldItem(WorldCellReservationRequest);
 
 impl ReservedWorldItem {
-    pub fn slot(&self) -> &crate::checked_cell::CheckedPlannedCellSlot {
-        &self.slot
+    pub fn slot(&self) -> crate::checked_cell::CheckedPlannedCellSlot {
+        self.0.slot()
     }
     pub fn bindings(&self) -> &[(String, tidepool_repr::SessionVarId)] {
-        &self.bindings
+        self.0.bindings()
+    }
+    pub(crate) fn request_slot(&self) -> tidepool_extract_cmd::PlannedCellSlotRef<'_> {
+        use tidepool_extract_cmd::PlannedCellSlotRef as Slot;
+        match &self.0 {
+            WorldCellReservationRequest::Prologue { declaration } => Slot::Prologue(*declaration),
+            WorldCellReservationRequest::Declaration { declaration } => {
+                Slot::Declaration(*declaration)
+            }
+            WorldCellReservationRequest::Bind { value, .. } => Slot::Bind(*value),
+            WorldCellReservationRequest::Expression { capture, binding } => Slot::Expression {
+                generation: *capture,
+                observation: &binding.0,
+            },
+        }
     }
 }
 
 impl WorldCellReservationRequest {
-    fn into_item(self) -> ReservedWorldItem {
+    fn slot(&self) -> crate::checked_cell::CheckedPlannedCellSlot {
         use crate::checked_cell::CheckedPlannedCellSlot as Slot;
-        let (slot, bindings) = match self {
-            Self::Prologue { declaration } => (Slot::Prologue { declaration }, Vec::new()),
-            Self::Declaration { declaration } => (Slot::Declaration { declaration }, Vec::new()),
-            Self::Bind { value, bindings } => (Slot::Bind { value }, bindings),
-            Self::Expression { capture, binding } => (
-                Slot::Expression {
-                    capture,
-                    observation_name: binding.0.clone(),
-                },
-                vec![binding],
-            ),
-        };
-        ReservedWorldItem { slot, bindings }
+        match self {
+            Self::Prologue { declaration } => Slot::Prologue {
+                declaration: *declaration,
+            },
+            Self::Declaration { declaration } => Slot::Declaration {
+                declaration: *declaration,
+            },
+            Self::Bind { value, .. } => Slot::Bind { value: *value },
+            Self::Expression { capture, binding } => Slot::Expression {
+                capture: *capture,
+                observation_name: binding.0.clone(),
+            },
+        }
+    }
+    fn bindings(&self) -> &[(String, tidepool_repr::SessionVarId)] {
+        match self {
+            Self::Prologue { .. } | Self::Declaration { .. } => &[],
+            Self::Bind { bindings, .. } => bindings,
+            Self::Expression { binding, .. } => std::slice::from_ref(binding),
+        }
     }
 }
 
@@ -471,8 +489,9 @@ fn world_cell_admission_digest(
     frame(producer_sha256);
     frame(plan_digest);
     for item in reserved {
-        let (slot, bindings) = (item.slot(), item.bindings());
-        let (kind, generation) = match slot {
+        let slot = item.slot();
+        let bindings = item.bindings();
+        let (kind, generation) = match &slot {
             Slot::Prologue { declaration } => (0, *declaration),
             Slot::Declaration { declaration } => (1, *declaration),
             Slot::Bind { value } => (2, *value),
@@ -497,18 +516,14 @@ fn admit_world_cell_reservations(
     expression_names: &WorldExpressionNames,
     requests: Vec<WorldCellReservationRequest>,
 ) -> Result<Vec<ReservedWorldItem>, CompileError> {
-    let reserved: Vec<_> = requests
-        .into_iter()
-        .map(WorldCellReservationRequest::into_item)
-        .collect();
-    validate_world_cell_reservations(items, expression_names, &reserved)?;
-    Ok(reserved)
+    validate_world_cell_reservations(items, expression_names, &requests)?;
+    Ok(requests.into_iter().map(ReservedWorldItem).collect())
 }
 
 fn validate_world_cell_reservations(
     items: &[ParsedCellPlanItem],
     expression_names: &WorldExpressionNames,
-    reserved: &[ReservedWorldItem],
+    reserved: &[WorldCellReservationRequest],
 ) -> Result<(), CompileError> {
     use crate::checked_cell::CheckedPlannedCellSlot as Slot;
     if reserved.len() != items.len() {
@@ -517,8 +532,9 @@ fn validate_world_cell_reservations(
     let mut generations = std::collections::HashSet::new();
     let mut identifiers = std::collections::BTreeSet::new();
     for (item, reserved) in items.iter().zip(reserved) {
-        let (slot, bindings) = (reserved.slot(), reserved.bindings());
-        let (generation, names): (u64, Vec<&str>) = match (item.kind(), slot) {
+        let slot = reserved.slot();
+        let bindings = reserved.bindings();
+        let (generation, names): (u64, Vec<&str>) = match (item.kind(), &slot) {
             (ParsedCellPlanKind::Prologue, Slot::Prologue { declaration })
             | (ParsedCellPlanKind::Declaration, Slot::Declaration { declaration }) => {
                 if !bindings.is_empty() {
@@ -540,7 +556,7 @@ fn validate_world_cell_reservations(
             }
             _ => return Err(failure("world cell slot differs from parsed item kind")),
         };
-        let module = match slot {
+        let module = match &slot {
             Slot::Prologue { .. } | Slot::Declaration { .. } => {
                 tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
             }
@@ -581,7 +597,7 @@ impl CompilerWorldCellReservation {
     }
     pub fn slots(
         &self,
-    ) -> impl ExactSizeIterator<Item = &crate::checked_cell::CheckedPlannedCellSlot> + Clone {
+    ) -> impl ExactSizeIterator<Item = crate::checked_cell::CheckedPlannedCellSlot> + Clone {
         self.items.iter().map(ReservedWorldItem::slot)
     }
 }
@@ -1393,7 +1409,7 @@ mod tests {
         assert_ne!(admission_digest, [0; 32]);
         assert_eq!(
             items[0].slot(),
-            &crate::checked_cell::CheckedPlannedCellSlot::Bind { value: 7 }
+            crate::checked_cell::CheckedPlannedCellSlot::Bind { value: 7 }
         );
         assert_eq!(
             items[0].bindings(),
