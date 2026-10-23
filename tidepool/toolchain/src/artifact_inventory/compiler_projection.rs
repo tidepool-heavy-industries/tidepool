@@ -7046,7 +7046,17 @@ mod tests {
         let full = inventory
             .admit_shared(&inventory.empty_view(), vec![entry.clone()])
             .unwrap();
-        let full_offers = IssuedNativeOffer::issue_context_offers(&projection, &full, &[]).unwrap();
+        let full_source =
+            crate::declaration_context::issue_fixture_compiler_support(projection.clone(), full)
+                .unwrap();
+        let full_proof = NativeOriginalRequirement::from_selected_view(
+            entry.descriptor.id,
+            full_source.artifacts(),
+        )
+        .unwrap();
+        let full_offers = [full_source
+            .issue_native_offer(&entry.descriptor.owner, full_proof)
+            .unwrap()];
         for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
             let groups = ordinals
                 .iter()
@@ -7058,20 +7068,13 @@ mod tests {
             let chosen = inventory
                 .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &groups)
                 .unwrap();
-            let offers =
-                IssuedNativeOffer::issue_context_offers(&projection, &chosen, &[]).unwrap();
-            let availability =
-                crate::declaration_context::RequestNativeAvailability::issue_checked(
-                    &projection,
-                    &chosen,
-                    &offers,
-                )
-                .unwrap();
-            let source =
-                CompilerSourceSupport::new(projection.clone(), chosen, offers, availability)
-                    .unwrap()
-                    .retain_offers(full_offers.iter().cloned())
-                    .unwrap();
+            let source = crate::declaration_context::issue_fixture_compiler_support(
+                projection.clone(),
+                chosen,
+            )
+            .unwrap()
+            .retain_offers(full_offers.iter().cloned())
+            .unwrap();
             let before = source.artifacts.capture_graph_selection();
             let old_edges = source.artifacts.binding_dependencies();
             let required_binding = source.selected[&entry.descriptor.owner].interface().0;
@@ -7598,12 +7601,25 @@ mod tests {
             .unwrap();
             let historical_projection =
                 CompilerInputProjection::from_issued_entries(&[Arc::clone(&historical)]).unwrap();
-            let offers =
-                IssuedNativeOffer::issue_context_offers(&historical_projection, &view, &[])
-                    .unwrap();
-            assert!(!offers.is_empty());
-            let support =
-                CompilerSourceSupport::new(projection, view, offers, Default::default()).unwrap();
+            let historical_source = crate::declaration_context::issue_fixture_compiler_support(
+                historical_projection,
+                view.clone(),
+            )
+            .unwrap();
+            let proof = NativeOriginalRequirement::from_selected_view(
+                historical.descriptor.id,
+                historical_source.artifacts(),
+            )
+            .unwrap();
+            let offer = historical_source
+                .issue_native_offer(&historical.descriptor.owner, proof)
+                .unwrap();
+            let support = crate::declaration_context::recover_fixture_compiler_support(
+                projection,
+                view,
+                [offer],
+            )
+            .unwrap();
             assert!(
                 support.artifacts.reads.read_projection.get().is_none(),
                 "the real offer retention must leave a cold returned view for this control"
