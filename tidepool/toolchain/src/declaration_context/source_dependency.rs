@@ -408,4 +408,116 @@ mod tests {
             left_group
         );
     }
+    #[test]
+    #[ignore = "requires the declared rooted compiler service"]
+    fn source_observation_keeps_the_selected_historical_body_with_newer_custody() {
+        let fixture =
+            crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        let original_context = fixture
+            .entry
+            .products()
+            .original_execution_evidence()
+            .unwrap()
+            .context()
+            .clone();
+        let ArtifactPayload::Original(old_product) = &fixture.root.payload else {
+            unreachable!()
+        };
+        let source_path = fixture.includes[0].join("SourceOriginalSupport.hs");
+        let source = std::fs::read_to_string(&source_path).unwrap();
+        assert!(source.contains("first = 17"));
+        std::fs::write(&source_path, source.replace("first = 17", "first = 19")).unwrap();
+        let frozen = crate::artifacts::FrozenEntrySources::capture(
+            &fixture.includes,
+            &fixture.includes[0].join("PublicationTarget.hs"),
+        )
+        .unwrap();
+        let directory = fixture.includes[0].parent().unwrap();
+        let newer = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &frozen,
+            directory,
+            &directory.join("newer-source"),
+        )
+        .unwrap();
+        let newer_context = newer
+            .products()
+            .original_execution_evidence()
+            .unwrap()
+            .context()
+            .clone();
+        let old_input = original_context
+            .compiler_source_support()
+            .compiler_primary_input(&fixture.root.descriptor.owner)
+            .unwrap()
+            .unwrap();
+        let new_input = newer_context
+            .compiler_source_support()
+            .compiler_primary_input(&fixture.root.descriptor.owner)
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            old_input.original(),
+            new_input.original(),
+            "the second actual compile must issue another native body"
+        );
+        let ArtifactPayload::Original(new_product) = &new_input.entry().payload else {
+            unreachable!()
+        };
+        assert_ne!(old_product.owner(), new_product.owner());
+        let binder = original_native_group_definitions(old_product, fixture.root_ordinals[0])
+            .unwrap()
+            .export_contracts()
+            .map(Result::unwrap)
+            .find(|contract| contract.identity.occurrence == "first")
+            .unwrap()
+            .identity
+            .clone();
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: binder.unit.clone(),
+            module: binder.module.clone(),
+            interface: old_input.interface(),
+            original: old_input.original().unwrap(),
+            binder: binder.clone(),
+        };
+        let newer_reference = ReceiptImportOwner::OriginalBinding {
+            unit: binder.unit.clone(),
+            module: binder.module.clone(),
+            interface: new_input.interface(),
+            original: new_input.original().unwrap(),
+            binder,
+        };
+        let historical = original_context
+            .as_ref()
+            .clone()
+            .rebuild(|facts| {
+                facts.compiler_support = facts
+                    .compiler_support
+                    .retain_custody(newer_context.artifact_view())
+                    .unwrap();
+            })
+            .finish()
+            .unwrap();
+        assert!(historical
+            .artifact_view()
+            .observed_payload(&new_input.original().unwrap().artifact)
+            .is_some());
+        let primary = historical
+            .capture_world_primary_inputs(historical.toolchain_identity_sha256())
+            .unwrap();
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let observed =
+            SourceDependencyBasis::observe(&primary, vec![reference.clone()], &operation).unwrap();
+        assert_eq!(
+            &observed._membership.get(&reference).unwrap().0,
+            old_product.owner()
+        );
+        assert!(
+            SourceDependencyBasis::observe(&primary, vec![newer_reference], &operation).is_err(),
+            "newer byte custody cannot replace the selected exact source body"
+        );
+        assert!(
+            SourceDependencyBasis::observe(&primary, vec![reference], &operation).is_ok(),
+            "refusal preserves the historical basis"
+        );
+    }
 }
