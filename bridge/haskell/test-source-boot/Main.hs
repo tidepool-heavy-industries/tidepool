@@ -3,7 +3,7 @@ module Main (main, tests) where
 import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredInput)
 import Test.Tasty (withResource)
 import SourceBootCases
-import CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
+import CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease)
 import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries)
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
@@ -21,7 +21,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
+  [ testCase "worker request admission precedes source scratch executor and RTS effects" workerRequestAdmissionBeforeEffects
+  , testCase "compiler receipt symbol parents use null or text" nativeReceiptIdentityChecks
   , testCase "finite native output separates package products with captured interfaces" nativePackageOutputChecks
   , testCase "target package roots are unchanged after stage issuance" packageTargetRootDriftRefusal
   , testCase "native output requires admitted provenance and portable stays explicit" nativeOutputProvenanceChecks

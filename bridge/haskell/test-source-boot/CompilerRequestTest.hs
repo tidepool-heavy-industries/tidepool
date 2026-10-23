@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module CompilerRequestTest (nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
+module CompilerRequestTest (workerRequestAdmissionBeforeEffects, nativeReceiptIdentityChecks, nativePackageOutputChecks, packageTargetRootDriftRefusal, nativeOutputProvenanceChecks, completedRequestHistories, completedRequestCancellation, completedRequestRelease, checkedPublicModuleHistories, worldAcquisitionDiagnostics, worldRequestSlotBoundaries, worldRequestBoundaries, worldMaterializationBoundaries) where
 
 import Tidepool.RequestCompletion
   ( finishCompletion, captureCompletion, completionResult, completionFailures
@@ -9,10 +9,16 @@ import Control.Exception (AsyncException(ThreadKilled), SomeException, SomeAsync
 import Control.Concurrent (forkFinally, killThread, newEmptyMVar, putMVar, readMVar)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
+import Data.Bits ((.|.), shiftL, shiftR)
+import qualified Data.ByteString.Char8 as BSC
+import System.Environment (getEnvironment, lookupEnv)
+import System.Exit (ExitCode(..))
+import System.Process (CreateProcess(..), StdStream(..), proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
+import System.Posix.Files (createNamedPipe, ownerReadMode, ownerWriteMode, unionFileModes)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
-import System.IO (stderr)
+import System.IO (stderr, hClose, hFlush, hSetBinaryMode)
 import Control.Monad ((>=>), forM, forM_, unless, void, when)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
@@ -818,3 +824,88 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
 -- Fixture requests pass the production pure admission before compiler binding.
 admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
 admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)
+
+
+-- FIFO source and an absent request CWD distinguish pure admission from later
+-- filesystem, harness and executor failures through the actual worker binary.
+workerRequestAdmissionBeforeEffects :: IO ()
+workerRequestAdmissionBeforeEffects = withScratch $ \root -> do
+  worker <- lookupEnv "TIDEPOOL_EXTRACT_WORKER" >>= maybe (fail "missing declared worker binary") pure
+  inherited <- getEnvironment
+  let environment = filter ((`notElem` bootNames) . fst) inherited
+      bootNames = ["TIDEPOOL_COMPILER_PACKAGE_PROFILE", "TIDEPOOL_COMPILER_PACKAGE_PROFILE_SHA256"
+        ,"TIDEPOOL_COMPILER_SERVICE_EPOCH", "TIDEPOOL_COMPILER_PACKAGE_SOURCE_ID"
+        ,"TIDEPOOL_COMPILER_PACKAGE_PROFILE_ID", "TIDEPOOL_COMPILER_WORKER_INSTANCE"
+        ,"TIDEPOOL_COMPILER_WORLD_DIRECTORY"]
+      fifo = root </> "unreadable-source.hs"
+      scratch = root </> "harness-copies"
+      bad = workerArgv [Input fifo, OutputDir scratch, HarnessProfile, Turn, Cell
+        ,TurnOut (root </> "turn.cbor"), CellTemplate "unused", CellOut (root </> "cell.cbor")]
+      command arguments = (proc worker arguments) {env=Just environment}
+      bounded action = timeout 30000000 action >>= maybe (fail "worker request admission timed out") pure
+      noScratch = doesDirectoryExist scratch >>= \exists -> when exists (fail "refused request wrote harness scratch")
+      noRequestWork diagnostics = forM_ ["BodyStarted", "CleanupStarted ExecutorStop", "CleanupStarted CapabilitiesRestore"] $ \phase ->
+        when (phase `isInfixOf` diagnostics) (fail ("refused request entered " ++ phase))
+  createNamedPipe fifo (ownerReadMode `unionFileModes` ownerWriteMode)
+  (directCode,directOut,directErr) <- bounded (readCreateProcessWithExitCode (command bad) "")
+  unless (directCode /= ExitSuccess && "input-rejected" `isInfixOf` directOut)
+    (fail "malformed direct request did not retain input rejection")
+  noRequestWork directErr
+  noScratch
+  let source = root </> "Classify.hs"
+      verdicts = root </> "classified.json"
+      good = workerArgv [Input source, Classify, ClassifyOut verdicts]
+  writeFile source "let observed = 41\n"
+  bounded $ withCreateProcess ((command ["--worker-loop-v2", "+RTS", "-I0", "-RTS"])
+      {std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe}) $ \input output diagnostics process -> do
+    incoming <- maybe (fail "worker stdin missing") pure input
+    outgoing <- maybe (fail "worker stdout missing") pure output
+    errors <- maybe (fail "worker stderr missing") pure diagnostics
+    mapM_ (`hSetBinaryMode` True) [incoming,outgoing,errors]
+    drained <- newEmptyMVar
+    _ <- forkFinally (BS.hGetContents errors) (putMVar drained)
+    let exact count = do
+          bytes <- BS.hGet outgoing count
+          unless (BS.length bytes == count) (fail "worker admission response was truncated")
+          pure bytes
+        word value = BS.pack [fromIntegral (value `shiftR` bits) | bits <- [0,8,16,24]]
+        readWord = do
+          bytes <- exact 4
+          pure (foldr (.|.) 0 [fromIntegral (BS.index bytes index) `shiftL` (8*index) | index <- [0..3]] :: Int)
+        frame bytes = word (BS.length bytes) <> bytes
+        readFrame = do
+          size <- readWord
+          when (size > 16384) (fail "worker admission response exceeded test bound")
+          exact size
+        acknowledge commandByte = do
+          BS.hPut incoming (BS.singleton commandByte)
+          hFlush incoming
+          reply <- exact 1
+          unless (reply == BS.singleton 1) (fail "worker admission lost BEGIN/END acknowledgement")
+        request cwd arguments = do
+          BS.hPut incoming (BS.singleton 1 <> frame (BSC.pack cwd) <> word (length arguments)
+            <> foldMap (frame . BSC.pack) arguments)
+          hFlush incoming
+          (,,) <$> readWord <*> readFrame <*> readFrame
+    acknowledge 1
+    (badCode,badOut,_) <- request (root </> "absent-cwd") bad
+    unless (badCode /= 0 && "input-rejected" `BS.isInfixOf` badOut)
+      (fail "malformed daemon request performed CWD/source work before admission")
+    noScratch
+    (goodCode,goodOut,_) <- request root good
+    unless (goodCode == 0 && "success" `BS.isInfixOf` goodOut)
+      (fail "admitted classification failed after malformed request")
+    doesFileExist verdicts >>= \written -> unless written (fail "classification did not write its required output")
+    acknowledge 0
+    acknowledge 1
+    acknowledge 0
+    hClose incoming
+    code <- waitForProcess process
+    unless (code == ExitSuccess) (fail "worker admission history failed to release")
+    captured <- readMVar drained >>= either throwIO pure
+    let phases = lines (BSC.unpack captured)
+        count phase = length (filter (== "tidepool-request-phase-v1 " ++ phase) phases)
+    unless (count "BodyStarted" == 1 && count "CleanupStarted ExecutorStop" == 1
+        && count "CleanupStarted CapabilitiesRestore" == 1)
+      (fail "malformed daemon request allocated an executor or changed RTS capabilities")
+  noScratch
