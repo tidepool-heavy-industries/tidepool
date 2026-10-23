@@ -4727,7 +4727,7 @@ where
     }
 
     pub fn begin_cell_program(
-        &self,
+        &mut self,
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<super::RuntimeCheckedPrefix>>, SessionError> {
         self.state.begin_cell_program(settled)
