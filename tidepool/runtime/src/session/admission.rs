@@ -10,7 +10,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::Generation;
 use tidepool_toolchain::compiler_world::{
-    PrivateCheckedItemProgress, PrivateCompilerProgress, PrivateHostBindingProgress,
+    CompletedPrivateCompilerProgress, PrivateCheckedItemProgress, PrivateHostBindingProgress,
     PrivateSettledFrontier,
 };
 
@@ -226,7 +226,7 @@ impl<'a> CompletedPrivateFrontier<'a> {
         self.admission
     }
 
-    pub(super) fn publication(&self) -> PrivateCompilerProgress {
+    pub(super) fn publication(&self) -> CompletedPrivateCompilerProgress {
         self.frontier.publication()
     }
 
@@ -1400,7 +1400,9 @@ impl PrivateExecutionAdmission {
     pub fn checked_progress(&self) -> PrivateCheckedItemProgress {
         match &self.state.lock().authored {
             PrivateAuthoredProgram::Ready(frontier) => match frontier.publication() {
-                PrivateCompilerProgress::Checked(_) => PrivateCheckedItemProgress::Completed,
+                CompletedPrivateCompilerProgress::Checked(_) => {
+                    PrivateCheckedItemProgress::Completed
+                }
                 _ => PrivateCheckedItemProgress::NotStarted,
             },
             PrivateAuthoredProgram::Active { .. } | PrivateAuthoredProgram::Failed => {

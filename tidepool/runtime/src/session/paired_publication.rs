@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tidepool_codegen::binding_table::{PreparedWorldExecutionSelection, SourceLeaseKey};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::{Generation, SessionModule, SessionVarId};
-use tidepool_toolchain::compiler_world::PrivateCompilerProgress;
+use tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress;
 use tidepool_toolchain::declaration_join::{
     AcceptedJoin, CertifiedAuthoredDeclaration, CertifiedPublicationJoin, DeclarationExport,
     DeclarationWrite, ExactDeclarationContext, ExactModuleIdentity, ExportIdentity,
@@ -103,9 +103,8 @@ pub(super) struct WorldExecutionIntent {
     pub(super) private: Arc<super::inspection::InspectionWorldAssociation>,
     /// The exact typed progress the private execution actually produced.
     /// An installed no-cell invocation is `Unchanged`; a completed cell is
-    /// `Checked`; started/refused/uncertain work is `Incomplete` and can never
-    /// become either successful publication branch.
-    pub(super) progress: PrivateCompilerProgress,
+    /// `Checked`; started, refused or uncertain work cannot issue this evidence.
+    pub(super) progress: CompletedPrivateCompilerProgress,
     /// The exact private source-selection suffix, issued from the private
     /// execution's actual admissions. Publication composes it over the latest
     /// public selection without treating the frozen public base as current.

@@ -1739,12 +1739,12 @@ pub struct CompilerWorld {
     position: Option<WorldCellPosition>,
 }
 
-/// The exact typed compiler progress a private execution can carry into public
-/// promotion. Only the compiler owner can classify its own products; runtime
-/// code never guesses this from tool names, `position.is_none()`, or Arc
-/// address identity.
+/// The completed compiler progress a private execution can carry into public
+/// promotion. Changed branches retain their issuing settled frontier; promotion
+/// authenticates its exact kind and lineage. Runtime does not infer progress
+/// from tool names, absent positions or pointer identity.
 #[derive(Clone, Debug)]
-pub enum PrivateCompilerProgress {
+pub enum CompletedPrivateCompilerProgress {
     /// The private World is the exact borrowed public product with no compiler
     /// additions. Publication keeps the latest public World instead of
     /// restoring the older borrowed base.
@@ -1756,10 +1756,6 @@ pub enum PrivateCompilerProgress {
     /// named facts were projected into the private World. No checked item
     /// completed for this invocation.
     HostChanged(Arc<PrivateSettledFrontier>),
-    /// Compiler work started, changed its input, was refused, or otherwise
-    /// never produced a completed checked successor. None of these may become
-    /// either successful publication branch.
-    Incomplete,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1917,11 +1913,11 @@ impl PrivateSettledFrontier {
         Arc::ptr_eq(&self.world, world)
     }
 
-    pub fn publication(self: &Arc<Self>) -> PrivateCompilerProgress {
+    pub fn publication(self: &Arc<Self>) -> CompletedPrivateCompilerProgress {
         match self.kind {
-            PrivateSettledKind::Borrowed => PrivateCompilerProgress::Unchanged,
-            PrivateSettledKind::Host => PrivateCompilerProgress::HostChanged(self.clone()),
-            PrivateSettledKind::Checked => PrivateCompilerProgress::Checked(self.clone()),
+            PrivateSettledKind::Borrowed => CompletedPrivateCompilerProgress::Unchanged,
+            PrivateSettledKind::Host => CompletedPrivateCompilerProgress::HostChanged(self.clone()),
+            PrivateSettledKind::Checked => CompletedPrivateCompilerProgress::Checked(self.clone()),
         }
     }
 
@@ -2343,12 +2339,12 @@ impl CompilerWorld {
         original_public: &Arc<Self>,
         private: &Arc<Self>,
         target_scope: u64,
-        progress: &PrivateCompilerProgress,
+        progress: &CompletedPrivateCompilerProgress,
         declaration: Option<CompilerWorldDeclarationPublication>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
     ) -> Result<Arc<Self>, CompileError> {
         let checked_prefix = match progress {
-            PrivateCompilerProgress::Checked(frontier) => {
+            CompletedPrivateCompilerProgress::Checked(frontier) => {
                 frontier.validate_publication(
                     original_public,
                     private,
@@ -2356,7 +2352,7 @@ impl CompilerWorld {
                 )?;
                 true
             }
-            PrivateCompilerProgress::HostChanged(frontier) => {
+            CompletedPrivateCompilerProgress::HostChanged(frontier) => {
                 frontier.validate_publication(
                     original_public,
                     private,
@@ -2364,7 +2360,7 @@ impl CompilerWorld {
                 )?;
                 false
             }
-            PrivateCompilerProgress::Unchanged | PrivateCompilerProgress::Incomplete => {
+            CompletedPrivateCompilerProgress::Unchanged => {
                 return Err(source_failure(
                     "private publication progress is not promotable",
                 ));

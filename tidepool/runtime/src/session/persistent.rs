@@ -4301,13 +4301,13 @@ impl PersistentSession {
                 })
                 .transpose()?;
             let successor = match &world.progress {
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged => {
+                tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress::Unchanged => {
                     if declaration.is_some() {
                         return Err(SessionError::WorldCellPublicationIncomplete);
                     }
                     public.world.clone()
                 }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_) => {
+                tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress::Checked(_) => {
                     public.world.promote_private_bindings(
                         &world.association.world,
                         &world.private.world,
@@ -4319,7 +4319,7 @@ impl PersistentSession {
                             .map(|(name, entry)| (name.as_str(), *entry)),
                     )?
                 }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::HostChanged(_) => {
+                tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress::HostChanged(_) => {
                     if declaration.is_some() {
                         return Err(SessionError::WorldCellPublicationIncomplete);
                     }
@@ -4333,9 +4333,6 @@ impl PersistentSession {
                             .iter()
                             .map(|(name, entry)| (name.as_str(), *entry)),
                     )?
-                }
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Incomplete => {
-                    return Err(SessionError::WorldCellPublicationIncomplete);
                 }
             };
             let bindings = self
