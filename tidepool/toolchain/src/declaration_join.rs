@@ -402,10 +402,6 @@ impl PublicationComposition {
         &self.join
     }
 
-    pub fn receipt(&self) -> &Arc<AcceptedJoin> {
-        &self.join
-    }
-
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.context
     }
@@ -711,9 +707,6 @@ impl CertifiedAuthoredDeclaration {
         &self.source_scope
     }
 
-    pub(crate) fn source_lexical_imports(&self) -> &[ExactLexicalNode] {
-        self.source_scope.rows()
-    }
     pub fn product(&self) -> &CertifiedRecoveryProduct {
         &self.product
     }
