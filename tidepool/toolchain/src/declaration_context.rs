@@ -23069,14 +23069,16 @@ mod tests {
 
     #[test]
     fn empty_native_offer_and_later_full_availability_roundtrip_as_retained_data() {
-        use crate::artifact_inventory::IssuedNativeOffer;
         use crate::exact_context::NativeOfferSnapshotBody;
         let base = published_original_choice_history_fixture();
         let beta = identity("fixture", "Beta");
         let beta_original = base.compiler_input_projection().snapshot_roles()[&beta]
             .original()
             .unwrap();
-        let empty = IssuedNativeOffer::issue(beta_original, base.artifact_view(), None).unwrap();
+        let empty = base
+            .compiler_source_support()
+            .issue_native_offer(&beta, None)
+            .unwrap();
         assert!(matches!(
             empty.snapshot_facts().body,
             NativeOfferSnapshotBody::Empty(_)
@@ -33191,7 +33193,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     #[test]
     fn execution_support_keeps_carried_partial_availability_and_instance_origin() {
-        use crate::artifact_inventory::{IssuedNativeOffer, NativeOriginalRequirement};
+        use crate::artifact_inventory::NativeOriginalRequirement;
         let producer = [2; 32];
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture_with_interface(
@@ -33215,10 +33217,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
             .unwrap()
             .unwrap();
-        let full =
-            IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, Some(proof.clone())).unwrap();
+        let issuer = issue_fixture_compiler_support(projection.clone(), artifacts.clone()).unwrap();
+        let full = issuer
+            .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
+            .unwrap();
         let partial = full
-            .within_projection(&projection, &inventory.empty_view())
+            .within_assembly(projection.role_view(), &inventory.empty_view())
             .unwrap()
             .unwrap();
         assert!(!partial.is_full());

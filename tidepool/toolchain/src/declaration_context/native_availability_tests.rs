@@ -43,8 +43,8 @@ fn encoded_fixture_snapshot(
     context: &ExactDeclarationContext,
 ) -> crate::exact_context::MaterializedContext {
     use crate::exact_context::{hydrate_context, Materializer};
-    use blockstore::Blockstore;
-    let store = blockstore::MemoryBlockstore::new();
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+    let store = MemoryBlockstore::new();
     let mut writer = Materializer::new(&store);
     let receipt = writer
         .materialize_context(None, &context.snapshot())
@@ -510,24 +510,22 @@ fn replay_offer_retention(indices: &[usize], foreign: bool, baseline_empty: bool
         let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
             .unwrap()
             .unwrap();
-        let full = fixture_compiler_support(
+        let offer_issuer = fixture_compiler_support(
             CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
             ArtifactView::clone(&source),
-        )
-        .issue_native_offer(&entry.descriptor.owner, Some(proof))
-        .unwrap();
+        );
+        let full = offer_issuer
+            .issue_native_offer(&entry.descriptor.owner, Some(proof))
+            .unwrap();
         assert!(full.is_full());
         let partial = full
             .within_assembly(projection.role_view(), &issuer.empty_view())
             .unwrap()
             .unwrap();
         assert!(!partial.is_full());
-        let empty = fixture_compiler_support(
-            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-            ArtifactView::clone(&source),
-        )
-        .issue_native_offer(&entry.descriptor.owner, None)
-        .unwrap();
+        let empty = offer_issuer
+            .issue_native_offer(&entry.descriptor.owner, None)
+            .unwrap();
         for offer in [&full, &partial, &empty] {
             eager_custody.push(eager_artifact_custody_reference(&source, offer));
         }
@@ -631,18 +629,19 @@ fn issued_offer_retention_records_cumulative_prefix_work() {
     let source = inventory
         .admit_shared(&inventory.empty_view(), entries.clone())
         .unwrap();
+    let offer_issuer = fixture_compiler_support(
+        CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+        source.clone(),
+    );
     let offers = entries
         .iter()
         .map(|entry| {
             let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &source)
                 .unwrap()
                 .unwrap();
-            fixture_compiler_support(
-                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-                ArtifactView::clone(&source),
-            )
-            .issue_native_offer(&entry.descriptor.owner, Some(proof))
-            .unwrap()
+            offer_issuer
+                .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                .unwrap()
         })
         .collect::<Vec<_>>();
     let eager_custody = offers
@@ -5009,19 +5008,17 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         original: entry.descriptor.id,
         selection: ExactArtifactSelection::capture(&base),
     };
-    let unqualified = fixture_compiler_support(
+    let offer_issuer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&full),
-    )
-    .issue_native_offer(&entry.descriptor.owner, Some(no_groups))
-    .unwrap();
+    );
+    let unqualified = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, Some(no_groups))
+        .unwrap();
     assert!(!unqualified.is_full());
-    let complete = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&full),
-    )
-    .issue_native_offer(&entry.descriptor.owner, Some(issued))
-    .unwrap();
+    let complete = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, Some(issued))
+        .unwrap();
     assert!(complete.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
     let no_demand = projection
@@ -5040,12 +5037,9 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
         );
         assert!(!offers[0].is_full());
     }
-    let empty_offer = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&full),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    let empty_offer = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
     let empty = NativeInputSelection::issue_checked(&projection, &no_demand, &full, &[empty_offer])
         .unwrap();
     assert!(!empty.availability.0[&entry.descriptor.id].permits(7));
@@ -6351,12 +6345,13 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
             }]),
         )
         .unwrap();
-    let empty = fixture_compiler_support(
+    let offer_issuer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&full),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    );
+    let empty = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
     let partial = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&sparse),
@@ -6366,15 +6361,12 @@ fn activation_reuses_exact_empty_sparse_and_full_authored_offers() {
         NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &sparse).unwrap(),
     )
     .unwrap();
-    let complete = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&full),
-    )
-    .issue_native_offer(
-        &entry.descriptor.owner,
-        NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full).unwrap(),
-    )
-    .unwrap();
+    let complete = offer_issuer
+        .issue_native_offer(
+            &entry.descriptor.owner,
+            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &full).unwrap(),
+        )
+        .unwrap();
     assert!(!partial.is_full());
     assert!(complete.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
@@ -7956,24 +7948,22 @@ fn matching_native_offer_role_preserves_issuance_without_rewalking_proof() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
         .unwrap()
         .unwrap();
-    let full = fixture_compiler_support(
+    let offer_issuer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&artifacts),
-    )
-    .issue_native_offer(&entry.descriptor.owner, Some(proof))
-    .unwrap();
+    );
+    let full = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .unwrap();
     assert!(full.is_full());
     let partial = full
         .within_assembly(projection.role_view(), &inventory.empty_view())
         .unwrap()
         .unwrap();
     assert!(!partial.is_full());
-    let empty = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&artifacts),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    let empty = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
 
     for offer in [&full, &partial, &empty] {
         let expected = offer.snapshot_facts();
@@ -8052,12 +8042,13 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &artifacts)
         .unwrap()
         .unwrap();
-    let full = fixture_compiler_support(
+    let offer_issuer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&artifacts),
-    )
-    .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
-    .unwrap();
+    );
+    let full = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, Some(proof.clone()))
+        .unwrap();
     assert!(full.is_full());
     // Namespace withdrawal narrows an actual issuance. Restoring the original
     // complete namespace later must not reverse that decision.
@@ -8067,12 +8058,9 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
         .unwrap();
     assert!(!partial.is_full());
     assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
-    let empty = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&artifacts),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    let empty = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
     let canonical = ArtifactEntry::canonical(match &entry.payload {
         ArtifactPayload::Original(product) => product.module_interface().clone(),
         _ => unreachable!(),
@@ -8632,15 +8620,15 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 )
                 .unwrap();
             let projection = baseline.projection().clone();
-            let full_offer = fixture_compiler_support(
-                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-                ArtifactView::clone(&full),
-            )
-            .issue_native_offer(
-                &entry.descriptor.owner,
-                NativeOriginalRequirement::from_selected_view(id, &full).unwrap(),
-            )
-            .unwrap();
+            let full_offer = source
+                .compiler_source_support()
+                .retain_custody(&full)
+                .unwrap()
+                .issue_native_offer(
+                    &entry.descriptor.owner,
+                    NativeOriginalRequirement::from_selected_view(id, &full).unwrap(),
+                )
+                .unwrap();
             assert!(full_offer.is_full());
             let full_support = fixture_support_with_issued_offers(
                 projection.clone(),
@@ -8668,15 +8656,15 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                         .collect(),
                 )
                 .unwrap();
-            let available_offer = fixture_compiler_support(
-                CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-                ArtifactView::clone(&chosen),
-            )
-            .issue_native_offer(
-                &entry.descriptor.owner,
-                NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
-            )
-            .unwrap();
+            let available_offer = source
+                .compiler_source_support()
+                .retain_custody(&chosen)
+                .unwrap()
+                .issue_native_offer(
+                    &entry.descriptor.owner,
+                    NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
+                )
+                .unwrap();
             let mut issuer_projection = projection.clone();
             issuer_projection
                 .admit_role(
@@ -8964,7 +8952,6 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
 
 #[test]
 fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawal() {
-    use crate::artifact_inventory::IssuedNativeOffer;
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
 
@@ -9039,12 +9026,10 @@ fn public_bound_recovery_preserves_selected_full_offer_after_execution_withdrawa
     let artifacts = support.artifacts().clone();
     assert!(artifacts.selected_native_groups().is_empty());
     let full = issued.owner.facts.compiler_support.native_offers()[0].clone();
-    let empty = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&artifacts),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    let empty = issued
+        .compiler_source_support()
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
     for (index, offer) in [full, empty].into_iter().enumerate() {
         let support = fixture_support_with_issued_offers(
             projection.clone(),
@@ -9790,7 +9775,6 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
-    use crate::artifact_inventory::IssuedNativeOffer;
     let fixture = compiled_publication_fixture();
     let actual_owner = fixture.original.descriptor.owner.clone();
     let captured = CapturedTemplateImports::capture(
@@ -10117,12 +10101,13 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
     let proof = NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &issued)
         .unwrap()
         .unwrap();
-    let full = fixture_compiler_support(
+    let offer_issuer = fixture_compiler_support(
         CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
         ArtifactView::clone(&issued),
-    )
-    .issue_native_offer(&entry.descriptor.owner, Some(proof))
-    .unwrap();
+    );
+    let full = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, Some(proof))
+        .unwrap();
     assert!(full.is_full());
     let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
     let partial = full
@@ -10130,12 +10115,9 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
         .unwrap()
         .unwrap();
     assert!(!partial.is_full());
-    let empty = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-        ArtifactView::clone(&issued),
-    )
-    .issue_native_offer(&entry.descriptor.owner, None)
-    .unwrap();
+    let empty = offer_issuer
+        .issue_native_offer(&entry.descriptor.owner, None)
+        .unwrap();
     let baseline = type_context(&[historical, fresh.clone()]);
     let candidates = crate::module_candidates::CandidateSet {
         manifest_path: PathBuf::from("candidate-manifest-not-consumed-by-native-issuance"),
@@ -11912,17 +11894,6 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
         let chosen = inventory
             .admit_recovery_selection(initial, vec![entry.clone()], &selected)
             .unwrap();
-        // The selected groups issue this mode. Broader Full proofs are retained
-        // afterward without widening the normalized permission row.
-        let offer = fixture_compiler_support(
-            CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)]).unwrap(),
-            ArtifactView::clone(&chosen),
-        )
-        .issue_native_offer(
-            &entry.descriptor.owner,
-            NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen).unwrap(),
-        )
-        .unwrap();
         let mut issuer_projection = projection.clone();
         issuer_projection
             .admit_role(
@@ -11933,6 +11904,16 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 },
             )
             .unwrap();
+        // The selected groups issue this mode. Broader Full proofs are retained
+        // afterward without widening the normalized permission row.
+        let offer =
+            fixture_compiler_support(issuer_projection.clone(), ArtifactView::clone(&chosen))
+                .issue_native_offer(
+                    &entry.descriptor.owner,
+                    NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen)
+                        .unwrap(),
+                )
+                .unwrap();
         let support = fixture_support_with_issued_offers(issuer_projection, chosen, [offer])
             .unwrap()
             .retain_offers(full_support.native_offers().iter().cloned())

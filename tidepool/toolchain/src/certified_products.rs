@@ -20686,8 +20686,11 @@ pub(crate) mod tests {
                     NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &view)
                         .unwrap()
                         .expect("the actual issuer selected native groups");
-                let offer =
-                    IssuedNativeOffer::issue(entry.descriptor.id, &view, Some(proof)).unwrap();
+                let issuer =
+                    issue_fixture_compiler_support(projection.clone(), view.clone()).unwrap();
+                let offer = issuer
+                    .issue_native_offer(&entry.descriptor.owner, Some(proof))
+                    .unwrap();
                 assert!(offer.is_full());
                 (view, offer)
             };
@@ -21132,7 +21135,7 @@ pub(crate) mod tests {
     fn completed_request_retained_generation_history_uses_exact_input_permissions() {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactEntry, ArtifactInventory, CanonicalProducerIdentity,
-            CompilerInputProjection, ExactArtifactSelection, IssuedNativeOffer, NativeGroupKey,
+            CompilerInputProjection, ExactArtifactSelection, NativeGroupKey,
             NativeOriginalRequirement,
         };
         use crate::declaration_context::{
@@ -21270,10 +21273,16 @@ pub(crate) mod tests {
             world_roles.snapshot_roles()[&retained_owner],
             crate::artifact_inventory::CompilerInputRole::InterfaceOnly { .. }
         ));
+        let world_support = closed
+            .selected_interfaces()
+            .unwrap()
+            .type_interfaces_for_owners(world_roles.snapshot_roles().keys().cloned().collect())
+            .unwrap();
+        assert_eq!(world_support.projection(), &world_roles);
         let world_availability = completed
             .compiler_inputs()
             .native_availability()
-            .for_compiler_roles(&world_roles, completed.issued_artifacts())
+            .for_compiler_roles(world_support.compiler_roles(), completed.issued_artifacts())
             .unwrap();
         let retained_row = world_availability
             .issued_row(original.descriptor.id)
@@ -21342,6 +21351,8 @@ pub(crate) mod tests {
             carriers.first()
         );
         assert!(selected_input.selected_native_groups().is_empty());
+        let input_owner =
+            issue_fixture_compiler_support(input_roles.clone(), selected_input.clone()).unwrap();
         let partial = selected_input
             .inventory()
             .admit_recovery_selection(
@@ -21353,19 +21364,22 @@ pub(crate) mod tests {
                 }]),
             )
             .unwrap();
-        let partial_offer = IssuedNativeOffer::issue(
-            original.descriptor.id,
-            &partial,
-            Some(
-                NativeOriginalRequirement::from_selected_view(original.descriptor.id, &partial)
-                    .unwrap()
-                    .unwrap(),
-            ),
-        )
-        .unwrap();
+        let partial_issuer = input_owner.retain_custody(&partial).unwrap();
+        let partial_offer = partial_issuer
+            .issue_native_offer(
+                &original.descriptor.owner,
+                Some(
+                    NativeOriginalRequirement::from_selected_view(original.descriptor.id, &partial)
+                        .unwrap()
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
         assert!(!partial_offer.is_full());
         let empty = selected_input.clone();
-        let empty_offer = IssuedNativeOffer::issue(original.descriptor.id, &empty, None).unwrap();
+        let empty_offer = input_owner
+            .issue_native_offer(&original.descriptor.owner, None)
+            .unwrap();
         for (label, view, offer, expected_one, expected_two) in [
             ("full", selected_input, full, Some(1), Some(2)),
             ("partial", partial, partial_offer, None, Some(2)),
@@ -21483,7 +21497,7 @@ pub(crate) mod tests {
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
             CanonicalProducerIdentity, CompilerInputProjection, CompilerInputRole,
-            IssuedNativeOffer, NativeArtifactDemand,
+            NativeArtifactDemand,
         };
         use crate::declaration_context::{
             issue_fixture_compiler_support, recover_fixture_compiler_support, ExactCompileContext,
@@ -21625,8 +21639,9 @@ pub(crate) mod tests {
             let support_output = OriginalCompilerInputs::from_issued_support(&support_source);
             let issued_view = support_output.issued_artifacts();
             let issued_graph = issued_view.capture_graph_selection();
-            let empty_offer =
-                IssuedNativeOffer::issue(support_entry.descriptor.id, issued_view, None).unwrap();
+            let empty_offer = support_source
+                .issue_native_offer(&support_entry.descriptor.owner, None)
+                .unwrap();
             let empty_rows = RequestNativeAvailability::issue_checked(
                 support_output.role_projection(),
                 issued_view,
