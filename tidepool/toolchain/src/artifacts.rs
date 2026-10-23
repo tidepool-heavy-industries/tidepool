@@ -826,11 +826,8 @@ impl PreparedCellProgram {
             .seal_prepared(
                 prepared_native.checked,
                 context,
-                source_lexical,
-                checked_cell::CheckedValueCaptureInput::Prepared {
-                    produced: &produced_outputs.for_segment(index..index + 1)?,
-                    support: &value_support,
-                },
+                &value_support,
+                &produced_outputs.for_segment(index..index + 1)?,
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {

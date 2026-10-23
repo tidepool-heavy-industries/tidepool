@@ -1774,8 +1774,7 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
                         .flat_map(|item| {
                             item.checked_item()
                                 .world_stage_dependencies()
-                                .map(|owner| owner.terminals().collect::<Vec<_>>())
-                                .unwrap_or_default()
+                                .terminals()
                         })
                         .collect::<Vec<_>>();
                     assert!(terminals.iter().any(|terminal| {
@@ -1886,10 +1885,7 @@ fn same_cell_source_capture_requeries_only_the_referenced_prior_output() {
                             .iter()
                             .filter(|item| item.native().is_some())
                             .flat_map(|item| {
-                                item.checked_item()
-                                    .world_stage_dependencies()
-                                    .unwrap()
-                                    .terminals()
+                                item.checked_item().world_stage_dependencies().terminals()
                             })
                             .collect::<Vec<_>>();
                         assert!(

@@ -239,9 +239,7 @@ impl ScopedResolvedInputs {
         item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<(), SessionError> {
         session.validate_lexical_scope_lease(self.scope.scope(), &self.scope)?;
-        let inputs = item
-            .world_selected_runtime_inputs()
-            .ok_or(super::super::SessionTransitionReason::WrongPhase)?;
+        let inputs = item.world_selected_runtime_inputs();
         let stage = self
             .stages
             .get(&inputs.stage_first_ordinal())
@@ -299,10 +297,7 @@ impl ScopedResolvedInputs {
                 let NativeOccurrenceId::Home(demander) = owner.occurrence() else {
                     return Err(PreparedRuntimeError::CertifiedTargetOwners);
                 };
-                let stage = item
-                    .world_selected_runtime_inputs()
-                    .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?
-                    .stage_first_ordinal();
+                let stage = item.world_selected_runtime_inputs().stage_first_ordinal();
                 let uses = self
                     .stages
                     .get(&stage)
@@ -419,14 +414,12 @@ impl PersistentSession {
             let checked = item.checked_item();
             let stage = checked
                 .world_selected_runtime_inputs()
-                .ok_or(super::super::SessionTransitionReason::WrongPhase)?
                 .stage_first_ordinal();
             if let std::collections::btree_map::Entry::Vacant(entry) = stage_terminals.entry(stage)
             {
                 entry.insert(
                     checked
                         .world_stage_dependencies()
-                        .ok_or(super::super::SessionTransitionReason::WrongPhase)?
                         .terminals()
                         .collect::<Vec<_>>(),
                 );

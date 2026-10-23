@@ -2439,6 +2439,26 @@ tidepool_buildscript_run(
                 runtime_arguments(finite_env, finite_resources, finite_worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            checked_value_tests = [
+                "checked_cell::tests::checked_baseline_borrows_issued_rows_and_releases_actual_backing",
+                "checked_cell::tests::checked_baseline_keeps_distinct_equal_byte_issuers_and_refuses_mismatch",
+            ]
+            checked_value_env, checked_value_resources, checked_value_worker = compiler_service_test_inputs(
+                package_name, "toolchain_checked_value_authority_tests"
+            )
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_checked_value_authority_tests",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [", render_strings(checked_value_tests, 8), "    ],",
+                f"    expected_count = {len(checked_value_tests)},", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
+                "    case_compiler_modes = {" + ", ".join(
+                    json.dumps(test) + ': "owned-resident"' for test in checked_value_tests
+                ) + "},",
+                runtime_arguments(checked_value_env, checked_value_resources, checked_value_worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             for world_target, world_case in [
                 ("toolchain_world_native_seal_test", "artifacts::module_product_tests::real_world_output_seals_native_items_after_its_matching_compiler_end"),
                 ("toolchain_world_original_seal_test", "artifacts::module_product_tests::real_world_original_output_seals_its_actual_native_declaration"),

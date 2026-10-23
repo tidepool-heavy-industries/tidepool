@@ -4259,9 +4259,7 @@ impl PersistentSession {
             let epoch = owner.epoch();
             // Direct stage observations are checked independently. Lifetime
             // roots come from the accepted join's full native body closure.
-            let selected = item
-                .world_selected_runtime_inputs()
-                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let selected = item.world_selected_runtime_inputs();
             prior.scoped_inputs.validate_item(self, item)?;
             for input in selected.inputs() {
                 let entry = self
