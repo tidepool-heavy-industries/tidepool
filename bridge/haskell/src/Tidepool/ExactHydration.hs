@@ -1131,7 +1131,7 @@ readCapturedVerifiedOne (RequestIfaceDecoder state) readInput env artifact = do
       Nothing -> do
         token <- readInput artifact
         unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
-        result <- readVerifiedOneWith (const (pure (artifactBytes token))) env artifact
+        result <- readVerifiedOneTokenWith (const (pure token)) env artifact
         let retained = case result of
               Right verified | retains retention -> (cache,Map.insert key verified known) : filter ((/= cache) . fst) universes
               Right _ -> universes
@@ -1147,18 +1147,22 @@ readOneWith readInput env artifact = fmap verifiedExactInterface <$> readVerifie
 
 readVerifiedOneWith :: (ExactIfaceArtifact -> IO BS.ByteString) -> HscEnv -> ExactIfaceArtifact
   -> IO (Either String VerifiedExactInterface)
-readVerifiedOneWith readInput env artifact = do
+readVerifiedOneWith readInput = readVerifiedOneTokenWith (fmap captureArtifactBytes . readInput)
+
+readVerifiedOneTokenWith :: (ExactIfaceArtifact -> IO ArtifactBytes) -> HscEnv -> ExactIfaceArtifact
+  -> IO (Either String VerifiedExactInterface)
+readVerifiedOneTokenWith readInput env artifact = do
   timing <- readTimingEnabled
   emitCount timing ("exact_iface_read_calls." ++ exactModule artifact) 1
-  readResult <- try (readInput artifact) :: IO (Either IOException BS.ByteString)
+  readResult <- try (readInput artifact) :: IO (Either IOException ArtifactBytes)
   case readResult of
     Left _ -> pure (Left ("interface unavailable: " ++ exactModule artifact))
-    Right bytes -> do
-      emitCount timing ("exact_iface_read_bytes." ++ exactModule artifact) (fromIntegral (BS.length bytes))
-      readVerified timing bytes
+    Right body -> do
+      emitCount timing ("exact_iface_read_bytes." ++ exactModule artifact) (fromIntegral (BS.length (artifactBytes body)))
+      readVerified timing body
   where
-   readVerified timing bytes =
-    if hexBytes (SHA256.hash bytes) /= map toLower (exactSha256 artifact)
+   readVerified timing body =
+    if artifactSha256 body /= map toLower (exactSha256 artifact)
     then pure (Left ("interface digest mismatch: " ++ exactModule artifact))
     else do
       -- Decode the exact bytes that passed the digest check. Reading the
@@ -1167,7 +1171,7 @@ readVerifiedOneWith readInput env artifact = do
       -- original bytes restored.
       let owner = mkModule (stringToUnit (exactUnit artifact))
             (mkModuleName (exactModule artifact))
-      decoded <- try @SomeException (withCapturedIface timing (exactModule artifact) bytes $ \path -> do
+      decoded <- try @SomeException (withCapturedIface timing (exactModule artifact) (artifactBytes body) $ \path -> do
         emitCount timing ("exact_iface_decode_reads." ++ exactModule artifact) 1
         readIface (hsc_dflags env) (hsc_NC env) owner path)
       case decoded of
@@ -1182,7 +1186,7 @@ readVerifiedOneWith readInput env artifact = do
                 Left ("interface owner mismatch: " ++ exactModule artifact)
             | isJust (mi_extra_decls iface) ->
                 Left ("interface contains defining Core: " ++ exactModule artifact)
-            | otherwise -> Right (VerifiedExactInterface artifact iface (captureArtifactBytes bytes)
+            | otherwise -> Right (VerifiedExactInterface artifact iface body
                 (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)))
 
 data OriginalInterfaceCaptureFailure
