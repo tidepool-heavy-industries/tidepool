@@ -167,11 +167,18 @@ fn protected_catalog_availability_preserves_receiving_interface_only_selection()
         .unwrap()
         .unwrap();
     assert_eq!(received.role_projection(), support.projection());
+    assert!(received
+        .native_availability()
+        .same_acquisition(support.native_availability()));
     assert_eq!(
-        received.native_availability(),
-        support.native_availability()
+        received.issued_offers().len(),
+        support.native_offers().len()
     );
-    assert_eq!(received.issued_offers(), support.native_offers());
+    assert!(received
+        .issued_offers()
+        .iter()
+        .zip(support.native_offers())
+        .all(|(received, issued)| received.same_issuance(issued)));
     assert_eq!(
         received
             .issued_input_decisions()

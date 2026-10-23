@@ -3229,7 +3229,7 @@ struct SealedTypedEntry {
 /// Sites from the checked target's exact original native dependency closure.
 /// Construction stays with the original-group issuer; composition cannot add
 /// observations or promote unselected available native groups.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct SelectedNativeSites {
     sites: BTreeMap<u64, IssuedNativeSite>,
 }
@@ -3240,14 +3240,11 @@ struct IssuedNativeSite {
     types: Arc<tidepool_repr::type_graph::TypeGraph>,
 }
 
-impl PartialEq for IssuedNativeSite {
-    fn eq(&self, other: &Self) -> bool {
-        // Equality preserves issuer custody identity. Cross-original semantic
-        // compatibility is fallible and belongs to composition below.
+impl IssuedNativeSite {
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
         self.row == other.row && Arc::ptr_eq(&self.types, &other.types)
     }
 }
-impl Eq for IssuedNativeSite {}
 
 impl IssuedNativeSite {
     fn matches(&self, other: &Self) -> Result<bool, CompileError> {
@@ -3280,6 +3277,16 @@ impl IssuedNativeSite {
 }
 
 impl SelectedNativeSites {
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.sites.len() == other.sites.len()
+            && self.sites.iter().all(|(site, row)| {
+                other
+                    .sites
+                    .get(site)
+                    .is_some_and(|held| row.same_selected_acquisitions(held))
+            })
+    }
+
     pub(crate) fn insert_issued(
         &mut self,
         row: tidepool_repr::execution_schema::SiteRow,
@@ -5744,6 +5751,11 @@ mod tests {
                 .unwrap();
             pool.push(issued);
         }
+        let mut independently_held = SelectedNativeSites::default();
+        independently_held
+            .insert_issued(row(7, 0), Arc::new((*first_graph).clone()))
+            .unwrap();
+        assert!(!pool[0].same_selected_acquisitions(&independently_held));
         let mut relocated = pool[0].clone();
         relocated
             .merge(&pool[1])
@@ -5783,7 +5795,7 @@ mod tests {
                     .expect("merge order preserves semantic site metadata");
                 let before = issued.clone();
                 issued.merge(&before).unwrap();
-                prop_assert_eq!(issued, before);
+                prop_assert!(issued.same_selected_acquisitions(&before));
                 Ok(())
             })
             .unwrap();
@@ -5811,8 +5823,8 @@ mod tests {
             let mut issued = pool[0].clone();
             let before = issued.clone();
             assert!(issued.merge(&other).is_err());
-            assert_eq!(
-                issued, before,
+            assert!(
+                issued.same_selected_acquisitions(&before),
                 "failed merge must not add the unrelated site either"
             );
         }

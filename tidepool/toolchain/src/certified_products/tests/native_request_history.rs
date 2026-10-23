@@ -628,8 +628,15 @@ fn replay_native_transport_history(
         assert!(support.artifacts().selected_native_groups().is_empty());
         let input = OriginalCompilerInputs::from_issued_support(&support);
         assert_eq!(input.role_projection(), support.projection());
-        assert_eq!(input.native_availability(), support.native_availability());
-        assert_eq!(input.issued_offers(), support.native_offers());
+        assert!(input
+            .native_availability()
+            .same_acquisition(support.native_availability()));
+        assert_eq!(input.issued_offers().len(), support.native_offers().len());
+        assert!(input
+            .issued_offers()
+            .iter()
+            .zip(support.native_offers())
+            .all(|(received, issued)| received.same_issuance(issued)));
         input
     });
     let base_context = context(&base);
