@@ -116,6 +116,7 @@ TEST_ONLY_MODULES = _ownership_table("modules", (
         'tidepool/runtime/src/session/turn_scaling_tests.rs',
         'tidepool/runtime/src/session/typed_segment_tests.rs',
         'tidepool/runtime/src/session/staged_world_acceptance_tests.rs',
+        'tidepool/runtime/src/session/world_scaffold_diagnostic_tests.rs',
     })),
     ('tidepool-toolchain', frozenset({
         'tidepool/toolchain/src/artifact_inventory/compiler_projection_acquisition_tests.rs',
@@ -256,6 +257,9 @@ TEST_ONLY_FIXTURES = _ownership_table("fixtures", (
         'tidepool/runtime/src/session/fixtures/activation-input-request-layout.hs',
         'tidepool/runtime/src/session/fixtures/ProvenanceSharedRequest.hs',
         'tidepool/runtime/src/session/fixtures/world-native-captured-home.hs',
+        'tidepool/runtime/src/session/fixtures/world-scaffold-prior.hs',
+        'tidepool/runtime/src/session/fixtures/world-scaffold-record-partial.hs',
+        'tidepool/runtime/src/session/fixtures/world-scaffold-record-complete.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs',
         'tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs',
         'tidepool/runtime/src/session/fixtures/checked-home-relay.hs',

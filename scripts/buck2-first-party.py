@@ -1455,6 +1455,8 @@ def runtime_test_cases(binary):
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
     semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+        "scaffold_diagnostics::shipped_world_scaffold_scopes_equality_with_a_custom_prelude",
+        "scaffold_diagnostics::world_preparation_reports_authored_record_warning_without_imported_warnings",
         "signed_template_helpers_execute_recursion_and_polymorphism_once",
         "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
         "scalar_publication_forces_after_effect_without_publishing_then_recovers",

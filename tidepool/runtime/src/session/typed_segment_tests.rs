@@ -12,6 +12,9 @@ use tidepool_effect::EffectError;
 #[path = "staged_world_acceptance_tests.rs"]
 mod staged_world_acceptance;
 
+#[path = "world_scaffold_diagnostic_tests.rs"]
+mod scaffold_diagnostics;
+
 #[derive(FromHaskell)]
 enum ProbeRequest {
     #[haskell(name = "Print")]
