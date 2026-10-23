@@ -126,10 +126,6 @@ impl ScopedResolvedInputs {
         }
     }
 
-    pub(super) fn scope(&self) -> &Arc<RuntimeLexicalScopeLease> {
-        &self.scope
-    }
-
     pub(super) fn imports(&self) -> impl Iterator<Item = (&SymbolIdentity, u64)> {
         self.values
             .values()
@@ -214,13 +210,6 @@ impl ScopedResolvedInputs {
             }
         }
         Ok(next)
-    }
-
-    pub(super) fn with_scope(&self, scope: Arc<RuntimeLexicalScopeLease>) -> Self {
-        Self {
-            scope,
-            ..self.clone()
-        }
     }
 
     pub(in crate::session) fn validate_live(
@@ -332,7 +321,7 @@ impl ScopedResolvedInputs {
 }
 
 impl RuntimeCheckedPrefix {
-    pub(super) fn scoped_inputs_for(
+    pub(in crate::session) fn scoped_inputs_for(
         &self,
         session: &PersistentSession,
         execution: &tidepool_toolchain::checked_cell::ExactCompiledItem,

@@ -283,23 +283,6 @@ impl NativeSourceCustody {
     }
 }
 
-/// Compiler/display metadata follows exact retained binding identities. Runtime
-/// source custody is resolved independently by the actual native installation.
-fn retained_import_metadata<'a>(
-    imports: impl IntoIterator<Item = &'a ImportOwner>,
-    bindings: &'a HashMap<u64, Arc<ProgramProvenance>>,
-) -> Vec<&'a Arc<ProgramProvenance>> {
-    let mut retained = BTreeMap::new();
-    for owner in imports {
-        if let ImportOwner::Retained { id, .. } = owner {
-            if let Some(provenance) = bindings.get(&id.raw()) {
-                retained.entry(id.raw()).or_insert(provenance);
-            }
-        }
-    }
-    retained.into_values().collect()
-}
-
 impl PartialEq for RuntimeSourceOrigin {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -15060,67 +15043,21 @@ mod source_origin_tests {
     }
 
     #[test]
-    fn import_metadata_keeps_runtime_sources_pending() {
+    fn metadata_merge_keeps_runtime_sources_pending() {
         let mut owner = PersistentSession::new(None, 1024);
         let lexical = owner.mint_notebook_scope_with_lease(None).unwrap();
         let source = lexical.original_source().clone();
         source.validate_source_issuer().unwrap();
-        assert_ne!(source.scope(), ScopeId::ROOT);
-        let binder = SymbolIdentity {
-            unit: "Source".into(),
-            module: "Source".into(),
-            namespace: "value".into(),
-            occurrence: "f".into(),
-            record_parent: None,
-        };
-        let selected_binding = SessionVarId::from_extract(7);
-        let known = Arc::new(issued(17, &source));
-        let bindings = HashMap::from([(selected_binding.raw(), known.clone())]);
-        let retained = ImportOwner::Retained {
-            id: selected_binding,
-            generation: 1,
-        };
-        let missing_owners = [
-            ImportOwner::Retained {
-                id: SessionVarId::from_extract(8),
-                generation: 1,
-            },
-            ImportOwner::Source {
-                version: tidepool_repr::execution_schema::ModuleVersion([1; 32]),
-                binder: binder.clone(),
-            },
-            ImportOwner::Package {
-                unit: binder.unit.clone(),
-                module: binder.module.clone(),
-                binder,
-                interface_digest: [2; 32],
-            },
-        ];
-        for missing in &missing_owners {
-            for missing_first in [false, true] {
-                let imports = if missing_first {
-                    [missing, &retained]
-                } else {
-                    [&retained, missing]
-                };
-                let retained_refs = retained_import_metadata(
-                    imports
-                        .into_iter()
-                        .chain([&retained, missing, &retained, missing]),
-                    &bindings,
-                );
-                assert_eq!(retained_refs.len(), 1, "one unique retained binding");
-                let mut metadata = ProgramProvenance::default();
-                for original in retained_refs {
-                    metadata.merge_metadata(original).unwrap();
-                }
-                assert_eq!(metadata.sites.keys().copied().collect::<Vec<_>>(), [17]);
-                assert!(
-                    metadata.original_sources.sites.is_empty(),
-                    "compiler metadata preflight does not select runtime sources"
-                );
-            }
+        let known = issued(17, &source);
+        let mut metadata = ProgramProvenance::default();
+        for _ in 0..3 {
+            metadata.merge_metadata(&known).unwrap();
         }
+        assert_eq!(metadata.sites.keys().copied().collect::<Vec<_>>(), [17]);
+        assert!(
+            metadata.original_sources.sites.is_empty(),
+            "compiler metadata preflight does not select runtime sources"
+        );
     }
 
     #[test]

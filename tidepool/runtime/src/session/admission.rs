@@ -3769,27 +3769,6 @@ impl AdmittedValueInterface {
     }
 }
 
-fn initial_interfaces_match<'a, I: AsRef<ValueInterfaceSnapshot>>(
-    admitted: &[I],
-    consumed: impl IntoIterator<Item = (&'a tidepool_repr::SessionModule, &'a Arc<[u8]>)>,
-) -> bool {
-    let mut inventory = consumed.into_iter();
-    let mut seen = std::collections::BTreeSet::new();
-    for interface in admitted {
-        let interface = interface.as_ref();
-        let Some((module, bytes)) = inventory.next() else {
-            return false;
-        };
-        if !seen.insert(interface.module.module_name())
-            || interface.module != *module
-            || (!Arc::ptr_eq(&interface.bytes, bytes) && interface.bytes.as_ref() != bytes.as_ref())
-        {
-            return false;
-        }
-    }
-    inventory.next().is_none()
-}
-
 impl std::fmt::Debug for RuntimeCellAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug = f.debug_struct("RuntimeCellAdmission");
@@ -7164,73 +7143,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_interface_inventory_refuses_missing_extra_duplicate_and_changed_bytes() {
-        let first = ValueInterfaceSnapshot {
-            module: tidepool_repr::SessionModule::val(Generation(1)),
-            bytes: Arc::from([1, 2, 3]),
-        };
-        let second = ValueInterfaceSnapshot {
-            module: tidepool_repr::SessionModule::val(Generation(2)),
-            bytes: Arc::from([4, 5, 6]),
-        };
-        let admitted = [first.clone(), second.clone()];
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [
-                (&second.module, &second.bytes),
-                (&first.module, &first.bytes)
-            ],
-        ));
-        assert!(initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &first.bytes),
-                (&second.module, &second.bytes)
-            ],
-        ));
-        let equal_bytes: Arc<[u8]> = Arc::from([1, 2, 3]);
-        assert!(!Arc::ptr_eq(&first.bytes, &equal_bytes));
-        assert!(initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &equal_bytes),
-                (&second.module, &second.bytes)
-            ],
-        ));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &first.bytes)],
-        ));
-        let extra = tidepool_repr::SessionModule::val(Generation(3));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [
-                (&first.module, &first.bytes),
-                (&second.module, &second.bytes),
-                (&extra, &first.bytes),
-            ],
-        ));
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &first.bytes), (&first.module, &first.bytes)],
-        ));
-        let changed: Arc<[u8]> = Arc::from([1, 2, 4]);
-        assert!(!initial_interfaces_match(
-            &admitted,
-            [(&first.module, &changed), (&second.module, &second.bytes)],
-        ));
-        assert!(!initial_interfaces_match(
-            &[first.clone(), first],
-            [(&second.module, &second.bytes)],
-        ));
-        assert!(initial_interfaces_match::<ValueInterfaceSnapshot>(&[], []));
-        assert!(!initial_interfaces_match::<ValueInterfaceSnapshot>(
-            &[],
-            [(&second.module, &second.bytes)],
-        ));
-    }
-
-    #[test]
     fn native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger() {
         use tidepool_repr::{SessionModule, SessionVarId};
 
@@ -7544,7 +7456,8 @@ mod tests {
             let owner = session
                 .capture_admitted_scoped_inputs(Arc::clone(&lease))
                 .unwrap();
-            let shared = owner.with_scope(lease);
+            let shared = owner.clone();
+            drop(lease);
             assert!(Arc::ptr_eq(
                 owner.value(&identity, 460).unwrap(),
                 shared.value(&identity, 460).unwrap()
