@@ -12790,14 +12790,9 @@ impl PendingWorldExecutableStage {
             })?;
         let products = output.sealed_products_shared()?;
         if !output.belongs_to_world_item(program, ordinal)
-            || products.typed_entry().is_none_or(|entry| {
-                !entry.matches_world_item(
-                    program,
-                    ordinal,
-                    output.target(),
-                    &self.segment.source.generated_source_owner(),
-                )
-            })
+            || products
+                .typed_entry()
+                .is_none_or(|entry| !entry.belongs_to_target(output.target()))
         {
             return Err(WorldProgramCursorFailure::WrongItemOutput {
                 stage: self.segment.stage.index(),
@@ -13222,6 +13217,7 @@ pub(crate) fn assert_world_repeated_source_refusals(
 pub(crate) fn assert_world_foreign_output_refusal(
     program: &Arc<crate::compiler_world::CheckedWorldCellProgram>,
     foreign: &crate::artifacts::ProgramNativeOutput,
+    actual: &crate::artifacts::ProgramNativeOutput,
 ) {
     let mut validation =
         PackageInterfaceValidation::with_inventory(Arc::clone(&program.validation().inventory));
@@ -13238,19 +13234,22 @@ pub(crate) fn assert_world_foreign_output_refusal(
     else {
         unreachable!()
     };
-    assert!(
-        foreign
-            .sealed_products_shared()
-            .unwrap()
-            .typed_entry()
-            .unwrap()
-            .matches_world_item(
-                program,
-                0,
-                foreign.target(),
-                &pending.segment.source.generated_source_owner(),
-            ),
-        "the independently issued actual output has the same item facts"
+    let foreign_entry = foreign
+        .sealed_products_shared()
+        .unwrap()
+        .typed_entry()
+        .unwrap();
+    let actual_entry = actual
+        .sealed_products_shared()
+        .unwrap()
+        .typed_entry()
+        .unwrap();
+    assert_eq!(foreign_entry.plan_digest(), actual_entry.plan_digest());
+    assert_eq!(foreign_entry.origin(), actual_entry.origin());
+    assert_eq!(foreign_entry.entry(), actual_entry.entry());
+    assert_eq!(
+        foreign_entry.original_ordinal(),
+        actual_entry.original_ordinal()
     );
     assert!(
         !foreign.belongs_to_world_item(program, 0),
@@ -13265,6 +13264,14 @@ pub(crate) fn assert_world_foreign_output_refusal(
     );
     assert!(pending.items.is_empty());
     assert_eq!(pending.segment.continuation.next_stage, 0);
+    pending
+        .admit_item(program, actual.clone(), &produced)
+        .unwrap();
+    let (continuation, _) = pending.seal().unwrap();
+    assert_eq!(
+        continuation.next_stage, 1,
+        "same-request cloned evidence advances"
+    );
 }
 
 #[cfg(test)]
