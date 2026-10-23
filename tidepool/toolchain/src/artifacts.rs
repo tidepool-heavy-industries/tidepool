@@ -3735,6 +3735,8 @@ impl SealedTurnProducts {
 
     /// The execution context belongs to this completed output, including its
     /// issued native custody independently of the original compilation inputs.
+    /// A cell's cumulative continuation belongs to `CellProgramItem::compiler_context`;
+    /// it may also retain targets completed by earlier items.
     pub fn original_execution_context(
         &self,
     ) -> Result<Arc<crate::declaration_context::ExactDeclarationContext>, CompileError> {

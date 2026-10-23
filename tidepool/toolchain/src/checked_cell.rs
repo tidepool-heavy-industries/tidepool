@@ -1291,6 +1291,8 @@ impl CellProgram {
 }
 
 impl CellProgramItem {
+    /// The admitted continuation after this item, including prior completed
+    /// native targets. Its output evidence separately owns this target's context.
     pub(crate) fn compiler_context(
         &self,
     ) -> &Arc<crate::declaration_context::ExactDeclarationContext> {

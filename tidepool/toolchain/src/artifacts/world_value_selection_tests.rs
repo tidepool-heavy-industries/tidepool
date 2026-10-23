@@ -137,10 +137,14 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
             first_target.acquired().len() > 0,
             "first item selects executable code"
         );
-        let prefix = second
-            .original_execution_context()
-            .expect("second item retains its actual prepared prefix");
-        assert!(prefix.compiler_source_support().acquired_native_closures().contains_owner(first_target.closure()), "prepared prefix retains the exact prior acquired owner independently of the second target demand");
+        let prefix = program.items()[1].compiler_context();
+        assert!(
+            prefix
+                .compiler_source_support()
+                .acquired_native_closures()
+                .contains_owner(first_target.closure()),
+            "prepared prefix retains the exact prior acquired owner independently of the second target demand"
+        );
         for acquired in first_target.acquired() {
             let NativeCodeGrant::Home {
                 binding, product, ..
