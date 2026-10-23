@@ -28816,18 +28816,32 @@ pub(crate) mod tests {
         )
         .unwrap()
         .is_empty());
-        assert!(certify_owned_products_with_validation(
+        let missing = certify_owned_products_with_validation(
             &[products[0]],
             &[],
-            &mut PackageInterfaceValidation::default()
+            &mut PackageInterfaceValidation::default(),
         )
-        .is_err());
-        assert!(certify_owned_products_with_validation(
+        .expect_err("a selected member requires the other half of the issued source cycle");
+        assert!(
+            matches!(
+                &missing,
+                CertificationError::Mismatch("inherited source owner closure")
+            ),
+            "missing source-cycle member must fail its owner closure: {missing:?}"
+        );
+        let duplicate_product = certify_owned_products_with_validation(
             &[products[0], products[0]],
             &[],
-            &mut PackageInterfaceValidation::default()
+            &mut PackageInterfaceValidation::default(),
         )
-        .is_err());
+        .expect_err("duplicate selection cannot replace the other source-cycle member");
+        assert!(
+            matches!(
+                &duplicate_product,
+                CertificationError::Mismatch("duplicate inherited module")
+            ),
+            "duplicate source-cycle member must fail its selection: {duplicate_product:?}"
+        );
         assert_eq!(
             ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) - before,
             2,
@@ -28855,14 +28869,27 @@ pub(crate) mod tests {
             generation: 99,
         }]
         .into();
-        assert!(matches!(
-            certify_owned_products_with_validation(
-                &products,
-                &changed,
-                &mut PackageInterfaceValidation::default()
-            ),
-            Err(CertificationError::Mismatch("shared original home groups"))
-        ));
+        let failure = certify_owned_products_with_validation(
+            &products,
+            &changed,
+            &mut PackageInterfaceValidation::default(),
+        )
+        .expect_err("a shared original cannot substitute another group's import history");
+        assert!(
+            matches!(&failure, CertificationError::OriginalGroupConflict(conflict)
+            if conflict.owner == *changed[0].owner()
+                && conflict.failure == (OriginalGroupFailure::PromotionImports {
+                    ordinal: changed[0].group().original_ordinal(),
+                })),
+            "changed shared import must retain its exact original owner and ordinal: {failure:?}"
+        );
+        assert!(certify_owned_products_with_validation(
+            &products,
+            &groups,
+            &mut PackageInterfaceValidation::default()
+        )
+        .unwrap()
+        .is_empty());
         println!("native witness original_decodes=2 reuse_decodes=0 nonempty_groups=2");
     }
 
