@@ -33239,12 +33239,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let groups = Arc::clone(&continued.groups);
         let wrong_producer = Arc::new(
             ExactDeclarationContext::from_authenticated_interfaces(
-                program_test_producer_sha256(),
+                CanonicalProducerIdentity::from_producer_bytes(b"foreign context producer")
+                    .sha256(),
                 &ArtifactInventory::default().empty_view(),
                 CompilerInputProjection::default(),
             )
-            .unwrap()
-            .admit_producer([3; 32])
             .unwrap(),
         );
         let refusal = continued

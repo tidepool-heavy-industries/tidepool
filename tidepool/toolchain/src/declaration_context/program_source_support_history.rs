@@ -176,7 +176,10 @@ mod program_source_support_history {
             baseline[0].interface_bytes().to_vec(),
         );
         let alternate = crate::certified_products::tests::recovered_witness_fixtures(&[
-            crate::certified_products::fixture_finalized_product(alternate, [2; 32]),
+            crate::certified_products::fixture_finalized_product(
+                alternate,
+                program_test_producer_sha256(),
+            ),
         ])
         .remove(0)
         .product;
@@ -228,8 +231,17 @@ mod program_source_support_history {
             std::fs::create_dir_all(&root).unwrap();
             // Public role growth and private promotion retain one semantic owner;
             // neither transition creates compiler transport copies.
-            let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-            let original = program_request(&root, empty)
+            let empty = Arc::new(
+                ExactDeclarationContext::from_authenticated_interfaces(
+                    program_test_producer_sha256(),
+                    &ArtifactInventory::default().empty_view(),
+                    CompilerInputProjection::default(),
+                )
+                .unwrap(),
+            );
+            let original = empty
+                .prepare_compilation(&root.join("request"), PROGRAM_TEST_PRODUCER)
+                .unwrap()
                 .program_admission()
                 .in_program_context(public.clone())
                 .unwrap();
@@ -387,11 +399,13 @@ mod program_source_support_history {
             assert_private_choices(&retried, &expected, &published);
 
             // An inherited native carrier cannot borrow the generated omission.
-            let selected_id =
-                crate::artifact_inventory::ArtifactEntry::original([2; 32], selected[0].clone())
-                    .unwrap()
-                    .descriptor
-                    .id;
+            let selected_id = crate::artifact_inventory::ArtifactEntry::original(
+                program_test_producer_sha256(),
+                selected[0].clone(),
+            )
+            .unwrap()
+            .descriptor
+            .id;
             let missing_selected = full_view
                 .select_roots(
                     full_view
