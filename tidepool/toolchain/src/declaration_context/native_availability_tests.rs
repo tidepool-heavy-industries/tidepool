@@ -3025,7 +3025,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .all(|role| role.original().is_none()));
     assert!(inputs.metadata.retained.selected_native_groups.is_empty());
     assert!(inputs.artifacts().selected_native_groups().is_empty());
-    assert_eq!(context.as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
     let owner = native.owner();
     let held_graph = Value::Array(vec![
         Value::Array(vec![]),
@@ -3276,7 +3276,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .iter()
         .all(|role| role.original().is_none()));
     assert!(next_inputs.artifacts().selected_native_groups().is_empty());
-    assert_eq!(context.as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
 
     // Acquire the separately issued reusable compiler role explicitly. The
     // private availability above did not supply this role or choose a body.
@@ -3373,7 +3373,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .collect::<BTreeSet<_>>();
     assert_eq!(expected.len(), 1);
     assert_eq!(groups.into_iter().collect::<BTreeSet<_>>(), expected);
-    assert_eq!(context.as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
 }
 
 #[test]
@@ -5616,7 +5616,7 @@ fn candidate_availability_keeps_partial_same_owner_input_permissions() {
         assert_eq!(rows["BaselineNative"], vec![7]);
         assert_eq!(wire_mode(&request, "BaselineNative"), issued_mode(&[7]));
         assert!(!rows.contains_key("UnusedNative"));
-        assert_eq!(context.as_ref(), &before);
+        assert!(context.same_authenticated_context(&before));
         assert_eq!(
             request
                 .compiler_inputs()
@@ -6002,7 +6002,7 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .is_none(),
         "dependency body custody does not grant an original namespace role"
     );
-    assert_eq!(context.as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
 }
 
 #[test]
@@ -6167,8 +6167,8 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
             Some(input),
         )
         .unwrap();
-    assert_eq!(context.as_ref(), &before);
-    assert_eq!(request.context().as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
+    assert!(request.context().same_authenticated_context(&before));
     assert_eq!(request.semantic_sha256, baseline.semantic_sha256);
     assert_ne!(request.request_sha256, baseline.request_sha256);
     assert_eq!(
@@ -7292,7 +7292,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 "TYPE evidence alone cannot advertise an Original"
             );
         }
-        assert_eq!(context, &before);
+        assert!(context.same_authenticated_context(&before));
     };
     let authored_groups = selected_before
         .iter()
@@ -7327,7 +7327,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .unwrap()
         .iter()
         .any(|product| product.owner() == certificate.product().owner()));
-    assert_eq!(native_request.context().as_ref(), &native_context);
+    assert!(native_request
+        .context()
+        .same_authenticated_context(&native_context));
     assert!(native_request
         .compiler_inputs()
         .metadata
@@ -7438,7 +7440,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .unwrap()
         .iter()
         .any(|product| product.owner() == certificate.product().owner()));
-    assert_eq!(captured_request.context().as_ref(), &before_custody);
+    assert!(captured_request
+        .context()
+        .same_authenticated_context(&before_custody));
     assert!(captured_request
         .compiler_inputs()
         .metadata
@@ -7450,7 +7454,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         "custodied-authored-exact-offer",
         Some(full_mode()),
     );
-    assert_eq!(captured, before_custody);
+    assert!(captured.same_authenticated_context(&before_custody));
     // A fresh receiver gains TYPE evidence without the source's native owner.
     let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
         .unwrap()
@@ -7645,7 +7649,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         assert_eq!(row.issued_ordinals(), expected_ordinals);
         assert!(inputs.artifacts().selected_native_groups().is_empty());
         assert!(request.groups.is_empty());
-        assert_eq!(request.context().as_ref(), &before);
+        assert!(request.context().same_authenticated_context(&before));
         let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
             inputs, &operation,
         )
@@ -12052,9 +12056,9 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 &evidence, prior_evidence,
                 "recipe evidence does not encode native permissions"
             );
-            assert_ne!(
-                exported, *prior_context,
-                "equal template evidence cannot erase different compiler support"
+            assert!(
+                !exported.same_recorded_facts(prior_context),
+                "equal template evidence cannot erase different recorded compiler support"
             );
             assert_ne!(
                 exported.snapshot().native_availability,
