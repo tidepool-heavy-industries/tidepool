@@ -417,6 +417,15 @@ impl SessionCompileView {
         Ok(self)
     }
 
+    /// A checked value commit changes only the lexical value projection. Keep
+    /// the compiler context already admitted before that infallible commit.
+    pub(super) fn with_committed_values(self, mut current: Self) -> Self {
+        Arc::make_mut(&mut current.projection).exact_context =
+            self.projection.exact_context.clone();
+        current.request_context = self.request_context;
+        current
+    }
+
     /// Request annotations and retained type interfaces are local to this
     /// compile view; the cached lexical projection remains unchanged.
     pub fn with_request_type_evidence(
