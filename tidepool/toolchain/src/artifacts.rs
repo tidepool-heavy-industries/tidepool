@@ -2288,66 +2288,6 @@ impl ProgramNativeOutput {
     }
 }
 
-fn read_native_turn_artifacts(
-    directory: &Path,
-    turn: Arc<[u8]>,
-    source: String,
-) -> Result<ProgramNativeOutput, CompileError> {
-    let prepared_read_start = Instant::now();
-    let prepared_bytes =
-        crate::checked_cell::read(directory.join("__prepared.prepared.cbor"), 128 << 20)?;
-    let prepared_len = prepared_bytes.len() as u64;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_PREPARED_READ,
-        prepared_read_start.elapsed(),
-        prepared_len,
-    );
-    let prepared_decode_start = Instant::now();
-    let artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
-        Arc::new(prepared_bytes),
-        &crate::prepared_artifact::production_requirements()?,
-        DecodeLimits::default(),
-    )?;
-    let target = Arc::clone(artifact.prepared_shared());
-    let program = artifact.bind_package_program();
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        "native.prepared_decode",
-        prepared_decode_start.elapsed(),
-        prepared_len,
-    );
-    let metadata_read_start = Instant::now();
-    let metadata: Arc<[u8]> =
-        crate::checked_cell::read(directory.join("meta.cbor"), 32 << 20)?.into();
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_CBOR_READ,
-        metadata_read_start.elapsed(),
-        metadata.len() as u64,
-    );
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        "native.metadata_read",
-        metadata_read_start.elapsed(),
-        metadata.len() as u64,
-    );
-    Ok(ProgramNativeOutput {
-        origin: ProgramNativeOutputOrigin::Finite,
-        directory: directory.to_owned(),
-        target,
-        program,
-        turn,
-        metadata,
-        products: None,
-        source,
-    })
-}
-
 /// Immutable native products and observations retained by the execution owner.
 /// Reading the diagnostic directory cannot change this compiled bundle.
 #[derive(Debug)]
@@ -8427,7 +8367,7 @@ mod module_product_tests {
         assert_eq!(std::env::var("TIDEPOOL_TEST_COMPILER_DIAGNOSTICS").as_deref(), Ok("off"),
             "physical lifetime control requires --compiler-diagnostics off; capture intentionally retains scratch");
         use crate::cell_plan::WorldCellAdmissionSubject;
-        use crate::checked_cell::{CellProgramBasis, CheckedPlannedCellSlot};
+        use crate::checked_cell::CellProgramBasis;
         use crate::compiler_world::{
             CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorldBinding,
             CompilerWorldLexicalSurface, PublicModuleQuestion, VisibleWorldBindings,
@@ -10951,26 +10891,38 @@ mod constructor_identity_tests {
     }
 
     #[test]
-    fn immutable_native_turn_output_ignores_mutated_diagnostic_files() {
+    fn captured_invocation_output_ignores_mutated_diagnostic_files() {
         let directory = tempfile::tempdir().unwrap();
-        let metadata = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
+        let bytes = prepared_fixture_bytes();
+        let artifact = PreparedArtifact::parse(bytes.clone(), DecodeLimits::default()).unwrap();
+        let mut table = DataConTable::new();
+        for decl in artifact.prepared().constructors() {
+            table.insert_checked(matching_dc(decl)).unwrap();
+        }
+        let mut warnings = MetaWarnings::default();
+        warnings.captured_type = Some("captured observation".into());
+        let metadata = write_metadata(&table, &warnings).unwrap();
+        std::fs::write(directory.path().join("__prepared.prepared.cbor"), bytes).unwrap();
+        std::fs::write(directory.path().join("meta.cbor"), &metadata).unwrap();
+        std::fs::write(directory.path().join("asks.json"), b"[]").unwrap();
+        // Layout capture retains untrusted bytes. Only completed native
+        // acquisition can authenticate the receipt and issue native products.
         std::fs::write(
-            directory.path().join("__prepared.prepared.cbor"),
-            prepared_fixture_bytes(),
+            directory.path().join("certified-products.cbor"),
+            b"unadmitted receipt observation",
         )
         .unwrap();
-        std::fs::write(directory.path().join("meta.cbor"), &metadata).unwrap();
-        let turn: Arc<[u8]> = b"retained turn observation".as_slice().into();
-        let output =
-            read_native_turn_artifacts(directory.path(), turn.clone(), "module Input where".into())
-                .unwrap();
-        let (table, warnings) = tidepool_repr::serial::read_metadata(&output.metadata).unwrap();
-        let retained = NativeTurnOutput {
-            output,
-            table,
-            warnings,
-        };
-        let target = retained.target_owned();
+        let layout = invocation_output::InvocationOutputLayout::original(&["__prepared"]).unwrap();
+        let captured = layout
+            .read(
+                directory.path(),
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
+            )
+            .unwrap();
+        let retained = assemble(captured.metadata(), &captured.targets(), |_, _, _| {}).unwrap();
+        let target = Arc::clone(retained.targets["__prepared"].prepared.prepared_shared());
         std::fs::write(
             directory.path().join("__prepared.prepared.cbor"),
             b"invalid",
@@ -10978,15 +10930,22 @@ mod constructor_identity_tests {
         .unwrap();
         std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
         drop(directory);
-        assert!(Arc::ptr_eq(&target, &retained.target_owned()));
-        assert_eq!(retained.turn_bytes(), turn.as_ref());
-        assert_eq!(retained.metadata_bytes(), metadata.as_slice());
-        assert_eq!(retained.source(), "module Input where");
-        assert!(retained.products().is_none());
+        assert!(Arc::ptr_eq(
+            &target,
+            retained.targets["__prepared"].prepared.prepared_shared()
+        ));
+        assert_eq!(captured.metadata(), metadata.as_slice());
+        let assembled = assemble(captured.metadata(), &captured.targets(), |_, _, _| {}).unwrap();
+        assert_eq!(assembled.table, table);
+        assert_eq!(assembled.warnings.captured_type, warnings.captured_type);
+        for output in [&retained, &assembled] {
+            assert!(output.producer_identity.is_none());
+            assert!(output.issued_output.is_none());
+        }
     }
 
     #[test]
-    fn captured_checked_metadata_never_reopens_a_changed_file_for_the_same_target() {
+    fn captured_invocation_metadata_never_reopens_a_changed_file_for_the_same_target() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = prepared_fixture_bytes();
         let artifact = PreparedArtifact::parse(bytes.clone(), DecodeLimits::default()).unwrap();
@@ -10998,16 +10957,28 @@ mod constructor_identity_tests {
         warnings.captured_type = Some("captured observation".into());
         let original = write_metadata(&table, &warnings).unwrap();
         std::fs::write(directory.path().join("__prepared.prepared.cbor"), &bytes).unwrap();
+        std::fs::write(directory.path().join("asks.json"), b"[]").unwrap();
+        std::fs::write(
+            directory.path().join("certified-products.cbor"),
+            b"unadmitted receipt observation",
+        )
+        .unwrap();
+        let layout = invocation_output::InvocationOutputLayout::original(&["__prepared"]).unwrap();
         // Both table-only and warning-only changes remain valid for exactly P.
         for changed_table in [false, true] {
             std::fs::write(directory.path().join("meta.cbor"), &original).unwrap();
-            let output = read_native_turn_artifacts(
-                directory.path(),
-                Arc::from(&b"turn"[..]),
-                "source".into(),
-            )
-            .unwrap();
-            let target = output.target().clone();
+            let captured = layout
+                .read(
+                    directory.path(),
+                    Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                        Default::default(),
+                    )),
+                )
+                .unwrap();
+            let output = assemble(captured.metadata(), &captured.targets(), |_, _, _| {}).unwrap();
+            assert!(output.producer_identity.is_none());
+            assert!(output.issued_output.is_none());
+            let target = Arc::clone(output.targets["__prepared"].prepared.prepared_shared());
             let mut alternate = table.clone();
             if changed_table {
                 let decl = artifact.prepared().constructors().first().unwrap();
@@ -11030,21 +11001,48 @@ mod constructor_identity_tests {
                 changed_table
             );
             std::fs::write(directory.path().join("meta.cbor"), replacement).unwrap();
-            let (decoded, observed) = output.decode_metadata().unwrap();
-            assert!(Arc::ptr_eq(&target, output.target()));
-            assert_eq!(output.metadata.as_ref(), original.as_slice());
-            assert_eq!(decoded, table);
-            assert_eq!(observed.captured_type, warnings.captured_type);
+            let decoded = assemble(captured.metadata(), &captured.targets(), |_, _, _| {}).unwrap();
+            assert!(Arc::ptr_eq(
+                &target,
+                output.targets["__prepared"].prepared.prepared_shared()
+            ));
+            assert_eq!(captured.metadata(), original.as_slice());
+            assert_eq!(decoded.table, table);
+            assert_eq!(decoded.warnings.captured_type, warnings.captured_type);
             std::fs::remove_file(directory.path().join("meta.cbor")).unwrap();
-            assert_eq!(output.decode_metadata().unwrap().0, table);
+            assert_eq!(
+                assemble(captured.metadata(), &captured.targets(), |_, _, _| {})
+                    .unwrap()
+                    .table,
+                table
+            );
         }
         // A later valid file cannot repair the actual invalid observation.
         std::fs::write(directory.path().join("meta.cbor"), b"invalid").unwrap();
-        let invalid =
-            read_native_turn_artifacts(directory.path(), Arc::from(&b"turn"[..]), "source".into())
-                .unwrap();
+        let invalid = layout
+            .read(
+                directory.path(),
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
+            )
+            .unwrap();
+        assert!(assemble(invalid.metadata(), &invalid.targets(), |_, _, _| {}).is_err());
         std::fs::write(directory.path().join("meta.cbor"), original).unwrap();
-        assert!(invalid.decode_metadata().is_err());
+        assert!(assemble(invalid.metadata(), &invalid.targets(), |_, _, _| {}).is_err());
+        let repaired = layout
+            .read(
+                directory.path(),
+                Arc::new(tidepool_repr::execution_schema::InventoryOperation::new(
+                    Default::default(),
+                )),
+            )
+            .unwrap();
+        let assembled = assemble(repaired.metadata(), &repaired.targets(), |_, _, _| {}).unwrap();
+        assert_eq!(assembled.table, table);
+        assert_eq!(assembled.warnings.captured_type, warnings.captured_type);
+        assert!(assembled.producer_identity.is_none());
+        assert!(assembled.issued_output.is_none());
     }
 
     /// A table entry that agrees with `decl` on every fact this crate checks
