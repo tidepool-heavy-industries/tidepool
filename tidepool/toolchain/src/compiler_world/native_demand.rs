@@ -308,19 +308,11 @@ impl WorldDependencyObservations {
         mut self,
         stages: &[Arc<CheckedWorldCellStage>],
     ) -> Result<Arc<WorldNativeDemandCompletion>, CompileError> {
-        for offset in self.stages.keys() {
-            crate::host_work::checkpoint()?;
-            let offset = usize::try_from(*offset)
-                .map_err(|_| source_failure("dependency stage offset is out of range"))?;
-            if stages
+        require_emitted_stage_keys(self.stages.keys().copied(), |offset| {
+            stages
                 .binary_search_by(|stage| stage.ordinals().first().copied().cmp(&Some(offset)))
-                .is_err()
-            {
-                return Err(source_failure(
-                    "dependency query has no actual completed World stage",
-                ));
-            }
-        }
+                .is_ok()
+        })?;
         self.operation
             .reserve::<(u64, CompletedStageDependencies)>(stages.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
@@ -352,6 +344,41 @@ impl WorldDependencyObservations {
             acquired_uses: self.acquired_uses,
             stages: completed,
         }))
+    }
+}
+
+fn require_emitted_stage_keys(
+    recorded: impl Iterator<Item = u64>,
+    is_emitted_start: impl Fn(usize) -> bool,
+) -> Result<(), CompileError> {
+    for offset in recorded {
+        crate::host_work::checkpoint()?;
+        let offset = usize::try_from(offset)
+            .map_err(|_| source_failure("dependency stage offset is out of range"))?;
+        if !is_emitted_start(offset) {
+            return Err(source_failure(
+                "dependency query has no actual completed World stage",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn dependency_completion_rejects_non_start_and_unemitted_query_keys() {
+        // One decoded stage can contain several lexical ordinals. A query
+        // belongs to its exact start, not merely an in-range ordinal.
+        let starts = [0, 3];
+        let emitted = |offset| starts.binary_search(&offset).is_ok();
+        assert!(require_emitted_stage_keys([0, 3].into_iter(), emitted).is_ok());
+        assert!(require_emitted_stage_keys([0, 1].into_iter(), emitted).is_err());
+        assert!(require_emitted_stage_keys([0, 4].into_iter(), emitted).is_err());
+        assert!(require_emitted_stage_keys([3].into_iter(), |_| false).is_err());
+        assert!(require_emitted_stage_keys(std::iter::empty(), emitted).is_ok());
     }
 }
 
