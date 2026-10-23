@@ -272,7 +272,7 @@ import Tidepool.ExtractRequest
   , StructuredNameNamespace(..), InspectionProvenance(..) )
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence
+  , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence, capturedSessionInterfaceEvidenceBodies
   , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceBody, capturedSessionCompilerProduct, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName
   , injectCapturedSessionIfaceWithBindings )
@@ -3821,6 +3821,7 @@ hydrateWorldCellOperand available environment (Just operand) = do
   retained <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact)
   (owner,capture) <- case retained of
     Just actual -> do
+      requireSelectedSessionCapture artifact (worldCellOperandBody operand) (worldCellOperandPackages operand) actual
       hydrated <- hydrateInterfaceInputs environment selectedInputs
       pure (hydrated,actual)
     Nothing -> do
@@ -3840,6 +3841,17 @@ hydrateWorldCellOperand available environment (Just operand) = do
     [actual] -> pure actual
     _ -> throwIO WorldCellCorrupt
   pure (hydratedExactEnvironment owner,Just (WorldCellOperandProjection operand owner capture name))
+
+-- A receiving role selects the full captured value input, including package
+-- obligations. Equal interface bytes alone cannot substitute prior sidecars.
+requireSelectedSessionCapture :: ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
+  -> CapturedSessionInterface -> IO ()
+requireSelectedSessionCapture artifact body packages capture =
+  case capturedSessionInterfaceEvidenceBodies capture of
+    Just (issuedPackages,_,required)
+      | snd (capturedSessionInterfaceBody capture) == body
+      , issuedPackages == packages,required == exactRequirements artifact -> pure ()
+    _ -> throwIO (InterfaceSessionAliasMismatch (exactUnit artifact,exactModule artifact))
 
 worldDemandSymbol :: WorldDemandBinding -> SymbolIdentity
 worldDemandSymbol (WorldBaseBinding binding) = worldBindingSymbol binding
@@ -3953,7 +3965,9 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
         , let (actual,bytes) = capturedSessionInterfaceBody capture
         , actual == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , bytes == body] of
-      capture:_ -> pure (current,capture:captures)
+      capture:_ -> do
+        requireSelectedSessionCapture artifact body packages capture
+        pure (current,capture:captures)
       [] -> do
         selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
         (ready,_,capture) <- injectCapturedSessionIfaceWithBindings selected body packages (exactRequirements artifact) current
