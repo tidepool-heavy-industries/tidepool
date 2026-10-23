@@ -681,6 +681,32 @@ fn check_actual_retained_core_promotion_history() {
                 .original_acquisition(&root_owner)
                 .is_none());
             assert!(
+                continuation.compiler_roles().get(&helper_owner).is_some(),
+                "the import-only phase supplies the helper's canonical TYPE row"
+            );
+            assert!(
+                continuation
+                    .compiler_roles()
+                    .original_acquisition(&helper_owner)
+                    .is_none(),
+                "the later helper production requires an import-only input without its native Original"
+            );
+            let support = continuation.compiler_source_support();
+            assert!(
+                support
+                    .native_offers()
+                    .iter()
+                    .all(|offer| { offer.original_acquisition().descriptor.owner != helper_owner }),
+                "the import-only phase cannot carry an existing helper native offer"
+            );
+            assert!(
+                support.native_availability().rows().all(|row| {
+                    row.original_owner().unit != helper_owner.unit
+                        || row.original_owner().module != helper_owner.module
+                }),
+                "the later helper re-emission requires no carried helper native availability"
+            );
+            assert!(
                 emitted.is_empty(),
                 "the import-only phase cannot already produce either native body"
             );
@@ -779,6 +805,46 @@ fn check_actual_retained_core_promotion_history() {
             .graph_selection();
         let root_id = actual[0].0.descriptor.id;
         let helper_id = helper_entry.descriptor.id;
+        let helper_offer = actual[1]
+            .1
+            .source_selection()
+            .completed_compiler_output_offer(&helper_owner)
+            .unwrap()
+            .unwrap();
+        let helper_groups = helper_offer
+            .proof()
+            .expect("the actual helper producer retains its own scoped group proof")
+            .selection
+            .graph_selection()
+            .native_groups
+            .iter()
+            .filter(|group| group.binding.artifact() == helper_id)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert!(!helper_groups.is_empty());
+        let expected_edges = root
+            .original_native()
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group.imports.iter().filter_map(|import| match import {
+                    ReceiptImportOwner::Source {
+                        unit,
+                        module,
+                        module_version: Some(version),
+                        original_ordinal,
+                        ..
+                    } if unit == &helper.owner().unit
+                        && module == &helper.owner().module
+                        && version == &helper.owner().module_version =>
+                    {
+                        Some((group.original_ordinal, *original_ordinal))
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!expected_edges.is_empty());
         let edges = graph
             .selections
             .iter()
@@ -794,18 +860,21 @@ fn check_actual_retained_core_promotion_history() {
                 ) if parent.binding.artifact() == root_id
                     && child.binding.artifact() == helper_id =>
                 {
+                    assert_eq!(*dependent_ordinal, parent.original_ordinal);
+                    assert_eq!(*required_ordinal, child.original_ordinal);
+                    assert!(
+                        helper_groups.contains(child),
+                        "the root dependency retains the actual helper producer's scoped group"
+                    );
                     Some((*dependent_ordinal, *required_ordinal))
                 }
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        assert!(
-            !edges.is_empty(),
-            "the actual cohort binds a nonempty root-to-promoted-helper graph"
+        assert_eq!(
+            edges, expected_edges,
+            "the exact graph preserves every parent-to-helper import and introduces none"
         );
-        assert!(edges.iter().all(|(_, required)| root_imports
-            .iter()
-            .any(|(_, ordinal, _)| ordinal == required)));
         assert!(!graph.native_groups.iter().any(|group|
             group.binding.artifact() == fixture.root.descriptor.id || group.binding.artifact() == fixture.helper.descriptor.id),
             "the prior ordinary products are independent evidence, not selected promoted group owners");
