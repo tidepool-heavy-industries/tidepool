@@ -1602,260 +1602,288 @@ fn try_execute_cell_with_template_preamble_observed<H>(
 where
     H: crate::DispatchEffect<QuietOutput> + Send,
 {
+    use crate::session::resident::world_cell_test_support::{
+        bootstrap_world_for, plan_fixture_specification_for, source_action_with_original,
+        InputRecipe,
+    };
     let cell_started = Instant::now();
+    let previous_context = resident.run_context();
+    let public_source = resident.adopt_initial_notebook_scope(public)?;
+    let original = public_source.original_source().clone();
+    let include = resident
+        .compile_view_in(public)
+        .unwrap()
+        .include_paths(effects.include_paths());
+    let recipe = InputRecipe::capture(preamble.to_owned(), effects.row().to_owned(), include);
+    measured(
+        resident,
+        images,
+        scenario,
+        &format!("{label}.world_bootstrap"),
+        None,
+        |resident| {
+            bootstrap_world_for(resident, &recipe, &public_source);
+        },
+    );
     let mut expected_public_winners: std::collections::BTreeMap<_, _> = resident
         .public_visibility_snapshot_in(public)
         .unwrap()
         .bindings
         .into_iter()
         .collect();
-    let execution = Arc::new(resident.begin_private_execution(public).unwrap());
-    let view = execution.view().unwrap();
-    let imports = view.turn_imports(template_imports);
-    let template = resident_cell_check_template(preamble, effects.row(), &imports);
-    let templates = resident_workbench_templates(preamble, effects.row(), &imports);
-    let specification = CellRecipe::new(
-        source.to_string(),
-        template.clone(),
-        templates
-            .iter()
-            .map(|template| {
-                (
-                    template.kind.wire_name().to_string(),
-                    template.source.clone(),
-                )
-            })
-            .collect(),
-        view.injected_module_names(),
-    )
-    .unwrap();
-    let admitted_include = view.include_paths(effects.include_paths());
-    let plan = measured(
+    let execution = Arc::new(source_action_with_original(
         resident,
-        images,
-        scenario,
-        &format!("{label}.parse"),
-        None,
-        |_| {
-            tidepool_testing::with_settlement(|settlement| {
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &admitted_include,
-                    settlement,
-                )
-            })
+        original.clone(),
+        |resident, _| match publication_target {
+            ScalePublication::Ephemeral => resident.begin_private_execution(public),
+            ScalePublication::Durable { owner, .. } => {
+                resident.begin_durable_private_execution(owner, public)
+            }
         },
-    )
-    .map_err(crate::session::SessionError::Compile)?;
-    use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
-    match declarations {
-        CellDeclarationExpectation::Total(expected) => assert_eq!(
-            plan.items()
-                .iter()
-                .filter(|item| {
-                    matches!(
-                        item.kind(),
-                        ParsedCellPlanKind::Prologue | ParsedCellPlanKind::Declaration
-                    )
-                })
-                .count(),
-            expected
-        ),
-        CellDeclarationExpectation::CapturedAt { name, line } => {
-            let declarations = plan
-                .items()
-                .iter()
-                .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
-                .collect::<Vec<_>>();
-            let [declaration] = declarations.as_slice() else {
-                panic!("capture requires one authored declaration group: {declarations:?}");
-            };
-            assert_eq!(declaration.binders(), [name]);
-            assert_eq!(declaration.span().start_line(), line);
-            assert_eq!(declaration.span().end_line(), line + 1);
-            assert_eq!(
-                declaration.source_ordinals().len(),
-                2,
-                "the adjacent authored signature and equation must share a declaration group"
-            );
-            let prologues = plan
-                .items()
-                .iter()
-                .filter(|item| item.kind() == ParsedCellPlanKind::Prologue)
-                .collect::<Vec<_>>();
-            assert!(prologues.len() <= 1);
-            for prologue in prologues {
-                assert!(prologue.index() < declaration.index());
-                assert_eq!(prologue.span().start_line(), 1);
-                assert!(prologue.source().is_empty() && prologue.binders().is_empty());
-            }
-        }
-    }
-    let admission = resident
-        .admit_planned_cell_for_execution(
-            execution.clone(),
-            plan,
-            Arc::new(specification.clone()),
-            specification.specification_digest(),
-            [1; 32],
-            admitted_include,
+    )?);
+    let result = (|| {
+        let view = execution.view().unwrap();
+        let imports = view.turn_imports(template_imports);
+        let template = resident_cell_check_template(preamble, effects.row(), &imports);
+        let templates = resident_workbench_templates(preamble, effects.row(), &imports);
+        let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+            source: source.to_owned(),
+            template,
+            turn_templates: templates
+                .into_iter()
+                .map(|template| (template.kind.wire_name().to_owned(), template.source))
+                .collect(),
+            inject_modules: view.injected_module_names(),
+        });
+        let admission = measured(
+            resident,
+            images,
+            scenario,
+            &format!("{label}.parse"),
             None,
-        )
-        .unwrap();
-    let compile_cell = || {
-        match authority_checks {
-            AuthorityChecks::NativeEmissionOwnersAbsent(old_owners) => {
-                compile_cell_program_admitted_native_emission_controls(
-                    admission.clone(),
-                    old_owners,
+            |resident| {
+                plan_fixture_specification_for(
+                    resident,
+                    &public_source,
+                    specification,
+                    execution.clone(),
                 )
+            },
+        )
+        .map_err(|error| match error {
+            crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Compile(error)) => {
+                ResidentError::Session(crate::session::SessionError::Compile(error))
             }
-            AuthorityChecks::TypedEntryRefusalBranches(test_name) => {
-                compile_cell_program_admitted_receipt_controls(admission.clone(), test_name)
-            }
-            AuthorityChecks::FreshTargetWork => {
-                compile_cell_program_admitted_work_controls(admission.clone(), None)
-            }
-            AuthorityChecks::SegmentWorkCounts(count) => {
-                // Item certification and its ledger events run on this thread.
-                let subscriber = tracing_subscriber::registry().with(
-                    tracing_subscriber::fmt::layer()
-                        .with_test_writer()
-                        .with_filter(tracing_subscriber::EnvFilter::new(
-                            "off,exomonad_harness::timing=debug",
-                        )),
+            crate::session::WorldInspectionError::Runtime(error) => ResidentError::Run(error),
+            other => panic!("scaling fixture World observation failed: {other:?}"),
+        })?;
+        let plan = admission
+            .world_reservation()
+            .expect("actual World reservation")
+            .plan();
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
+        match declarations {
+            CellDeclarationExpectation::Total(expected) => assert_eq!(
+                plan.items()
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.kind(),
+                            ParsedCellPlanKind::Prologue | ParsedCellPlanKind::Declaration
+                        )
+                    })
+                    .count(),
+                expected
+            ),
+            CellDeclarationExpectation::CapturedAt { name, line } => {
+                let declarations = plan
+                    .items()
+                    .iter()
+                    .filter(|item| item.kind() == ParsedCellPlanKind::Declaration)
+                    .collect::<Vec<_>>();
+                let [declaration] = declarations.as_slice() else {
+                    panic!("capture requires one authored declaration group: {declarations:?}");
+                };
+                assert_eq!(declaration.binders(), [name]);
+                assert_eq!(declaration.span().start_line(), line);
+                assert_eq!(declaration.span().end_line(), line + 1);
+                assert_eq!(
+                    declaration.source_ordinals().len(),
+                    2,
+                    "the adjacent authored signature and equation must share a declaration group"
                 );
-                tracing::subscriber::with_default(subscriber, || {
-                    compile_cell_program_admitted_work_controls(admission.clone(), Some(count))
-                })
-            }
-            _ => tidepool_testing::with_settlement(|settlement| {
-                compile_cell_program_admitted(admission.clone(), settlement)
-            }),
-        }
-    };
-    if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
-        struct RestoreDeployment(std::ffi::OsString);
-        impl Drop for RestoreDeployment {
-            fn drop(&mut self) {
-                std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", &self.0);
+                let prologues = plan
+                    .items()
+                    .iter()
+                    .filter(|item| item.kind() == ParsedCellPlanKind::Prologue)
+                    .collect::<Vec<_>>();
+                assert!(prologues.len() <= 1);
+                for prologue in prologues {
+                    assert!(prologue.index() < declaration.index());
+                    assert_eq!(prologue.span().start_line(), 1);
+                    assert!(prologue.source().is_empty() && prologue.binders().is_empty());
+                }
             }
         }
-        let configured = std::env::var_os("TIDEPOOL_COMPILER_DEPLOYMENT")
-            .expect("vertical test requires configured deployment");
-        let guard = RestoreDeployment(configured.clone());
-        let before = tidepool_extract_cmd::extract_spawn_count();
-        std::env::remove_var("TIDEPOOL_COMPILER_DEPLOYMENT");
-        assert!(
-            compile_cell().is_err(),
-            "unconfigured planned compile must refuse admission"
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-        let mut mismatch: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(configured).unwrap()).unwrap();
-        let producer = mismatch["producer_identity"].as_array_mut().unwrap();
-        producer[0] = serde_json::json!(producer[0].as_u64().unwrap() ^ 1);
-        let wrong = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(wrong.path(), serde_json::to_vec(&mismatch).unwrap()).unwrap();
-        std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", wrong.path());
-        assert!(
-            compile_cell().is_err(),
-            "wrong producer planned compile must refuse admission"
-        );
-        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
-        drop(guard);
-    }
-    let (checked, program) = measured(
-        resident,
-        images,
-        scenario,
-        &format!("{label}.compile_cell"),
-        None,
-        |_| compile_cell(),
-    )
-    .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
-    observe(&program);
-    assert!(!checked.items.is_empty());
-    if matches!(
-        authority_checks,
-        AuthorityChecks::TypedEntryRefusalBranches(_)
-    ) {
-        assert_checked_native_entries(resident, public, &checked, &program);
-    }
-
-    eprintln!(
-        "protected-scale {}",
-        serde_json::json!({
-            "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
-            "phase": format!("{label}.checked_inventory"),
-            "binder_counts": (0..checked.items.len())
-                .map(|index| checked.checked_item(index).unwrap().binders().len())
-                .collect::<Vec<_>>(),
-        })
-    );
-    // Keep the actual compiler products for owner tests that inspect structural
-    // link contracts. These are observations of admitted output, not authority.
-    let native_targets = program
-        .items()
-        .iter()
-        .filter_map(|item| item.native().map(|native| native.target_owned()))
-        .collect();
-
-    let prefix = resident
-        .begin_cell_program(program)
-        .unwrap()
-        .expect("nonempty compiled cell has an ordered prefix");
-    if matches!(
-        authority_checks,
-        AuthorityChecks::TypedEntryRefusalBranches(_)
-    ) {
-        assert!(checked.items.len() >= 2);
-        let before = resident.public_visibility_snapshot_in(public).unwrap();
-        let wrong = checked.checked_item(1).unwrap();
-        assert!(matches!(
-            resident.admit_checked_item(prefix.clone(), wrong),
-            Err(crate::session::SessionError::StaleStagedDeclaration)
-        ));
-        assert_eq!(
-            resident.public_visibility_snapshot_in(public).unwrap(),
-            before
-        );
-    }
-    let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
-    let mut expected_observation_seen = false;
-    resident
-        .set_run_context(SessionRunContext {
-            lexical_scope: execution.private_scope(),
-            ..Default::default()
-        })
-        .unwrap();
-    for index in 0..checked.items.len() {
-        let item = checked.checked_item(index).unwrap();
-        let reservation = resident
-            .admit_checked_item(prefix.clone(), item.clone())
-            .unwrap();
-        if item.kind() == CheckedItemKind::Declaration {
-            let generation = reservation.generation();
-            measured(
-                resident,
-                images,
-                scenario,
-                &format!("{label}.adopt"),
-                Some(index),
-                |resident| {
-                    resident.adopt_checked_declaration(reservation).unwrap();
-                },
+        let compile_cell = || {
+            match authority_checks {
+                AuthorityChecks::NativeEmissionOwnersAbsent(old_owners) => {
+                    compile_cell_program_admitted_native_emission_controls(
+                        admission.clone(),
+                        old_owners,
+                    )
+                }
+                AuthorityChecks::TypedEntryRefusalBranches(test_name) => {
+                    compile_cell_program_admitted_receipt_controls(admission.clone(), test_name)
+                }
+                AuthorityChecks::FreshTargetWork => {
+                    compile_cell_program_admitted_work_controls(admission.clone(), None)
+                }
+                AuthorityChecks::SegmentWorkCounts(count) => {
+                    // Item certification and its ledger events run on this thread.
+                    let subscriber = tracing_subscriber::registry().with(
+                        tracing_subscriber::fmt::layer()
+                            .with_test_writer()
+                            .with_filter(tracing_subscriber::EnvFilter::new(
+                                "off,exomonad_harness::timing=debug",
+                            )),
+                    );
+                    tracing::subscriber::with_default(subscriber, || {
+                        compile_cell_program_admitted_work_controls(admission.clone(), Some(count))
+                    })
+                }
+                _ => tidepool_testing::with_settlement(|settlement| {
+                    compile_cell_program_admitted(admission.clone(), settlement)
+                }),
+            }
+        };
+        if matches!(authority_checks, AuthorityChecks::RefusalBranches) {
+            struct RestoreDeployment(std::ffi::OsString);
+            impl Drop for RestoreDeployment {
+                fn drop(&mut self) {
+                    std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", &self.0);
+                }
+            }
+            let configured = std::env::var_os("TIDEPOOL_COMPILER_DEPLOYMENT")
+                .expect("vertical test requires configured deployment");
+            let guard = RestoreDeployment(configured.clone());
+            let before = tidepool_extract_cmd::extract_spawn_count();
+            std::env::remove_var("TIDEPOOL_COMPILER_DEPLOYMENT");
+            assert!(
+                compile_cell().is_err(),
+                "unconfigured planned compile must refuse admission"
             );
-            if let AuthorityChecks::PrivateAuthoredLifetime(binding_module) = authority_checks {
-                let context = resident
-                    .compile_view_in(execution.private_scope())
-                    .unwrap()
-                    .exact_declaration_context()
-                    .unwrap()
-                    .clone();
-                let original = context.authored_native_root(generation.0).unwrap();
-                assert!(context.artifact_view().artifact_ids().contains(&original));
-                assert!(
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+            let mut mismatch: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(configured).unwrap()).unwrap();
+            let producer = mismatch["producer_identity"].as_array_mut().unwrap();
+            producer[0] = serde_json::json!(producer[0].as_u64().unwrap() ^ 1);
+            let wrong = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(wrong.path(), serde_json::to_vec(&mismatch).unwrap()).unwrap();
+            std::env::set_var("TIDEPOOL_COMPILER_DEPLOYMENT", wrong.path());
+            assert!(
+                compile_cell().is_err(),
+                "wrong producer planned compile must refuse admission"
+            );
+            assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
+            drop(guard);
+        }
+        let (checked, program) = measured(
+            resident,
+            images,
+            scenario,
+            &format!("{label}.compile_cell"),
+            None,
+            |_| compile_cell(),
+        )
+        .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
+        observe(&program);
+        assert!(!checked.items.is_empty());
+        if matches!(
+            authority_checks,
+            AuthorityChecks::TypedEntryRefusalBranches(_)
+        ) {
+            assert_checked_native_entries(resident, public, &checked, &program);
+        }
+
+        eprintln!(
+            "protected-scale {}",
+            serde_json::json!({
+                "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
+                "phase": format!("{label}.checked_inventory"),
+                "binder_counts": (0..checked.items.len())
+                    .map(|index| checked.checked_item(index).unwrap().binders().len())
+                    .collect::<Vec<_>>(),
+            })
+        );
+        // Keep the actual compiler products for owner tests that inspect structural
+        // link contracts. These are observations of admitted output, not authority.
+        let native_targets = program
+            .items()
+            .iter()
+            .filter_map(|item| item.native().map(|native| native.target_owned()))
+            .collect();
+
+        let prefix = resident
+            .begin_cell_program(program)
+            .unwrap()
+            .expect("nonempty compiled cell has an ordered prefix");
+        if matches!(
+            authority_checks,
+            AuthorityChecks::TypedEntryRefusalBranches(_)
+        ) {
+            assert!(checked.items.len() >= 2);
+            let before = resident.public_visibility_snapshot_in(public).unwrap();
+            let wrong = checked.checked_item(1).unwrap();
+            assert!(matches!(
+                source_action_with_original(resident, original.clone(), |resident, _| resident
+                    .admit_checked_item(prefix.clone(), wrong)),
+                Err(crate::session::SessionError::StaleStagedDeclaration)
+            ));
+            assert_eq!(
+                resident.public_visibility_snapshot_in(public).unwrap(),
+                before
+            );
+        }
+        let submissions_before_effects = tidepool_extract_cmd::extract_spawn_count();
+        let mut expected_observation_seen = false;
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..Default::default()
+            })
+            .unwrap();
+        for index in 0..checked.items.len() {
+            let item = checked.checked_item(index).unwrap();
+            let reservation =
+                source_action_with_original(resident, original.clone(), |resident, _| {
+                    resident.admit_checked_item(prefix.clone(), item.clone())
+                })?;
+            if item.kind() == CheckedItemKind::Declaration {
+                let generation = reservation.generation();
+                measured(
+                    resident,
+                    images,
+                    scenario,
+                    &format!("{label}.adopt"),
+                    Some(index),
+                    |resident| {
+                        source_action_with_original(resident, original.clone(), |resident, _| {
+                            resident.adopt_checked_declaration(reservation)
+                        })
+                        .unwrap();
+                    },
+                );
+                if let AuthorityChecks::PrivateAuthoredLifetime(binding_module) = authority_checks {
+                    let context = resident
+                        .compile_view_in(execution.private_scope())
+                        .unwrap()
+                        .exact_declaration_context()
+                        .unwrap()
+                        .clone();
+                    let original = context.authored_native_root(generation.0).unwrap();
+                    assert!(context.artifact_view().artifact_ids().contains(&original));
+                    assert!(
                     context
                         .artifact_view()
                         .selected_native_groups()
@@ -1863,354 +1891,383 @@ where
                         .all(|group| group.artifact != original),
                     "the lexical projection retains authored custody without selecting its body"
                 );
-                let ScalePublication::Durable { recovery, .. } = publication_target else {
-                    panic!("private authored lifetime requires durable recovery");
-                };
-                let domain = crate::session::RecoveryDomainId::Root;
-                let state = recovery.store.read_domain(domain).unwrap().unwrap();
-                let graph = crate::session::recovery::RecoveryGraph::hydrate_domain(
-                    recovery.store.clone(),
-                    domain,
-                    &state,
-                )
-                .unwrap();
-                let node = graph.node(generation).unwrap().unwrap();
-                assert_eq!(
-                    node.kind,
-                    crate::session::recovery::RecoveryNodeKind::Authored
-                );
-                assert!(matches!(
-                    node.state,
-                    crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
-                ));
-                assert!(node
-                    .live_dependencies
-                    .iter()
-                    .any(|dependency| matches!(dependency,
+                    let ScalePublication::Durable { recovery, .. } = publication_target else {
+                        panic!("private authored lifetime requires durable recovery");
+                    };
+                    let domain = crate::session::RecoveryDomainId::Root;
+                    let state = recovery.store.read_domain(domain).unwrap().unwrap();
+                    let graph = crate::session::recovery::RecoveryGraph::hydrate_domain(
+                        recovery.store.clone(),
+                        domain,
+                        &state,
+                    )
+                    .unwrap();
+                    let node = graph.node(generation).unwrap().unwrap();
+                    assert_eq!(
+                        node.kind,
+                        crate::session::recovery::RecoveryNodeKind::Authored
+                    );
+                    assert!(matches!(
+                        node.state,
+                        crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
+                    ));
+                    assert!(node
+                        .live_dependencies
+                        .iter()
+                        .any(|dependency| matches!(dependency,
                     crate::session::recovery::RecoveryLiveDependency::NativeBinding {
                         binding, generation, ..
                     } if binding.unit == "main"
                         && binding.module == binding_module.module_name()
                         && binding.occurrence == "x"
                         && *generation == binding_module.gen().0)));
-                super::super::recovery_hydration::validate_recovery_native_markers(&node, &context)
-                    .unwrap();
-                let mut missing = (*node).clone();
-                missing.live_dependencies.clear();
-                missing.state = crate::session::recovery::RecoveryNodeState::ExactArtifactClosure;
-                assert!(
                     super::super::recovery_hydration::validate_recovery_native_markers(
-                        &missing, &context,
+                        &node, &context,
                     )
-                    .is_err(),
-                    "hydration must independently reject omitted authored lifetime markers"
-                );
-            }
-        } else {
-            let TurnResult::Bind {
-                bound, compiled, ..
-            } = measured(
-                resident,
-                images,
-                scenario,
-                &format!("{label}.native_materialize"),
-                Some(index),
-                |_| consume_cell_program_item(reservation.clone()).unwrap(),
-            )
-            else {
-                panic!("checked native item did not return its binding recipe")
-            };
-            if matches!(
-                authority_checks,
-                AuthorityChecks::TypedEntryRefusalBranches(_)
-            ) && index == 1
-            {
-                assert_checked_capture_refusals(&compiled, &reservation);
-            }
-
-            if item.kind() == CheckedItemKind::Bind {
-                assert_eq!(
-                    bound
-                        .iter()
-                        .map(|binder| binder.name.as_str())
-                        .collect::<Vec<_>>(),
-                    item.binders()
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                    "native recipe must preserve the complete checked binder inventory"
-                );
-                measured(
-                    resident,
-                    images,
-                    scenario,
-                    &format!("{label}.native_bind"),
-                    Some(index),
-                    |resident| {
-                        if bound.is_empty() {
-                            tidepool_testing::with_settlement(|settlement| {
-                                resident.run_with_sites(label, compiled.code(), settlement)
-                            })
-                        } else if bound.len() == 1 {
-                            tidepool_testing::with_settlement(|settlement| {
-                                resident.run_bind_with_sites(
-                                    &bound[0].name,
-                                    compiled.code(),
-                                    &bound[0],
-                                    reservation.generation(),
-                                    settlement,
-                                )
-                            })
-                        } else {
-                            tidepool_testing::with_settlement(|settlement| {
-                                resident.run_projected_bind_with_sites(
-                                    label,
-                                    compiled.code(),
-                                    &bound,
-                                    reservation.generation(),
-                                    settlement,
-                                )
-                            })
-                        }
-                    },
-                )?;
-            } else {
-                let observed = measured(
-                    resident,
-                    images,
-                    scenario,
-                    &format!("{label}.native_observe"),
-                    Some(index),
-                    |resident| {
-                        tidepool_testing::with_settlement(|settlement| {
-                            resident.run_observation_with_sites(
-                                compiled.code(),
-                                &bound[0],
-                                reservation.generation(),
-                                false,
-                                settlement,
-                            )
-                        })
-                    },
-                );
-                assert_eq!(
-                    tidepool_extract_cmd::extract_spawn_count(),
-                    submissions_before_effects
-                );
-                let outcome = observed?;
-                if let Some(expected) = expected_observation {
+                    .unwrap();
+                    let mut missing = (*node).clone();
+                    missing.live_dependencies.clear();
+                    missing.state =
+                        crate::session::recovery::RecoveryNodeState::ExactArtifactClosure;
                     assert!(
-                        matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
-                        "guarded integer {expected} capture did not complete: {outcome:?}"
+                        super::super::recovery_hydration::validate_recovery_native_markers(
+                            &missing, &context,
+                        )
+                        .is_err(),
+                        "hydration must independently reject omitted authored lifetime markers"
                     );
-                    assert_eq!(bound.len(), 1, "one exact native observation binder");
-                    let installed = resident
-                        .current_binding_in(execution.private_scope(), &bound[0].name)
-                        .expect("completed capture installs its original checked binder");
-                    assert_eq!(installed.0.raw(), bound[0].var_id);
-                    expected_observation_seen = true;
+                }
+            } else {
+                let TurnResult::Bind {
+                    bound, compiled, ..
+                } = measured(
+                    resident,
+                    images,
+                    scenario,
+                    &format!("{label}.native_materialize"),
+                    Some(index),
+                    |_| consume_cell_program_item(reservation.clone()).unwrap(),
+                )
+                else {
+                    panic!("checked native item did not return its binding recipe")
+                };
+                if matches!(
+                    authority_checks,
+                    AuthorityChecks::TypedEntryRefusalBranches(_)
+                ) && index == 1
+                {
+                    assert_checked_capture_refusals(&compiled, &reservation);
+                }
+
+                if item.kind() == CheckedItemKind::Bind {
+                    assert_eq!(
+                        bound
+                            .iter()
+                            .map(|binder| binder.name.as_str())
+                            .collect::<Vec<_>>(),
+                        item.binders()
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        "native recipe must preserve the complete checked binder inventory"
+                    );
+                    measured(
+                        resident,
+                        images,
+                        scenario,
+                        &format!("{label}.native_bind"),
+                        Some(index),
+                        |resident| {
+                            if bound.is_empty() {
+                                source_action_with_original(
+                                    resident,
+                                    original.clone(),
+                                    |resident, settlement| {
+                                        resident.run_with_sites(label, compiled.code(), settlement)
+                                    },
+                                )
+                            } else if bound.len() == 1 {
+                                source_action_with_original(
+                                    resident,
+                                    original.clone(),
+                                    |resident, settlement| {
+                                        resident.run_bind_with_sites(
+                                            &bound[0].name,
+                                            compiled.code(),
+                                            &bound[0],
+                                            reservation.generation(),
+                                            settlement,
+                                        )
+                                    },
+                                )
+                            } else {
+                                source_action_with_original(
+                                    resident,
+                                    original.clone(),
+                                    |resident, settlement| {
+                                        resident.run_projected_bind_with_sites(
+                                            label,
+                                            compiled.code(),
+                                            &bound,
+                                            reservation.generation(),
+                                            settlement,
+                                        )
+                                    },
+                                )
+                            }
+                        },
+                    )?;
+                } else {
+                    let observed = measured(
+                        resident,
+                        images,
+                        scenario,
+                        &format!("{label}.native_observe"),
+                        Some(index),
+                        |resident| {
+                            source_action_with_original(
+                                resident,
+                                original.clone(),
+                                |resident, settlement| {
+                                    resident.run_observation_with_sites(
+                                        compiled.code(),
+                                        &bound[0],
+                                        reservation.generation(),
+                                        false,
+                                        settlement,
+                                    )
+                                },
+                            )
+                        },
+                    );
+                    assert_eq!(
+                        tidepool_extract_cmd::extract_spawn_count(),
+                        submissions_before_effects
+                    );
+                    let outcome = observed?;
+                    if let Some(expected) = expected_observation {
+                        assert!(
+                            matches!(outcome, crate::session::ResidentOutcome::Completed { .. }),
+                            "guarded integer {expected} capture did not complete: {outcome:?}"
+                        );
+                        assert_eq!(bound.len(), 1, "one exact native observation binder");
+                        let installed = resident
+                            .current_binding_in(execution.private_scope(), &bound[0].name)
+                            .expect("completed capture installs its original checked binder");
+                        assert_eq!(installed.0.raw(), bound[0].var_id);
+                        expected_observation_seen = true;
+                    }
                 }
             }
+            assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                submissions_before_effects,
+                "native execution must consume the immutable cell without compiler requests"
+            );
         }
-        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+        if expected_observation.is_some() {
+            assert!(
+                expected_observation_seen,
+                "expected source to execute through the native observation path"
+            );
+        }
+        let work = checked.checked_item(0).unwrap().input_work();
+        eprintln!(
+            "protected-scale {}",
+            serde_json::json!({
+                "schema": 1, "prefix": scenario.0, "baseline": scenario.1, "phase": format!("{label}.checked_input_work"),
+                "initial_files_written": work.initial_files_written,
+                "initial_bytes_written_and_hashed": work.initial_bytes_written_and_hashed,
+                "output_files_hashed": work.output_files_hashed, "output_bytes_hashed": work.output_bytes_hashed,
+            })
+        );
+        let private_winners = resident
+            .public_visibility_snapshot_in(execution.private_scope())
+            .unwrap()
+            .bindings;
+        let intent = measured(
+            resident,
+            images,
+            scenario,
+            &format!("{label}.freeze"),
+            None,
+            |resident| resident.freeze_private_execution(&execution).unwrap(),
+        );
+        for id in intent.native_write_ids() {
+            let (name, _) = private_winners
+                .iter()
+                .find(|(_, winner)| winner == id)
+                .expect("sealed native write must be a final private winner");
+            expected_public_winners.insert(name.clone(), *id);
+        }
+        let publication =
+            source_action_with_original(resident, original.clone(), |resident, _| {
+                match publication_target {
+                    ScalePublication::Ephemeral => {
+                        resident.restage_ephemeral_execution_publication(intent)
+                    }
+                    ScalePublication::Durable { owner, .. } => {
+                        resident.restage_execution_publication(owner.clone(), intent)
+                    }
+                }
+            })?;
+        let submissions_before_publication = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            submissions_before_publication, submissions_before_effects,
+            "freezing and restaging completed native execution must issue no compiler requests"
+        );
+        let mut certification_requests = 0;
+        let (ticket, certification_ns, stage_ns, certified_generation) = match publication {
+            ExecutionPublication::Bindings(base) => {
+                let (ticket, stage_ns) = measured_duration(
+                    resident,
+                    images,
+                    scenario,
+                    &format!("{label}.metadata_stage_blocks"),
+                    None,
+                    |_| base.stage().unwrap(),
+                );
+                (ticket, None, stage_ns, None)
+            }
+            ExecutionPublication::Declarations(base) => {
+                let reserved = base.reserved_generation();
+                let (certified, certification_ns) = measured_duration(
+                    resident,
+                    images,
+                    scenario,
+                    &format!("{label}.declaration_certification"),
+                    None,
+                    |resident| {
+                        let span = tracing::info_span!(
+                            "publication_declaration_certification",
+                            reserved_generation = reserved.0,
+                        );
+                        let _entered = span.enter();
+                        source_action_with_original(resident, original.clone(), |_, settlement| {
+                            base.certify(settlement)
+                        })
+                        .unwrap()
+                    },
+                );
+                let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
+                    panic!("actual original declaration/prefix publication was rejected")
+                };
+                assert_eq!(accepted.reserved_generation(), reserved);
+                certification_requests = tidepool_extract_cmd::extract_spawn_count()
+                    .checked_sub(submissions_before_publication)
+                    .unwrap();
+                assert!(
+                    certification_requests <= 1,
+                    "certification reuses an issued projection or issues one source-less join"
+                );
+                let (ticket, stage_ns) = measured_duration(
+                    resident,
+                    images,
+                    scenario,
+                    &format!("{label}.metadata_stage_blocks"),
+                    None,
+                    |_| accepted.stage().unwrap(),
+                );
+                (ticket, Some(certification_ns), stage_ns, Some(reserved))
+            }
+        };
+        let recovery_work = ticket.recovery_work();
+        let (_, publication_ns) = measured_duration(
+            resident,
+            images,
+            scenario,
+            &format!("{label}.publication_transaction_commit"),
+            None,
+            |resident| {
+                let result = resident
+                    .attempt_public_manifest(ticket, &PublicationDecision::new())
+                    .map(crate::session::settled_manifest_attempt)
+                    .unwrap();
+                assert!(matches!(
+                    (publication_target, result),
+                    (ScalePublication::Ephemeral, PublicManifestCommit::Ephemeral)
+                        | (
+                            ScalePublication::Durable { .. },
+                            PublicManifestCommit::Durable
+                        )
+                ));
+            },
+        );
         assert_eq!(
             tidepool_extract_cmd::extract_spawn_count(),
-            submissions_before_effects,
-            "native execution must consume the immutable cell without compiler requests"
+            submissions_before_publication + certification_requests,
+            "staging and publishing an accepted interface must issue no compiler requests"
         );
-    }
-    if expected_observation.is_some() {
-        assert!(
-            expected_observation_seen,
-            "expected source to execute through the native observation path"
-        );
-    }
-    let work = checked.checked_item(0).unwrap().input_work();
-    eprintln!(
-        "protected-scale {}",
-        serde_json::json!({
-            "schema": 1, "prefix": scenario.0, "baseline": scenario.1, "phase": format!("{label}.checked_input_work"),
-            "initial_files_written": work.initial_files_written,
-            "initial_bytes_written_and_hashed": work.initial_bytes_written_and_hashed,
-            "output_files_hashed": work.output_files_hashed, "output_bytes_hashed": work.output_bytes_hashed,
-        })
-    );
-    let private_winners = resident
-        .public_visibility_snapshot_in(execution.private_scope())
-        .unwrap()
-        .bindings;
-    let intent = measured(
-        resident,
-        images,
-        scenario,
-        &format!("{label}.freeze"),
-        None,
-        |resident| resident.freeze_private_execution(&execution).unwrap(),
-    );
-    for id in intent.native_write_ids() {
-        let (name, _) = private_winners
-            .iter()
-            .find(|(_, winner)| winner == id)
-            .expect("sealed native write must be a final private winner");
-        expected_public_winners.insert(name.clone(), *id);
-    }
-    let publication = match publication_target {
-        ScalePublication::Ephemeral => resident.restage_ephemeral_execution_publication(intent),
-        ScalePublication::Durable { owner, .. } => {
-            resident.restage_execution_publication(owner.clone(), intent)
+        if let Some(generation) = certified_generation {
+            assert_eq!(
+                resident
+                    .public_visibility_snapshot_in(public)
+                    .unwrap()
+                    .declaration_tip,
+                generation,
+                "publication installs the accepted join reservation"
+            );
         }
-    }
-    .unwrap();
-    let submissions_before_publication = tidepool_extract_cmd::extract_spawn_count();
-    assert_eq!(
-        submissions_before_publication, submissions_before_effects,
-        "freezing and restaging completed native execution must issue no compiler requests"
-    );
-    let mut certification_requests = 0;
-    let (ticket, certification_ns, stage_ns, certified_generation) = match publication {
-        ExecutionPublication::Bindings(base) => {
-            let (ticket, stage_ns) = measured_duration(
-                resident,
-                images,
-                scenario,
-                &format!("{label}.metadata_stage_blocks"),
-                None,
-                |_| base.stage().unwrap(),
-            );
-            (ticket, None, stage_ns, None)
-        }
-        ExecutionPublication::Declarations(base) => {
-            let reserved = base.reserved_generation();
-            let (certified, certification_ns) = measured_duration(
-                resident,
-                images,
-                scenario,
-                &format!("{label}.declaration_certification"),
-                None,
-                |_| {
-                    let span = tracing::info_span!(
-                        "publication_declaration_certification",
-                        reserved_generation = reserved.0,
-                    );
-                    let _entered = span.enter();
-                    tidepool_testing::with_settlement(|settlement| base.certify(settlement))
-                        .unwrap()
-                },
-            );
-            let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
-                panic!("actual original declaration/prefix publication was rejected")
-            };
-            assert_eq!(accepted.reserved_generation(), reserved);
-            certification_requests = tidepool_extract_cmd::extract_spawn_count()
-                .checked_sub(submissions_before_publication)
-                .unwrap();
-            assert!(
-                certification_requests <= 1,
-                "certification reuses an issued projection or issues one source-less join"
-            );
-            let (ticket, stage_ns) = measured_duration(
-                resident,
-                images,
-                scenario,
-                &format!("{label}.metadata_stage_blocks"),
-                None,
-                |_| accepted.stage().unwrap(),
-            );
-            (ticket, Some(certification_ns), stage_ns, Some(reserved))
-        }
-    };
-    let recovery_work = ticket.recovery_work();
-    let (_, publication_ns) = measured_duration(
-        resident,
-        images,
-        scenario,
-        &format!("{label}.publication_transaction_commit"),
-        None,
-        |resident| {
-            let result = resident
-                .attempt_public_manifest(ticket, &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap();
-            assert!(matches!(
-                (publication_target, result),
-                (ScalePublication::Ephemeral, PublicManifestCommit::Ephemeral)
-                    | (
-                        ScalePublication::Durable { .. },
-                        PublicManifestCommit::Durable
-                    )
-            ));
-        },
-    );
-    assert_eq!(
-        tidepool_extract_cmd::extract_spawn_count(),
-        submissions_before_publication + certification_requests,
-        "staging and publishing an accepted interface must issue no compiler requests"
-    );
-    if let Some(generation) = certified_generation {
         assert_eq!(
             resident
                 .public_visibility_snapshot_in(public)
                 .unwrap()
-                .declaration_tip,
-            generation,
-            "publication installs the accepted join reservation"
+                .bindings,
+            expected_public_winners.into_iter().collect::<Vec<_>>(),
+            "publication must preserve prior public winners and publish sealed native writes"
         );
-    }
-    assert_eq!(
-        resident
-            .public_visibility_snapshot_in(public)
-            .unwrap()
-            .bindings,
-        expected_public_winners.into_iter().collect::<Vec<_>>(),
-        "publication must preserve prior public winners and publish sealed native writes"
-    );
-    // Retained snapshots and diagnostic reads do not belong to cell latency.
-    let elapsed = cell_started.elapsed();
-    let inventory = resident.compile_view_in(public).and_then(|view| {
-        view.exact_declaration_context()
-            .map(|context| context.artifact_view().inventory().metrics())
-    });
-    if let ScalePublication::Durable { recovery, .. } = publication_target {
-        let state = recovery.state();
-        let snapshot = recovery
-            .store
-            .path()
-            .with_file_name(format!("domain-{label}.json"));
-        let diagnostic = serde_json::to_vec(&state).unwrap();
-        std::fs::write(&snapshot, &diagnostic).unwrap();
+        // Retained snapshots and diagnostic reads do not belong to cell latency.
+        let elapsed = cell_started.elapsed();
+        let inventory = resident.compile_view_in(public).and_then(|view| {
+            view.exact_declaration_context()
+                .map(|context| context.artifact_view().inventory().metrics())
+        });
+        if let ScalePublication::Durable { recovery, .. } = publication_target {
+            let state = recovery.state();
+            let snapshot = recovery
+                .store
+                .path()
+                .with_file_name(format!("domain-{label}.json"));
+            let diagnostic = serde_json::to_vec(&state).unwrap();
+            std::fs::write(&snapshot, &diagnostic).unwrap();
+            eprintln!(
+                "durable-performance {}",
+                serde_json::json!({
+                    "schema": 2, "composition": "durable-publication", "cell": label,
+                    "prefix": scenario.0, "baseline": scenario.1, "completed": true,
+                    "elapsed_ns": elapsed.as_nanos(), "certification_ns": certification_ns,
+                    "metadata_stage_blocks_ns": stage_ns,
+                    "publication_transaction_commit_ns": publication_ns,
+                    "domain_state_path": snapshot, "domain_state_bytes": diagnostic.len(),
+                    "domain_root": state.snapshot_root.cid().to_string(),
+                    "domain_revision": state.revision.0,
+                    "domain_content_revision": state.content_revision.0,
+                    "allocation_ceiling": state.allocation_ceiling.0,
+                    "changed_entries": recovery_work.changed_entries,
+                    "staged_blocks": recovery_work.staged_blocks,
+                    "staged_bytes": recovery_work.staged_bytes,
+                    "offered_bytes": recovery_work.offered_bytes,
+                    "serialized_value_bytes": recovery_work.serialized_bytes,
+                    "cid_validation_bytes": recovery_work.cid_validation_bytes,
+                    "counter_scope": "immutable-metadata-materializers",
+                    "artifact_inventory": inventory,
+                    "inventory_counter_scope": "shared-artifact-inventory-owner",
+                })
+            );
+        }
         eprintln!(
-            "durable-performance {}",
+            "protected-scale {}",
             serde_json::json!({
-                "schema": 2, "composition": "durable-publication", "cell": label,
-                "prefix": scenario.0, "baseline": scenario.1, "completed": true,
-                "elapsed_ns": elapsed.as_nanos(), "certification_ns": certification_ns,
-                "metadata_stage_blocks_ns": stage_ns,
-                "publication_transaction_commit_ns": publication_ns,
-                "domain_state_path": snapshot, "domain_state_bytes": diagnostic.len(),
-                "domain_root": state.snapshot_root.cid().to_string(),
-                "domain_revision": state.revision.0,
-                "domain_content_revision": state.content_revision.0,
-                "allocation_ceiling": state.allocation_ceiling.0,
-                "changed_entries": recovery_work.changed_entries,
-                "staged_blocks": recovery_work.staged_blocks,
-                "staged_bytes": recovery_work.staged_bytes,
-                "offered_bytes": recovery_work.offered_bytes,
-                "serialized_value_bytes": recovery_work.serialized_bytes,
-                "cid_validation_bytes": recovery_work.cid_validation_bytes,
-                "counter_scope": "immutable-metadata-materializers",
-                "artifact_inventory": inventory,
-                "inventory_counter_scope": "shared-artifact-inventory-owner",
+                "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
+                "phase": format!("{label}.artifact_inventory"), "inventory": inventory,
             })
         );
-    }
-    eprintln!(
-        "protected-scale {}",
-        serde_json::json!({
-            "schema": 1, "prefix": scenario.0, "baseline": scenario.1,
-            "phase": format!("{label}.artifact_inventory"), "inventory": inventory,
-        })
-    );
-    Ok((elapsed, native_targets))
+        Ok((elapsed, native_targets))
+    })();
+    resident.set_run_context(previous_context).unwrap();
+    resident.retire_scope(execution.private_scope());
+    result
 }
 
 fn execute_growth_cell(
@@ -2299,6 +2356,7 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let observer = durable.then(CellRequestObserver::default);
@@ -2536,6 +2594,7 @@ fn guarded_integer_capture_rejects_wrong_native_result() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let before = resident
@@ -2619,6 +2678,7 @@ fn resident_capture_cells(count: usize, durable: bool) {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let observer = CellRequestObserver::default();
@@ -2776,6 +2836,7 @@ fn simple_cell_vertical(
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     execute_cell_with_authority_checks(
@@ -2830,6 +2891,7 @@ fn generic_program_admission_preserves_delayed_capture_prefix() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     try_execute_cell_with_template_imports_expectation_observed(
@@ -2941,6 +3003,7 @@ fn following_declaration_retains_original_native_binding_inventory() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     execute_cell(
@@ -3072,6 +3135,7 @@ fn following_declaration_publishes_current_source_selected_originals() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     try_execute_cell_with_template_imports(
@@ -3178,6 +3242,7 @@ fn same_cell_authored_import_retains_completed_quasiquote_support() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     execute_cell(
@@ -3262,6 +3327,7 @@ fn following_cells_reprove_template_imports_of_retained_rich_originals() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let imports = SourceImports::from_specs(["qualified Tidepool.Aeson as Aeson"]);
@@ -3341,6 +3407,7 @@ fn same_cell_private_support_survives_late_type_error_retry() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let imports = SourceImports::from_specs(["QuotedTemplateSupport"]);
@@ -3415,6 +3482,7 @@ fn following_cells_preserve_quoted_template_original_without_lexical_promotion()
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     execute_cell(
@@ -3639,6 +3707,7 @@ fn private_authored_projection_retains_exact_live_binding_before_publication() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let publication = ScalePublication::Durable {
@@ -3720,6 +3789,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     } else {
         persistent.mint_scope(ScopeId::ROOT).unwrap()
     };
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let publication = ScalePublication::Durable {
@@ -3933,6 +4003,7 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
         let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
         persistent.set_image_registry(images.clone());
         let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+        let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
         let mut resident =
             ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
         execute_cell(
@@ -4070,6 +4141,7 @@ fn checked_cell_retained_imports_preserve_value_callable_and_generation() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     std::fs::write(
@@ -4295,6 +4367,7 @@ fn later_cells_retain_more_than_128_distinct_value_owners() {
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let _public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
     let mut resident =
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     for (start, end, label) in [(0, 125, "first_125_owners"), (125, 129, "cross_128_owners")] {

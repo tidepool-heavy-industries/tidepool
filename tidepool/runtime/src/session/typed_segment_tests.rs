@@ -2546,6 +2546,7 @@ mod finite_component_controls {
     struct FiniteControlSession {
         resident: ProbeSession,
         public: ScopeId,
+        _public_source: Arc<crate::session::RuntimeLexicalScopeLease>,
         trace: Arc<CaptureMutex<Vec<i64>>>,
         effects: TestEffectSurface,
         images: Arc<ImageRegistry>,
@@ -2580,6 +2581,7 @@ mod finite_component_controls {
             let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
             persistent.set_image_registry(images.clone());
             let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+            let public_source = persistent.adopt_initial_notebook_scope(public).unwrap();
             let trace = Arc::new(CaptureMutex::new(Vec::new()));
             let compiler_counts = Arc::new(CaptureMutex::new(Vec::new()));
             let cancel_after_record = Arc::new(CaptureMutex::new(None));
@@ -2596,6 +2598,7 @@ mod finite_component_controls {
             Self {
                 resident,
                 public,
+                _public_source: public_source,
                 trace,
                 effects,
                 images,
