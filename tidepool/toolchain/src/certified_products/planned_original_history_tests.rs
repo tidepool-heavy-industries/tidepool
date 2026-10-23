@@ -379,7 +379,7 @@ fn issue_planned_original(
     include: &[PathBuf],
     source_tag: u8,
     body_tag: u8,
-) -> PendingOriginal {
+) -> IssuedOriginal {
     issue_planned_original_with_source_value(
         root, module, producer, include, source_tag, body_tag, 3,
     )

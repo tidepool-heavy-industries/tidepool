@@ -3,9 +3,9 @@ use super::*;
 use crate::artifact_inventory::{ArtifactEntry, CanonicalProducerIdentity, NativeArtifactDemand};
 use crate::cache::{DependencyEvidence, ModuleEvidence, SourceEvidence};
 use crate::certified_products::{
-    AcceptedGlobal, AcceptedGroup, CertifiedModuleReceipt, CertifiedProducts, CertifiedReceipt,
-    CertifiedSourceSelection, PackageInterfaceWitness, PendingImportOwner, ProductOrigin,
-    ReceiptImportOwner, WorkerExecutionSource,
+    AcceptedGlobal, AcceptedGroup, CapturedProducts, CertifiedModuleReceipt, CertifiedProducts,
+    CertifiedReceipt, CertifiedSourceSelection, PackageInterfaceWitness, PendingImportOwner,
+    ProductOrigin, ReceiptImportOwner, WorkerExecutionSource,
 };
 use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
 use crate::recovery_artifacts::PackageInterfaceValidation;
@@ -63,7 +63,7 @@ fn literal() -> SymbolIdentity {
 fn issue_original(
     root: &Path,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
-) -> CertifiedProducts {
+) -> CapturedProducts {
     issue_original_with_extra_group(root, packages, None)
 }
 
@@ -71,7 +71,7 @@ fn issue_original_with_extra_group(
     root: &Path,
     packages: &BTreeMap<(String, String), PackageInterfaceWitness>,
     extra_package: Option<SymbolIdentity>,
-) -> CertifiedProducts {
+) -> CapturedProducts {
     let source = format!("module {MODULE} where\n");
     let input = root.join(format!("{MODULE}.hs"));
     std::fs::write(&input, &source).unwrap();
@@ -210,7 +210,7 @@ fn issue_original_with_extra_group(
         finalization,
         source_recipe: WorkerExecutionSource::Ordinary,
     };
-    let mut certified = certified_products::certify_products(
+    let certified = certified_products::certify_products(
         None,
         &packet,
         &parsed,
@@ -229,12 +229,11 @@ fn issue_original_with_extra_group(
     .unwrap();
     crate::declaration_context::issue_certified_product_native_availability(
         CanonicalProducerIdentity::from_producer_bytes(&PRODUCER).sha256(),
-        &mut certified,
+        certified,
         None,
         &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
     )
-    .unwrap();
-    certified
+    .unwrap()
 }
 
 fn select_original_groups(
@@ -261,11 +260,11 @@ fn select_original_groups(
 
 fn selected_package_closure(
     current: &BTreeMap<(String, String), PackageInterfaceWitness>,
-    certified: &CertifiedProducts,
+    certified: &CapturedProducts,
     groups: &[certified_products::PendingCertifiedGroup],
     validation: &mut PackageInterfaceValidation,
 ) -> Result<BTreeMap<(String, String), PackageInterfaceWitness>, CompileError> {
-    let catalog = package_availability_with_validation(current, certified, validation)?;
+    let catalog = package_availability_with_validation(current, certified.data(), validation)?;
     catalog.select(groups, &[], &validation.inventory)
 }
 
@@ -342,10 +341,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             binder: reader(),
         },
     }];
-    let physical = issued
-        .compiler_inputs()
-        .expect("completed products retain their actual physical inputs")
-        .as_ref();
+    let physical = issued.compiler_inputs().as_ref();
     assert!(physical
         .issued_artifacts()
         .selected_native_groups()
@@ -384,7 +380,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .issued_artifacts()
         .inventory()
         .select_native_target(
-            issued.physical_cohort().unwrap(),
+            issued.physical_cohort(),
             observed,
             None,
             None,
@@ -881,7 +877,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
             ..testing::identity("External.Unselected", "literal")
         }),
     );
-    assert_eq!(subset.groups.len(), 2);
+    assert_eq!(subset.data().groups.len(), 2);
     let selected_validation = &mut PackageInterfaceValidation::default();
     let selected_groups = select_original_groups(subset.data(), selected_validation).unwrap();
     let all_groups = selected_package_closure(

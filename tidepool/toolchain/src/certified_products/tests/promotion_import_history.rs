@@ -320,7 +320,7 @@ fn certify_promotion(
     producer: &[u8; 32],
     include: &[PathBuf],
     root: &Path,
-) -> CertifiedProducts {
+) -> CapturedProducts {
     let projection = context.compiler_input_projection().interface_only();
     let context = Arc::new(
         context
@@ -377,7 +377,7 @@ fn certify_promotion(
     for module in &mut packet.modules {
         module.product_sha256 = sha(product_bytes);
     }
-    let mut products = certify_products(
+    let products = certify_products(
         None,
         &packet,
         parsed,
@@ -401,12 +401,11 @@ fn certify_promotion(
     .unwrap();
     crate::declaration_context::issue_certified_product_native_availability(
         CanonicalProducerIdentity::from_producer_bytes(producer).sha256(),
-        &mut products,
+        products,
         Some(request.compiler_inputs().artifacts()),
         &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
     )
-    .unwrap();
-    products
+    .unwrap()
 }
 
 #[test]
@@ -451,7 +450,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         targets: BTreeMap::new(),
         packages: BTreeMap::new(),
     };
-    let mut initial = certify_products(
+    let initial = certify_products(
         None,
         &packet,
         &parsed,
@@ -486,14 +485,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
     assert!(initial_a.original_native().groups.iter().all(|g| {
         matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
-    assert!(initial.compiler_inputs().is_none());
-    let initial_output = crate::declaration_context::issue_certified_product_native_availability(
+    let initial = crate::declaration_context::issue_certified_product_native_availability(
         canonical_producer,
-        &mut initial,
+        initial,
         None,
         &mut PackageInterfaceValidation::with_inventory(Arc::clone(parsed.operation())),
     )
     .unwrap();
+    let initial_output = initial.captured_stage().output();
     assert!(initial_output
         .issued_artifacts()
         .selected_native_groups()
@@ -760,7 +759,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
     )
     .is_err());
-    let mut certified = certify_products(
+    let certified = certify_products(
         None,
         &promoted_packet,
         &promoted,
@@ -782,13 +781,14 @@ fn check_retained_core_promotion_history(item_count: usize) {
         None,
     )
     .unwrap();
-    let output = crate::declaration_context::issue_certified_product_native_availability(
+    let certified = crate::declaration_context::issue_certified_product_native_availability(
         canonical_producer,
-        &mut certified,
+        certified,
         Some(request.compiler_inputs().artifacts()),
         &mut PackageInterfaceValidation::with_inventory(Arc::clone(promoted.operation())),
     )
     .unwrap();
+    let output = certified.captured_stage().output();
     let selected_owners = certified
         .source_selection()
         .receipt_native_body_owners()
@@ -803,11 +803,13 @@ fn check_retained_core_promotion_history(item_count: usize) {
         BTreeSet::from([A, B])
     );
     let current_a = certified
+        .data()
         .recovery_products
         .iter()
         .find(|p| selected_owners.contains(p.owner()) && p.owner().module == A)
         .unwrap();
     let current_b = certified
+        .data()
         .recovery_products
         .iter()
         .find(|p| selected_owners.contains(p.owner()) && p.owner().module == B)
@@ -1084,7 +1086,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .issued_artifacts()
             .inventory()
             .select_native_target(
-                selected.physical_cohort().unwrap(),
+                selected.physical_cohort(),
                 observed,
                 None,
                 None,
@@ -1193,6 +1195,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     )
     .unwrap();
     let independent_a = independent_result
+        .data()
         .recovery_products
         .iter()
         .find(|product| product.owner() == current_a.owner())
@@ -1437,6 +1440,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     owner_history.insert(current_b.owner().clone());
     assert_eq!(
         certified
+            .data()
             .recovery_products
             .iter()
             .map(|product| product.owner().clone())
@@ -1530,11 +1534,13 @@ fn check_retained_core_promotion_history(item_count: usize) {
             .collect::<BTreeSet<_>>();
         assert_eq!(selected.len(), 2);
         let current_a = next
+            .data()
             .recovery_products
             .iter()
             .find(|p| selected.contains(p.owner()) && p.owner().module == A)
             .unwrap();
         let current_b = next
+            .data()
             .recovery_products
             .iter()
             .find(|p| selected.contains(p.owner()) && p.owner().module == B)
@@ -1593,9 +1599,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         history_context = history_context
             .recover_fixture_projection(projection)
             .unwrap();
-        let output = next
-            .compiler_inputs()
-            .expect("promotion helper retains its actual physical issuer");
+        let output = next.compiler_inputs();
         let completed =
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(output)
                 .unwrap();
