@@ -221,7 +221,7 @@ pub fn certify_recovered_declaration_tip_in_context(
             pending.extend(node.imports.iter().cloned());
         }
     }
-    let source_surface = AdmittedDeclarationSurface {
+    let mut source_surface = AdmittedDeclarationSurface {
         roots,
         lexical: context
             .lexical_graph()
@@ -239,7 +239,10 @@ pub fn certify_recovered_declaration_tip_in_context(
                     .then(|| owner.clone())
             })
             .collect(),
+        source_bindings: Default::default(),
     };
+    let lexical = source_surface.lexical_graph().to_vec();
+    source_surface.retain_source_bindings(context.compiler_source_support(), &lexical)?;
     Ok(RecoveredDeclarationTip {
         origin,
         context,
