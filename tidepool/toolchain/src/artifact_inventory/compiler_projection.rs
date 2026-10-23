@@ -6087,7 +6087,20 @@ impl CompilerSourceSupport {
     ) -> Result<Self, CompileError> {
         let incoming = interfaces
             .support_for_owners(interfaces.iter().map(|(owner, _)| owner.clone()).collect())?;
-        self.merge(&incoming)
+        let inputs = ArtifactView::merge_admitted_compiler_interfaces(self, &incoming)?;
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.extend_interfaces",
+            "retain_selected_rows",
+        );
+        Self::complete_resolved(
+            inputs,
+            self.native_offers.iter().cloned(),
+            self.native_availability.clone(),
+            Some(&self.native_fact_owner),
+            self.native_closures.clone(),
+            &mut timing,
+        )?
+        .close()
     }
 
     #[tracing::instrument(

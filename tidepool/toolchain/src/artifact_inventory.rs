@@ -8876,43 +8876,68 @@ impl ArtifactView {
         left: &CompilerSourceSupport,
         right: &CompilerSourceSupport,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
-        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::Closed)
+        Self::merge_acquired_compiler_rows(
+            left,
+            right,
+            CompilerInputValidation::Closed,
+            CompilerNativeDemand::SourceSelections {
+                left: Some(left.input_decisions()),
+                right: Some(right.input_decisions()),
+            },
+        )
     }
 
     fn merge_admitted_output_fragments(
         left: &CompilerSourceSupport,
         right: &CompilerSourceSupport,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
-        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::FragmentPair)
+        Self::merge_acquired_compiler_rows(
+            left,
+            right,
+            CompilerInputValidation::FragmentPair,
+            CompilerNativeDemand::SourceSelections {
+                left: Some(left.input_decisions()),
+                right: Some(right.input_decisions()),
+            },
+        )
+    }
+
+    fn merge_admitted_compiler_interfaces(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        Self::merge_acquired_compiler_rows(
+            left,
+            right,
+            CompilerInputValidation::Closed,
+            CompilerNativeDemand::ExtendInterfaces,
+        )
     }
 
     fn merge_acquired_compiler_rows(
         left: &CompilerSourceSupport,
         right: &CompilerSourceSupport,
         validation: CompilerInputValidation,
+        demand: CompilerNativeDemand<'_>,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
         let mut selected = left.fork_selected_rows();
-        let (artifacts, projection, input_decisions) =
-            left.artifacts().merge_compiler_inputs_inner(
-                left.projection(),
-                right.artifacts(),
-                right.projection(),
-                CompilerNativeDemand::SourceSelections {
-                    left: Some(left.input_decisions()),
-                    right: Some(right.input_decisions()),
-                },
-                validation,
-                Some(AdmittedCompilerRowMerge {
-                    receiving: left.compiler_roles(),
-                    incoming: right.compiler_roles(),
-                    selected: &mut selected,
-                }),
-            )?;
+        let (artifacts, projection, _) = left.artifacts().merge_compiler_inputs_inner(
+            left.projection(),
+            right.artifacts(),
+            right.projection(),
+            demand,
+            validation,
+            Some(AdmittedCompilerRowMerge {
+                receiving: left.compiler_roles(),
+                incoming: right.compiler_roles(),
+                selected: &mut selected,
+            }),
+        )?;
         Ok(compiler_projection::ResolvedCompilerInputs {
             artifacts,
             projection,
             selected,
-            input_decisions,
+            input_decisions: left.input_decisions().clone(),
         })
     }
 
