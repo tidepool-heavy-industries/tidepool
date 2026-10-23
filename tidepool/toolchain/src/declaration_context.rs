@@ -282,6 +282,55 @@ impl SelectedTypeInterfaces {
     }
 }
 
+impl SelectedTypeInterfaces {
+    /// The actual checked Val interface and its sealed TYPE requirements,
+    /// without source names, original bodies, or executable group authority.
+    pub(crate) fn from_checked_value(
+        value: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
+        let certified = value.certified_interface();
+        let interface = certified.interface();
+        let producer = interface.toolchain_identity_sha256();
+        if producer == [0; 32] || value.world_issuer().0 != producer {
+            return Err(failure(
+                "checked value TYPE row has another compiler producer",
+            ));
+        }
+        let selected = value.compiler_source_support().selected_interfaces()?;
+        let owner = identity(interface.unit(), interface.module());
+        let row = selected
+            .get(&owner)
+            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
+        if row.descriptor.id != certified.artifact_id()
+            || row.descriptor.producer_sha256 != producer
+        {
+            return Err(failure(
+                "checked value TYPE row differs from its certified interface",
+            ));
+        }
+        Ok(SelectedTypeInterfaces {
+            support: selected.type_interfaces_for_owners(vec![owner])?,
+            producer,
+            identity: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn from_checked_value_signature(
+        value: &crate::checked_cell::CheckedValueArtifact,
+        signature: &crate::checked_cell::ExactCheckedSignature,
+    ) -> Result<SelectedTypeInterfaces, CompileError> {
+        SelectedTypeInterfaces::from_support(
+            value.compiler_source_support(),
+            value
+                .certified_interface()
+                .interface()
+                .toolchain_identity_sha256(),
+            &[],
+            &[signature],
+        )
+    }
+}
+
 /// Requested type evidence and execution custody from one validated compiler output.
 /// The borrowed source cannot outlive its issuing output proof.
 pub struct ValidatedOriginalSource<'a> {
@@ -14511,53 +14560,6 @@ impl ExactDeclarationContext {
             self.owner.facts.producer,
             witnesses,
             signatures,
-        )
-    }
-
-    /// The actual checked Val interface and its sealed TYPE requirements,
-    /// without source names, original bodies, or executable group authority.
-    pub(crate) fn checked_value_interface_context(
-        value: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<SelectedTypeInterfaces, CompileError> {
-        let certified = value.certified_interface();
-        let interface = certified.interface();
-        let producer = interface.toolchain_identity_sha256();
-        if producer == [0; 32] || value.world_issuer().0 != producer {
-            return Err(failure(
-                "checked value TYPE row has another compiler producer",
-            ));
-        }
-        let selected = value.compiler_source_support().selected_interfaces()?;
-        let owner = identity(interface.unit(), interface.module());
-        let row = selected
-            .get(&owner)
-            .ok_or_else(|| failure("checked value TYPE row lacks its issued interface"))?;
-        if row.descriptor.id != certified.artifact_id()
-            || row.descriptor.producer_sha256 != producer
-        {
-            return Err(failure(
-                "checked value TYPE row differs from its certified interface",
-            ));
-        }
-        Ok(SelectedTypeInterfaces {
-            support: selected.type_interfaces_for_owners(vec![owner])?,
-            producer,
-            identity: OnceLock::new(),
-        })
-    }
-
-    pub(crate) fn checked_value_type_interfaces(
-        value: &crate::checked_cell::CheckedValueArtifact,
-        signature: &crate::checked_cell::ExactCheckedSignature,
-    ) -> Result<SelectedTypeInterfaces, CompileError> {
-        SelectedTypeInterfaces::from_support(
-            value.compiler_source_support(),
-            value
-                .certified_interface()
-                .interface()
-                .toolchain_identity_sha256(),
-            &[],
-            &[signature],
         )
     }
 
@@ -32975,7 +32977,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             );
         }
         let row = advanced
-            .primary.inputs
+            .primary
+            .inputs
             .compiler_source_support()
             .world_primary_type_row(&owner)
             .unwrap();

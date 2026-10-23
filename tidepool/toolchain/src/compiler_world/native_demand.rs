@@ -337,9 +337,11 @@ impl<'a> WorldNativeDemandResolver<'a> {
         let world = reservation.plan().world();
         let mut primary = world.restoration.primary_inputs.clone();
         if let Some(operand) = reservation.plan().operand() {
-            let types = Arc::new(ExactDeclarationContext::checked_value_interface_context(
-                operand.checked_row(),
-            )?);
+            let types = Arc::new(
+                crate::declaration_context::SelectedTypeInterfaces::from_checked_value(
+                    operand.checked_row(),
+                )?,
+            );
             primary = primary.with_type_interfaces(&[types])?.primary;
         }
         // Reserve the one terminal semantic-refusal reply before traversing

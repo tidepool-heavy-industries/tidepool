@@ -1753,7 +1753,7 @@ impl ExactHostBindingPrototype {
             .value_interface_certificate()
             .ok_or_else(|| failure("host prototype lacks its original value interface"))?;
         let context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::checked_value_type_interfaces(
+            crate::declaration_context::SelectedTypeInterfaces::from_checked_value_signature(
                 &interface, signature,
             )?,
         );
@@ -2192,9 +2192,7 @@ impl CheckedValueImportAuthority {
                 }
             };
             contexts.push(Arc::new(
-                crate::declaration_context::ExactDeclarationContext::checked_value_interface_context(
-                    original,
-                )?,
+                crate::declaration_context::SelectedTypeInterfaces::from_checked_value(original)?,
             ));
         }
         Ok(contexts)
