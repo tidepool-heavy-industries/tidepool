@@ -4,6 +4,8 @@ This map was checked against joined source `f5e8cb121a` (2026-10-22), with the
 checked-value instance-scope boundary updated for `c92fb6217b`, and publication,
 TYPE and exact restoration boundaries updated through `ccc5dedfe2`, and native
 candidate/output ownership plus strict recovery callers through `ee1d302f0e`.
+World/TYPE ownership is updated through `c8d5cb0469` (joined at `04fb19a11e`);
+live custody merge preserves explicit overlapping seeds through `09ff07f0ad`.
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -94,6 +96,8 @@ These reports describe execution and resource settlement independently.
 | Authored source permission versus original instance adjacency | [SourceLexicalScope / ExactDeclarationContext](../tidepool/toolchain/src/declaration_context.rs) | Source permission from compiler TYPE closure; complete display instance evidence merely from an admitted native entry |
 | Immutable graph and exact historical binding | [Exact context](../tidepool/toolchain/src/exact_context.rs), [artifact inventory](../tidepool/toolchain/src/artifact_inventory.rs) | Selection of every retained alternative; logical/image equality cannot replace issued binding identity |
 | Physical bytes and acquisition lifetime | Artifact views, captured compiler outputs and retained image plans | Compiler roles, executable roots or runtime instance authority |
+| Narrow signature-selected TYPE evidence | `SelectedTypeInterfaces` in [declaration_context.rs](../tidepool/toolchain/src/declaration_context.rs), privately issued from actual signature/witness owners | Generic context access, SOURCE mutation, executable demand or completed instance evidence |
+| World primary context paired with request inputs | `WorldPrimaryInputs` in [declaration_context.rs](../tidepool/toolchain/src/declaration_context.rs), retained by World restoration and continuation | World-only operations on a generic request, or replacement of initial native-demand ownership by a later TYPE overlay |
 | Joined interface materialization | [CertifiedJoinedInterface::materialize](../tidepool/toolchain/src/recovery_artifacts.rs) consumes its owned interface/sidecar bytes; raw path-based Joined materialization APIs have been removed | Capture of every external package root named by that sidecar, or native/source authority from interface bytes |
 | Native availability versus demand | `IssuedNativeOffer`, `RequestNativeAvailability`, `ResolvedNativeDemand` in [declaration_context.rs](../tidepool/toolchain/src/declaration_context.rs) | Full permission from partial offers, or execution from an authenticated but unselected dependency |
 | Linked code versus acquired permission | [NativeCodeComponent](../tidepool/repr/src/native_code.rs) describes immutable code; [AcquiredNativeCode / LinkedNativeTarget](../tidepool/toolchain/src/linked_native.rs) carry actual scoped grants and ordered receipt choices | Acquisition, Current source membership or mutable instance identity from pure `CodeId`; nominal metadata and PACKAGE payload custody do not add compiler roles or executable roots |
@@ -106,6 +110,14 @@ well as the compiler projection; narrowing Haskell inputs does not remove all
 Rust graph work. Observations such as `last_admission_residency` may already be
 stale after END. Preserve the issued owners through the next consumer instead
 of reconstructing them from module names, generation labels or retained catalogs.
+
+Exact retained graph identity includes explicit custody seeds even when they also
+appear among selected roots. Strict restoration preserves both frontiers. Live
+compiler merges retain existing custody seeds and only convert displaced roots
+to custody; removing overlap changes an otherwise unchanged snapshot. Physical
+output `certified_groups` enumerates that output's demand issuer. Inherited source
+implementations are inspected through the completed target's
+`native_source_products`, including exact binding scope.
 
 ## Remaining boundaries and routes
 

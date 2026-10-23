@@ -80,11 +80,26 @@ preserves that same distinction.
 
 ## Checkpoint 2: request and output owners
 
-Output ownership is integrated from `fbbcc0494d`. The first joined compilation
-exposed stale test consumers, including callers of removed recovery constructors;
-no tests executed at that revision. Repairs and strict recovery migrations are
-integrated through `ee1d302f0e` and await compilation/execution. WorldPrimaryInputs
-and the narrow TYPE owner remain the next implementation slice, not completed work.
+Output ownership is integrated from `fbbcc0494d`, and strict recovery consumers
+through `ee1d302f0e`. At `196b6c43ea`, production/test consumer compilation,
+exact packet controls and the full staged cold history pass; the staged history
+took 140.919 seconds with confirmed cleanup. Its outer launcher exit record was
+lost across a tool restart; the retained native test report establishes execution.
+
+WorldPrimaryInputs and the narrow TYPE owner are integrated at `04fb19a11e`.
+Independent source review found and repaired moved-field accesses and verified
+the restricted producers and consumers. Joined compilation at `04fb19a11e` and
+`5a699c3e66` exposed remaining cfg(test) callers; those executions ran no tests.
+The new World/TYPE boundary therefore remains unqualified pending joined checks.
+
+At predecessor `b5c8008343`, the three output API control/refusal pairs passed;
+the four focused executions passed three and failed one. Output cohorts
+16/7/2/6 executed 31 cases with 16 passing and 15 failing. Failures distinguish
+stale custody-versus-demand premises, wrong fixture home units, exact-key versus
+transitive dependency observation, and real cold-reimport identity drift.
+Reviewed repairs are integrated through `0d99014c42`; they require execution.
+Exact commands, source hashes and reports are retained in
+`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/b5c8-checkpoint.json`.
 
 Ordinary compile sealing and exact/World admission issue OriginalExecutionEvidence
 from actual request/output owners. Move instance status out of general contexts.
