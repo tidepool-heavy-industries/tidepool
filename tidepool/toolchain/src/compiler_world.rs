@@ -7083,6 +7083,75 @@ mod answer_tests {
         }
     }
     #[test]
+    fn dependency_terminal_wire_preserves_occurrence_and_refuses_other_identity_codecs() {
+        use ciborium::value::Value;
+        let integer = |n: u64| Value::Integer(n.into());
+        let binding = |artifact, selection| {
+            world_array(vec![
+                world_blob([artifact; 32]),
+                world_blob([selection; 32]),
+            ])
+        };
+        let symbol = world_array(vec![
+            world_text("main"),
+            world_text("Tidepool.Session.Val.G7"),
+            world_text("value"),
+            world_text("captured"),
+            Value::Null,
+        ]);
+        let packet = world_array(vec![
+            integer(0),
+            world_array(vec![
+                world_text("main"),
+                world_text("Source"),
+                binding(1, 2),
+                binding(3, 4),
+                symbol.clone(),
+            ]),
+            world_array(vec![world_blob([5; 32]), world_blob([6; 32]), integer(9)]),
+            integer(2),
+            binding(7, 8),
+            symbol,
+            integer(7),
+        ]);
+        let decoded = DependencyTerminalReference::decode(&packet).unwrap();
+        assert_eq!(decoded.origin, DependencyTerminalOrigin::SourceDefinition);
+        assert_eq!(decoded.demander.binding.artifact().0, [5; 32]);
+        assert_eq!(decoded.demander.binding.selection().0, [6; 32]);
+        assert_eq!(decoded.demander.original_ordinal, 9);
+        assert_eq!(decoded.global_index, 2);
+        assert_eq!(decoded.binding.artifact.0, [7; 32]);
+        assert_eq!(decoded.binding.selection.0, [8; 32]);
+        assert_eq!(decoded.generation, 7);
+        for (field, replacement) in [
+            (0, integer(2)),
+            (
+                2,
+                world_array(vec![world_blob([5; 32]), world_blob([6; 32])]),
+            ),
+            (3, integer(u64::MAX)),
+            (
+                4,
+                world_array(vec![world_blob([7; 31]), world_blob([8; 32])]),
+            ),
+        ] {
+            let Value::Array(mut fields) = packet.clone() else {
+                unreachable!()
+            };
+            fields[field] = replacement;
+            assert!(DependencyTerminalReference::decode(&world_array(fields)).is_err());
+        }
+        let Value::Array(mut fields) = packet else {
+            unreachable!()
+        };
+        let Value::Array(identity) = &mut fields[5] else {
+            unreachable!()
+        };
+        identity[4] = world_array(vec![integer(0)]);
+        assert!(DependencyTerminalReference::decode(&world_array(fields)).is_err());
+    }
+
+    #[test]
     fn input_refs_keep_closed_origins_and_actual_prior_stage_scope_distinct() {
         use ciborium::value::Value;
         let integer = |value: u64| Value::Integer(value.into());
