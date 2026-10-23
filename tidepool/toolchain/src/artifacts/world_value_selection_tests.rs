@@ -173,7 +173,7 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
 }
 
 #[test]
-#[ignore = "requires the declared rooted compiler service; toolchain_world_value_selection_test owns it"]
+#[ignore = "requires the declared rooted compiler service; toolchain_world_produced_value_prefix_test owns it"]
 fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand() {
     let (prepared, admission) = settle(|| {
         let (endpoint, world, source) = open_empty_world()?;

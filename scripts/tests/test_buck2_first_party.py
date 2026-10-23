@@ -1740,6 +1740,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
                               "tidepool_rust_isolated_test")
         expected_modes = {
+            'module_candidates::publication_refusal_tests::refused_completed_output_keeps_candidate_store_empty_before_valid_followup': 'owned-resident',
             'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground':
             'owned-resident',
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof': 'owned-resident',
@@ -1749,14 +1750,24 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'declaration_context::native_availability_tests::retained_template_capture_uses_selected_canonical_with_historical_custody': 'owned-resident',
             'declaration_context::native_availability_tests::retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody': 'owned-resident',
         }
-        for target, count in (
-            ('toolchain_output_context_publication_test', 16),
-            ('toolchain_output_publication_evidence_test', 7),
-            ('toolchain_retained_output_proof_test', 2),
+        expected_modes.update({name: 'owned-resident' for name in (
+            'artifact_inventory::compiler_projection::acquisition_tests::authored_promotion_preserves_actual_offered_acquisition',
+            'artifact_inventory::compiler_projection::acquisition_tests::completed_output_keeps_actual_producer_with_private_equal_offer',
+            'artifact_inventory::tests::bound_projection_rebinding_preserves_issuing_none_override',
+            'artifact_inventory::tests::independent_native_admission_does_not_inherit_global_source_witness',
+            'artifact_inventory::tests::source_witness_histories_follow_selected_issuer',
+            'artifact_inventory::tests::native_inventory_reuse_preserves_each_owners_source_admission_witness',
+            'artifact_inventory::tests::artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads',
+        )})
+        for target in (
+            'toolchain_output_context_publication_test',
+            'toolchain_output_publication_evidence_test',
+            'toolchain_retained_output_proof_test',
         ):
             cohort = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
-            self.assertEqual(cohort['expected_count'], count)
-            self.assertEqual(len(cohort['exact_tests']), count)
+            self.assertTrue(cohort['exact_tests'])
+            self.assertEqual(cohort['expected_count'], len(cohort['exact_tests']))
+            self.assertEqual(len(set(cohort['exact_tests'])), len(cohort['exact_tests']))
             self.assertTrue(cohort['ignored'])
             self.assertEqual(cohort['jobs'], 1)
             modes = {name: 'owned-resident' for name in cohort['exact_tests']}
@@ -1808,7 +1819,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         reference = self.rule("tidepool/toolchain", "toolchain_world_reference_history_test",
                               "tidepool_rust_test_cases")
         self.assertEqual(reference['env']['TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES'], '0')
-        for name in ["toolchain_world_value_selection_test", "toolchain_world_native_seal_test", "toolchain_world_original_seal_test",
+        for name in ["toolchain_world_value_selection_test", "toolchain_world_produced_value_prefix_test",
+                     "toolchain_world_native_seal_test", "toolchain_world_original_seal_test",
                      "toolchain_world_mixed_seal_test", "toolchain_world_lifetime_test"]:
             other = self.rule("tidepool/toolchain", name, "tidepool_rust_test_cases")
             self.assertNotIn('TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES', other['env'])

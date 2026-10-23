@@ -2442,6 +2442,7 @@ tidepool_buildscript_run(
                 ("toolchain_world_mixed_seal_test", "artifacts::module_product_tests::real_world_mixed_output_retains_prior_native_stages"),
                 ("toolchain_world_lifetime_test", "artifacts::module_product_tests::real_world_shadow_successors_release_transport_ancestors_before_cold_restore"),
                 ("toolchain_world_value_selection_test", "artifacts::world_value_selection_tests::real_world_value_selection_preserves_physical_owner_and_item_prefix"),
+                ("toolchain_world_produced_value_prefix_test", "artifacts::world_value_selection_tests::real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand"),
                 ("toolchain_world_reference_history_test", "artifacts::world_value_selection_tests::real_world_reference_history_restores_same_owner_and_rejects_crossed_ready"),
                 ("toolchain_staged_world_first_demands_test", "artifacts::world_value_selection_tests::prior_source_home_links_bind_first_packagefree_and_packageful_targets"),
             ]:
