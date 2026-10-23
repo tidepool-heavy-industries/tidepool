@@ -17,7 +17,7 @@ import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile)
 import GHC
   ( runGhc, setSession, setTargets, guessTarget, depanal, mgModSummaries
-  , ms_mod_name, parseModule, typecheckModule, getSession, tm_internals_, ParsedModule )
+  , ms_mod_name, parseModule, getSession, tm_internals_, ParsedModule, pm_parsed_source )
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
 import GHC.Builtin.Types (intTy, boolTy)
@@ -33,15 +33,21 @@ import GHC.Unit.Module (moduleNameString)
 import Control.Monad.IO.Class (liftIO)
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), StmtBinders(..), TurnKind(..)
-  , analyzeCell, renderCellCheckSource )
-import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
+  , analyzeCell, renderCellCheckSource, defaultParserDynFlags, templateParserFlags )
+import Tidepool.CheckedCell
+  ( CheckedSignature(..), CheckedSignatureName(..), NativeParsedModule
+  , unannotatedModule, typecheckNativeModule )
+import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), ExportIdentity(..))
 import Tidepool.GhcPipeline
   ( CompilePurpose(..), PipelineSelection(..), pprPipelineResult, prHscEnv, prTargetRdrEnv
   , CheckedEnvironmentResult(..), runPipelineSessionSelected, cellCheckedBinderSignatures
   , cellGeneratedInstanceRecipe )
 import Tidepool.CheckedPrefixImports
-import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ExactHydration
+  ( ExactIfaceArtifact(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  , generatedCheckingTemplateRecipeWithImportRendering )
+import Tidepool.ExactScope (CheckedTemplateImports(..))
 import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
@@ -226,12 +232,18 @@ checkOriginalDeclarationShadow work = do
       && ".Display" `isInfixOf` plannedSource original) $
     fail "original shadow fixture lost genuine generated Generic or Display companions"
   writeFile originalFile (plannedSource original)
+  defaults <- defaultParserDynFlags
+  parserFlags <- templateParserFlags defaults wrapper >>= either (fail . show) pure
+  captured <- either fail pure (captureProtectedTemplateImportsAt "{{CELL_IMPORTS}}" parserFlags wrapper)
+  protected <- either fail pure (renderProtectedTemplateImports (plannedSourceLineOffset original) captured)
+  recipe <- generatedCheckingTemplateRecipeWithImportRendering parserFlags (CheckedTemplateImports [] [])
+    protected wrapper (plannedSourceImports original) originalFile originalName >>= either fail pure
   checked <- runPipelineSessionSelected CheckedEnvironment Set.empty
-    (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile)
+    (GeneratedScaffoldCompile recipe (GeneratedInstanceCheck (cellGeneratedInstanceRecipe plan) OriginalDeclarationCompile))
     Nothing originalFile [directory,"lib"] Nothing
   assertShadowNames originalName previousName (crTargetRdrEnv checked)
   prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
-    (ProgramItemCompile True [] [] []) Nothing originalFile [directory,"lib"] Nothing
+    (GeneratedScaffoldCompile recipe (ProgramItemCompile True [] [] [])) Nothing originalFile [directory,"lib"] Nothing
   _ <- certifyPlannedDeclaration original (prHscEnv (pprPipelineResult prepared)) >>= either fail pure
   assertShadowNames originalName previousName (prTargetRdrEnv (pprPipelineResult prepared))
   where
@@ -346,8 +358,9 @@ checkCompletedImports file env original completed = do
       (SessionModule ValMod (Generation 9))) (SessionModule ValMod (Generation 9)) current)
     liftIO (registerSessionInterfaceLocation (sessionHiPath (takeDirectory file)
       (SessionModule ValMod (Generation 8))) (SessionModule ValMod (Generation 8)) current)
-    transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current parsed)
-    typed <- typecheckModule transformed
+    native <- liftIO (parsedNativeModule parsed)
+    transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current native)
+    typed <- typecheckNativeModule transformed
     let (tcg, _) = tm_internals_ typed
         owners spelling = nub [moduleNameString (moduleName owner)
           | entry <- globalRdrEnvElts (tcg_rdr_env tcg)
@@ -379,16 +392,25 @@ checkImports checkFile importedEnv importedInventory staleInventory = do
       [item] -> pure item
       _ -> fail "checking module summary absent"
     parsed <- parseModule summary
-    transformed <- liftIO (transformPlannedDeclarationImports importedInventory importedEnv parsed)
+    native <- liftIO (parsedNativeModule parsed)
+    transformed <- liftIO (transformPlannedDeclarationImports importedInventory importedEnv native)
     forM_ staleInventory $ \stale -> do
-      absent <- liftIO (try (transformPlannedDeclarationImports stale importedEnv parsed) :: IO (Either IOException ParsedModule))
+      absent <- liftIO (try (transformPlannedDeclarationImports stale importedEnv native) :: IO (Either IOException NativeParsedModule))
       unless (case absent of Left _ -> True; Right _ -> False) $
         fail "stale original inventory admitted changed interface"
-    typed <- typecheckModule transformed
+    typed <- typecheckNativeModule transformed
     env <- getSession
     let (tcg, _) = tm_internals_ typed
         checkedImport = CheckedEnvironmentResult env tcg (tcg_rdr_env tcg) Map.empty Nothing [] []
     liftIO (cellCheckedBinderSignatures checkedImport)
+
+-- The actual parsed module establishes syntax correspondence only. Selected
+-- Original/value authority still comes from the real hydrated inventories.
+parsedNativeModule :: ParsedModule -> IO NativeParsedModule
+parsedNativeModule parsed = do
+  capture <- either (fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+  driver <- either (fail . show) pure (matchDriverImports capture parsed)
+  pure (unannotatedModule (beginImportRefinement driver))
 
 withScratch :: (FilePath -> IO a) -> IO a
 withScratch action = bracket

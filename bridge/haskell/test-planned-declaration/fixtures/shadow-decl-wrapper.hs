@@ -6,6 +6,7 @@ import Data.Text (Text)
 import qualified "text" Data.Text as OriginalText
 import Tidepool.Session.Lib.G6
 import Foreign as Selected (Box(..))
+{{CELL_IMPORTS}}
 {{COMPILER_DEFAULTS}}
 {{TURN}}
 __result :: ()
