@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-This map was checked against joined candidate `72c34141e3` (2026-10-22).
+This map was checked against joined source `4912601c7f` (2026-10-22).
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -18,6 +18,7 @@ boundaries, not disjoint timing phases.
 |---|---|---|
 | Source/request → compiler inputs | Runtime [source admission](../tidepool/runtime/src/session/source_admission.rs), [cell admission](../tidepool/runtime/src/session/admission.rs) and [inspection](../tidepool/runtime/src/session/inspection.rs) retain the actual source, target lease, current-view observations and ordered cell reservation. | `prepare_cell_program_admitted_inner` in [turn.rs](../tidepool/runtime/src/session/turn.rs) checks preparation admission and execution purpose before dispatch. `run_admitted_compiler_world` / `run_admitted_world_scope_inspection` acquire a World or answer under their own admission. A captured view describes state; it grants neither source access nor execution. |
 | Inputs → held compiler World | Rust [CompilerWorldRestoration / CompilerWorld](../tidepool/toolchain/src/compiler_world.rs) retain producer/profile, exact context, compiler-input projection, bindings and lexical facts. Haskell [HeldCompilerWorld](../bridge/haskell/src/Tidepool/GhcPipeline.hs) retains admitted input facts, realization, backing and prepared modules. | [Main.hs](../bridge/haskell/app/Main.hs) dispatches exact-input acquisition to `scopedEnsureWorld`. `runHeldWorldSource` serves cell/observation preparation; `runWorldPublicModule` resolves public modules from captured source selection. Realization/residency is an observation of a worker admission, not a lease or runtime permission. |
+| Source imports → completed import admission | [ImportAdmission](../bridge/haskell/src/Tidepool/ImportAdmission.hs) exposes opaque completed owners; [GhcPipeline](../bridge/haskell/src/Tidepool/GhcPipeline.hs) owns qualification, selected-owner resolution, actual frontend and completion transitions through the private representation. Captured source and scoped request facts precede the actual root's matched driver syntax. | Early matched syntax is DATA for planning and source qualification. After `cpBeforeModule` selectively installs source-less interfaces, preparation resolves exact owners and refines its own parsed module. Successful whole compilation issues the compact completed owner; a parsed or typechecked module alone cannot issue the terminal receipt. |
 | World/finite request → captured compiler output | Haskell [CompilerRequest](../bridge/haskell/src/Tidepool/CompilerRequest.hs) acquires `PreparedOutputAuthority` before compilation and returns `NativeOutputs` with its product context or explicit `PortableOutputs`. [CompilerProducts](../bridge/haskell/src/Tidepool/CompilerProducts.hs) retains package bodies and captured defining interfaces under the actual producer/profile; World completion also carries the same request's pending dependencies. | Rust [invocation_output.rs](../tidepool/toolchain/src/artifacts/invocation_output.rs) owns named output layouts and `CapturedNativeOutput`, whose private World/Finite variants retain bytes, provenance and inventory operation. Finite native extraction requires an admitted package-service profile; portable output cannot issue native products. [Certified products](../tidepool/toolchain/src/certified_products.rs) authenticate the captured bytes. A reply alone cannot seal executable output. |
 | Captured output → physical cohort and target selection | [CapturedCompilerStage](../tidepool/toolchain/src/declaration_context.rs) owns the actual operation, captured facts, demanded-row issuer and whole-stage output. `CertifiedProducts` privately pairs that stage with its advancing prefix and authoritative selection. [World native-demand resolver](../tidepool/toolchain/src/compiler_world/native_demand.rs) retains initial request inputs and stage demand; `WorldProgramContinuation` advances source/TYPE inputs separately. | `PhysicalCohortInputs` borrows the issued bundle; `ArtifactInventory::select_native_target` consumes it with the actual ordered prepared-target imports. Item prefixes cannot issue physical capture. `stage_inputs` checks the request/stage/inventory owner; an empty prefix `ReceiptNativeInputDemand` does not reconstruct executable demand. `OriginalBindingSelection::from_world_stage` keeps nominal references separate. `CompiledArtifacts`, compile-input sealing and declaration joins carry `IssuedOriginalOutput` instead of reconstructing selection/view pairs. |
 | Selected target → linked code and acquisition | [NativeCodeComponent / NativeCodeRef](../tidepool/repr/src/native_code.rs) own immutable SCCs, canonical bodies and ordered edges. [LinkedNativeTarget / AcquiredNativeClosure](../tidepool/toolchain/src/linked_native.rs) pair the actual target with exact HOME grants, PACKAGE receipt occurrences and retained requirements. [link_native_target](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs) is the demand producer; unused availability does not become a code root. | HOME grants retain their certified scoped row; PACKAGE grants retain authenticated products and reached receipt/child occurrence choices. Pure `CodeId` equality permits immutable sharing, not acquisition or Current authority. `physical_current_for` checks the actual target, acquired closure and receiving source-map owner before lending Current. Restored prefix handles are historical. The old completion-row and executable package-scope graphs are removed. |
@@ -137,6 +138,37 @@ of reconstructing them from module names, generation labels or retained catalogs
   gap in canonical source. Scoped Ordinary effect and captured-source cutoff
   passes belong to their recorded predecessor revision in the ledger;
   they do not qualify the finite → public World journey or full launch.
+- **Import admission:** generated roots carry immutable captured bytes, path and
+  producer-associated import origins; ordinary source derives Authored imports
+  from the actual driver, preserving admitted CPP. `ScopedImportAdmission` binds
+  the admitted finite scope or World identities to the request, incarnation and
+  full root. Its private `MatchedImportDriver` retains syntax correspondence and
+  current-source selection DATA before actual owner resolution.
+  [GhcPipeline.hs](../bridge/haskell/src/Tidepool/GhcPipeline.hs) keeps the existing
+  source selectors, canonical validators and finite/World hydration policies.
+  It acquires the actual downsweep root parse once, then reuses that owner for
+  quotation planning, current-source qualification and the three frontend paths.
+  `parseModuleWithImportRoot` guards the full Module, source kind, canonical path,
+  source fingerprint and effective language/extensions/safety/import-path policy;
+  an hs-boot summary remains a separate parse. After `cpBeforeModule` installs
+  precisely demanded source-less interfaces, `prepareImportAdmission` resolves
+  selected Modules and invokes the closed refiner on its owned driver. Narrowed
+  and qualified descendants must preserve their parent's selected owner and
+  import restriction. Frontend summary rebinding preserves the parsed body and
+  occurrence lineage; callers cannot pair a replacement AST with that proof.
+  Prepared evidence is recorded only after the actual owned frontend succeeds.
+  Checked completion additionally requires its unique successful target and
+  candidate revalidation; PreparedStg/PreparedProducts completion follows successful
+  executable compilation and the relevant final checks. `ExactCompilation`
+  structurally owns finite completion, while World inputs retain their correlated
+  World completion. Terminal projections retain compact consumed decisions and
+  perform no Finder resolution; the successful parsed owner is released from the
+  attempt reference. The detached import-intent parser/selection route is removed.
+  This boundary is source-reviewed at this checkpoint; actual-driver, cold finite,
+  ordinary CPP and carried-World histories remain execution obligations. Relevant
+  controls include `moduleHeaderCompilation`, `generatedScaffoldImports`,
+  `checkedCommandValue` and `worldCarriedImportTypes`; migrated callers and linked
+  test executables alone do not establish their passing behavior.
 - **TYPE and lexical support:** `readWorldImportBasis` in
   [GhcPipeline.hs](../bridge/haskell/src/Tidepool/GhcPipeline.hs) retains exact
   carried TYPE entries separately from lexical roots/edges. In
