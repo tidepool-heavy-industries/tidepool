@@ -3635,7 +3635,8 @@ def declare_haskell_components():
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -3648,7 +3649,8 @@ def declare_haskell_components():
         "ghc",
         "mtl",
         "tasty",
-        "tasty-hunit"
+        "tasty-hunit",
+        "text"
     ], [
         "-XGHC2024",
         "-Werror=missing-fields",
