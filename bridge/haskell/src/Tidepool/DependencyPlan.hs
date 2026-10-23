@@ -8,7 +8,7 @@ module Tidepool.DependencyPlan
   , RetainedOccurrence, DependencyTerminal, terminalBinding
   , CompilerDependencyBasis, FrozenDependencyBasis
   , newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis
-  , dependencyGenerations, frozenDependencyGenerations, selectDependencyTerminals
+  , frozenDependencyGenerations, selectDependencyTerminals
   , requireUnambiguousDependencySymbols
   , nativeDependencyTerminals, encodeDependencyTerminal, encodeDependencyUses, readDependencyReply
   , NativePreparationFailure(..)
@@ -86,9 +86,6 @@ freezeDependencyBasis (CompilerDependencyBasis _ _ state) = do
         [(identity,Set.singleton (binding,generation))
           | DependencyTerminal _ _ (RetainedOccurrence _ _ binding identity generation) <- terminals]
   pure (FrozenDependencyBasis terminals choices)
-
-dependencyGenerations :: CompilerDependencyBasis -> IO (Map.Map SymbolIdentity Word64)
-dependencyGenerations basis = freezeDependencyBasis basis >>= frozenDependencyGenerations
 
 frozenDependencyGenerations :: FrozenDependencyBasis -> IO (Map.Map SymbolIdentity Word64)
 frozenDependencyGenerations basis@(FrozenDependencyBasis _ choices) = pure (Map.fromList
