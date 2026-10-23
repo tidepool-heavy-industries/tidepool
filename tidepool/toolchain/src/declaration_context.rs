@@ -1087,8 +1087,13 @@ fn preserve_native_offers(
 ) -> Result<Vec<crate::artifact_inventory::IssuedNativeOffer>, CompileError> {
     let mut retained = Vec::new();
     for offer in offers {
-        if let Some(offer) = offer.within_projection(projection, namespace)? {
-            if !retained.contains(&offer) {
+        if let Some(offer) = offer.within_assembly(projection.role_view(), namespace)? {
+            if !retained
+                .iter()
+                .any(|prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                    prior.same_issuance(&offer)
+                })
+            {
                 retained.push(offer);
             }
         }
@@ -1166,7 +1171,7 @@ impl CapturedCompilerStage {
         let issued = RequestNativeAvailability::from_current_cohort(
             &physical,
             validated,
-            &projection,
+            projection.role_view(),
             &validation.inventory,
         )?;
         selection
@@ -1637,7 +1642,11 @@ impl OriginalCompilerInputs {
         let mut native_offers = Vec::new();
         for issued in continuation.availability_rows() {
             for offer in issued.offers() {
-                if !native_offers.contains(offer) {
+                if !native_offers.iter().any(
+                    |prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                        prior.same_issuance(offer)
+                    },
+                ) {
                     native_offers.push(offer.clone());
                 }
             }
@@ -1728,7 +1737,12 @@ impl OriginalCompilerInputs {
         // Only an explicit request or continuation may narrow an issued offer.
         let mut native_offers = self.native_offers.clone();
         for offer in &other.native_offers {
-            if !native_offers.contains(offer) {
+            if !native_offers
+                .iter()
+                .any(|prior: &crate::artifact_inventory::IssuedNativeOffer| {
+                    prior.same_issuance(offer)
+                })
+            {
                 native_offers.push(offer.clone());
             }
         }
@@ -4445,7 +4459,7 @@ impl RequestCompilerInputs {
             }
         }
         let availability = self.native_selection.availability.for_compiler_roots(
-            demand.projection(),
+            demand.compiler_roles(),
             self.artifacts(),
             &direct,
             budget,
@@ -4458,7 +4472,7 @@ impl RequestCompilerInputs {
                 &demand.metadata().entries,
             )?;
         }
-        availability.validate_role_coverage(demand.projection())?;
+        availability.validate_role_coverage(demand.compiler_roles())?;
         let mut changed = BTreeMap::new();
         for row in availability.rows() {
             let id = row.original.descriptor.id;
@@ -5094,7 +5108,7 @@ impl WorldPrimaryInputs {
             )?
         } else {
             NativeInputSelection::receive(
-                delta.support.projection(),
+                delta.support.compiler_roles(),
                 &metadata,
                 delta.support.artifacts(),
                 delta.support.native_availability(),
@@ -5280,7 +5294,7 @@ impl ProtectedScaffoldRequirements {
             .projection()
             .project_metadata(support.artifacts().metadata_snapshot())?;
         let native_selection = NativeInputSelection::receive(
-            support.projection(),
+            support.compiler_roles(),
             &metadata,
             support.artifacts(),
             support.native_availability(),

@@ -1520,6 +1520,7 @@ pub(crate) struct ProgramSupportDelta {
 /// An operation's role closure borrows its original complete issuer. Native
 /// availability, input choices and instance authority remain with that issuer.
 pub(crate) struct DemandCompilerProjection {
+    selected: SelectedCompilerRows,
     source_support: Arc<CompilerSourceSupport>,
     projection: CompilerInputProjection,
     metadata: CompilerArtifactMetadata,
@@ -1538,6 +1539,11 @@ pub(crate) struct DemandCompilerProjectionWork {
 }
 
 impl DemandCompilerProjection {
+    pub(crate) fn compiler_roles(&self) -> AdmittedCompilerRoles<'_> {
+        self.selected
+            .admitted_roles(&self.source_support.input_decisions)
+    }
+
     pub(crate) fn source_support(&self) -> &Arc<CompilerSourceSupport> {
         &self.source_support
     }
@@ -2148,6 +2154,16 @@ struct SelectedCompilerRows {
 }
 
 impl SelectedCompilerRows {
+    fn admitted_roles<'a>(
+        &'a self,
+        decisions: &'a IssuedInputNativeDecisions,
+    ) -> AdmittedCompilerRoles<'a> {
+        AdmittedCompilerRoles {
+            selected: self,
+            decisions,
+        }
+    }
+
     fn from_admitted(rows: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>) -> Self {
         let mut home_units = BTreeSet::new();
         for row in rows.values() {
@@ -2675,6 +2691,7 @@ impl crate::declaration_context::RequestCompilerInputs {
         work.selected_rows = selected.len();
         work.metadata_entries = entries.len();
         Ok(DemandCompilerProjection {
+            selected: SelectedCompilerRows::from_admitted(selected),
             source_support: source,
             projection,
             metadata: CompilerArtifactMetadata {
@@ -2689,10 +2706,7 @@ impl crate::declaration_context::RequestCompilerInputs {
 
 impl CompilerSourceSupport {
     pub(crate) fn compiler_roles(&self) -> AdmittedCompilerRoles<'_> {
-        AdmittedCompilerRoles {
-            selected: &self.selected,
-            decisions: &self.input_decisions,
-        }
+        self.selected.admitted_roles(&self.input_decisions)
     }
 
     /// Reopen a closed support as assembly state for one bounded mutation.
@@ -3157,7 +3171,10 @@ impl CompilerSourceSupport {
         let mut fact_error = None;
         let retained = artifacts.retain_issued_offer_custody(
             native_offers.into_iter().filter_map(|offer| {
-                if !offers.contains(&offer) {
+                if !offers
+                    .iter()
+                    .any(|prior: &IssuedNativeOffer| prior.same_issuance(&offer))
+                {
                     match offer.snapshot_identity() {
                         Ok(identity) => {
                             if prior.is_some_and(|prior| prior.offers.contains_key(&identity)) {
@@ -3200,7 +3217,9 @@ impl CompilerSourceSupport {
         // Custody-only retention preserves these exact selected bindings while
         // it may acquire additional immutable sources for their payloads.
         timing.advance("qualify_canonical_availability");
-        let native_availability = native_availability.for_compiler_roles(&projection, &retained)?;
+        let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
+        let native_availability = native_availability
+            .for_compiler_roles(selected.admitted_roles(&input_decisions), &retained)?;
         timing.advance("assemble_support");
         let input_decisions = input_decisions.with_recorded_facts(input_decisions.facts.clone());
         let support = SupportDraft {
@@ -3211,7 +3230,7 @@ impl CompilerSourceSupport {
             native_offer_facts,
             native_closures,
             native_offers: offers.into(),
-            selected: Arc::new(SelectedCompilerRows::from_admitted(selected)),
+            selected,
             input_decisions,
         };
         Ok(support)
@@ -3324,19 +3343,47 @@ impl CompilerSourceSupport {
                 offers.push(offer);
             }
         }
-        Self::new_with_native_facts(
-            projection.clone(),
-            artifacts.clone(),
-            offers.clone(),
-            crate::declaration_context::RequestNativeAvailability::issue_checked(
-                &projection,
-                &artifacts,
-                &offers,
-            )?,
-            input_decisions,
+        projection.validate(&artifacts)?;
+        let selected = projection.resolve_associations(&artifacts)?;
+        let metadata = CompilerArtifactMetadata {
+            entries: selected
+                .iter()
+                .map(|(owner, row)| {
+                    (
+                        owner.clone(),
+                        Arc::clone(&row.original().unwrap_or(row.interface()).1),
+                    )
+                })
+                .collect(),
+            retained: artifacts.metadata_snapshot(),
+        };
+        let mut timing = crate::timing::InvocationTiming::start_scoped(
+            "exact.compiler_support.issue",
+            "retain_issuance",
+        );
+        let mut draft = Self::complete_resolved(
+            ResolvedCompilerInputs {
+                artifacts,
+                projection,
+                selected,
+                input_decisions,
+            },
+            offers,
+            crate::declaration_context::RequestNativeAvailability::default(),
             None,
             AcquiredNativeClosures::default(),
-        )
+            &mut timing,
+        )?;
+        draft.native_availability =
+            crate::declaration_context::RequestNativeAvailability::issue_checked(
+                draft.selected.admitted_roles(&draft.input_decisions),
+                &metadata,
+                &draft.artifacts,
+                &draft.native_offers,
+            )?;
+        let result = draft.close();
+        timing.finish(result.is_ok());
+        result
     }
 
     pub(crate) fn compiler_primary_inputs(
@@ -3623,11 +3670,13 @@ impl CompilerSourceSupport {
                 if previous != &offer.snapshot_facts() {
                     return Err(failure("program support changed an issued native offer"));
                 }
-                continue;
+            } else {
+                native_offer_facts.insert(id, offer.snapshot_facts());
             }
-            native_offer_facts.insert(id, offer.snapshot_facts());
-            new_offers.push(offer.clone());
-            offers.push(offer.clone());
+            if !offers.iter().any(|prior| prior.same_issuance(offer)) {
+                new_offers.push(offer.clone());
+                offers.push(offer.clone());
+            }
         }
         let artifacts = self.artifacts.append_admitted_custody(
             incoming.selected.iter().flat_map(|(_, row)| {
@@ -3658,8 +3707,8 @@ impl CompilerSourceSupport {
             // Only this semantic transition can change qualification of prior
             // optional Full rows. The existing qualifier preserves exact
             // historical dependencies independently of direct root choices.
-            native_availability =
-                native_availability.for_compiler_roles(&projection, &artifacts)?;
+            native_availability = native_availability
+                .for_compiler_roles(selected.admitted_roles(&input_decisions), &artifacts)?;
         }
         selected.home_units = Arc::new(home_units);
         Ok(ProgramSupportDelta {
@@ -3975,12 +4024,15 @@ impl CompilerSourceSupport {
         );
         let availability = original
             .native_availability
-            .for_compiler_roles(&self.projection, &original.artifacts)?;
+            .for_compiler_roles(self.compiler_roles(), &original.artifacts)?;
         timing.advance("collect_offers");
         let mut offers = Vec::new();
         for row in availability.rows() {
             for offer in row.offers() {
-                if !offers.contains(offer) {
+                if !offers
+                    .iter()
+                    .any(|prior: &IssuedNativeOffer| prior.same_issuance(offer))
+                {
                     offers.push(offer.clone());
                 }
             }
@@ -4022,7 +4074,7 @@ impl CompilerSourceSupport {
             crate::declaration_context::NativeAvailabilityMerge::Changed(rows) => {
                 let mut draft = self.reopen();
                 draft.native_availability =
-                    rows.for_compiler_roles(&self.projection, &self.artifacts)?;
+                    rows.for_compiler_roles(self.compiler_roles(), &self.artifacts)?;
                 draft.close()
             }
         }
@@ -4541,9 +4593,10 @@ impl CompilerSourceSupport {
             .cloned()
             .unwrap_or_default()
             .for_exact_roles(&projection);
+        let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
         let native_availability = inputs
             .native_availability()
-            .for_compiler_roles(&projection, artifacts)?;
+            .for_compiler_roles(selected.admitted_roles(&input_decisions), artifacts)?;
         if executable
             && native_availability.rows().any(|row| {
                 row.original_owner().unit == generated.unit
@@ -4577,7 +4630,7 @@ impl CompilerSourceSupport {
             native_offer_facts,
             native_closures: inputs.acquired_native_closures().clone(),
             native_availability,
-            selected: Arc::new(SelectedCompilerRows::from_admitted(selected)),
+            selected,
             input_decisions,
         }
         .close()
@@ -4685,7 +4738,10 @@ impl CompilerSourceSupport {
                 .cloned()
                 .chain(incoming)
                 .filter_map(|offer| {
-                    if offers.contains(&offer) {
+                    if offers
+                        .iter()
+                        .any(|prior: &IssuedNativeOffer| prior.same_issuance(&offer))
+                    {
                         None
                     } else {
                         offers.push(offer.clone());
@@ -4772,20 +4828,21 @@ impl CompilerSourceSupport {
             }
         }
         let input_decisions = self.input_decisions.for_exact_roles(&projection);
+        let selected = Arc::new(SelectedCompilerRows {
+            rows: selected,
+            home_units: Arc::clone(&self.selected.home_units),
+        });
         SupportDraft {
             native_availability: self
                 .native_availability
-                .for_compiler_roles(&projection, &self.artifacts)?,
+                .for_compiler_roles(selected.admitted_roles(&input_decisions), &self.artifacts)?,
             projection,
             artifacts: self.artifacts.clone(),
             native_offers: Arc::clone(&self.native_offers),
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
             native_offer_facts: self.native_offer_facts.clone(),
             native_closures: self.native_closures.clone(),
-            selected: Arc::new(SelectedCompilerRows {
-                rows: selected,
-                home_units: Arc::clone(&self.selected.home_units),
-            }),
+            selected,
             input_decisions,
         }
         .close()
@@ -5208,35 +5265,38 @@ impl CompilerSourceSupport {
         // Keep the existing topology/custody transition. Only its already
         // authenticated role rows bypass metadata reconstruction afterward.
         let artifacts = self.artifacts.select_compiler_support(&projection)?;
+        let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
+        let decisions = self.input_decisions.restricted(&projection, &artifacts);
         let mut native_offer_facts = self.native_offer_facts.clone();
         let offers = self
             .native_offers
             .iter()
-            .filter_map(|offer| match offer.is_relevant_to_support(&projection) {
-                Ok(true) => Some(Ok(offer.clone())),
-                Ok(false) => match offer.snapshot_identity() {
-                    Ok(identity) => {
-                        native_offer_facts.remove(&identity);
-                        None
-                    }
+            .filter_map(|offer| {
+                match offer.is_relevant_to_support(selected.admitted_roles(&decisions)) {
+                    Ok(true) => Some(Ok(offer.clone())),
+                    Ok(false) => match offer.snapshot_identity() {
+                        Ok(identity) => {
+                            native_offer_facts.remove(&identity);
+                            None
+                        }
+                        Err(error) => Some(Err(error)),
+                    },
                     Err(error) => Some(Err(error)),
-                },
-                Err(error) => Some(Err(error)),
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let decisions = self.input_decisions.restricted(&projection, &artifacts);
         let artifacts = artifacts.retain_issued_offer_custody(offers.iter().cloned())?;
         SupportDraft {
             native_availability: self
                 .native_availability
-                .for_compiler_roles(&projection, &self.artifacts)?,
+                .for_compiler_roles(selected.admitted_roles(&decisions), &self.artifacts)?,
             projection,
             artifacts,
             native_fact_owner: Some(Arc::clone(&self.native_fact_owner)),
             native_offer_facts,
             native_closures: self.native_closures.clone(),
             native_offers: offers.into(),
-            selected: Arc::new(SelectedCompilerRows::from_admitted(selected)),
+            selected,
             input_decisions: decisions,
         }
         .retain_completion_custody()?
@@ -5410,15 +5470,12 @@ impl CompilerInputProjection {
             .collect::<BTreeSet<_>>();
         let mut contributions = Vec::new();
         for offer in offers {
-            let Some(consumed) = offer.within_projection(self, parent)? else {
+            let Some(consumed) = offer.within_assembly(self.role_view(), parent)? else {
                 continue;
             };
             if originals.contains(&consumed.original()) || consumed.offers_groups_for(&originals) {
                 contributions.push(consumed);
-            } else if consumed
-                .qualified_private_availability(self, parent)
-                .is_none()
-            {
+            } else if !consumed.qualifies_assembly(self.role_view(), parent) {
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeRootOutsideView {
                         artifact: consumed.original(),

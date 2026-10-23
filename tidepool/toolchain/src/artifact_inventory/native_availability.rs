@@ -3322,10 +3322,29 @@ impl IssuedNativeOffer {
         roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
     ) -> Option<&QualifiedNativeAvailability> {
+        self.qualification_for_role(roles.get(&self.0.owner), namespace)
+    }
+
+    /// Assembly may observe the qualification of this already-issued offer;
+    /// this does not acquire a compiler row or grant an alternative body.
+    pub(crate) fn qualifies_assembly(
+        &self,
+        roles: AssemblyRoleView<'_>,
+        namespace: &ArtifactView,
+    ) -> bool {
+        self.qualification_for_role(roles.get(&self.0.owner), namespace)
+            .is_some()
+    }
+
+    fn qualification_for_role(
+        &self,
+        role: Option<CompilerRoleFacts<'_>>,
+        namespace: &ArtifactView,
+    ) -> Option<&QualifiedNativeAvailability> {
         let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
             return None;
         };
-        let role = roles.get(&self.0.owner)?;
+        let role = role?;
         (role.interface() == self.0.interface
             && role
                 .original()
@@ -3608,33 +3627,49 @@ impl IssuedNativeOffer {
         roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
-        if self
-            .qualified_private_availability(roles, namespace)
-            .is_some()
-        {
+        self.narrow_issued_offer(
+            roles.get(&self.0.owner),
+            roles.iter().filter_map(|(_, role)| role.original()),
+            namespace,
+        )
+    }
+
+    /// Narrow an existing issuance while a compiler namespace is assembled.
+    /// Permission still comes solely from this offer's acquired custody.
+    pub(crate) fn within_assembly(
+        &self,
+        roles: AssemblyRoleView<'_>,
+        namespace: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        self.narrow_issued_offer(
+            roles.get(&self.0.owner),
+            roles.iter().filter_map(|(_, role)| role.original()),
+            namespace,
+        )
+    }
+
+    fn narrow_issued_offer(
+        &self,
+        role: Option<CompilerRoleFacts<'_>>,
+        originals: impl Iterator<Item = ArtifactId>,
+        namespace: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        if self.qualification_for_role(role, namespace).is_some() {
             return Ok(Some(self.clone()));
         }
-        // Matching roles propagate the existing opaque issuance directly.
-        // Only a different or absent role needs dependency relevance.
-        let contributes = || -> Result<bool, CompileError> {
-            let originals = roles
-                .iter()
-                .filter_map(|(_, role)| role.original())
-                .collect::<BTreeSet<_>>();
-            Ok(self
-                .0
-                .custody
-                .native_originals
-                .iter()
-                .any(|original| originals.contains(original)))
-        };
-        let role = roles.get(&self.0.owner);
+        let originals = originals.collect::<BTreeSet<_>>();
+        let contributes = self
+            .0
+            .custody
+            .native_originals
+            .iter()
+            .any(|original| originals.contains(original));
         let Some(original) = role.and_then(CompilerRoleFacts::original) else {
-            return Ok(contributes()?.then(|| self.clone()));
+            return Ok(contributes.then(|| self.clone()));
         };
         let role = role.expect("native role");
         if original != self.0.original || role.interface() != self.0.interface {
-            if contributes()? {
+            if contributes {
                 return Ok(Some(self.clone()));
             }
             return Err(admission_failure(
