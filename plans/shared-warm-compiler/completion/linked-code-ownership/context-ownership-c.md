@@ -44,13 +44,12 @@ available payloads or newer implementations do not select replacements.
 
 ## Checkpoint 1: publication and TYPE admission
 
-The publication/TYPE implementation is integrated. The staged history executes
-and publishes its initial mixed cell, runs the fresh consumer and later declaration,
-then cold-attaches through the actual recovery store. Its remaining observed
-failure is cold World bootstrap: `NativeOwnerAmbiguity` for SegmentProbeSupport.
-Root owns diagnosis; do not choose a body by inventory order or weaken ambiguity
-refusals. Additional filtered diagnostics distinguish native advertisement,
-explicit request choice and private-availability qualification.
+The publication/TYPE implementation and native-candidate correction are integrated.
+At `5e5a37fff8`, the complete staged history passes: mixed execution/publication,
+fresh consumer, later declaration, cold attach and cold consumer without replay.
+The corrected boundary retains competing historical bodies as candidates, requires
+uniqueness only for nominal demand, and carries exact issued bindings for exact
+demand. It never chooses by inventory order or weakens group permission.
 
 Use the existing exact graph owner. Composition of equal canonical issued rows
 is idempotent; conflicting adjacency refuses. Raw decoding/restoration rejects
@@ -71,15 +70,21 @@ Acceptance: mixed staged history reaches actual effects, Display, publication,
 private retirement and fresh consumer; follow through real cold restoration and
 another request using existing session/recovery owners.
 
-At `ccc5dedfe2`, the exact restoration repair passes its two focused controls
-(including five malformed-baseline mutations) and advances the staged history
-past cold attachment. The final cold consumer remains unexecuted. Evidence:
-`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/ccc5-checkpoint.json`.
+The exact restoration repair passes two focused controls (including five
+malformed-baseline mutations); the complete staged history and candidate control
+pass at `5e5a37fff8`. Evidence:
+`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/5e5a-checkpoint.json`.
 Restoration authenticates and attaches recorded owners; it must not replay live
 custody-growth composition, which can change exact seeds. Final baseline binding
 preserves that same distinction.
 
 ## Checkpoint 2: request and output owners
+
+Output ownership is integrated from `fbbcc0494d`. The first joined compilation
+exposed stale test consumers, including callers of removed recovery constructors;
+no tests executed at that revision. Repairs and strict recovery migrations are
+integrated through `ee1d302f0e` and await compilation/execution. WorldPrimaryInputs
+and the narrow TYPE owner remain the next implementation slice, not completed work.
 
 Ordinary compile sealing and exact/World admission issue OriginalExecutionEvidence
 from actual request/output owners. Move instance status out of general contexts.

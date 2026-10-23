@@ -2,7 +2,8 @@
 
 This map was checked against joined source `f5e8cb121a` (2026-10-22), with the
 checked-value instance-scope boundary updated for `c92fb6217b`, and publication,
-TYPE and exact restoration boundaries updated through `ccc5dedfe2`.
+TYPE and exact restoration boundaries updated through `ccc5dedfe2`, and native
+candidate/output ownership plus strict recovery callers through `ee1d302f0e`.
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -206,9 +207,11 @@ of reconstructing them from module names, generation labels or retained catalogs
   claim here.
 - **Source-scope separation:** [SourceLexicalScope](../tidepool/toolchain/src/declaration_context.rs)
   carries admitted source permission independently of the broader original
-  compiler/instance adjacency. `OriginalInstanceEnvironment` separately records
-  whether the original compiler graph is complete enough for display and source
-  publication. Ordinary output obtains source scope through actual completed
+  compiler/instance adjacency. Output-issued `OriginalExecutionEvidence` owns
+  the exact target, execution context and complete/missing instance census.
+  Its borrowed `CompletedOriginalExecution` view admits display and source
+  publication; a retained or restored context cannot produce that view.
+  Ordinary output obtains source scope through actual completed
   source admission and matching canonical output; exact output consumes its
   checked source admission. Generated import-role receipts preserve authored,
   inherited and protected occurrences separately from exact import authorization.
@@ -234,9 +237,19 @@ of reconstructing them from module names, generation labels or retained catalogs
   not grant fresh SOURCE authority. Context9 restores native offers and acquired
   closures against the held exact selection and attaches the authenticated owners
   without repeating live custody-growth composition. Baseline rebinding follows
-  the same rule: exact seeds and proof scopes must remain equal. At `ccc5dedfe2`,
-  cold attachment passes in the staged runtime history; subsequent World bootstrap
-  still refuses ambiguous native ownership. The final cold consumer is unqualified.
+  the same rule: exact seeds and proof scopes must remain equal. The full staged
+  history at `5e5a37fff8` passes cold attachment, subsequent World bootstrap and
+  cold consumer execution without replaying effects. Later output-owner changes
+  require their own joined execution evidence.
+- **Native candidates versus selection:** `NativeInputSelection` retains closed
+  permission rows and all eligible exact candidates. Receiving two historical
+  bodies with one canonical interface does not choose either. Nominal demand and
+  finite transport require a unique choice; exact demand carries resolved
+  Original bindings and its actual inventory operation through group certification.
+  Membership, namespace and issued group permission remain independent checks.
+  TYPE additions may expose an already-held candidate without granting new native
+  permission. Candidate refresh depends on both retained rows and exact offers;
+  unchanged row storage alone is not proof of an unchanged candidate set.
 - **Acquired-prefix work:** `AcquiredNativeClosures::append` in
   [compiler_projection.rs](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs)
   retains actual immutable owners, shared component/closure records and a
