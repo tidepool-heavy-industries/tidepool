@@ -1990,6 +1990,7 @@ tidepool_buildscript_run(
             ]
             toolchain_output_evidence_cases = [
                 'declaration_context::published_source::tests::published_source_composition_preserves_sealed_selection_across_repeated_imports',
+                'declaration_context::published_source::tests::nested_publication_digest_cannot_change_recovered_source_or_native_selection',
                 'declaration_context::published_source::tests::authored_certifier_preserves_published_policy_with_complete_demand',
                 'declaration_context::published_source::tests::published_native_custody_does_not_require_dependency_namespace_originals',
                 'declaration_context::published_source::history_properties::publication_reopening_keeps_birth_when_current_roles_change',

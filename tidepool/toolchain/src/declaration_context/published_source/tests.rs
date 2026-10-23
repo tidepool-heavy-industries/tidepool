@@ -1239,3 +1239,253 @@ fn published_native_custody_does_not_require_dependency_namespace_originals() {
         "canonical Helper custody cannot replace the exact required native child"
     );
 }
+
+#[test]
+#[ignore = "requires the declared rooted compiler service"]
+fn nested_publication_digest_cannot_change_recovered_source_or_native_selection() {
+    use crate::exact_context::{
+        hydrate_context, ExactContextSnapshot, Materializer, PublicationNativeFacts,
+        PublicationNativeMaps, RecordedCompilerRow, RecordedOriginalProvenance,
+    };
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+
+    fn publication(
+        row: &mut RecordedCompilerRow,
+    ) -> &mut crate::exact_context::RecordedPublicationBirth {
+        let RecordedCompilerRow::Original {
+            provenance: RecordedOriginalProvenance::Published(birth),
+            ..
+        } = row
+        else {
+            panic!("actual nested publication row")
+        };
+        birth
+    }
+    fn encode(snapshot: &ExactContextSnapshot) -> crate::exact_context::DecodedContext {
+        let store = MemoryBlockstore::new();
+        let mut writer = Materializer::new(&store);
+        let receipt = writer.materialize_context(None, snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
+        hydrate_context(&store, receipt.root()).unwrap()
+    }
+
+    let fixture =
+        crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+    let root = fixture.root.descriptor.owner.clone();
+    let helper = fixture.helper.descriptor.owner.clone();
+    let helper_publication = fixture
+        .entry
+        .products()
+        .published_source_original_selection("nested-helper", &helper)
+        .unwrap();
+    let source = fixture
+        .entry
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let before_root = source
+        .published_context_for_root(&root, fixture.root.descriptor.id)
+        .unwrap()
+        .with_published_source_originals(&helper_publication)
+        .unwrap();
+    let input = fixture
+        .entry
+        .products()
+        .original_compile_input
+        .as_ref()
+        .unwrap();
+    let endorsement = before_root
+        .endorse_published_original(&root, "nested-root", input.original_input_identity())
+        .unwrap();
+    let support = before_root
+        .compiler_source_support()
+        .publish_original(&endorsement)
+        .unwrap();
+    let context = before_root
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
+        .unwrap();
+    let snapshot = context.snapshot();
+    let birth = snapshot.roles[&root].publication().unwrap();
+    let original_nested_digest = birth.native_facts.roles[&helper]
+        .publication()
+        .unwrap()
+        .selection_sha256;
+    assert_eq!(birth.native_facts.roles[&root].publication(), None);
+    let view = context.artifact_view();
+    let graph = view.capture_graph_selection();
+    let inventory = RecoveredArtifactInventory {
+        producer: context.toolchain_identity_sha256(),
+        entries: view
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.descriptor.id, entry))
+            .collect(),
+        recorded_inventory: true,
+        bindings: graph.bindings.iter().copied().collect(),
+        binding_edges: view.binding_dependencies(),
+        interfaces: view.interface_dependencies(),
+    };
+    let recorded = encode(&snapshot);
+    let positive = inventory
+        .context_for_expected_snapshot(recorded.root(), &recorded)
+        .unwrap();
+    positive.published_source_original_selections().unwrap();
+    let positive_birth = positive
+        .compiler_source_support()
+        .publication_birth_support(&root)
+        .unwrap();
+    before_root
+        .clone()
+        .rebuild(|facts| facts.compiler_support = positive_birth.clone())
+        .finish()
+        .unwrap();
+
+    // Deliberate raw-record corruption: the nested historical digest changes,
+    // while all acquisitions, native permissions, lexical rows and source rows
+    // remain those of the actual issuer. Rebuild content addressing honestly.
+    let mut altered = recorded.snapshot().clone();
+    let outer = publication(altered.roles.get_mut(&root).unwrap());
+    let mut nested_rows = outer.native_facts.roles.clone();
+    publication(nested_rows.get_mut(&helper).unwrap()).selection_sha256[0] ^= 1;
+    outer.native_facts = PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: nested_rows,
+            offers: outer.native_facts.offers.clone(),
+            native_availability: outer.native_facts.native_availability.clone(),
+        },
+    )
+    .unwrap();
+    altered.native_fact_owner = None;
+    let unframed = encode(&altered);
+    assert!(
+        inventory
+            .context_for_expected_snapshot(unframed.root(), &unframed)
+            .is_err(),
+        "the original outer commitment must detect changed historical bytes"
+    );
+
+    // Recompute only the outer digest with the owning algorithm, so failure
+    // cannot be attributed to stale framing. This is not a successful issuer:
+    // the intermediate support is never presented as a finished context.
+    let support = crate::artifact_inventory::CompilerSourceSupport::authenticate_recorded_rows(
+        context.artifact_view().clone(),
+        &altered.roles,
+        &altered.offers,
+        &altered.native_availability,
+    )
+    .unwrap();
+    let unfinished = context
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support);
+    let roles = unfinished.compiler_input_projection().snapshot_roles();
+    let facts = PublishedSelectionFacts::from_role(&roles[&root]).unwrap();
+    let digest = unfinished
+        .published_selection_sha256(&root, &facts)
+        .unwrap();
+    publication(altered.roles.get_mut(&root).unwrap()).selection_sha256 = digest;
+    let reframed = encode(&altered);
+    let restored = inventory
+        .context_for_expected_snapshot(reframed.root(), &reframed)
+        .unwrap();
+    let altered_birth = restored
+        .compiler_source_support()
+        .publication_birth_support(&root)
+        .unwrap();
+    assert_ne!(
+        altered_birth.recorded_rows()[&helper]
+            .publication()
+            .unwrap()
+            .selection_sha256,
+        original_nested_digest
+    );
+
+    // The nested digest is retained metadata in the outer native domain. It
+    // does not select a different occurrence, issue SOURCE, or change demand.
+    assert_eq!(
+        restored.snapshot().source_scope,
+        positive.snapshot().source_scope
+    );
+    assert_eq!(restored.snapshot().lexical, positive.snapshot().lexical);
+    assert_eq!(
+        restored.artifact_view().capture_graph_selection(),
+        positive.artifact_view().capture_graph_selection()
+    );
+    assert_eq!(
+        altered_birth.artifacts().capture_graph_selection(),
+        positive_birth.artifacts().capture_graph_selection()
+    );
+    assert_eq!(
+        altered_birth
+            .native_availability()
+            .snapshot_facts()
+            .unwrap(),
+        positive_birth
+            .native_availability()
+            .snapshot_facts()
+            .unwrap()
+    );
+    let selected = |context: &ExactDeclarationContext| {
+        context
+            .published_source_original_selections()
+            .unwrap()
+            .into_iter()
+            .map(|selection| {
+                (
+                    selection.public_root().clone(),
+                    selection.revision().to_owned(),
+                    selection
+                        .context()
+                        .artifact_view()
+                        .capture_graph_selection(),
+                    selection
+                        .context()
+                        .compiler_source_support()
+                        .native_availability()
+                        .snapshot_facts()
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(selected(&restored), selected(&positive));
+    let groups = positive
+        .artifact_view()
+        .selected_native_binding_rows()
+        .1
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !groups.is_empty(),
+        "actual producer supplies executable demand"
+    );
+    let target_selections = |context: &ExactDeclarationContext| {
+        context
+            .published_source_original_selections_for_target(&groups, &[])
+            .unwrap()
+            .into_iter()
+            .map(|selection| selection.public_root().clone())
+            .collect::<Vec<_>>()
+    };
+    let expected = target_selections(&positive);
+    assert!(
+        !expected.is_empty(),
+        "positive target consumes actual publication authority"
+    );
+    assert_eq!(target_selections(&restored), expected);
+
+    // Reusing that birth as a source context must validate its own historical
+    // lexical context. The retained pre-endorsement context is the independent
+    // oracle here; the receiving context is deliberately not substituted.
+    assert!(
+        before_root
+            .rebuild(|facts| facts.compiler_support = altered_birth)
+            .finish()
+            .is_err(),
+        "corrupt historical digest cannot become a usable source context"
+    );
+}
