@@ -1075,6 +1075,19 @@ impl CapturedCompilerStage {
             "products.segment_native_availability",
             "initial_admission",
         );
+        let mut primary: BTreeMap<ArtifactId, &Arc<ArtifactEntry>> = BTreeMap::new();
+        for entry in &entries {
+            if primary
+                .insert(entry.descriptor.id, entry)
+                .is_some_and(|prior| !prior.same_issuing_authority(entry))
+            {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::BindingAmbiguity {
+                        artifact: entry.descriptor.id,
+                    },
+                ));
+            }
+        }
         let producer_certificates = entries.clone().into();
         let mut facts = BTreeMap::new();
         for entry in &entries {

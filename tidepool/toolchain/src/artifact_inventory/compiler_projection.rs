@@ -3108,7 +3108,7 @@ impl CompilerSourceSupport {
         let desired = selection
             .compiler_projection(artifacts)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let selected = Self::certified_output_rows(selection, &desired, artifacts)?;
+        let selected = Self::project_completed_output_visibility(selection, &desired)?;
         let projection = selection
             .input_compiler_support()
             .map(|source| source.projection.clone())
@@ -3164,12 +3164,35 @@ impl CompilerSourceSupport {
         result
     }
 
-    fn certified_output_rows(
+    fn project_completed_output_visibility(
         selection: &crate::certified_products::CertifiedSourceSelection,
         projection: &CompilerInputProjection,
-        _artifacts: &ArtifactView,
     ) -> Result<SelectedCompilerRows, CompileError> {
-        let mut selected = selection.selected_compiler_rows().clone();
+        Self::project_compiler_row_bindings(selection.selected_compiler_rows(), projection)
+    }
+
+    fn project_explicit_compiler_rows(
+        selection: &crate::certified_products::CertifiedSourceSelection,
+        projection: &CompilerInputProjection,
+    ) -> Result<SelectedCompilerRows, CompileError> {
+        let mut selected =
+            Self::project_compiler_row_bindings(selection.selected_compiler_rows(), projection)?;
+        for (owner, role) in projection.snapshot_roles() {
+            let row = &selected.rows[owner];
+            let projected = row.clone().with_issued_provenance(role)?;
+            if !projected.same_recorded_facts(row) {
+                selected.rows.insert(owner.clone(), projected);
+                selected.changed_owners.insert(owner.clone());
+            }
+        }
+        Ok(selected)
+    }
+
+    fn project_compiler_row_bindings(
+        rows: &SelectedCompilerRows,
+        projection: &CompilerInputProjection,
+    ) -> Result<SelectedCompilerRows, CompileError> {
+        let mut selected = rows.clone();
         let removed = selected
             .rows
             .keys()
@@ -3200,8 +3223,6 @@ impl CompilerSourceSupport {
                 row.select_type_only();
                 selected.rows.insert(owner.clone(), row);
                 selected.changed_owners.insert(owner.clone());
-            } else if role.is_published_source_original() {
-                row.clone().with_issued_provenance(role)?;
             }
         }
         if !removed.is_empty() {
@@ -5545,7 +5566,7 @@ impl CompilerSourceSupport {
         dependencies: &crate::declaration_context::CompilerDependencies,
     ) -> Result<Self, CompileError> {
         let incoming = issued.for_source_owners(&dependencies.owners());
-        let selected = Self::certified_output_rows(selection, &incoming, artifacts)?;
+        let selected = Self::project_explicit_compiler_rows(selection, &incoming)?;
         let availability = crate::declaration_context::RequestNativeAvailability::from_issued_rows(
             selection.issued_native_availability().cloned(),
         )?;

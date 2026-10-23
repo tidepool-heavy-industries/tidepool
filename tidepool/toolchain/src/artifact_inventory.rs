@@ -2472,7 +2472,7 @@ impl ArtifactEntry {
         }
     }
 
-    fn same_issuing_authority(&self, other: &Self) -> bool {
+    pub(crate) fn same_issuing_authority(&self, other: &Self) -> bool {
         if let (ArtifactPayload::Original(left), ArtifactPayload::Original(right)) =
             (&self.payload, &other.payload)
         {
@@ -4659,6 +4659,9 @@ impl ArtifactInventory {
             .map(|entry| (entry.descriptor.id, entry))
             .collect::<BTreeMap<_, _>>();
         let mut supplied = BTreeMap::new();
+        // Capture checks primary certificates before this expansion. Explicit
+        // entries precede implicit canonical support, which cannot replace the
+        // actual primary producer paired with the issued binding.
         let mut producer_entries = BTreeMap::new();
         for entry in expanded {
             producer_entries
