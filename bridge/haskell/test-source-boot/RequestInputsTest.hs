@@ -156,7 +156,7 @@ import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor,
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures
   , newPreparedOriginalInterfaceArtifactsWithPrior, writeCertifiedSegmentProducts, withStagedOriginalBindings, StagedProductFailure(..)
   , bindWorldStageInputs, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
-  , withWorldStageInputs, completeWorldProducts, completedWorldNative)
+  , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..))
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
@@ -2529,9 +2529,9 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                 (Just inputs) environment (compilationScope <$> preparedExactCompilation prepared)
                                 (pprProductInterfaces prepared) projection Set.empty (pprModules prepared)
                               originals <- newPreparedWorldInterfaceArtifacts inputs captureDirectory
-                              completedProducts <- completeWorldProducts originals captureDirectory inputs
+                              pendingProducts <- stageWorldProducts originals captureDirectory inputs
                                 (withWorldStageInputs (Just inputs) rawProducts)
-                              let staged = completedWorldNative completedProducts
+                              let staged = pendingWorldNative pendingProducts
                               selected <- withStagedOriginalBindings prepared (Just staged) projection
                               repeated <- withStagedOriginalBindings prepared (Just staged) selected
                               unless (projectionCurrentOriginals selected == projectionCurrentOriginals repeated)
@@ -2560,10 +2560,12 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                       && Map.lookup name (projectionCurrentOriginals aliases) == Just identity)
                                     (fail "two actual Names could not retain one certified identity")
                                 _ -> fail "Name refusal control needs two distinct certified binders"
+                              -- Product bytes alone do not advance the compiler cursor.
+                              withCompiledWorldStage stage (\_ _ -> pure ())
+                              completedProducts <- completeWorldProducts pendingProducts Set.empty [] []
                               stale <- try (withCompiledWorldStage stage (\_ _ -> pure ()))
                                 :: IO (Either InputRejection ())
-                              repeatedFinish <- try (void (completeWorldProducts originals captureDirectory inputs
-                                (withWorldStageInputs (Just inputs) rawProducts))) :: IO (Either InputRejection ())
+                              repeatedFinish <- try (void (completeWorldProducts pendingProducts Set.empty [] [])) :: IO (Either InputRejection ())
                               forM_ [stale,repeatedFinish] $ \refused -> unless
                                 (case refused of Left CheckedPurposeMismatch -> True; _ -> False)
                                 (fail "sealed stage allowed another borrow or completion")
