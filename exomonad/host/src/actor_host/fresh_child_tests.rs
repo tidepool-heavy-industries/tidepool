@@ -628,10 +628,16 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
             Some(RecoveryArtifactClosure::Join(reference)) => Some(reference),
             _ => None,
         }).collect::<Vec<_>>();
+    let selected_lexical = context.snapshot().lexical();
     for root in &authored.lexical_roots {
-        let projection = selected_interfaces.iter().find(|projection|
-            root.unit == projection.unit && root.module == projection.module)
+        assert!(selected_lexical.iter().any(|node| &node.owner == root),
+            "the child's lexical owner must be retained by its selected context");
+        let mut matching = selected_interfaces.iter().filter(|projection|
+            root.unit == projection.unit && root.module == projection.module);
+        let projection = matching.next()
             .expect("the child's newly issued lexical projection is selected in its exact context");
+        assert!(matching.next().is_none(),
+            "a selected lexical owner has exactly one canonical interface");
         tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection).unwrap();
     }
     assert!(!authored.lexical_roots.is_empty());
