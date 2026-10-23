@@ -83,6 +83,7 @@ import GHC.Driver.Config.Diagnostic (initDiagOpts, initPrintConfig)
 import GHC.Driver.Errors (printOrThrowDiagnostics)
 import GHC.Iface.Load (loadInterface, WhereFrom(..))
 import GHC.Rename.Names (renameRawPkgQual)
+import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache, filterModIfaceCache, addHmiToCache)
 import qualified GHC.Linker.Loader as Linker
 import GHC.Linker.Types (Linkable(..), linkableObjs, linkableLibs)
@@ -117,11 +118,12 @@ import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, Type
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, typedItemCaptures, typedCaptureType, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
   ( rewriteParsedSegmentRoot, moduleInputOccurrences, moduleImportRequests, prepareSegmentDemand, prepareModuleDemand
-  , ParsedModuleDemand, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
+  , ParsedModuleDemand, moduleDemandCapturedImports, segmentModuleDemand, moduleDemandMatchesSource, annotateModuleDemand, ObservationOperand(..), validateObservationContribution
   , SegmentDemandScope, newSegmentDemandScope, updateSegmentDemandScope, associateSegmentDemandName )
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), SourceRejection(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, renderDiag, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
+import GHC.Utils.Fingerprint (fingerprintByteString)
 import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..), mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Env (UnitEnv(..))
@@ -225,7 +227,7 @@ import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
 import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, locatedImportIntent, locatedImportNamespaces, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
-  , NativeParsedModule, unannotatedModule, nativeParsedModule, mapNativeModule, typecheckNativeModuleWithDiagnostics
+  , NativeParsedModule, unannotatedModule, nativeParsedModule, nativeImportSyntax, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
 import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
@@ -313,17 +315,24 @@ import Tidepool.ExactHydration
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , noCheckedValueImports, checkedValueImportAuthorityFromVerified
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget, captureGeneratedScaffoldSource
-  , capturedGeneratedScaffoldBytes
+  , CapturedGeneratedImports, capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
+  , capturedGeneratedImportSource, capturedGeneratedImportSyntax, capturedGeneratedImportOccurrences
+  , capturedGeneratedImportOccurrenceSyntax, capturedGeneratedImportOccurrenceOrigin
   , CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedCheckingTemplateRecipe
   , generatedTypedSegmentRecipeWithImportRendering, generatedCheckingTemplateRecipeWithImportRendering
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot, sourceImportsHomeRoles
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
-import Tidepool.TurnSource (importRenderingSource)
+import Tidepool.TurnSource (importRenderingSource, ImportOrigin(..))
 import Tidepool.ImportAdmission (ExactCompilation, compilationScope, compilationSourceSelection, compilationExactImports, writeCheckedExactCompilation, compilationOriginalSourceImports)
-import Tidepool.ImportAdmission.Internal (ExactCompilation(..))
-import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.ImportSyntax.Internal (LocatedImport(..))
+import Tidepool.ImportAdmission.Internal
+  ( ExactCompilation(..), CapturedImportAdmission(..), ImportAdmissionContext(..)
+  , ImportAttempt(..), ScopedImportAdmission(..), ResolvedImportAdmission(..)
+  , ResolvedImportOccurrence(..), PreparedImportAdmission(..) )
+import Tidepool.ImportSyntax
+  ( DriverImportSyntax, captureImportSyntax, matchDriverImports, beginImportRefinement, driverParsedModule
+  , driverImportOccurrences, importOccurrenceId, refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
+import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportOccurrenceId(..))
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -1362,7 +1371,7 @@ data PipelineVariant = PipelineVariant
   , pvDownsweepExcludes :: [ModuleName]
     -- ^ Modules @depanal@ must NOT try to summarise (the session path's
     -- source-less @Val.G\<g\>@ ifaces). Empty on the normal path.
-  , pvPlan :: FilePath -> Bool -> ModuleName -> ModuleGraph -> Maybe ExactScope -> Ghc CompilePlan
+  , pvPlan :: FilePath -> Bool -> ModuleName -> ModuleGraph -> Maybe ExactScope -> ResolvedImportAdmission -> Ghc CompilePlan
     -- ^ @pvPlan compilerViewDirectory timingEnabled targetName downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
   , pvSourceImportIntents :: [ImportIntent]
@@ -3090,7 +3099,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   refineOriginalDeclarationImports (mi_module iface) (mi_iface_hash (mi_final_exts iface)) exports environment annotated
               declared <- transformProgramDeclarationImports inventories Nothing environment baseDeclared
               transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
-        , pvPlan = \directory enabled target graph exact -> do
+        , pvPlan = \directory enabled target graph exact resolved -> do
             environment <- getSession
             prefixEnvironment <- case operation of
               WorldCellSource _ _ prefix _ _ _ -> do
@@ -3103,7 +3112,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
               WorldCellNameSource {} -> pure environment {hsc_mod_graph=graph}
             ready <- liftIO (restoreWorldImportBasis importBasis prefixEnvironment `catch` importFailure)
             setSession ready
-            planned <- pvPlan variant directory enabled target graph exact
+            planned <- pvPlan variant directory enabled target graph exact resolved
             let sourceOwners = Set.fromList
                   [(unitString (moduleUnit (ms_mod summary)),moduleNameString (ms_mod_name summary))
                   | ModuleNode _ summary <- mgModSummaries' graph]
@@ -3930,6 +3939,151 @@ typedPurposePlan (GeneratedInstanceCheck _ inner) = typedPurposePlan inner
 typedPurposePlan (GeneratedScaffoldCompile _ inner) = typedPurposePlan inner
 typedPurposePlan (ExactScopeCompile inner _) = typedPurposePlan inner
 typedPurposePlan _ = Nothing
+
+-- Only this actual pipeline entry issues scoped import prerequisites. The
+-- captured route is explicit: ordinary CPP is classified from its driver;
+-- generated syntax must correspond to its immutable origin census.
+scopedImportAdmission
+  :: PipelineVariant -> Word64 -> Maybe String -> Module -> ModSummary
+  -> ImportAdmissionContext -> Ghc ScopedImportAdmission
+scopedImportAdmission variant request incarnation root summary context = do
+  path <- maybe (liftIO (fail "import admission root lacks a source path"))
+    (liftIO . canonicalizePath) (ml_hs_file (ms_location summary))
+  captured <- case pvGeneratedScaffold variant of
+    Nothing -> liftIO $ do
+      bytes <- BS.readFile path
+      pure (OrdinaryImportCapture path (captureArtifactBytes bytes) (fingerprintByteString bytes))
+    Just recipe -> case pvWorldSources variant of
+      Just (WorldSourceInputBasis _ _ _ demand _ _ _) -> do
+        let whole = moduleDemandCapturedImports demand
+            source = capturedGeneratedImportSource whole
+        unless (capturedGeneratedScaffoldPath source == path) $
+          liftIO (fail "generated import admission belongs to another root")
+        pure (GeneratedImportCapture whole)
+      Nothing -> liftIO $ do
+        source <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+        whole <- either fail pure (parseCapturedGeneratedImports (ms_hspp_opts summary) source)
+        pure (GeneratedImportCapture whole)
+  let observed = case captured of
+        OrdinaryImportCapture _ _ fingerprint -> fingerprint
+        GeneratedImportCapture whole -> fingerprintByteString
+          (capturedGeneratedScaffoldBytes (capturedGeneratedImportSource whole))
+  unless (ms_mod summary == root && ms_hs_hash summary == observed) $
+    liftIO (fail "import admission root differs from its captured source")
+  pure (ScopedImportAdmission captured context
+    (ImportAttempt request incarnation root path observed))
+
+-- This is the driver's actual parse, not a caller-provided AST plus labels.
+-- Current-source qualification follows correspondence and keeps the exact
+-- selected Module for each occurrence before any compiler refinement.
+resolveImportAdmission :: ScopedImportAdmission -> ParsedModule -> HscEnv -> IO ResolvedImportAdmission
+resolveImportAdmission scoped@(ScopedImportAdmission captured _
+    (ImportAttempt _ _ root path fingerprint)) parsed environment = do
+  actualPath <- traverse canonicalizePath (ml_hs_file (ms_location summary))
+  unless (ms_mod summary == root && ms_hs_hash summary == fingerprint && actualPath == Just path) $
+    fail "import driver belongs to another captured root"
+  (driver,origins) <- case captured of
+    GeneratedImportCapture whole -> do
+      driver <- either (fail . show) pure (matchDriverImports (capturedGeneratedImportSyntax whole) parsed)
+      pure (driver,[(importOccurrenceId (capturedGeneratedImportOccurrenceSyntax occurrence),
+        capturedGeneratedImportOccurrenceOrigin occurrence)
+        | occurrence <- capturedGeneratedImportOccurrences whole])
+    OrdinaryImportCapture _ _ _ -> do
+      syntax <- either (fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+      driver <- either (fail . show) pure (matchDriverImports syntax parsed)
+      pure (driver,[(importOccurrenceId occurrence,AuthoredCurrent)
+        | occurrence <- driverImportOccurrences driver])
+  let declarations = hsmodImports (unLoc (pm_parsed_source parsed))
+      occurrences = driverImportOccurrences driver
+  unless (length declarations == length occurrences && length declarations == length origins) $
+    fail "resolved import occurrence census is incomplete"
+  selected <- forM (zip occurrences declarations) $ \(occurrence,located) -> do
+    let declaration = unLoc located
+        name = unLoc (ideclName declaration)
+        raw = ideclPkgQual declaration
+        qualifier = renameRawPkgQual (hsc_unit_env environment) name raw
+        identity = importOccurrenceId occurrence
+    origin <- maybe (fail "resolved import lost its captured origin") pure (lookup identity origins)
+    found <- findImportedModule environment name qualifier
+    owner <- case found of
+      Found _ owner -> pure owner
+      _ -> fail "resolved import lacks its selected module"
+    pure (ResolvedImportOccurrence identity origin name raw qualifier
+      (ideclSource declaration == IsBoot) owner)
+  -- An implicit Prelude is selected by the actual driver summary even though
+  -- it has no written declaration. The refiner may materialize only this exact
+  -- ordinary import, not a new ambient namesake.
+  implicit <- if any (\located -> unLoc (ideclName (unLoc located)) == mkModuleName "Prelude") declarations
+    then pure []
+    else fmap concat $ forM [(qualifier,name) | (qualifier,name) <- ms_textual_imps summary
+        , unLoc name == mkModuleName "Prelude"] $ \(qualifier,name) -> do
+      found <- findImportedModule environment (unLoc name) qualifier
+      case found of
+        Found _ owner -> pure [ResolvedImportOccurrence SyntheticPreludeId AuthoredCurrent
+          (unLoc name) NoRawPkgQual qualifier False owner]
+        _ -> fail "implicit Prelude lacks its selected driver module"
+  pure (ResolvedImportAdmission scoped driver (selected ++ implicit) Nothing)
+  where summary = pm_mod_summary parsed
+
+resolvedImportDriver :: ResolvedImportAdmission -> ParsedModule
+resolvedImportDriver (ResolvedImportAdmission _ driver _ _) = driverParsedModule driver
+
+generatedImportDriver :: ResolvedImportAdmission -> Either String (CapturedGeneratedImports, DriverImportSyntax)
+generatedImportDriver (ResolvedImportAdmission (ScopedImportAdmission capture _ _) driver _ _) = case capture of
+  GeneratedImportCapture whole -> Right (whole,driver)
+  OrdinaryImportCapture{} -> Left "generated import authority lacks its captured generated root"
+
+resolvedImportIntents :: ResolvedImportAdmission -> [ImportIntent]
+resolvedImportIntents (ResolvedImportAdmission _ _ selected _) =
+  [case origin of
+    AuthoredCurrent -> AuthoredSourceImport requested raw
+    InheritedLexical -> InheritedLexicalImport
+    ProtectedCompiler -> ProtectedCompilerImport
+  | ResolvedImportOccurrence _ origin requested raw _ _ _ <- selected]
+
+-- The closed purpose recipe consumes its own matched driver. Every narrowed
+-- or qualified child must still resolve to that parent's exact selected Module;
+-- ambient Finder state cannot replace an earlier choice with a namesake.
+prepareImportAdmission :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary
+  -> ResolvedImportAdmission -> IO PreparedImportAdmission
+prepareImportAdmission variant target environment actual resolved@(ResolvedImportAdmission
+    (ScopedImportAdmission _ _ (ImportAttempt _ _ root path fingerprint)) driver selected _) = do
+  actualPath <- traverse canonicalizePath (ml_hs_file (ms_location actual))
+  let admitted = pm_mod_summary (driverParsedModule driver)
+      policy flags = (language flags,extensionFlags flags,safeHaskell flags,importPaths flags)
+  unless (ms_mod actual == root && ms_hs_hash actual == fingerprint
+      && actualPath == Just path && policy (ms_hspp_opts actual) == policy (ms_hspp_opts admitted)) $
+    fail "import frontend differs from its resolved root or source policy"
+  native <- pvTransformParsed variant target environment actual
+    (unannotatedModule (beginImportRefinement driver))
+  let occurrences = refinedImportOccurrences (nativeImportSyntax native)
+      declarations = hsmodImports (unLoc (pm_parsed_source (nativeParsedModule native)))
+      parent (CapturedImportId index) = CapturedImportId index
+      parent (NarrowedImportId identity) = parent identity
+      parent (QualifiedImportId identity) = parent identity
+      parent SyntheticPreludeId = SyntheticPreludeId
+  unless (length occurrences == length declarations) (fail "prepared import census is incomplete")
+  forM_ (zip occurrences declarations) $ \(occurrence,located) -> do
+    let declaration = unLoc located
+        name = unLoc (ideclName declaration)
+        qualifier = renameRawPkgQual (hsc_unit_env environment) name (ideclPkgQual declaration)
+    found <- findImportedModule environment name qualifier
+    owner <- case found of
+      Found _ owner -> pure owner
+      _ -> fail "prepared import lost its resolved module"
+    case importOccurrenceLineage occurrence of
+      SyntheticPrelude -> case [expected | ResolvedImportOccurrence SyntheticPreludeId _ requested _ raw _ expected <- selected
+          , requested == name, raw == qualifier] of
+        [expected] | expected == owner -> pure ()
+        _ -> fail "synthetic Prelude changed its selected driver module"
+      _ -> case [expected | ResolvedImportOccurrence identity _ _ _ _ _ expected <- selected
+          , identity == parent (importOccurrenceId occurrence)] of
+        [expected] | expected == owner -> pure ()
+        _ -> fail "prepared import changed its selected owner"
+  pure (PreparedImportAdmission resolved actual native)
+
+preparedImportModule :: PreparedImportAdmission -> NativeParsedModule
+preparedImportModule (PreparedImportAdmission _ _ native) = native
 
 nativeParsedModuleFor :: ParsedModule -> IO NativeParsedModule
 nativeParsedModuleFor parsed = do
@@ -5010,6 +5164,22 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           _ -> False) (mgModSummaries' modGraphDownsweep)) $
         liftIO $ ioError $ userError "fresh source collides with an admitted exact owner"
     targetOwner <- liftIO (targetModuleFor modGraphRaw path)
+    targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
+        , ms_mod summary == targetOwner, ms_hsc_src summary == HsSrcFile] of
+      [summary] -> pure summary
+      _ -> liftIO (fail "import admission lacks its unique actual root summary")
+    importContext <- case (pvExactScope variant,pvWorldSources variant) of
+          (Just scope,Nothing) -> pure (FiniteImportContext scope)
+          (Nothing,Just (WorldSourceInputBasis _ facts _ _ _ imports (WorldPrefixLexicalOwners prefix))) ->
+            pure (WorldImportContext (worldInputsIdentityBytes facts) (worldInputsCompilerIdentityBytes facts)
+              (worldInputsBindingScope facts) (worldLexicalImportGraph (case imports of WorldImportBasis _ rows -> rows))
+              (Map.toAscList prefix))
+          (Nothing,Nothing) -> pure OrdinaryImportContext
+          _ -> liftIO (throwIO CheckedPurposeMismatch)
+    scopedImports <- scopedImportAdmission variant requestIdentity incarnation targetOwner targetSummary importContext
+    driverTarget <- parseModule targetSummary {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts targetSummary)}
+    importEnvironment <- getSession
+    resolvedImports0 <- liftIO (resolveImportAdmission scopedImports driverTarget importEnvironment)
     let targetName = moduleName targetOwner
         prepareTypedTarget originAdmissions summary env tcg = case typedPlanFor selection of
           Just typedPlan | ms_mod_name summary == targetName -> do
@@ -5371,7 +5541,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       Nothing -> pure Nothing
       Just scope -> withSourceSelectionRefusal
         (selectCurrentSourceOriginals scope (programSourceImports (pvPurpose variant))
-          (pvSourceImportIntents variant) (pvGeneratedScaffold variant) modGraphRaw)
+          resolvedImports0 (pvGeneratedScaffold variant) modGraphRaw)
+    let resolvedImports = case resolvedImports0 of
+          ResolvedImportAdmission scoped driver choices _ ->
+            ResolvedImportAdmission scoped driver choices sourceSelection
     selectedExact <- traverse (either (liftIO . fail) pure . extendSourceSelectedOriginals sourceSelection)
       (pvExactScope variant)
     let canonicalOriginalInputs = case worldSources of
@@ -5426,11 +5599,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     exactCompilation <- if isNothing (pvExactScope variant) && isNothing (pvWorldSources variant)
       then pure Nothing
       else do
-        targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-            , ms_mod summary == targetOwner] of
-          [summary] -> pure summary
-          _ -> liftIO (fail "source imports lack their actual parsed target")
-        parsedTarget <- parseModule targetSummary
+        let parsedTarget = resolvedImportDriver resolvedImports
         let home = moduleUnit targetOwner
             homeNodes = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
               , moduleUnit (ms_mod summary) == home]
@@ -5699,7 +5868,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     setupT1 <- monotonicTime
     endResourceTiming setupResources "compile" "ghc_setup"
     liftIO (emitPhase timing "ghc_setup" (elapsedMs sessionT0 setupT1))
-    observedPlan <- pvPlan variant compilerViewDirectory timing targetName modGraphRaw selectedExact
+    observedPlan <- pvPlan variant compilerViewDirectory timing targetName modGraphRaw selectedExact resolvedImports
     -- Returned environments outlive this request's observer, just as the
     -- resident session does. Keep all plan-owned hooks, restoring only ours.
     let originalPlan = observedPlan
@@ -5953,9 +6122,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               reflectGhc (do
                 cpBeforeModule plan summaryC
                 current <- getSession
-                parsed <- parseModule summaryC
+                parsed <- if ms_mod summaryC == targetOwner then pure (resolvedImportDriver resolvedImports)
+                  else parseModule summaryC
                 let quotes = classifyQuasiQuoteUse parsed
-                transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summaryC)
+                transformed <- liftIO $ if ms_mod summaryC == targetOwner
+                  then preparedImportModule <$> prepareImportAdmission variant targetName current summaryC resolvedImports
+                  else nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summaryC
                 ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
                   (typecheckNativeModuleWithDiagnostics current transformed)
                 liftIO (validateCompilationFamilies current tcg)
@@ -6264,9 +6436,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 typecheckEnv <- getSession
                 ((tcGblEnv, quasiQuoteUse), tcMs) <- timeSection $
                   timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
-                    parsed <- parseModule modSum
+                    parsed <- if ms_mod modSum == targetOwner then pure (resolvedImportDriver resolvedImports)
+                      else parseModule modSum
                     let quotes = classifyQuasiQuoteUse parsed
-                    transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName typecheckEnv modSum)
+                    transformed <- liftIO $ if ms_mod modSum == targetOwner
+                      then preparedImportModule <$> prepareImportAdmission variant targetName typecheckEnv modSum resolvedImports
+                      else nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName typecheckEnv modSum
                     ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName typecheckEnv modSum parsed
                       (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
                     let flags = ms_hspp_opts modSum
@@ -7005,9 +7180,12 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       ++ " target=" ++ show isTarget
                   (tcg, quotes) <- timeDetailPhase timing "checked_typecheck"
                     (moduleNameString (ms_mod_name summary)) $ do
-                      parsed <- parseModule summary
+                      parsed <- if ms_mod summary == targetOwner then pure (resolvedImportDriver resolvedImports)
+                        else parseModule summary
                       let quotes = classifyQuasiQuoteUse parsed
-                      transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summary)
+                      transformed <- liftIO $ if ms_mod summary == targetOwner
+                        then preparedImportModule <$> prepareImportAdmission variant targetName current summary resolvedImports
+                        else nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summary
                       ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
                       let flags = ms_hspp_opts summary
@@ -9180,7 +9358,7 @@ normalVariant purpose = do
    , pvSourceImportIntents = sourceImportIntents purpose
    , pvDownsweepExcludes = []
    , pvTransformParsed = transformFor purpose
-   , pvPlan = \_compilerViewDirectory _timing _targetName modGraphRaw _selectedExact -> pure CompilePlan
+   , pvPlan = \_compilerViewDirectory _timing _targetName modGraphRaw _selectedExact _resolved -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
       , cpAfterLoad = \_ -> pure ()
         -- Consume load captures and finalize any deferred source in dependency
@@ -9452,9 +9630,10 @@ checkedRecipeOriginal admitted = do
 -- reload inspection separately demands current proof for the entire original scope.
 -- Available retained requirements alone never create a source demand.
 selectCurrentSourceOriginals
-  :: ExactScope -> Maybe ProgramSourceImports -> [ImportIntent] -> Maybe GeneratedScaffoldRecipe -> ModuleGraph
+  :: ExactScope -> Maybe ProgramSourceImports -> ResolvedImportAdmission -> Maybe GeneratedScaffoldRecipe -> ModuleGraph
   -> Ghc (Maybe SourceSelectedOriginals)
-selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
+selectCurrentSourceOriginals admitted completed resolved recipe sourceGraph = do
+  let intents = resolvedImportIntents resolved
   initial <- getSession
   forM_ completed (either (liftIO . fail) pure . validateProgramSourceImports admitted)
   let home = homeUnitId (hsc_home_unit initial)
@@ -9524,18 +9703,11 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
     scaffold <- case recipe of
       Nothing -> pure noGeneratedScaffoldImports
       Just protected -> do
-        candidates <- filterM (\summary -> case ml_hs_file (ms_location summary) of
-          Nothing -> pure False
-          Just source -> liftIO (captureGeneratedScaffoldTarget protected source)
-            >>= pure . either (const False) (const True)) sourceSummaries
-        case candidates of
-          [summary] -> do
-            parsed <- parseModule summary
-            original <- either (liftIO . fail) pure (checkedRecipeOriginal admitted)
-            liftIO (readGeneratedScaffoldImportAuthority closure'
-              (scopeExecutionNativeOwners admitted) original protected parsed sourceGraph hydrated)
-              >>= either (liftIO . fail) pure
-          _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
+        (whole,driver) <- either (liftIO . fail) pure (generatedImportDriver resolved)
+        original <- either (liftIO . fail) pure (checkedRecipeOriginal admitted)
+        liftIO (readGeneratedScaffoldImportAuthority closure'
+          (scopeExecutionNativeOwners admitted) original protected whole driver sourceGraph hydrated)
+          >>= either (liftIO . fail) pure
     let roots = Set.toAscList (reloadOwners `Set.union` Set.fromList [key | (summary,imported,key) <- hiddenImports
           , key `Set.notMember` publishedOwners
           , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)])
@@ -9993,7 +10165,7 @@ sessionVariant purpose scope = do
          Just (recipe, signatures) | ms_mod_name summary == targetModName' ->
            rewriteRequestTypes env recipe signatures transformed
          _ -> pure transformed
-   , pvPlan = \compilerViewDirectory timing targetModName' modGraphRaw selectedExact -> do
+   , pvPlan = \compilerViewDirectory timing targetModName' modGraphRaw selectedExact resolved -> do
       current <- getSession
       let targetKeys = Set.fromList [mkNodeKey node
             | node@(ModuleNode _ summary) <- mgModSummaries' modGraphRaw
@@ -10039,14 +10211,10 @@ sessionVariant purpose scope = do
           scaffold <- case generatedRecipe purpose of
             Nothing -> pure noGeneratedScaffoldImports
             Just recipe -> do
-              targetSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw
-                  , ms_mod_name summary == targetModName'] of
-                [summary] -> pure summary
-                _ -> liftIO (fail "generated scaffold target summary is missing or duplicated")
-              parsedScaffold <- parseModule targetSummary
+              (whole,driver) <- either (liftIO . fail) pure (generatedImportDriver resolved)
               original <- either (liftIO . fail) pure (checkedRecipeOriginal admitted)
               liftIO (readGeneratedScaffoldImportAuthority closure'
-                (scopeExecutionNativeOwners admitted) original recipe parsedScaffold modGraphRaw hydrated)
+                (scopeExecutionNativeOwners admitted) original recipe whole driver modGraphRaw hydrated)
                 >>= either (liftIO . fail) pure
           liftIO (writeIORef scaffoldRef scaffold)
           preflight <- liftIO (installExactLexicalGraphWithScaffold modGraphRaw lexical checkedValues scaffold hydrated)

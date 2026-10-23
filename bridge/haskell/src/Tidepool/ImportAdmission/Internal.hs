@@ -34,7 +34,8 @@ data CapturedImportAdmission
 -- carriage keeps only the actual selected lexical rows and existing identity
 -- bytes, rather than retaining a world, HscEnv or available inventory.
 data ImportAdmissionContext
-  = FiniteImportContext ExactScope
+  = OrdinaryImportContext
+  | FiniteImportContext ExactScope
   | WorldImportContext BS.ByteString BS.ByteString Word64
       [(ExactIfaceArtifact,[(String,String)])] [(ModuleName,String)]
 
@@ -47,7 +48,7 @@ data ScopedImportAdmission = ScopedImportAdmission
   CapturedImportAdmission ImportAdmissionContext ImportAttempt
 
 data ResolvedImportOccurrence = ResolvedImportOccurrence
-  ImportOccurrenceId ImportOrigin RawPkgQual PkgQual Bool Module
+  ImportOccurrenceId ImportOrigin ModuleName RawPkgQual PkgQual Bool Module
 
 data ResolvedImportAdmission = ResolvedImportAdmission
   ScopedImportAdmission DriverImportSyntax [ResolvedImportOccurrence]
