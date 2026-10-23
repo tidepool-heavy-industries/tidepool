@@ -939,7 +939,7 @@ runLegacyCellMode bound cellPath = do
     preparedDeclaration <- case admittedScope >>= \exact -> (,) exact <$> scopeCheckedCell exact of
       Just (exact, admission)
         | any ((== KDecl) . sbKind . cellAnalysisVerdict) (cellPlanItems initialPlan) ->
-            Just <$> prepareOriginalCellDeclaration parserFlags bound template outDir scope exact admission initialPlan
+            Just <$> prepareOriginalCellDeclaration bound template outDir scope exact admission initialPlan
       _ -> pure Nothing
     let checkPurpose = maybe GeneralCompile (\(_,_,inventory,exact,_) -> PlannedDeclarationCheck inventory exact) preparedDeclaration
         checkedSelection = if isJust preparedDeclaration then CheckedEnvironment else
@@ -1315,12 +1315,13 @@ addProgramValue root generation binders@(firstBinder:_) state = do
 -- The successful frontend's prepared interface supplies the declaration's
 -- native product and its retained type evidence.
 prepareOriginalCellDeclaration
-  :: DynFlags -> BoundCompilerRequest -> String -> FilePath -> Maybe SessionScope
+  :: BoundCompilerRequest -> String -> FilePath -> Maybe SessionScope
   -> ExactScope -> CheckedCellAdmission -> CellSourcePlan
   -> IO (CellSourcePlan, PlannedDeclaration, PlannedDeclarationInventory, ExactScope,
          (PreparedPipelineResult, CertifiedOriginalProducts))
-prepareOriginalCellDeclaration parserFlags bound template outDir scope exact admission initial = do
+prepareOriginalCellDeclaration bound template outDir scope exact admission initial = do
   let args = boundWorkerRequest bound
+      parserFlags = boundParserFlags bound
   reserved <- case checkedReservedModules admission of
     [owner] -> pure owner
     _ -> throwIO InvalidDeclarationReservation
