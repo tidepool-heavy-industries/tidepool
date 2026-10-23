@@ -569,6 +569,40 @@ impl PartialEq for CanonicalFacts {
     }
 }
 impl Eq for CanonicalFacts {}
+impl CanonicalFacts {
+    pub(crate) fn record_metadata_differences(
+        &self,
+        other: &Self,
+        fields: &mut Vec<crate::artifact_inventory::ArtifactMetadataField>,
+    ) {
+        use crate::artifact_inventory::ArtifactMetadataField as Field;
+        for (different, field) in [
+            (
+                self.producer_sha256 != other.producer_sha256,
+                Field::CanonicalProducer,
+            ),
+            (
+                self.certificate != other.certificate,
+                Field::CanonicalCertificate,
+            ),
+            (self.interface != other.interface, Field::CanonicalInterface),
+            (
+                self.package_imports != other.package_imports,
+                Field::CanonicalPackages,
+            ),
+            (self.core != other.core, Field::CanonicalCore),
+            (self.origin != other.origin, Field::CanonicalOrigin),
+            (
+                self.home_units != other.home_units,
+                Field::CanonicalHomeUnits,
+            ),
+        ] {
+            if different {
+                fields.push(field);
+            }
+        }
+    }
+}
 impl std::ops::Deref for CertifiedModuleInterface {
     type Target = CanonicalFacts;
     fn deref(&self) -> &CanonicalFacts {

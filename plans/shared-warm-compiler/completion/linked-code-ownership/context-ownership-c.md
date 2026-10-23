@@ -1,189 +1,139 @@
-# G2: retained state, request selection and completed evidence
+# G2: issued dependencies and acquired compiler context
 
-Accepted 2026-10-22. Integration branch:
-`refactor/g2-context-ownership-c-20261022`, starting at `663c94293e`
-(code candidate `c92fb6217b`). Root owns integration and technical review.
-The preceding review checkpoint retains baseline evidence; this document owns
-the active assignments. G2 and G3 remain unqualified.
+Accepted 2026-10-23. Integration: `refactor/g2-context-ownership-c-20261022`.
+Root owns architecture, integration and joined qualification. G2/G3 remain
+unqualified. Prior checkpoint history is in Git and retained validation evidence.
 
-## Contract
+## Current evidence and first gates
 
-Preserve the warm compiler, `CompilerSourceSupport` with private `SupportDraft`,
-exact request selection, `WorldProgramContinuation`, and Context9. Migrate the
-construction and consumption boundaries; do not create parallel inventories,
-authority registries, compilers or test frameworks.
+At `726e35e25f`, cold composition, four ownership controls, authored execution
+and the staged World history pass. The rooted cohort executed 30 cases: 19 pass,
+11 fail; a separate compiler startup failure executed zero cases. Ten failures
+have reviewed fixture repairs integrated at `d3922e34e9`; execution is pending.
+Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
 
-| Owner | Contract |
-| --- | --- |
-| `ExactDeclarationContext` | Immutable retained facts; no original-completion flag. |
-| `SelectedTypeInterfaces` | Actual selected TYPE evidence and custody; no SOURCE mutation, executable selection or completion authority. |
-| `RequestCompilerInputs` | Actual request selection, closed at the existing compile front door. |
-| `WorldPrimaryInputs` | Actual primary context paired with request inputs; World-only operations leave generic requests. |
-| `OriginalExecutionEvidence` | Actual output-issued execution context plus complete/missing instance census. Only a complete owner supplies the borrowed completed view. |
-| `PublicationComposition` | Accepted join and its exact selected context issued together. |
-| Context9 restoration | Authenticated exact retained selection; never a fresh compiler transaction or completion. |
+Two product boundaries require proof before broad migration:
 
-Names may reuse existing appropriate owners. Private construction and restricted
-consumer signatures are required; a wrapper exposing the old unrestricted API
-does not complete the migration. Reuse immutable owners through references.
+1. The generated publication history refuses MetadataConflict after demands and
+   composition. Record the exact rejected pair and differing immutable fields at
+   the inventory comparator. Keep the refusal; shallow view equality and
+   test-local logging cannot identify this defect.
+2. A later request consuming `historyCaptured` loses the exact transitive
+   `historyValue0` dependency. The compiler attempts native recovery of a thin
+   Val interface, then follows a logical arena alias as a file path. That alias
+   was never a file. Separate terminal classification from physical backing.
+   Establish inline and noinline histories through real compilation and runtime.
 
-Instance completeness, native executability and compiler END settlement remain
-independent. Native installation must not acquire a new completeness requirement.
-Template capture with no selected template roots still succeeds without such a
-proof. Checked retained values carry their genuine source/template evidence;
-plain TYPE and same-cell ProducedValueTypeInterfaces cannot impersonate them.
+## Owners and phase transitions
 
-Native custody advances through two real issuers: checked output and validated
-private-publication progress. The latter currently validates frontier, source
-seal, producer/profile, lineage and target scope in `promote_private_bindings`.
-Keep that path; do not require a newly manufactured sealed output for promotion.
-Preserve request-native demand and the receiving compiler namespace during both.
+Preserve the warm compiler, existing exact graph, certified products, persistent
+Merkle structures, runtime admission and request exchange. Evolve their owners;
+do not add a parallel compiler, authority inventory or test framework.
 
-Historical dependencies retain exact issued bindings. Equal interfaces, hashes,
-available payloads or newer implementations do not select replacements.
+- Certified artifact facts contain authenticated immutable bytes, descriptor,
+  requirements and seals. Acquired handles separately retain actual custody and
+  acquisition provenance. Equal facts never combine independent grants.
+- A selected context has one persistent compiler-row owner with distinct TYPE,
+  native demand, custody, SOURCE and instance relations. Private derived indexes
+  are permitted; independently supplied maps of the same fact are not.
+- Publication birth retains its actual immutable issuing context and acquisitions.
+  A receiving projection references that birth with its own selection/demand.
+  Reading birth evidence must not reconstruct or reissue its support.
+- Remove generic equality from live views. Each consumer chooses immutable fact
+  equality, exact recorded selection or actual acquisition identity explicitly.
+  An acquisition index preserves multiple equal-payload owners; first-match and
+  unions of unrelated partial grants cannot issue permission.
 
-## Checkpoint 1: publication and TYPE admission
+The dependency phases have private construction:
 
-The publication/TYPE implementation and native-candidate correction are integrated.
-At `5e5a37fff8`, the complete staged history passes: mixed execution/publication,
-fresh consumer, later declaration, cold attach and cold consumer without replay.
-The corrected boundary retains competing historical bodies as candidates, requires
-uniqueness only for nominal demand, and carries exact issued bindings for exact
-demand. It never chooses by inventory order or weakens group permission.
+1. `CompilerDependencyBasis` is issued before simplification from admitted
+   SOURCE/canonical owners, direct World inputs, operand and prior stages. It
+   supplies classification evidence, not execution permission.
+2. `ResolvedDependencyUse` classifies one reached reference as local code, an
+   exact Original occurrence, a runtime terminal or pinned package dependency.
+   Unknown/conflicting HOME evidence is a typed refusal.
+3. `SelectedDependencyPlan` retains ordered exact occurrences, acquired native
+   closures, package obligations and runtime terminal requirements. Projection,
+   linking and receipts consume this same owner.
+4. `BoundDependencyPlan` is issued by runtime admission after attaching actual
+   binding owners, handles, scopes, source custody and leases.
 
-Use the existing exact graph owner. Composition of equal canonical issued rows
-is idempotent; conflicting adjacency refuses. Raw decoding/restoration rejects
-duplicate owners and edges. Normalize source syntax before issuing canonical
-rows; composition must not erase malformed input silently.
+Runtime terminal origins are DirectWorld, PriorStage, Operand, SourceDefinition
+and NativeOriginal. Spelling is not identity. A hidden historical capture must
+not masquerade as a new visible binding. SourceDefinition preserves exact
+captured evidence when simplification removes its Original call; TYPE alone
+cannot supply this. Only reached uses become execution demand. PriorStage becomes
+live only after its producer succeeds and is rechecked before consumption.
 
-Make source surfaces opaque and issued. Remove runtime `roots + Vec` assembly.
-Keep actual adjacency, interface anchors and Original-role selection distinct.
-Selection comes from actual certificates, never graph keys or broad custody.
-Migrate private projection, public preflight, final publication and view callers
-together. Issue accepted join/context as one composition for World and storage.
+Extend the existing request-owned exchange with distinct SOURCE-dependency and
+native-use queries, fenced by operation, World, inputs and stage. The first does
+not acquire native code. The second returns package and retained-terminal
+occurrences. Preserve full ArtifactBinding.selection and import-slot ordering.
+Final receipts reference issued decisions; delete package-only replies and
+reconstruction from independent generation maps. Compiler evidence cannot invent
+SessionVar/scope/live authority; cold compiler reacquisition cannot resurrect it.
 
-Remove lexical replacement from TYPE admission. Ordinary TYPE addition preserves
-source policy; host TYPE-only projection explicitly selects that narrower shape.
-Delete the old broad publication route at this checkpoint.
+## Interfaces and persistence
 
-Acceptance: mixed staged history reaches actual effects, Display, publication,
-private retirement and fresh consumer; follow through real cold restoration and
-another request using existing session/recovery owners.
+An admitted interface retains identity, role, captured bytes and NameCache-bound
+interpretation. HPT-only TYPE hydration does not register synthetic Finder paths.
+Tidepool readers consume captured owners. Consumers requiring a physical GHC
+location request BackedInterface (real ModLocation plus backing lease), through
+existing materializeInterfaceView ownership. Materialize only demanded bytes;
+retained compiler state retains every registered location's lease. Thin TYPE
+cannot enter executable-body recovery. Pinned package access remains explicit.
 
-The exact restoration repair passes two focused controls (including five
-malformed-baseline mutations); the complete staged history and candidate control
-pass at `5e5a37fff8`. Evidence:
-`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/5e5a-checkpoint.json`.
-Restoration authenticates and attaches recorded owners; it must not replay live
-custody-growth composition, which can change exact seeds. Final baseline binding
-preserves that same distinction.
+Persistence becomes `decode -> DecodedContext -> authenticate -> AcquiredContext`.
+Recorded data cannot be a live capability or replay live issuance. Stabilize
+selected rows before finalizing Context10 and delete mixed Recorded/Acquired
+publication authority. Context10 explicitly refuses Context9; keep authored
+files, memory and old evidence. Bump matched exchange/stage layouts together;
+change artifact certificates only if authenticated meaning changes.
 
-## Checkpoint 2: request and output owners
+## Work sequencing and ownership
 
-Output ownership is integrated from `fbbcc0494d`, and strict recovery consumers
-through `ee1d302f0e`. At `196b6c43ea`, production/test consumer compilation,
-exact packet controls and the full staged cold history pass; the staged history
-took 140.919 seconds with confirmed cleanup. Its outer launcher exit record was
-lost across a tool restart; the retained native test report establishes execution.
+- Root: metadata rejection evidence/root cause, shared phase/schema decisions,
+  runtime binding contract, integrated canary, review, map, merge and qualification.
+- Astra dependency implementer: source basis before simplification, exact native
+  occurrence projection and matched compiler exchange. Coordinates runtime and
+  interface consumers with root before editing their shared boundaries.
+- Astra context implementer: retained publication birth first, then one selected
+  row owner and immutable facts/acquisition separation. Codec work follows rows.
+- Sol interface implementer: captured-reader versus BackedInterface cutover and
+  demanded physical consumers; coordinates GhcPipeline edits with dependency owner.
+- Sol validation: one warm integration lane at an exact clean source pin. Isolated
+  source branches continue concurrently; no integration mutation during a pin.
+- Further bounded Sol migrations receive frozen signatures and owning paths, not
+  a request to reconstruct architecture independently.
 
-WorldPrimaryInputs and the narrow TYPE owner are integrated at `04fb19a11e`.
-Independent source review found and repaired moved-field accesses and verified
-the restricted producers and consumers. At `a7371ee34e`, production and cfg(test)
-compilation passed for toolchain, runtime, actor and host consumers. Two new
-regressions passed: explicit overlapping custody seeds survive live merging,
-and equal TYPE payloads with different issued bindings remain distinct through
-warm and cold selection. These are component results; G2 remains unqualified.
+First canary: compilation -> exact dependency selection -> runtime binding ->
+publication -> genuine cold recovery -> subsequent execution. Prove inline and
+noinline transitive captures before expanding selected-row migrations. Every
+completed parcel removes its replaced route. No production todo!/placeholder
+issuers; staging compatibility is not a completed migration.
 
-At predecessor `b5c8008343`, the three output API control/refusal pairs passed;
-the four focused executions passed three and failed one. Output cohorts
-16/7/2/6 executed 31 cases with 16 passing and 15 failing. Failures distinguish
-stale custody-versus-demand premises, wrong fixture home units, exact-key versus
-transitive dependency observation, and real cold-reimport identity drift.
-Reviewed repairs are integrated through `0422550b91`; the broader histories
-require execution. The final test-only change makes the retained-template
-consumer explicitly TYPE-only while retaining Full/Partial/Empty permission
-and strict recovery controls.
-Exact commands, source hashes and reports are retained in
-`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/b5c8-checkpoint.json`.
+## Acceptance and delivery
 
-Ordinary compile sealing and exact/World admission issue OriginalExecutionEvidence
-from actual request/output owners. Move instance status out of general contexts.
-Migrate display, template capture and source publication; private complete views
-cannot be rebound to extended or restored contexts. Exact output replay retains
-its issued evidence. Keep the two native-custody transfer paths above.
+Use production-front-door histories and existing property/compile-fail owners.
+Cover hidden/shadowed captures, same-request barriers, later requests, cold reuse,
+equal facts with different acquisitions, wrong scope/generation/stage, missing
+capture, substituted binding, explicit Empty and refusal before consuming effects.
+An independent model tracks roles, roots, custody overlap, scoped adjacency,
+input choices, permission and SOURCE; do not copy the implementation projection.
 
-Carry SelectedTypeInterfaces through World bindings, query preparation and
-request composition. Replace optional World-primary mode with an explicit owner.
-Preserve initial acquisition/demand and actual predecessor/stage checks.
+Exercise actual arena aliases, backing lifetime/retirement, package missing/seal
+refusals. Unused imported bodies must cause no native acquisition/runtime binding;
+passive TYPE inventory must cause no file materialization. Measure persistent
+row growth rather than assuming cheapness from the wire size. Compile-fail pairs
+forbid recorded-to-acquired, alias-to-physical and compiler-to-runtime-bound casts.
 
-Version affected semantic/display identity domains. Retained identity excludes
-completion; output/display identity includes relevant target, census, witness and
-exact dependency distinctions. Digest equality is not authority. Context9's
-retained format remains unchanged.
+Compile affected production and test consumers, run focused cases and the joined
+canary at each meaningful boundary, then the remaining maintained G2 cohorts and
+affected fixture corpus. Freeze one matched bundle; verify actual Persona spec,
+tools and initial memory; run bounded DeepSeek turns with fresh chat state and
+preserved authored files. G3 force/fork/recovery/M1-M3 qualification is separate.
 
-Acceptance: repeat checkpoint 1 plus finite/World compile, retained checked value,
-missing-completeness native execution, display/source refusal, empty-template,
-foreign stage and private-promotion controls.
-
-## Checkpoint 3: restoration and closure
-
-Keep `context_for_expected_snapshot` as exact persisted restoration. Migrate
-remaining production raw inventory constructors to exact-selection acquisition
-or strict restoration, including declaration recovery. Remove old broad APIs.
-Raw malformed-input tests stay inside their owning parsers; successful fixtures
-must consume actual production-issued evidence.
-
-Known fixture repairs are separate from the runtime defect: TYPE-only admission
-need not create ProgramSourceSupport; FreshSource replay into a generated
-Original context needs the actual refusal retained; quotation compilation keeps
-its owned endpoint until completion. Disable the compiler only to prove replay
-after genuine completed evidence exists. No test-support authority factory.
-
-Acceptance: cold continuation after predecessor/source removal, old/new exact
-historical selection, missing evidence and wrong-root refusals, production and
-cfg(test) consumer compilation, compile-fail API controls with valid pairs.
-
-## Assignments and integration
-
-- Root: shared contracts; exact graph composition/error boundary; critical diff
-  review, integration, evidence/plan/map updates and qualification decisions.
-- Toolchain publication owner: declaration_context publication/TYPE methods and
-  declaration_join issuance. Own overlapping core edits serially.
-- Runtime owner: lexical_projection, paired_publication, view/render consumers;
-  coordinate API with toolchain owner before editing shared files.
-- Fixture owner: known component/quotation premises and production positive
-  controls; isolate changes from core methods and preserve actual refusals.
-- Recovery owner: audit strict restoration callers, implement consumer migration
-  and cold continuation once publication API is ready.
-- Output/request follow-up: prepared from the contract now; implement against
-  checkpoint 1 after core ownership transfers explicitly.
-- Independent reviewers: completion identity/ownership and joined migration;
-  inspect bypasses, repeated work and test discrimination while in the area.
-
-Each worker reports exact candidate/base, changed consumers, commands and actual
-executed counts, refusal controls and remaining uncertainty. Source review,
-compilation and execution are distinct. Isolated source branches fold into this
-integration branch; no orphaned completed work. No overlapping mutation of
-declaration_context. Each integrated checkpoint deletes its replaced production
-route, compiles consumers and executes its joined history before advancing.
-
-Use pinned local-only admitted Buck/just commands. Current scratch is about
-118 GiB: preserve 100 GiB including forecast growth. Prefer the warm integration
-output lane while preparing source-only branches; a cold build needs measured
-admission. Root coordinates concrete output/configuration conflicts, not routine
-permission. Stop only idle owned daemons and retain outputs/evidence.
-
-## Final evidence and release
-
-Use existing compile-fail infrastructure and an independent bounded history model
-of selected roles, adjacency, SOURCE permission and executable demand. Valid
-workflow histories use issued objects; raw corruption tests remain distinct.
-API controls forbid retained context as completion, TYPE as graph replacement,
-public raw source-surface construction and generic request as World capability.
-
-Run remaining recorded G2 cohorts and affected corpus, then build/freeze a single
-matched bundle. Execute named Persona acceptance, verify actual spec/tools/initial
-memory, run bounded live DeepSeek turns and launch fresh conversation state with
-authored files/memory preserved. Full G3 force/fork/recovery/M1-M3 and performance
-qualification follow separately. Measure structural work reduction using existing
-timing/counters; do not infer speedups from changed types or smaller diffs.
+Use pinned local-only Buck/just commands. Scratch was 113 GiB at admission;
+preserve 100 GiB including forecast growth. Retain source OID, exact commands,
+nonzero executed counts, outcomes and logs. Component passes and smaller bug
+counts do not establish release readiness or measured speedups.

@@ -136,6 +136,36 @@ impl PartialEq for OriginalFacts {
     }
 }
 impl Eq for OriginalFacts {}
+impl OriginalFacts {
+    pub(crate) fn record_metadata_differences(
+        &self,
+        other: &Self,
+        fields: &mut Vec<crate::artifact_inventory::ArtifactMetadataField>,
+    ) {
+        use crate::artifact_inventory::ArtifactMetadataField as Field;
+        for (different, field) in [
+            (self.bytes.owner != other.bytes.owner, Field::OriginalOwner),
+            (
+                self.bytes.product_bytes != other.bytes.product_bytes,
+                Field::OriginalProduct,
+            ),
+            (
+                self.bytes.certification_bytes != other.bytes.certification_bytes,
+                Field::OriginalCertificate,
+            ),
+            (
+                self.bytes.execution_source != other.bytes.execution_source,
+                Field::OriginalExecutionSource,
+            ),
+        ] {
+            if different {
+                fields.push(field);
+            }
+        }
+        self.canonical
+            .record_metadata_differences(&other.canonical, fields);
+    }
+}
 impl std::ops::Deref for CertifiedRecoveryProduct {
     type Target = OriginalBytes;
     fn deref(&self) -> &OriginalBytes {

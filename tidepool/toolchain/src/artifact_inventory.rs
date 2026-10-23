@@ -33,6 +33,8 @@ pub(crate) use native_availability::{
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
+mod metadata_conflict;
+pub(crate) use metadata_conflict::ArtifactMetadataField;
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
@@ -1749,6 +1751,12 @@ pub struct ArtifactInventoryError {
 }
 
 pub(crate) enum ArtifactOwnerConflictEvidence {
+    Metadata {
+        existing: Arc<ArtifactEntry>,
+        incoming: Arc<ArtifactEntry>,
+        fields: Vec<ArtifactMetadataField>,
+        selected: Option<(bool, bool, bool)>,
+    },
     ArtifactSelection {
         existing: Arc<ArtifactEntry>,
         incoming: Arc<ArtifactEntry>,
@@ -1785,6 +1793,16 @@ impl ArtifactOwnerConflictEvidence {
             summary
         }
         match self {
+            Self::Metadata {
+                existing,
+                incoming,
+                fields,
+                selected,
+            } => format!(
+                "metadata existing={} incoming={} fields={fields:?} selected={selected:?}",
+                artifact(existing),
+                artifact(incoming)
+            ),
             Self::ArtifactSelection {
                 existing, incoming, ..
             } => format!(
@@ -1837,6 +1855,24 @@ impl ArtifactOwnerConflictEvidence {
             }
         }
         match self {
+            Self::Metadata {
+                existing,
+                incoming,
+                fields,
+                selected,
+            } => serde_json::json!({
+                "boundary": "metadata",
+                "existing": existing.descriptor,
+                "incoming": incoming.descriptor,
+                "differing_fields": fields,
+                "selected": selected.map(|(existing, incoming, receiving)| serde_json::json!({
+                    "existing": existing, "incoming": incoming, "receiving": receiving,
+                })),
+                "existing_requirements": existing.requirements,
+                "incoming_requirements": incoming.requirements,
+                "existing_interface_seals": existing.interface_seals.iter().collect::<Vec<_>>(),
+                "incoming_interface_seals": incoming.interface_seals.iter().collect::<Vec<_>>(),
+            }),
             Self::ArtifactSelection {
                 existing,
                 incoming,
@@ -1862,6 +1898,9 @@ impl ArtifactOwnerConflictEvidence {
 
     fn entries(&self) -> Option<(&Arc<ArtifactEntry>, &Arc<ArtifactEntry>)> {
         match self {
+            Self::Metadata {
+                existing, incoming, ..
+            } => Some((existing, incoming)),
             Self::ArtifactSelection {
                 existing, incoming, ..
             } => Some((existing, incoming)),
@@ -2375,11 +2414,7 @@ impl ArtifactEntry {
         entry: &Arc<Self>,
     ) -> Result<Arc<Self>, CompileError> {
         if previous != entry {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: entry.descriptor.id,
-                },
-            ));
+            return Err(metadata_conflict::refusal(previous, entry));
         }
         let previous_custody = previous.catalog_input_custody();
         let incoming_custody = entry.catalog_input_custody();
@@ -2974,11 +3009,7 @@ impl InventoryState {
         self.canonical_bytes_offered
             .fetch_add(offered as u64, Ordering::Relaxed);
         if existing != entry {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: entry.descriptor.id,
-                },
-            ));
+            return Err(metadata_conflict::refusal(&existing, &entry));
         }
         Ok(Arc::new(entry.adopt_facts(existing.facts.clone())))
     }
@@ -9472,7 +9503,22 @@ impl ArtifactView {
         let mut issuing_payloads = BTreeMap::new();
         for (id, incoming) in &other.lease.payloads {
             if let Some(previous) = self.lease.payloads.get(id) {
-                let merged = ArtifactEntry::merge_catalog_input_custody(previous, incoming)?;
+                let merged = ArtifactEntry::merge_catalog_input_custody(previous, incoming)
+                    .map_err(|mut error| {
+                        if let CompileError::ArtifactInventory(inventory) = &mut error {
+                            if let Some(ArtifactOwnerConflictEvidence::Metadata {
+                                selected, ..
+                            }) = &mut inventory.owner_conflict
+                            {
+                                *selected = Some((
+                                    self.contains_namespace_artifact(*id),
+                                    other.contains_namespace_artifact(*id),
+                                    namespace.contains_key(id),
+                                ));
+                            }
+                        }
+                        error
+                    })?;
                 if !Arc::ptr_eq(previous, &merged) {
                     issuing_payloads.insert(*id, merged);
                 }
@@ -20891,6 +20937,43 @@ mod tests {
                     if artifact == cold.descriptor.id)
         ));
         assert_eq!(cold_view.artifact_ids(), fresh_view.artifact_ids());
+    }
+
+    #[test]
+    fn metadata_conflict_retains_rejected_pair_and_exact_field_difference() {
+        let original = Arc::new(entry("MetadataEvidence", &[]));
+        let mut altered = (*original).clone();
+        altered.requirements.push(module("UnissuedDependency"));
+        let incoming = Arc::new(altered);
+        let Err(CompileError::ArtifactInventory(error)) =
+            ArtifactEntry::merge_catalog_input_custody(&original, &incoming)
+        else {
+            panic!("different requirements must refuse before merging custody")
+        };
+        let Some(ArtifactOwnerConflictEvidence::Metadata {
+            existing,
+            incoming: retained,
+            fields,
+            ..
+        }) = error.owner_conflict.as_ref()
+        else {
+            panic!("metadata refusal must retain its actual comparison")
+        };
+        assert!(Arc::ptr_eq(existing, &original));
+        assert!(Arc::ptr_eq(retained, &incoming));
+        assert_eq!(fields, &[ArtifactMetadataField::Requirements]);
+        drop(original);
+        drop(incoming);
+        let directory = tempfile::tempdir().unwrap();
+        error.retain_owner_conflict(directory.path()).unwrap();
+        let recorded: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("owner-conflict/index.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded["differing_fields"],
+            serde_json::json!(["requirements"])
+        );
     }
 
     #[test]
