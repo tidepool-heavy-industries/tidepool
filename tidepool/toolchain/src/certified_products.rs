@@ -5967,7 +5967,9 @@ impl CertifiedSourceSelection {
             CertifiedInputOrigin::Continuation(inputs.shared_compiler_source_support());
         selected.original_bindings = inputs.original_bindings().cloned();
         selected.private_native = inputs.private_native_availability();
-        selected.private_advertised = inputs.advertised_native_originals();
+        selected.private_advertised = inputs
+            .advertised_native_originals()
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         for role in inputs.projection().roles() {
             let Some(original) = role.original() else {
                 continue;
