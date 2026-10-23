@@ -1420,8 +1420,6 @@ impl ExtractRequest {
                     field,
                     Field::Input(_)
                         | Field::OutputDir(_)
-                        | Field::Target(_)
-                        | Field::Targets(_)
                         | Field::Include(_)
                         | Field::Turn
                         | Field::TurnTemplate { .. }
@@ -1429,7 +1427,6 @@ impl ExtractRequest {
                         | Field::TurnVerdict(_)
                         | Field::BuildProductsDir(_)
                         | Field::ModuleCandidates(_)
-                        | Field::CertifyHomeProducts
                         | Field::SessionRoot(_)
                         | Field::BindGen(_)
                 )
@@ -3343,6 +3340,16 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(valid.mode(), mode);
+                let mut malformed = valid.clone();
+                malformed.fields.extend(
+                    source
+                        .fields
+                        .iter()
+                        .filter(|field| matches!(field, Field::Target(_) | Field::Targets(_)))
+                        .cloned(),
+                );
+                assert_eq!(malformed.mode(), RequestMode::Invalid);
+                assert!(!malformed.supports_compile_input_identity());
                 let mut invalid = recipe;
                 invalid.extend_from_slice(&target);
                 assert!(ExtractRequest::from_cli(
