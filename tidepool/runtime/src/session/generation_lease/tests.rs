@@ -968,12 +968,12 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
     assert_eq!(canonical.library(), Some(committed.module));
     assert_eq!(
         canonical.library_import_module(),
-        Some(prepared.projection.module_name())
+        Some(prepared.projection.module_name().to_owned())
     );
-    assert_eq!(
-        canonical.exact_declaration_context(),
-        Some(prepared.projection.context())
-    );
+    assert!(canonical
+        .exact_declaration_context()
+        .expect("adopted declaration context")
+        .same_authenticated_context(prepared.projection.context()));
     assert!(
         crate::session::world_cell_test_support::state_source_action(
             &mut session,

@@ -6555,9 +6555,7 @@ mod tests {
         );
         assert!(before.0 >= 2, "actual multi-item output must be observed");
         assert_eq!(before.0, before.1, "one decode per captured item");
-        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
-            panic!("metadata fixture must retain the actual World output owner");
-        };
+        let output = &prepared.evidence;
         let issued_items = output
             .items()
             .iter()
@@ -7290,8 +7288,20 @@ mod tests {
         let legitimate = fixture.check("let value = (42 :: Int)", &[]).unwrap();
         let alternate = fixture.check("let value = (43 :: Int)", &[]).unwrap();
         assert_ne!(
-            alternate.admission.specification_digest().unwrap(),
-            legitimate.admission.specification_digest().unwrap()
+            alternate
+                .admission
+                .world_reservation()
+                .unwrap()
+                .plan()
+                .recipe()
+                .source,
+            legitimate
+                .admission
+                .world_reservation()
+                .unwrap()
+                .plan()
+                .recipe()
+                .source,
         );
         assert!(
             crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
@@ -7311,9 +7321,23 @@ mod tests {
         let mut fixture = CheckedHomeFixture::new();
         let legitimate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
         let alternate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
+        let alternate_recipe = alternate
+            .admission
+            .world_reservation()
+            .unwrap()
+            .plan()
+            .recipe();
+        let legitimate_recipe = legitimate
+            .admission
+            .world_reservation()
+            .unwrap()
+            .plan()
+            .recipe();
+        assert_eq!(alternate_recipe.source, legitimate_recipe.source);
+        assert_eq!(alternate_recipe.template, legitimate_recipe.template);
         assert_eq!(
-            alternate.admission.specification_digest().unwrap(),
-            legitimate.admission.specification_digest().unwrap()
+            alternate_recipe.turn_templates,
+            legitimate_recipe.turn_templates
         );
         assert_ne!(
             alternate.admission.reserved_generations(),
@@ -7946,18 +7970,18 @@ mod tests {
             .clone()
             .with_compile_inputs(&selected_inputs)
             .unwrap();
-        assert_eq!(
-            shared.exact_declaration_context(),
-            repeated.exact_declaration_context()
-        );
-        assert_eq!(
-            projected.exact_declaration_context(),
-            projected
-                .clone()
-                .with_compile_inputs(&source_inputs)
-                .unwrap()
-                .exact_declaration_context()
-        );
+        assert!(shared
+            .exact_declaration_context()
+            .unwrap()
+            .same_authenticated_context(repeated.exact_declaration_context().unwrap()));
+        let reprojected = projected
+            .clone()
+            .with_compile_inputs(&source_inputs)
+            .unwrap();
+        assert!(projected
+            .exact_declaration_context()
+            .unwrap()
+            .same_authenticated_context(reprojected.exact_declaration_context().unwrap()));
         let graph = shared.exact_declaration_context().unwrap().lexical_graph();
         assert_eq!(
             graph
@@ -7979,7 +8003,8 @@ mod tests {
             .compile_view_in(execution.private_scope())
             .unwrap()
             .exact_declaration_context()
-            .cloned();
+            .expect("the local declaration owns its authenticated context")
+            .clone();
         let value_items = [replacement, binding, expression];
         assert_eq!(
             actual_value_outputs,
@@ -8069,14 +8094,8 @@ mod tests {
                 protected.snapshot().compiler_prefix().next_item(),
                 item.index() + 1
             );
-            assert_eq!(
-                resident
-                    .compile_view_in(execution.private_scope())
-                    .unwrap()
-                    .exact_declaration_context(),
-                original_context.as_ref(),
-                "private value overlays must preserve the exact original declaration context"
-            );
+            assert!(resident.compile_view_in(execution.private_scope()).unwrap().exact_declaration_context().unwrap().same_authenticated_context(&original_context),
+                "private value overlays must preserve the exact original declaration context and selected acquisitions");
         }
         let private_winners = resident
             .public_visibility_snapshot_in(execution.private_scope())
