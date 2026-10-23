@@ -13166,7 +13166,7 @@ impl<'a> DecodedWorldSourceReceipt<'a> {
             &inputs.checked_values,
             operation,
         )?;
-        let context = &continuation.context;
+        let context = continuation.primary.context();
         let binding = inputs.binding.clone();
         let facts = inputs.program_facts(&continuation.program);
         // The physical evidence stays owned by the decoded receipt; retain
