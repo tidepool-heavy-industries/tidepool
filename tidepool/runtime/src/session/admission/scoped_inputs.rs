@@ -503,29 +503,4 @@ impl PersistentSession {
         owner.stages = Arc::new(stages);
         Ok(owner)
     }
-
-    pub(super) fn capture_admitted_scoped_inputs(
-        &mut self,
-        scope: Arc<RuntimeLexicalScopeLease>,
-    ) -> Result<ScopedResolvedInputs, SessionError> {
-        self.validate_lexical_scope_lease(scope.scope(), &scope)?;
-        let ids = self
-            .scoped_prepared_bindings_in(scope.scope())
-            .into_values()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
-        let mut owner = ScopedResolvedInputs::empty(scope);
-        if ids.is_empty() {
-            return Ok(owner);
-        }
-        let bindings = Arc::new(self.lease_binding_ids(ids.iter().copied()));
-        for id in ids {
-            let entry = self
-                .bindings()
-                .get(id)
-                .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
-            owner.insert(self.resolved_value(entry, Arc::clone(&bindings))?)?;
-        }
-        Ok(owner)
-    }
 }

@@ -101,13 +101,12 @@ pub use persistent::{
 };
 
 pub use admission::{
-    NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
-    PrivateCellPreparation, PrivateExecutionAdmission, PrivateHostCarrierPreparation,
-    PrivatePreparationSnapshot, ReservedNotebookScope, RuntimeBindingInterfaceReservation,
-    RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
-    RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
-    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
-    UnpublishedNotebookScope,
+    HostCarrierAdmissionFailure, PendingHostValueWrite, PrivateCellPreparation,
+    PrivateExecutionAdmission, PrivateHostCarrierPreparation, PrivatePreparationSnapshot,
+    ReservedNotebookScope, RuntimeBindingInterfaceReservation, RuntimeCellAdmission,
+    RuntimeCheckedItemAdmission, RuntimeCheckedPrefix, RuntimeCheckedPrefixSnapshot,
+    RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission, RuntimeLexicalScopeLease,
+    RuntimeOriginalSource, RuntimeWorldCellOperand, UnpublishedNotebookScope,
 };
 pub use paired_publication::FrozenWorldExecution;
 pub use paired_publication::{
@@ -538,13 +537,13 @@ pub enum SessionError {
         reason: RecoveryInitializationFailure,
     },
     #[error(
-        "native setup admission owner={owner}, epoch={owner_epoch}, scope={scope:?}: {reason}"
+        "host carrier admission owner={owner}, epoch={owner_epoch}, scope={scope:?}: {reason}"
     )]
-    InvalidNativeSetupAdmission {
+    InvalidHostCarrierAdmission {
         owner: uuid::Uuid,
         owner_epoch: u64,
         scope: ScopeId,
-        reason: NativeSetupAdmissionFailure,
+        reason: HostCarrierAdmissionFailure,
     },
     #[error("private value replacement requires a certified lexical overlay")]
     UnsupportedPrivateValueReplacement,

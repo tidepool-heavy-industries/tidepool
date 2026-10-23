@@ -3107,7 +3107,7 @@ pub struct PreparedRuntimeCell {
     admission: Arc<super::RuntimeCellAdmission>,
     checked: CellCheck,
     program: tidepool_toolchain::artifacts::PreparedCellProgram,
-    evidence: PreparedRuntimeCellEvidence,
+    evidence: Arc<tidepool_toolchain::compiler_world::CheckedWorldCellProgram>,
 }
 
 /// Executable runtime admission issued only after the SAME compiler owner has
@@ -3141,15 +3141,6 @@ impl std::ops::Deref for SettledCellProgram {
     fn deref(&self) -> &Self::Target {
         &self.program
     }
-}
-
-enum PreparedRuntimeCellEvidence {
-    Finite {
-        offer: AppliedModuleCandidateOffer,
-        root: Arc<tempfile::TempDir>,
-        stderr: Vec<u8>,
-    },
-    World(Arc<tidepool_toolchain::compiler_world::CheckedWorldCellProgram>),
 }
 
 // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -3287,25 +3278,6 @@ pub fn finish_cell_program_admitted(
 }
 
 impl PreparedRuntimeCell {
-    #[cfg(test)]
-    fn finite_evidence(
-        &self,
-    ) -> (
-        &AppliedModuleCandidateOffer,
-        &Arc<tempfile::TempDir>,
-        &Vec<u8>,
-    ) {
-        match &self.evidence {
-            PreparedRuntimeCellEvidence::Finite {
-                offer,
-                root,
-                stderr,
-            } => (offer, root, stderr),
-            PreparedRuntimeCellEvidence::World(_) => {
-                panic!("finite audit requires finite preparation evidence")
-            }
-        }
-    }
     #[tracing::instrument(
         target = "exomonad_harness::timing",
         name = "cell_program.seal",
@@ -3319,14 +3291,9 @@ impl PreparedRuntimeCell {
     ) -> Result<(CellCheck, SettledCellProgram), CellCheckFailure> {
         let program = cancellation
             .run_sync(|| self.program.seal(cancellation))
-            .map_err(|error| match &self.evidence {
-                PreparedRuntimeCellEvidence::Finite { offer, root, stderr } => {
-                    offer.retain_failure(root.path(), offer.command(), stderr, error)
-                }
-                PreparedRuntimeCellEvidence::World(program) => {
-                    tracing::debug!(target: "exomonad_harness::timing", certificate = ?program.certificate_sha256(), "world cell executable seal refused");
-                    error
-                }
+            .map_err(|error| {
+                tracing::debug!(target: "exomonad_harness::timing", certificate = ?self.evidence.certificate_sha256(), "world cell executable seal refused");
+                error
             })?;
         Ok((
             self.checked,
@@ -3362,12 +3329,7 @@ fn compile_cell_program_admitted_inner(
     #[cfg(test)]
     let world = match (audit, outcome.action()) {
         (CellProgramAudit::None, _) => None,
-        (_, Ok(prepared)) => match &prepared.evidence {
-            PreparedRuntimeCellEvidence::World(program) => Some(Arc::clone(program)),
-            PreparedRuntimeCellEvidence::Finite { .. } => {
-                panic!("executable audits require an actual World preparation")
-            }
-        },
+        (_, Ok(prepared)) => Some(Arc::clone(&prepared.evidence)),
         (_, Err(_)) => None,
     };
     let result = finish_cell_program_admitted(outcome);
@@ -3404,15 +3366,10 @@ fn prepare_cell_program_admitted_inner(
     let origin = crate::CompilerTransactionOrigin::current().ok_or(
         CompileError::CompilerPublication(crate::CompilerTransactionPublicationError::MissingOwner),
     )?;
-    let setup_span =
+    let _setup_span =
         tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
-    if !admission.has_execution_purpose() {
-        return Err(CompileError::ExtractFailed(
-            "checked execution requires its owning World admission".into(),
-        )
-        .into());
-    }
-    if let Some(reservation) = admission.world_reservation() {
+    let reservation = admission.world_reservation();
+    {
         let reference = admission
             .world_source_reference()
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -3459,165 +3416,9 @@ fn prepare_cell_program_admitted_inner(
             admission,
             checked,
             program,
-            evidence: PreparedRuntimeCellEvidence::World(output),
+            evidence: output,
         });
     }
-    let finite_failure =
-        |error: super::SessionError| CompileError::ExtractFailed(error.to_string());
-    let planned = admission
-        .plan_reservation()
-        .map_err(finite_failure)?
-        .ok_or_else(|| {
-            CompileError::ExtractFailed(
-                "complete cell compilation requires its parser reservation".into(),
-            )
-        })?;
-    let view = admission.view().map_err(finite_failure)?;
-    let recipe = planned.plan().specification();
-    tracing::Span::current().record("cell_bytes", recipe.cell_source().len());
-    // The admission owner issued this request once, before sharing the
-    // admission. Compilation only reads it; there is no relabelling step.
-    let request = Arc::clone(admission.checked_request().map_err(finite_failure)?);
-    let scratch = Arc::new(compiler_scratch_directory()?);
-    if !tidepool_extract_cmd::retain_compiler_input_directory(scratch.clone()) {
-        return Err(CompileError::ExtractFailed(
-            "cell preparation requires its owning compiler transaction".into(),
-        )
-        .into());
-    }
-    let cell_path = scratch.path().join("cell.txt");
-    let template_path = scratch.path().join("CellCheckTemplate.hs");
-    let output_path = scratch.path().join("cell.cbor");
-    std::fs::write(&cell_path, recipe.cell_source())?;
-    std::fs::write(&template_path, recipe.template_source())?;
-    let mut command = extract_cmd()?;
-    command
-        .input(&cell_path)
-        .cell()
-        .cell_template(&template_path)
-        .cell_out(&output_path)
-        .output_dir(scratch.path())
-        .includes(admission.include_paths().map_err(finite_failure)?)
-        .session_root(view.session_root())
-        .inject_vals(view.injected_module_names());
-    command.session_incarnation(view.session().0.to_string());
-
-    for (index, (kind, source)) in recipe.turn_templates().iter().enumerate() {
-        let path = scratch.path().join(format!("checked-template-{index}.hs"));
-        std::fs::write(&path, source)?;
-        command.turn_template(kind, &path);
-    }
-    for (identity, generation) in admission
-        .admitted_retained_imports()
-        .map_err(finite_failure)?
-    {
-        command.retained_generation(extract_identity(identity), generation);
-    }
-    drop(setup_span);
-    let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
-        .in_scope(|| bind_extract_cmd(&command))?;
-    let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
-    let mut offer_timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
-        "cell_program.offer",
-        "select_offer",
-    );
-    let offer = ModuleCandidateOffer::select_cell_program_with_catalog(
-        &endpoint,
-        admission.include_paths().map_err(finite_failure)?,
-        scratch.path(),
-        view.exact_compile_context(),
-        request,
-        admission
-            .interfaces()
-            .map_err(finite_failure)?
-            .iter()
-            .map(|interface| (interface.module(), interface.bytes_owned().clone()))
-            .collect(),
-        planned.compiler_specification(),
-        &admission
-            .interfaces()
-            .map_err(finite_failure)?
-            .iter()
-            .map(|interface| interface.checked_artifact().clone())
-            .collect::<Vec<_>>(),
-        &admission
-            .retained_declaration_projections()
-            .map_err(finite_failure)?,
-        admission.catalog_selection().map_err(finite_failure)?,
-    )?;
-    offer_timing.advance("apply_offer");
-    if let Some(root) = offer.checked_value_root() {
-        command.session_root(root);
-    }
-    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
-    let offer = offer.apply_to(command, scratch.path())?;
-    let command = offer.command();
-    offer_timing.advance("diagnostics_start");
-    let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
-    offer_timing.finish(true);
-    drop(offer_span);
-    let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
-        .in_scope(|| endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))).map_err(|error| {
-        offer.retain_execution_failure(scratch.path(), &command, error)
-    })?;
-    let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true, output_dir = %scratch.path().display(), stdout_bytes = run.output.stdout.len(), stderr_bytes = run.output.stderr.len()).entered();
-    let mut admission_timing = tidepool_toolchain::timing::InvocationTiming::start_scoped(
-        "cell_program.admit",
-        "diagnostics_completed",
-    );
-    diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
-    admission_timing.advance("decode_extract_result");
-    let report = match crate::diag::decode_extract_result(
-        run.success(),
-        &run.output.stdout,
-        &run.output.stderr,
-    ) {
-        Ok(report) => report,
-        Err(error) => {
-            admission_timing.advance("retain_decode_failure");
-            return Err(offer
-                .retain_failure(scratch.path(), &command, &run.output.stderr, error)
-                .into());
-        }
-    };
-    admission_timing.advance("prepare_cell_program");
-    let result = offer.prepare_cell_program(scratch.clone());
-    let program = match result {
-        Ok(program) => program,
-        Err(error) => {
-            admission_timing.advance("retain_preparation_failure");
-            return Err(offer
-                .retain_failure(scratch.path(), &command, &run.output.stderr, error)
-                .into());
-        }
-    };
-    admission_timing.advance("decode_cell_out");
-    let mut checked = decode_cell_out(
-        program.checked_cell().observations(),
-        recipe.cell_source(),
-        admission.initial_value_generation().0,
-        "",
-    )?;
-    checked.warnings = report.diagnostics;
-    admission_timing.finish(true);
-    drop(admission_span);
-    admission
-        .prepare_declaration_projections(program.checked_cell(), settlement)
-        .map_err(CellCheckFailure::from)?;
-    checked.authority = Some(program.checked_cell().clone());
-    checked.admission = Some(admission.clone());
-    Ok(PreparedRuntimeCell {
-        origin,
-        source_origin,
-        admission,
-        checked,
-        program,
-        evidence: PreparedRuntimeCellEvidence::Finite {
-            offer,
-            root: scratch,
-            stderr: run.output.stderr,
-        },
-    })
 }
 
 fn check_cell_impl(
@@ -6209,7 +6010,7 @@ mod tests {
         assert_eq!(cell.checked.items.len(), 4);
         assert_eq!(cell.program.items().len(), 4);
         assert_eq!(fixture.resident.val_gen().0, initial + 3);
-        let reservation = cell.admission.world_reservation().unwrap();
+        let reservation = cell.admission.world_reservation();
         assert_eq!(reservation.admission_digest(), &cell.admission.digest());
         let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
             cell.program.basis()
@@ -7345,9 +7146,7 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = outcome.action().as_ref().unwrap();
-        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
-            panic!("the actual World producer must retain its completed output owner");
-        };
+        let output = &prepared.evidence;
         let weak = Arc::downgrade(output);
         let after = tidepool_extract_cmd::extract_spawn_count();
         assert_eq!(after - before, 1);
@@ -7410,9 +7209,7 @@ mod tests {
             crate::CompilerTransactionClose::Retired(_)
         ));
         let prepared = original.action.as_ref().unwrap();
-        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
-            panic!("the actual World producer must retain its completed output owner");
-        };
+        let output = &prepared.evidence;
         let weak = Arc::downgrade(output);
         let fresh = crate::CompilerTransactionCancellation::new();
         let reassociated =
@@ -7668,7 +7465,7 @@ mod tests {
                 &[],
             )
             .unwrap();
-        let items = cell.admission.world_reservation().unwrap().plan().items();
+        let items = cell.admission.world_reservation().plan().items();
         assert_eq!(items.len(), 3);
         assert_eq!(
             items[0].kind(),
@@ -7701,7 +7498,7 @@ mod tests {
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        for private in [false, true] {
+        {
             let root = tempfile::tempdir().unwrap();
             let lib = SessionLib::open(
                 SessionId(1016),
@@ -7718,16 +7515,14 @@ mod tests {
                 effects.row().to_owned(),
                 effects.include_paths().to_vec(),
             );
-            let execution = private.then(|| {
+            let execution = {
                 crate::session::world_cell_test_support::begin_state_fixture_execution(
                     &mut session,
                     &lease,
                     &recipe,
                 )
-            });
-            let scope = execution
-                .as_ref()
-                .map_or(public, |owner| owner.private_scope());
+            };
+            let scope = execution.private_scope();
             let view = session.compile_view_in(scope).unwrap();
             let declaration_module = session.next_lib_module().unwrap();
             assert_eq!(declaration_module.gen(), Generation(1));
@@ -7748,32 +7543,13 @@ mod tests {
                 view.injected_module_names(),
             )
             .unwrap();
-            let include_paths = view.include_paths(effects.include_paths());
-            let admission = match &execution {
-                Some(execution) => {
-                    crate::session::world_cell_test_support::plan_state_fixture_specification_for(
-                        &mut session,
-                        execution.clone(),
-                        crate::session::world_cell_test_support::world_recipe(&specification),
-                    )
-                    .unwrap()
-                }
-                None => crate::session::world_cell_test_support::state_source_action(
+            let admission =
+                crate::session::world_cell_test_support::plan_state_fixture_specification_for(
                     &mut session,
-                    lease.original_source().clone(),
-                    |session| {
-                        session.admit_cell_in(
-                            scope,
-                            1,
-                            Arc::new(specification.clone()),
-                            specification.specification_digest(),
-                            [1; 32],
-                            include_paths,
-                        )
-                    },
+                    execution.clone(),
+                    crate::session::world_cell_test_support::world_recipe(&specification),
                 )
-                .unwrap(),
-            };
+                .unwrap();
             let checked = tidepool_testing::with_settlement(|settlement| {
                 compile_cell_program_admitted(admission.clone(), settlement)
             });
@@ -7785,22 +7561,6 @@ mod tests {
                 .log
                 .certified_authored_at(Generation(1))
                 .is_none());
-            if !private {
-                let failure = checked
-                    .err()
-                    .expect("raw admission cannot check declarations");
-                let CompileError::ExtractFailed(message) = failure.error else {
-                    panic!("raw admission must be refused at the execution-owner boundary");
-                };
-                assert_eq!(
-                    message,
-                    "checked execution requires its owning World admission"
-                );
-                assert!(admission.private_execution().is_none());
-                assert_eq!(session.public_visibility_snapshot_in(scope), Some(original));
-                assert!(session.lib().log.is_reserved(Generation(1)));
-                continue;
-            }
             let (checked, program) = checked.unwrap();
             assert_eq!(checked.items.len(), 1);
             let item = checked.checked_item(0).unwrap();
@@ -7958,7 +7718,6 @@ mod tests {
         assert_eq!(
             admission
                 .world_reservation()
-                .unwrap()
                 .plan()
                 .items()
                 .iter()

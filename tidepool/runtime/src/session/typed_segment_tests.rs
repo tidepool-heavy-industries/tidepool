@@ -377,10 +377,7 @@ fn execute_semantic_cell(
         let admission =
             plan_fixture_specification_for(resident, Arc::new(specification), execution.clone())
                 .map_err(semantic_plan_error)?;
-        let plan = admission
-            .world_reservation()
-            .expect("ordinary semantic cell has a real World reservation")
-            .plan();
+        let plan = admission.world_reservation().plan();
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
         match declarations {
             CellDeclarationExpectation::Total(expected) => assert_eq!(

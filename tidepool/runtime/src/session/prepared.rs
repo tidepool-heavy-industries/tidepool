@@ -1000,32 +1000,16 @@ pub struct SiteTypeEvidence {
     request_context: Option<AuthenticatedRequestTypes>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct AuthenticatedRequestTypes {
     interfaces: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
     signatures: Arc<tidepool_toolchain::checked_cell::RequestTypeSignatures>,
 }
 
-impl PartialEq for SiteTypeEvidence {
-    fn eq(&self, other: &Self) -> bool {
-        self.types.evidence_eq(&other.types)
-            && self.input == other.input
-            && self.answer == other.answer
-            && self.request_context == other.request_context
-            && self
-                .constructors
-                .iter()
-                .map(|(identity, _)| identity)
-                .eq(other.constructors.iter().map(|(identity, _)| identity))
-    }
-}
-
-impl Eq for SiteTypeEvidence {}
-
 /// Authenticated request types and the helper mode for one compiler admission.
 /// Keeping these together preserves authored reply authority when an admission
 /// reconstructs its compile view from a retained request snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct RequestCompileAnnotations {
     evidence: Arc<SiteTypeEvidence>,
     helper_recipe: tidepool_toolchain::declaration_join::RequestHelperRecipe,
@@ -1034,7 +1018,7 @@ pub struct RequestCompileAnnotations {
 /// Exact compiler inputs retained by the runtime admission owner. A selected
 /// projection is independent of request type signatures; neither substitutes
 /// for the other.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct RuntimeCompileInputs {
     annotations: Option<RequestCompileAnnotations>,
     projections: Vec<Arc<super::CertifiedDeclarationProjection>>,

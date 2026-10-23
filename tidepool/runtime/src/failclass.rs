@@ -95,7 +95,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::InvalidDurablePublicAdmission { .. }
         | SessionError::InvalidRecoveryInitialization { .. }
         | SessionError::InitialNotebookFacadesChanged
-        | SessionError::InvalidNativeSetupAdmission { .. }
+        | SessionError::InvalidHostCarrierAdmission { .. }
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::CompilerInputWitnessExhausted { .. }

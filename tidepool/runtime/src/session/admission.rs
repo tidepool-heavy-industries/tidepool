@@ -1,6 +1,5 @@
 //! Runtime-owned immutable compilation and private execution admission.
 
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -105,67 +104,15 @@ impl RuntimeDurablePublicReadiness {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum NativeSetupAdmissionFailure {
-    #[error("expected one binderless Bind, items={items}, first={first:?}, binders={binders}")]
+pub enum HostCarrierAdmissionFailure {
+    #[error("host carrier differs from its single original binder recipe: items={items}, first={first:?}, binders={binders}")]
     Shape {
         items: usize,
         first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
         binders: usize,
     },
-    #[error("host carrier differs from its single original binder recipe: items={items}, first={first:?}, binders={binders}")]
-    HostCarrierShape {
-        items: usize,
-        first: Option<tidepool_toolchain::cell_plan::ParsedCellPlanKind>,
-        binders: usize,
-    },
-    #[error("specification digest differs: planned={planned:?}, admitted={admitted:?}")]
-    SpecificationDigest {
-        planned: [u8; 32],
-        admitted: [u8; 32],
-    },
-    #[error("ordered include paths differ: planned={planned:?}, admitted={admitted:?}")]
-    IncludePaths {
-        planned: NativeSetupInputInventory,
-        admitted: NativeSetupInputInventory,
-    },
-    #[error("ordered injection differs: planned={planned:?}, reachable={reachable:?}")]
-    InjectionInventory {
-        planned: NativeSetupInputInventory,
-        reachable: NativeSetupInputInventory,
-    },
     #[error("parser item index differs at {position}: observed={observed}")]
     ItemOrder { position: usize, observed: usize },
-}
-
-/// A bounded diagnostic commitment to the complete ordered input inventory.
-#[derive(Debug)]
-pub struct NativeSetupInputInventory {
-    pub count: usize,
-    pub digest: [u8; 32],
-    pub first: Vec<String>,
-}
-
-impl NativeSetupInputInventory {
-    fn new<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Self {
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"Tidepool.NativeSetupInputInventory.v1");
-        let mut count = 0;
-        let mut first = Vec::new();
-        for value in values {
-            count += 1;
-            hash.update(&(value.len() as u64).to_le_bytes());
-            hash.update(value);
-            if first.len() < 8 {
-                first.push(String::from_utf8_lossy(value).chars().take(128).collect());
-            }
-        }
-        hash.update(&(count as u64).to_le_bytes());
-        Self {
-            count,
-            digest: *hash.finalize().as_bytes(),
-            first,
-        }
-    }
 }
 
 /// A detached lexical owner captured in the same checkout as its public base.
@@ -1684,8 +1631,8 @@ impl PrivateExecutionAdmission {
     }
 }
 
-/// One runtime-owned cell admission, retaining either finite compiler inputs
-/// or a reservation from its held compiler world. Source leases and execution
+/// One runtime-owned cell admission retaining its held World reservation.
+/// Source leases and execution
 /// purpose remain runtime authority; parser receipts supply expectations only.
 /// Original declaration and value identities are burned before preparation.
 pub struct RuntimeCellAdmission {
@@ -1698,7 +1645,7 @@ pub struct RuntimeCellAdmission {
     scope: ScopeId,
     reserved_generations: Vec<Generation>,
     initial_value_generation: Generation,
-    compiler_basis: RuntimeCellCompilerBasis,
+    compiler_basis: RuntimeWorldCellInputs,
     declarations: RuntimeCellDeclarations,
     digest: tidepool_toolchain::checked_cell::AdmissionDigest,
 }
@@ -1714,46 +1661,18 @@ struct RuntimeCellDeclarations {
     >,
 }
 
-enum RuntimeCellCompilerBasis {
-    Finite(RuntimeFiniteCellInputs),
-    World {
-        reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
-        _operand: Option<Arc<RuntimeWorldCellOperand>>,
-        preparation: Option<Arc<PrivatePreparationSnapshot>>,
-        private_key: super::persistent::CompileViewKey,
-        source: Arc<super::GenerationArtifactReference>,
-        /// Original A from the issuing source transaction; the cell's retained
-        /// scope is the separately captured receiving target B.
-        original_source: Arc<RuntimeOriginalSource>,
-    },
+struct RuntimeWorldCellInputs {
+    reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
+    _operand: Option<Arc<RuntimeWorldCellOperand>>,
+    preparation: Option<Arc<PrivatePreparationSnapshot>>,
+    private_key: super::persistent::CompileViewKey,
+    source: Arc<super::GenerationArtifactReference>,
+    /// Original A is independent of the separately captured receiving target B.
+    original_source: Arc<RuntimeOriginalSource>,
 }
 
-/// Only the finite preparation route owns these compiler input projections.
-/// A held-world admission never constructs or populates them.
-pub(super) struct RuntimeFiniteCellInputs {
-    visibility: PublicVisibilitySnapshot,
-    catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
-    compile_inputs: super::prepared::RuntimeCompileInputs,
-    view: SessionCompileView,
-    view_digest: [u8; 32],
-    planned: Option<Arc<super::RuntimeCellPlanReservation>>,
-    native_shares: Vec<SourceLeaseKey>,
-    scoped_inputs: Arc<ScopedResolvedInputs>,
-    interfaces: Vec<AdmittedValueInterface>,
-    specification: Arc<dyn Any + Send + Sync>,
-    specification_digest: [u8; 32],
-    authority_digest: [u8; 32],
-    include_paths: Vec<PathBuf>,
-    /// The one issued request for this admission's exact recipe. A consumer
-    /// can read it but cannot relabel it with another admission digest.
-    checked_request: Option<Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>>,
-}
-
-/// One runtime-issued execution purpose. Component controls can capture an
-/// observation without making an executable cell admission.
+/// The purpose retained by an actual World cell reservation.
 enum RuntimeCellPurpose {
-    #[cfg(test)]
-    Observation,
     PrivateExecution(Arc<PrivateExecutionAdmission>),
     HostCarrier {
         binding: String,
@@ -1764,14 +1683,9 @@ enum RuntimeCellPurpose {
 }
 
 /// Source custody for a reusable host type prototype, without runtime target custody.
-pub(super) enum RuntimeHostPrototypeSource {
-    Finite {
-        _specification: Arc<dyn Any + Send + Sync>,
-    },
-    World {
-        _original_source: Arc<RuntimeOriginalSource>,
-        _reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
-    },
+pub(super) struct RuntimeHostPrototypeSource {
+    _original_source: Arc<RuntimeOriginalSource>,
+    _reservation: Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>,
 }
 
 pub(super) struct RuntimeHostPrototypeReceipt {
@@ -2793,7 +2707,7 @@ impl RuntimeCheckedPrefix {
         }
         self.settled.checkpoint()?;
         session.validate_lexical_scope_lease(scope, &self.admission._retained_scope)?;
-        if self.admission.world_reservation().is_some() {
+        {
             self.admission.original_source()?.validate_source_issuer()?;
         }
         let store = session.held_admission_store()?;
@@ -3127,7 +3041,7 @@ impl CheckedTurnCompletion {
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
         }
-        if self.prefix.admission.world_reservation().is_some() {
+        {
             self.prefix
                 .admission
                 .original_source()?
@@ -3306,7 +3220,7 @@ impl CheckedTurnCompletion {
             self.prefix.admission.scope,
             &self.prefix.admission._retained_scope,
         )?;
-        if self.prefix.admission.world_reservation().is_some() {
+        {
             self.prefix
                 .admission
                 .original_source()?
@@ -3318,8 +3232,7 @@ impl CheckedTurnCompletion {
         {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let world = self.prefix.admission.world_reservation().is_some();
-        if world {
+        {
             let private = self
                 .prefix
                 .admission
@@ -3690,30 +3603,17 @@ impl AdmittedValueInterface {
 
 impl std::fmt::Debug for RuntimeCellAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("RuntimeCellAdmission");
-        debug
+        f.debug_struct("RuntimeCellAdmission")
             .field("session", &self.session)
             .field("scope", &self.scope)
             .field("reserved_generations", &self.reserved_generations)
-            .field("digest", &self.digest);
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::Finite(inputs) => {
-                debug
-                    .field("visibility", &inputs.visibility)
-                    .field("finite_view", &inputs.view)
-                    .field("native_shares", &inputs.native_shares);
-            }
-            RuntimeCellCompilerBasis::World {
-                reservation,
-                private_key,
-                ..
-            } => {
-                debug
-                    .field("world_reservation", reservation)
-                    .field("private_declaration_tip", &private_key.generation());
-            }
-        }
-        debug.finish_non_exhaustive()
+            .field("digest", &self.digest)
+            .field("world_reservation", &self.compiler_basis.reservation)
+            .field(
+                "private_declaration_tip",
+                &self.compiler_basis.private_key.generation(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -3722,14 +3622,8 @@ impl RuntimeCellAdmission {
         &self,
         action: impl FnOnce() -> T,
     ) -> Result<T, super::SourceAdmissionError> {
-        let originals = match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World {
-                original_source, ..
-            } => Some(original_source.clone()),
-            RuntimeCellCompilerBasis::Finite(_) => None,
-        };
         RuntimeOriginalSource::with_sources_and_targets(
-            originals,
+            [self.compiler_basis.original_source.clone()],
             [self._retained_scope.clone()],
             |sources, _| {
                 super::RuntimeSourceAdmission::with_open_admissions(
@@ -3743,47 +3637,27 @@ impl RuntimeCellAdmission {
     pub(super) fn world_source_reference(
         &self,
     ) -> Result<&Arc<super::GenerationArtifactReference>, SessionError> {
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World { source, .. } => Ok(source),
-            RuntimeCellCompilerBasis::Finite(_) => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+        Ok(&self.compiler_basis.source)
     }
 
     /// The source owner captured for this compiler preparation. World requests
     /// retain their original source independently of the target placement lease.
     pub(super) fn compiler_preparation_source(&self) -> Arc<RuntimeOriginalSource> {
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World {
-                original_source, ..
-            } => original_source.clone(),
-            RuntimeCellCompilerBasis::Finite(_) => self._retained_scope.original_source().clone(),
-        }
+        self.compiler_basis.original_source.clone()
     }
 
     pub(super) fn original_source(&self) -> Result<Arc<RuntimeOriginalSource>, SessionError> {
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World {
-                original_source, ..
-            } => Ok(original_source.clone()),
-            RuntimeCellCompilerBasis::Finite(_) => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
+        Ok(self.compiler_basis.original_source.clone())
     }
 
     pub(super) fn admit_compiler_preparation(
         &self,
         source: &super::RuntimeSourceCompilerTransaction,
     ) -> Result<(), super::SourceAdmissionError> {
-        if let RuntimeCellCompilerBasis::World {
-            original_source, ..
-        } = &self.compiler_basis
-        {
-            return source.admit_original(original_source, Some(self.source_lease()));
-        }
-        source.admit(Some(self.source_lease()))
+        source.admit_original(
+            &self.compiler_basis.original_source,
+            Some(self.source_lease()),
+        )
     }
 
     pub fn source_lease(&self) -> Arc<RuntimeLexicalScopeLease> {
@@ -3794,28 +3668,10 @@ impl RuntimeCellAdmission {
         self.session
     }
 
-    pub(super) fn finite_inputs(&self) -> Result<&RuntimeFiniteCellInputs, SessionError> {
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::Finite(inputs) => Ok(inputs),
-            RuntimeCellCompilerBasis::World { .. } => {
-                Err(SessionError::WorldCellRequiresServicePreparation)
-            }
-        }
-    }
-
     pub fn world_reservation(
         &self,
-    ) -> Option<&Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation>> {
-        match &self.compiler_basis {
-            RuntimeCellCompilerBasis::World { reservation, .. } => Some(reservation),
-            RuntimeCellCompilerBasis::Finite(_) => None,
-        }
-    }
-
-    pub fn catalog_selection(
-        &self,
-    ) -> Result<&tidepool_toolchain::toolchain::CatalogSelection, SessionError> {
-        Ok(&self.finite_inputs()?.catalog_selection)
+    ) -> &Arc<tidepool_toolchain::cell_plan::CompilerWorldCellReservation> {
+        &self.compiler_basis.reservation
     }
 
     /// Issue cumulative lexical projections while the machine and prefix
@@ -3842,26 +3698,19 @@ impl RuntimeCellAdmission {
             let Some(evidence) = item.planned_declaration() else {
                 continue;
             };
-            let generation = match &self.compiler_basis {
-                RuntimeCellCompilerBasis::Finite(finite) => match &finite.planned {
-                    Some(plan) => plan
-                        .items()
-                        .get(index)
-                        .and_then(|row| row.declaration_generation()),
-                    None if index == 0 => self.reserved_generations.first().copied(),
-                    None => None,
-                },
-                RuntimeCellCompilerBasis::World { reservation, .. } => {
-                    use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-                    match reservation.items().get(index).map(|item| item.slot()) {
-                        Some(
-                            Slot::Prologue { declaration } | Slot::Declaration { declaration },
-                        ) => Some(Generation(declaration)),
-                        _ => None,
-                    }
+            use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+            let generation = match self
+                .compiler_basis
+                .reservation
+                .items()
+                .get(index)
+                .map(|item| item.slot())
+            {
+                Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
+                    Generation(declaration)
                 }
-            }
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+                _ => return Err(SessionError::StaleStagedDeclaration),
+            };
             let _join = tracing::debug_span!(target: "exomonad_harness::timing",
                 "cell_program.authenticated_declaration_join", inclusive = true,
                 item_ordinal = index, generation = generation.0,
@@ -3869,10 +3718,7 @@ impl RuntimeCellAdmission {
                 introduced_export_count = evidence.introduced_exports().len(),
             )
             .entered();
-            let includes = match &self.compiler_basis {
-                RuntimeCellCompilerBasis::Finite(finite) => finite.include_paths.as_slice(),
-                RuntimeCellCompilerBasis::World { .. } => item.include_paths(),
-            };
+            let includes = item.include_paths();
             let projection = super::lexical_projection::prepare_authored_projection(
                 baseline.as_ref(),
                 generation,
@@ -3889,18 +3735,6 @@ impl RuntimeCellAdmission {
             .prepared_declarations
             .set(prepared)
             .map_err(|_| SessionError::StaleStagedDeclaration)
-    }
-
-    pub(super) fn retained_declaration_projections(
-        &self,
-    ) -> Result<Vec<Arc<tidepool_toolchain::declaration_join::AcceptedJoin>>, SessionError> {
-        Ok(self
-            .finite_inputs()?
-            .compile_inputs
-            .projections()
-            .iter()
-            .map(|projection| projection.receipt().clone())
-            .collect())
     }
 
     pub(super) fn prepared_declaration(
@@ -3922,15 +3756,6 @@ impl RuntimeCellAdmission {
         }
     }
 
-    pub(super) fn has_execution_purpose(&self) -> bool {
-        match &self.purpose {
-            #[cfg(test)]
-            RuntimeCellPurpose::Observation => false,
-            RuntimeCellPurpose::PrivateExecution(_) | RuntimeCellPurpose::HostCarrier { .. } => {
-                true
-            }
-        }
-    }
     pub(super) fn host_carrier(&self) -> Option<(&str, super::resident::HostBindingType)> {
         match &self.purpose {
             RuntimeCellPurpose::HostCarrier {
@@ -3948,88 +3773,36 @@ impl RuntimeCellAdmission {
         else {
             return Err(SessionError::StaleStagedDeclaration);
         };
-        let source = match &self.compiler_basis {
-            RuntimeCellCompilerBasis::Finite(inputs) => RuntimeHostPrototypeSource::Finite {
-                _specification: inputs.specification.clone(),
-            },
-            RuntimeCellCompilerBasis::World {
-                original_source,
-                reservation,
-                ..
-            } => RuntimeHostPrototypeSource::World {
-                _original_source: original_source.clone(),
-                _reservation: reservation.clone(),
-            },
+        let source = RuntimeHostPrototypeSource {
+            _original_source: self.compiler_basis.original_source.clone(),
+            _reservation: self.compiler_basis.reservation.clone(),
         };
         Ok(RuntimeHostPrototypeReceipt {
             authority_digest: *authority_digest,
             source,
         })
     }
-    pub fn view(&self) -> Result<&SessionCompileView, SessionError> {
-        Ok(&self.finite_inputs()?.view)
-    }
+
     pub fn lexical_scope(&self) -> ScopeId {
         self.scope
     }
-    pub fn visibility(&self) -> Result<&PublicVisibilitySnapshot, SessionError> {
-        Ok(&self.finite_inputs()?.visibility)
-    }
+
     pub fn reserved_generations(&self) -> &[Generation] {
         &self.reserved_generations
     }
-    pub fn plan_reservation(
-        &self,
-    ) -> Result<Option<&Arc<super::RuntimeCellPlanReservation>>, SessionError> {
-        Ok(self.finite_inputs()?.planned.as_ref())
-    }
+
     pub fn initial_value_generation(&self) -> Generation {
         self.initial_value_generation
     }
-    pub fn native_shares(&self) -> Result<&[SourceLeaseKey], SessionError> {
-        Ok(&self.finite_inputs()?.native_shares)
-    }
-    pub fn admitted_retained_imports(
-        &self,
-    ) -> Result<impl Iterator<Item = (&SymbolIdentity, u64)>, SessionError> {
-        Ok(self.finite_inputs()?.scoped_inputs.imports())
-    }
-    pub fn interfaces(&self) -> Result<&[AdmittedValueInterface], SessionError> {
-        Ok(&self.finite_inputs()?.interfaces)
-    }
+
     pub fn digest(&self) -> [u8; 32] {
         self.digest.bytes()
-    }
-    /// The issued checked-cell request for this admission's exact recipe.
-    /// Issued once, before the admission was shared; consumers read it only.
-    pub fn checked_request(
-        &self,
-    ) -> Result<&Arc<tidepool_toolchain::checked_cell::CheckedCellRequest>, SessionError> {
-        self.finite_inputs()?
-            .checked_request
-            .as_ref()
-            .ok_or(SessionError::StaleStagedDeclaration)
-    }
-    pub fn specification_digest(&self) -> Result<[u8; 32], SessionError> {
-        Ok(self.finite_inputs()?.specification_digest)
-    }
-    pub fn authority_digest(&self) -> Result<[u8; 32], SessionError> {
-        Ok(self.finite_inputs()?.authority_digest)
-    }
-    /// Ordered search inputs selected by the original specification owner.
-    /// The source/tool capsule retains their lifetime; compiler evidence
-    /// independently validates every consumed byte and resolution witness.
-    pub fn include_paths(&self) -> Result<&[PathBuf], SessionError> {
-        Ok(&self.finite_inputs()?.include_paths)
     }
     pub(super) fn belongs_to(&self, session: &PersistentSession) -> bool {
         Arc::ptr_eq(&self.owner, session.admission_owner())
             && self.owner_epoch == session.admission_owner().epoch()
             && session.has_lib()
             && self.session == session.lib().session_id()
-    }
-    pub fn specification(&self) -> Result<&Arc<dyn Any + Send + Sync>, SessionError> {
-        Ok(&self.finite_inputs()?.specification)
     }
 }
 
@@ -4226,7 +3999,7 @@ impl PersistentSession {
         prefix.settled.checkpoint()?;
         let scope = prefix.admission.scope;
         self.validate_lexical_scope_lease(scope, &prefix.admission._retained_scope)?;
-        if prefix.admission.world_reservation().is_some() {
+        {
             prefix
                 .admission
                 .original_source()?
@@ -4256,54 +4029,28 @@ impl PersistentSession {
         use tidepool_toolchain::checked_cell::{
             CheckedItemKind as CheckedKind, CheckedPlannedCellSlot as Slot,
         };
-        let (generation, observation_name) =
-            if let Some(reservation) = prefix.admission.world_reservation() {
-                let slot = reservation
-                    .items()
-                    .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)?
-                    .slot();
-                let (generation, observation) = match (slot, item.kind()) {
-                    (
-                        Slot::Prologue { declaration } | Slot::Declaration { declaration },
-                        CheckedKind::Declaration,
-                    ) => (declaration, None),
-                    (Slot::Bind { value }, CheckedKind::Bind) => (value, None),
-                    (
-                        Slot::Expression {
-                            capture,
-                            observation_name,
-                        },
-                        CheckedKind::Expression,
-                    ) => (capture, Some(observation_name)),
-                    _ => return Err(SessionError::StaleStagedDeclaration),
-                };
-                (Generation(generation), observation)
-            } else {
-                let planned_row = prefix
-                    .admission
-                    .plan_reservation()?
-                    .ok_or(SessionError::StaleStagedDeclaration)?
-                    .items()
-                    .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
-                use super::RuntimePlannedCellItemKind as Kind;
-                if !matches!(
-                    (planned_row.kind(), item.kind()),
-                    (Kind::Prologue | Kind::Declaration, CheckedKind::Declaration)
-                        | (Kind::Bind, CheckedKind::Bind)
-                        | (Kind::Expression, CheckedKind::Expression)
-                ) {
-                    return Err(SessionError::StaleStagedDeclaration);
-                }
-                (
-                    planned_row
-                        .value_generation()
-                        .or_else(|| planned_row.declaration_generation())
-                        .ok_or(SessionError::StaleStagedDeclaration)?,
-                    planned_row.observation_name().map(str::to_owned),
-                )
-            };
+        let slot = prefix
+            .admission
+            .world_reservation()
+            .items()
+            .get(item.index())
+            .ok_or(SessionError::StaleStagedDeclaration)?
+            .slot();
+        let (generation, observation_name) = match (slot, item.kind()) {
+            (
+                Slot::Prologue { declaration } | Slot::Declaration { declaration },
+                CheckedKind::Declaration,
+            ) => (Generation(declaration), None),
+            (Slot::Bind { value }, CheckedKind::Bind) => (Generation(value), None),
+            (
+                Slot::Expression {
+                    capture,
+                    observation_name,
+                },
+                CheckedKind::Expression,
+            ) => (Generation(capture), Some(observation_name)),
+            _ => return Err(SessionError::StaleStagedDeclaration),
+        };
         let mut digest = blake3::Hasher::new();
         digest.update(b"TidepoolRuntimeCheckedItem1");
         digest.update(&snapshot.digest());
@@ -4344,13 +4091,12 @@ impl PersistentSession {
                 return Err(SessionError::StaleStagedDeclaration);
             }
             if let Some(execution) = prefix.admission.private_execution() {
-                let RuntimeCellCompilerBasis::World {
-                    preparation: Some(preparation),
-                    ..
-                } = &prefix.admission.compiler_basis
-                else {
-                    return Err(SessionError::StaleStagedDeclaration);
-                };
+                let preparation = prefix
+                    .admission
+                    .compiler_basis
+                    .preparation
+                    .as_ref()
+                    .ok_or(SessionError::StaleStagedDeclaration)?;
                 execution.claim_authored_program(prefix.admission.digest(), preparation)?;
             }
             state.phase = CellPhase::Reserved(reservation);
@@ -4392,27 +4138,18 @@ impl PersistentSession {
         let original_source = item
             .planned_declaration_source()
             .ok_or(SessionError::StaleStagedDeclaration)?;
-        let generation = if let Some(reservation) = prefix.admission.world_reservation() {
-            use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-            match reservation
-                .items()
-                .get(item.index())
-                .map(|item| item.slot())
-            {
-                Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
-                    Generation(declaration)
-                }
-                _ => return Err(SessionError::StaleStagedDeclaration),
+        use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+        let generation = match prefix
+            .admission
+            .world_reservation()
+            .items()
+            .get(item.index())
+            .map(|item| item.slot())
+        {
+            Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
+                Generation(declaration)
             }
-        } else {
-            prefix
-                .admission
-                .plan_reservation()?
-                .ok_or(SessionError::StaleStagedDeclaration)?
-                .items()
-                .get(item.index())
-                .and_then(|row| row.declaration_generation())
-                .ok_or(SessionError::StaleStagedDeclaration)?
+            _ => return Err(SessionError::StaleStagedDeclaration),
         };
         let prepared = prefix.admission.prepared_declaration(item)?;
         let module = tidepool_repr::SessionModule::lib(generation);
@@ -4994,14 +4731,8 @@ impl PersistentSession {
         settled.checkpoint()?;
         let admission = settled.admission().clone();
         let program = settled.program().clone();
-        if !admission.has_execution_purpose() {
-            return Err(SessionError::StaleStagedDeclaration);
-        }
         if let Some(private) = admission.private_execution() {
             private.ensure_open()?;
-            if admission.world_reservation().is_none() {
-                return Err(SessionError::WorldCellRequiresServicePreparation);
-            }
         }
         self.begin_world_cell_program(admission, program, settled)
     }
@@ -5016,16 +4747,13 @@ impl PersistentSession {
         let CellProgramBasis::World(checked) = program.basis() else {
             return Err(SessionError::StaleStagedDeclaration);
         };
-        let RuntimeCellCompilerBasis::World {
+        let RuntimeWorldCellInputs {
             reservation,
             preparation,
             private_key,
             original_source,
             ..
-        } = &admission.compiler_basis
-        else {
-            return Err(SessionError::StaleStagedDeclaration);
-        };
+        } = &admission.compiler_basis;
         if let RuntimeCellPurpose::HostCarrier {
             private_preparation: Some(preparation),
             ..
@@ -5742,430 +5470,17 @@ impl PersistentSession {
         self.begin_private_execution(public_scope)
     }
 
-    #[cfg(test)]
-    pub(super) fn admit_cell_in(
-        &mut self,
-        scope: ScopeId,
-        declaration_count: usize,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        self.admit_cell_with_plan(
-            scope,
-            declaration_count,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            None,
-            RuntimeCellPurpose::Observation,
-            None,
-        )
-    }
-
-    fn native_setup_refusal(
+    fn host_carrier_refusal(
         &self,
         scope: ScopeId,
-        reason: NativeSetupAdmissionFailure,
+        reason: HostCarrierAdmissionFailure,
     ) -> SessionError {
-        SessionError::InvalidNativeSetupAdmission {
+        SessionError::InvalidHostCarrierAdmission {
             owner: self.admission_owner().identity,
             owner_epoch: self.admission_owner().epoch(),
             scope,
             reason,
         }
-    }
-
-    #[cfg(test)]
-    fn admit_cell_with_plan(
-        &mut self,
-        scope: ScopeId,
-        declaration_count: usize,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-        plan: Option<Arc<tidepool_toolchain::cell_plan::ParsedCellPlan>>,
-        purpose: RuntimeCellPurpose,
-        compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        self.admit_source_work_in(scope)?;
-
-        let store = self.held_admission_store()?;
-        super::generation_lease::requested_end(self.val_gen(), 1)?;
-        self.reap_admission_leases();
-        let view = self
-            .compile_view_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?
-            .with_scoped_injection();
-        let compile_inputs = compile_inputs.unwrap_or_default();
-        let view = view
-            .with_compile_inputs(&compile_inputs)
-            .map_err(SessionError::Compile)?;
-        let declaration_baseline = if declaration_count > 0 {
-            super::lexical_projection::DeclarationProjectionBaseline::capture(
-                self.lib(),
-                self.lib().scope_tip(scope),
-            )?
-        } else {
-            None
-        };
-        if let Some(plan) = &plan {
-            let injected = view
-                .injected_values()
-                .iter()
-                .map(|module| module.module_name())
-                .collect::<Vec<_>>();
-            let refusal = if plan.specification_digest() != specification_digest {
-                Some(NativeSetupAdmissionFailure::SpecificationDigest {
-                    planned: plan.specification_digest(),
-                    admitted: specification_digest,
-                })
-            } else if plan.include_paths().len() != include_paths.len()
-                || !plan
-                    .include_paths()
-                    .iter()
-                    .zip(&include_paths)
-                    .all(|(a, b)| a.as_os_str() == b.as_os_str())
-            {
-                Some(NativeSetupAdmissionFailure::IncludePaths {
-                    planned: NativeSetupInputInventory::new(
-                        plan.include_paths()
-                            .iter()
-                            .map(|path| path.as_os_str().as_encoded_bytes()),
-                    ),
-                    admitted: NativeSetupInputInventory::new(
-                        include_paths
-                            .iter()
-                            .map(|path| path.as_os_str().as_encoded_bytes()),
-                    ),
-                })
-            } else if plan.injected_modules() != injected {
-                Some(NativeSetupAdmissionFailure::InjectionInventory {
-                    planned: NativeSetupInputInventory::new(
-                        plan.injected_modules()
-                            .iter()
-                            .map(|module| module.as_bytes()),
-                    ),
-                    reachable: NativeSetupInputInventory::new(
-                        injected.iter().map(|module| module.as_bytes()),
-                    ),
-                })
-            } else {
-                plan.items()
-                    .iter()
-                    .enumerate()
-                    .find(|(index, item)| item.index() != *index)
-                    .map(|(position, item)| NativeSetupAdmissionFailure::ItemOrder {
-                        position,
-                        observed: item.index(),
-                    })
-            };
-            if let Some(reason) = refusal {
-                let _ = reason;
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-        }
-        let view_digest = self
-            .compile_view_digest_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
-        // The lazy machine has one reserved lifetime identity before any
-        // compiler offer captures it. Bootstrap adopts this identity rather
-        // than invalidating another independently admitted private cell.
-        self.reserve_admitted_machine_incarnation(store.as_ref())?;
-        let visibility = self
-            .public_visibility_snapshot_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
-        let native_shares = self
-            .bindings()
-            .source_instance_keys_in(self.scope_tree(), scope)
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let scoped_inputs =
-            Arc::new(self.capture_admitted_scoped_inputs(Arc::clone(&retained_scope))?);
-        let interfaces = self.capture_value_interfaces(&view)?;
-        let native_count = match &plan {
-            Some(plan) => plan.items().iter().try_fold(0u64, |count, item| {
-                use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-                count.checked_add(match item.kind() {
-                    Kind::Prologue | Kind::Declaration => 0,
-                    Kind::Bind | Kind::Expression => 1,
-                })
-            }),
-            None => Some(1),
-        }
-        .ok_or(SessionError::StaleStagedDeclaration)?;
-        let last_value_generation =
-            super::generation_lease::requested_end(self.val_gen(), native_count)?;
-        super::generation_lease::requested_end(last_value_generation, 1)?;
-        let count_u64 =
-            u64::try_from(declaration_count).map_err(|_| SessionError::StaleStagedDeclaration)?;
-        self.lib()
-            .log
-            .generation()
-            .0
-            .checked_add(count_u64)
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        let mut reserved_generations = Vec::new();
-        reserved_generations
-            .try_reserve_exact(declaration_count)
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let mut planned_items = Vec::new();
-        if let Some(plan) = &plan {
-            planned_items
-                .try_reserve_exact(plan.items().len())
-                .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        }
-        let retained_scope = {
-            let admission = store
-                .as_ref()
-                .map(|store| store.begin_native_transition())
-                .transpose()
-                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            let retained = self.retain_lexical_scope(scope)?;
-            super::complete_native_transition(admission)?;
-            retained
-        };
-        if self.lib().durable_graph.is_some() {
-            reserved_generations = self
-                .lib_mut()
-                .reserve_declaration_generations_durable(declaration_count)?;
-        } else {
-            for _ in 0..declaration_count {
-                reserved_generations.push(self.lib_mut().log.reserve());
-            }
-        }
-        let (initial_value_generation, _) = self.reserve_value_generations(native_count)?;
-        let view =
-            view.with_request_inventory(view.injected_values().to_vec(), initial_value_generation);
-        let planned = plan.map(|plan| {
-            use super::planned_cell::{RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot};
-            use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-            let mut declarations = reserved_generations.iter().copied();
-            let mut next_value = initial_value_generation.0;
-            let mut names = self
-                .bindings()
-                .iter_current_in(self.scope_tree(), scope)
-                .into_iter()
-                .map(|(name, _)| name.0.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            names.extend(
-                plan.items()
-                    .iter()
-                    .flat_map(|item| item.binders().iter().cloned()),
-            );
-            names.extend(
-                self.lib()
-                    .log
-                    .current_items_at(visibility.declaration_tip)
-                    .into_iter()
-                    .flat_map(|(item, _)| {
-                        item.value_names().map(str::to_owned).collect::<Vec<_>>()
-                    }),
-            );
-            for item in plan.items() {
-                let slot = match item.kind() {
-                    Kind::Prologue => Slot::Prologue {
-                        declaration: declarations
-                            .next()
-                            .expect("parser declaration count preflighted"),
-                    },
-                    Kind::Declaration => Slot::Declaration {
-                        declaration: declarations
-                            .next()
-                            .expect("parser declaration count preflighted"),
-                    },
-                    Kind::Bind => {
-                        let value = Generation(next_value);
-                        next_value += 1;
-                        Slot::Bind { value }
-                    }
-                    Kind::Expression => {
-                        let capture = Generation(next_value);
-                        next_value += 1;
-                        let mut observation_name = format!("observation{}", capture.0);
-                        while names.contains(&observation_name) {
-                            observation_name.push('_');
-                        }
-                        names.insert(observation_name.clone());
-                        Slot::Expression {
-                            capture,
-                            observation_name,
-                        }
-                    }
-                };
-                planned_items.push(RuntimePlannedCellItem {
-                    index: item.index(),
-                    slot,
-                });
-            }
-            (plan, planned_items)
-        });
-        let mut digest = blake3::Hasher::new();
-        let mut frame = |bytes: &[u8]| {
-            digest.update(&(bytes.len() as u64).to_le_bytes());
-            digest.update(bytes);
-        };
-        frame(b"TidepoolRuntimeCellAdmission2");
-        frame(self.admission_owner().identity.as_bytes());
-        frame(&self.admission_owner().epoch().to_le_bytes());
-        frame(&specification_digest);
-        frame(&authority_digest);
-        frame(&(include_paths.len() as u64).to_le_bytes());
-        for path in &include_paths {
-            frame(path.as_os_str().as_encoded_bytes());
-        }
-        frame(&view.session().0.to_le_bytes());
-        frame(&scope.0.to_le_bytes());
-        frame(&visibility.epoch.to_le_bytes());
-        frame(&visibility.declaration_tip.0.to_le_bytes());
-        match visibility.machine_incarnation {
-            Some(incarnation) => {
-                frame(&[1]);
-                frame(&incarnation.0.to_le_bytes());
-            }
-            None => frame(&[0]),
-        }
-        frame(&view.next_value_generation().0.to_le_bytes());
-        frame(&view_digest);
-        frame(&scoped_inputs.commitment);
-        if let Some(context) = view.exact_declaration_context() {
-            frame(&context.semantic_sha256());
-        }
-        for (name, id) in &visibility.bindings {
-            frame(name.as_bytes());
-            frame(&id.raw().to_le_bytes());
-        }
-        for generation in &reserved_generations {
-            frame(&generation.0.to_le_bytes());
-        }
-        if let Some((plan, items)) = &planned {
-            frame(b"TidepoolRuntimeOrderedCell1");
-            frame(&plan.digest());
-            frame(&plan.producer_sha256());
-            for item in items {
-                frame(&(item.index() as u64).to_le_bytes());
-                frame(&[item.kind() as u8]);
-                for generation in [item.declaration_generation(), item.value_generation()] {
-                    match generation {
-                        Some(generation) => {
-                            frame(&[1]);
-                            frame(&generation.0.to_le_bytes());
-                        }
-                        None => frame(&[0]),
-                    }
-                }
-                match item.observation_name() {
-                    Some(name) => {
-                        frame(&[1]);
-                        frame(name.as_bytes());
-                    }
-                    None => frame(&[0]),
-                }
-            }
-        }
-        for interface in &interfaces {
-            frame(interface.module().module_name().as_bytes());
-            frame(interface.bytes());
-        }
-        for key in &native_shares {
-            frame(&key.instance.raw().to_le_bytes());
-            frame(&key.value.0.to_le_bytes());
-        }
-        purpose.frame_authorization(&mut frame);
-        compile_inputs.frame_authorization(&mut frame);
-        let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
-            *digest.finalize().as_bytes(),
-        )
-        .map_err(SessionError::Compile)?;
-        let checked_request = match &planned {
-            Some((plan, _)) => {
-                let reserved = reserved_generations
-                    .iter()
-                    .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
-                    .collect::<Vec<_>>();
-                Some(Arc::new(
-                    tidepool_toolchain::checked_cell::CheckedCellRequest::issue(
-                        Arc::clone(plan.specification()),
-                        digest,
-                        reserved,
-                    )
-                    .map_err(SessionError::Compile)?,
-                ))
-            }
-            None => None,
-        };
-        let planned = planned.map(|(plan, items)| {
-            Arc::new(super::planned_cell::RuntimeCellPlanReservation {
-                plan,
-                items,
-                digest: digest.bytes(),
-            })
-        });
-        let prepared = Arc::new(RuntimeCellAdmission {
-            owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
-            session: view.session(),
-            purpose,
-            _retained_scope: retained_scope,
-            prefix_started: std::sync::atomic::AtomicBool::new(false),
-            scope,
-            reserved_generations,
-            initial_value_generation,
-            declarations: RuntimeCellDeclarations {
-                root: view.session_root().to_path_buf(),
-                declaration_baseline,
-                prepared_declarations: std::sync::OnceLock::new(),
-            },
-            compiler_basis: RuntimeCellCompilerBasis::Finite(RuntimeFiniteCellInputs {
-                visibility,
-                catalog_selection: self.catalog_selection().clone(),
-                compile_inputs,
-                view,
-                view_digest,
-                planned,
-                native_shares,
-                scoped_inputs,
-                interfaces,
-                specification,
-                specification_digest,
-                authority_digest,
-                include_paths,
-                checked_request,
-            }),
-            digest,
-        });
-        Ok(prepared)
-    }
-
-    /// Capture private admission facts for owner-component controls without
-    /// a parser or compiler. This cannot produce an executable program prefix.
-    #[cfg(test)]
-    pub(super) fn admit_cell_for_execution(
-        &mut self,
-        execution: Arc<PrivateExecutionAdmission>,
-        declaration_count: usize,
-        specification: Arc<dyn Any + Send + Sync>,
-        specification_digest: [u8; 32],
-        authority_digest: [u8; 32],
-        include_paths: Vec<PathBuf>,
-    ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        self.compile_view_for_execution(&execution)?;
-        self.admit_cell_with_plan(
-            execution.private_scope(),
-            declaration_count,
-            specification,
-            specification_digest,
-            authority_digest,
-            include_paths,
-            None,
-            RuntimeCellPurpose::PrivateExecution(execution),
-            None,
-        )
     }
 
     // boundary: see CELL-PREPARATION-BOUNDARY.md
@@ -6382,7 +5697,7 @@ impl PersistentSession {
             .iter()
             .enumerate()
             .find(|(index, item)| item.index() != *index)
-            .map(|(position, item)| NativeSetupAdmissionFailure::ItemOrder {
+            .map(|(position, item)| HostCarrierAdmissionFailure::ItemOrder {
                 position,
                 observed: item.index(),
             })
@@ -6390,14 +5705,14 @@ impl PersistentSession {
                 (plan.items().len() != 1
                     || plan.items()[0].kind() != Kind::Bind
                     || plan.items()[0].binders() != [binding.as_str()])
-                .then(|| NativeSetupAdmissionFailure::HostCarrierShape {
+                .then(|| HostCarrierAdmissionFailure::Shape {
                     items: plan.items().len(),
                     first: plan.items().first().map(|item| item.kind()),
                     binders: plan.items().first().map_or(0, |item| item.binders().len()),
                 })
             });
         if let Some(reason) = shape_refusal {
-            return Err(self.native_setup_refusal(scope, reason));
+            return Err(self.host_carrier_refusal(scope, reason));
         }
         if !Arc::ptr_eq(plan.world().restoration(), published.world.restoration())
             || plan.world().logical_id() != published.world.logical_id()
@@ -6625,7 +5940,7 @@ impl PersistentSession {
                 },
                 prepared_declarations: std::sync::OnceLock::new(),
             },
-            compiler_basis: RuntimeCellCompilerBasis::World {
+            compiler_basis: RuntimeWorldCellInputs {
                 reservation,
                 _operand: operand,
                 preparation,
@@ -7062,84 +6377,6 @@ mod tests {
     }
 
     #[test]
-    fn native_admission_uses_exact_scoped_roots_and_keeps_its_original_ledger() {
-        use tidepool_repr::{SessionModule, SessionVarId};
-
-        let root = tempfile::tempdir().unwrap();
-        let lib =
-            SessionLib::open(SessionId(990), root.path(), ModuleEnv::standalone_default()).unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
-        let (public, retained, ledger, original_id, _sibling_source) =
-            native_source_action(&mut session, &source, |session| {
-                let public = session.mint_scope(ScopeId::ROOT).unwrap();
-                let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
-                let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
-                let sibling_source = session.adopt_initial_notebook_scope(sibling).unwrap();
-                let mut original =
-                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 910);
-                original.value.identity.module = original.module.module_name();
-                let original_identity = original.value.identity.clone();
-                let original_id = original.id;
-                session.bind_in(public, original).unwrap();
-                let mut historical =
-                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 911);
-                historical.value.identity.module = historical.module.module_name();
-                let historical_identity = historical.value.identity.clone();
-                session.bind_in(public, historical).unwrap();
-
-                // A sibling sharing a module is still a different exact binding owner.
-                let mut foreign = crate::session::prepared::tests::rooted_publication_fixture(
-                    session, "foreign", 912,
-                );
-                foreign.module = SessionModule::val(Generation(910));
-                foreign.value.identity.module = foreign.module.module_name();
-                foreign.value.identity.occurrence = "foreign".into();
-                let foreign_identity = foreign.value.identity.clone();
-                session.bind_in(sibling, foreign).unwrap();
-                let retained = session.retain_lexical_scope(public).unwrap();
-                let ledger = Arc::new(
-                    session
-                        .capture_admitted_scoped_inputs(
-                            session.prepared_lexical_scope_lease(public).unwrap(),
-                        )
-                        .unwrap(),
-                );
-                assert!(ledger.value(&original_identity, 910).is_some());
-                assert!(ledger.value(&historical_identity, 911).is_some());
-                assert!(!ledger
-                    .imports()
-                    .any(|(identity, _)| identity == &foreign_identity));
-
-                let mut replacement =
-                    crate::session::prepared::tests::rooted_publication_fixture(session, "x", 913);
-                replacement.value.identity.module = replacement.module.module_name();
-                let replacement_identity = replacement.value.identity.clone();
-                session.bind_in(public, replacement).unwrap();
-                assert!(session
-                    .capture_admitted_scoped_inputs(
-                        session.prepared_lexical_scope_lease(public).unwrap()
-                    )
-                    .unwrap()
-                    .value(&replacement_identity, 913)
-                    .is_some());
-                assert!(!ledger.value(&replacement_identity, 913).is_some());
-                assert!(ledger.value(&original_identity, 910).is_some());
-                (public, retained, ledger, original_id, sibling_source)
-            });
-        session.retire_scope(public);
-        assert!(session.bindings().get(original_id).is_some());
-        drop(ledger);
-        drop(retained);
-        session.reap_admission_leases();
-        assert!(session.bindings().get(original_id).is_none());
-        assert!(session
-            .bindings()
-            .get(SessionVarId::from_extract(912))
-            .is_some());
-    }
-
-    #[test]
     fn raw_interface_owner_tracks_hidden_binding_leases_without_checked_admission() {
         let root = tempfile::tempdir().unwrap();
         let lib =
@@ -7183,14 +6420,12 @@ mod tests {
         drop(bytes);
         drop(scratch);
         assert!(!root.path().join(module.relative_hi_path()).exists());
-        let private = Arc::new(session.begin_private_execution(public).unwrap());
-        assert!(matches!(session.admit_cell_for_execution(
-            private.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
-        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
+        let view = session.compile_view_in(public).unwrap();
+        assert!(matches!(session.capture_value_interfaces(&view),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
         session.retire_scope(public);
         assert!(session.bindings().get(id).is_some());
         assert!(session.retained_value_interface(module).is_some());
-        drop(private);
         session.reap_admission_leases();
         // The captured alias keeps the hidden original and its type evidence.
         assert!(session.bindings().get(id).is_some());
@@ -7203,11 +6438,11 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(989), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut restarted = PersistentSession::new(Some(lib), 1024 * 1024);
-        let private = Arc::new(restarted.begin_private_execution(ScopeId::ROOT).unwrap());
-        let admitted = restarted
-            .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
-            .unwrap();
-        assert!(admitted.interfaces().unwrap().is_empty());
+        let view = restarted.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(restarted
+            .capture_value_interfaces(&view)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -7227,11 +6462,9 @@ mod tests {
         let path = root.path().join(module.relative_hi_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, [9, 9, 9]).unwrap();
-        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
-        assert!(matches!(
-            session.admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new()),
-            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module
-        ));
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(matches!(session.capture_value_interfaces(&view),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
     }
 
     #[test]
@@ -7275,11 +6508,10 @@ mod tests {
         let path = root.path().join(module.relative_hi_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, [9, 8, 7]).unwrap();
-        let private = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
         assert!(session.retained_checked_value_artifact(module).is_none());
-        assert!(matches!(session.admit_cell_for_execution(
-            private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
-        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        assert!(matches!(session.capture_value_interfaces(&view),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == module));
     }
 
     #[test]
@@ -7359,62 +6591,13 @@ mod tests {
     }
 
     #[test]
-    fn scoped_inputs_share_held_values_and_keep_snapshot_membership() {
-        let mut session = PersistentSession::new(None, 1024 * 1024);
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
-        native_source_action(&mut session, &source, |session| {
-            let public = session.mint_isolated_scope();
-            let _public_source = session.adopt_initial_notebook_scope(public).unwrap();
-            let mut first =
-                super::super::prepared::tests::rooted_publication_fixture(session, "value", 460);
-            first.value.identity.module = first.module.module_name();
-            let identity = first.value.identity.clone();
-            let root = first.value.handle;
-            session.bind_in(public, first).unwrap();
-            let lease = session.prepared_lexical_scope_lease(public).unwrap();
-            let owner = session
-                .capture_admitted_scoped_inputs(Arc::clone(&lease))
-                .unwrap();
-            let shared = owner.clone();
-            drop(lease);
-            assert!(Arc::ptr_eq(
-                owner.value(&identity, 460).unwrap(),
-                shared.value(&identity, 460).unwrap()
-            ));
-            assert_eq!(owner.value(&identity, 460).unwrap().handle, root);
-            let mut later =
-                super::super::prepared::tests::rooted_publication_fixture(session, "value", 461);
-            later.value.identity.module = later.module.module_name();
-            let later_identity = later.value.identity.clone();
-            session.bind_in(public, later).unwrap();
-            let next = session
-                .capture_admitted_scoped_inputs(
-                    session.prepared_lexical_scope_lease(public).unwrap(),
-                )
-                .unwrap();
-            assert!(next.value(&later_identity, 461).is_some());
-            assert!(owner.value(&later_identity, 461).is_none());
-            let isolated = session.mint_isolated_scope();
-            let _isolated_source = session.adopt_initial_notebook_scope(isolated).unwrap();
-            let isolated = session
-                .capture_admitted_scoped_inputs(
-                    session.prepared_lexical_scope_lease(isolated).unwrap(),
-                )
-                .unwrap();
-            assert!(isolated.value(&identity, 460).is_none());
-            assert_eq!(owner.commitment, shared.commitment);
-            assert_ne!(owner.commitment, next.commitment);
-        });
-    }
-
-    #[test]
-    fn protected_injection_captures_private_setup_without_sibling_inventory() {
+    fn inspection_injection_keeps_exact_scope_without_sibling_inventory() {
         let root = tempfile::tempdir().unwrap();
         let lib =
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let private = session.mint_detached_scope(public).unwrap();
         let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
         let foreign = crate::session::prepared::tests::rooted_publication_fixture(
             &mut session,
@@ -7426,74 +6609,18 @@ mod tests {
         let setup =
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "input", 919);
         let setup_module = setup.module;
-        session.bind_in(execution.private_scope(), setup).unwrap();
-        assert!(execution.view().unwrap().injected_values().is_empty());
-        let ordinary = session.compile_view_in(execution.private_scope()).unwrap();
+        session.bind_in(private, setup).unwrap();
+        let ordinary = session.compile_view_in(private).unwrap();
         assert!(ordinary.injected_values().contains(&foreign_module));
-        let protected = session.compile_view_for_execution(&execution).unwrap();
+        let protected = ordinary.with_scoped_injection();
         assert_eq!(protected.injected_values(), protected.reachable_values());
         assert!(protected.injected_values().contains(&setup_module));
         assert!(!protected.injected_values().contains(&foreign_module));
         for module in protected.reachable_values() {
             session.retain_fixture_value_interface(*module, Arc::from([1, 2, 3]));
         }
-        assert!(matches!(session.admit_cell_for_execution(
-            execution.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new(),
-        ), Err(SessionError::MissingRetainedValueInterface(owner)) if owner == setup_module));
-        let foreign_session = PersistentSession::new(None, 1024 * 1024);
-        assert!(matches!(
-            foreign_session.compile_view_for_execution(&execution),
-            Err(SessionError::StaleStagedDeclaration)
-        ));
-    }
-
-    #[test]
-    fn native_admission_commits_only_exact_scoped_value_owners() {
-        let root = tempfile::tempdir().unwrap();
-        let lib =
-            SessionLib::open(SessionId(991), root.path(), ModuleEnv::standalone_default()).unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let source = session.mint_notebook_scope_with_lease(None).unwrap();
-        native_source_action(&mut session, &source, |session| {
-            let unbound = crate::session::prepared::tests::rooted_publication_fixture(
-                session,
-                "nativeValue",
-                914,
-            );
-            let key = (unbound.value.identity.clone(), unbound.module.gen.0);
-            let handle = unbound.value.handle.raw().0;
-            let scope = session.mint_scope(ScopeId::ROOT).unwrap();
-            let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
-            let before = session
-                .capture_admitted_scoped_inputs(
-                    session.prepared_lexical_scope_lease(scope).unwrap(),
-                )
-                .unwrap();
-            assert!(!before.value(&key.0, key.1).is_some());
-            session.bind_in(scope, unbound).unwrap();
-            let admitted = session
-                .capture_admitted_scoped_inputs(
-                    session.prepared_lexical_scope_lease(scope).unwrap(),
-                )
-                .unwrap();
-            assert!(admitted.value(&key.0, key.1).is_some());
-            assert_eq!(
-                admitted
-                    .value(&key.0, key.1)
-                    .map(|value| value.handle.raw().0),
-                Some(handle)
-            );
-            assert_ne!(handle, 0);
-            let unrelated = session
-                .capture_admitted_scoped_inputs(
-                    session.prepared_lexical_scope_lease(sibling).unwrap(),
-                )
-                .unwrap();
-            assert!(!unrelated.value(&key.0, key.1).is_some());
-            assert!(!unrelated.value(&key.0, key.1).is_some());
-            assert_ne!(admitted.commitment, unrelated.commitment);
-            assert_ne!(admitted.commitment, before.commitment);
-        });
+        assert!(matches!(session.capture_value_interfaces(&protected),
+            Err(SessionError::MissingRetainedValueInterface(owner)) if owner == setup_module));
     }
 
     #[test]
@@ -7502,54 +6629,51 @@ mod tests {
         let lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let first = Arc::new(session.begin_private_execution(public).unwrap());
-        let second = Arc::new(session.begin_private_execution(public).unwrap());
-        assert_eq!(first.admitted_public().unwrap().machine_incarnation, None);
-        let first_cell = session
-            .admit_cell_for_execution(first.clone(), 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
-            .unwrap();
-        let second_cell = session
-            .admit_cell_for_execution(
-                second.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
-            .unwrap();
-        let incarnation = first_cell.visibility().unwrap().machine_incarnation;
-        assert!(incarnation.is_some());
+        let first = session.mint_isolated_scope_with_lease().unwrap();
+        let second = session.mint_isolated_scope_with_lease().unwrap();
         assert_eq!(
-            second_cell.visibility().unwrap().machine_incarnation,
+            session
+                .public_visibility_snapshot_in(first.scope())
+                .unwrap()
+                .machine_incarnation,
+            None
+        );
+        session.reserve_admitted_machine_incarnation(None).unwrap();
+        let incarnation = session
+            .public_visibility_snapshot_in(first.scope())
+            .unwrap()
+            .machine_incarnation;
+        assert!(incarnation.is_some());
+        session.reserve_admitted_machine_incarnation(None).unwrap();
+        assert_eq!(
+            session
+                .public_visibility_snapshot_in(second.scope())
+                .unwrap()
+                .machine_incarnation,
             incarnation
         );
         assert!(session.prepared_mut().is_none());
-        let _value = crate::session::prepared::tests::rooted_publication_fixture(
-            &mut session,
-            "bootstrapRoot",
-            704,
-        );
-        assert_eq!(
-            session
-                .public_visibility_snapshot_in(first.private_scope())
-                .unwrap(),
-            *first_cell.visibility().unwrap()
-        );
-        assert_eq!(
-            session
-                .public_visibility_snapshot_in(second.private_scope())
-                .unwrap(),
-            *second_cell.visibility().unwrap()
-        );
-        drop(first);
-        let scope = first_cell.private_execution().unwrap().private_scope();
-        session.reap_admission_leases();
-        assert!(session.scope_tree().is_live(scope));
-        drop(first_cell);
-        session.reap_admission_leases();
-        assert!(!session.scope_tree().is_live(scope));
+        native_source_action(&mut session, &first, |session| {
+            let _value = crate::session::prepared::tests::rooted_publication_fixture(
+                session,
+                "bootstrapRoot",
+                704,
+            );
+            assert_eq!(
+                session
+                    .public_visibility_snapshot_in(first.scope())
+                    .unwrap()
+                    .machine_incarnation,
+                incarnation
+            );
+            assert_eq!(
+                session
+                    .public_visibility_snapshot_in(second.scope())
+                    .unwrap()
+                    .machine_incarnation,
+                incarnation
+            );
+        });
     }
 
     #[test]
@@ -7558,6 +6682,18 @@ mod tests {
             ExecutionPublication, PublicManifestCommit, PublicationDecision, PublicationPhase,
             RecoveryPublicOwner,
         };
+        tidepool_testing::eval_harness::require_extract();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let specification = crate::session::world_cell_test_support::fixture_cell_recipe(
+            &recipe,
+            "",
+            &crate::session::SourceImports::new(),
+        );
         let root = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut lib = SessionLib::open(
@@ -7581,17 +6717,18 @@ mod tests {
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
-        let private = Arc::new(session.begin_private_execution(public).unwrap());
-        let cell = session
-            .admit_cell_for_execution(
-                private.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
-            .unwrap();
+        let source = session.adopt_initial_notebook_scope(public).unwrap();
+        let private = crate::session::world_cell_test_support::begin_state_fixture_execution(
+            &mut session,
+            &source,
+            &recipe,
+        );
+        let cell = crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+            &mut session,
+            private.clone(),
+            specification.clone(),
+        )
+        .unwrap();
         let intent = session.freeze_private_execution(&private).unwrap();
         let ExecutionPublication::Bindings(base) = session
             .restage_execution_publication(owner.clone(), intent.clone())
@@ -7604,15 +6741,8 @@ mod tests {
         session.invalidate_execution_admissions_after_owner_transfer(next);
         assert!(!cell.belongs_to(&session));
         assert!(matches!(
-            session.admit_cell_for_execution(
-                private.clone(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new()
-            ),
-            Err(SessionError::StaleStagedDeclaration)
+            cell.compiler_preparation_source().validate_source_issuer(),
+            Err(super::super::SourceAdmissionError::StaleSourceLease)
         ));
         assert!(matches!(
             session.freeze_private_execution(&private),
@@ -7631,9 +6761,18 @@ mod tests {
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert!(session.scope_tree().is_live(private.private_scope()));
-        let fresh = Arc::new(session.begin_private_execution(public).unwrap());
-        let current = session
-            .admit_cell_for_execution(fresh, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
+        let fresh_source = session.retain_lexical_scope(public).unwrap();
+        let fresh = crate::session::world_cell_test_support::begin_state_fixture_execution(
+            &mut session,
+            &fresh_source,
+            &recipe,
+        );
+        let current =
+            crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                &mut session,
+                fresh,
+                specification,
+            )
             .unwrap();
         assert!(current.belongs_to(&session));
         assert_ne!(cell.digest(), current.digest());
@@ -7848,49 +6987,21 @@ mod tests {
         };
         let mut first = make_session();
         let mut second = make_session();
-        let first_public = first.mint_scope(ScopeId::ROOT).unwrap();
-        let second_public = second.mint_scope(ScopeId::ROOT).unwrap();
-        let private = first.begin_private_execution(first_public).unwrap();
-        let second_private = second.begin_private_execution(second_public).unwrap();
-        assert_eq!(private.private_scope(), second_private.private_scope());
-        assert_eq!(private.binding_tip(), second_private.binding_tip());
-        assert_eq!(private.session(), second_private.session());
-        assert_eq!(private.admitted_public().unwrap().machine_incarnation, None);
-        assert_eq!(
-            second_private
-                .admitted_public()
-                .unwrap()
-                .machine_incarnation,
-            None
-        );
-        assert!(matches!(
-            second.freeze_private_execution(&private),
-            Err(SessionError::TransitionRefused(
-                crate::session::SessionTransitionReason::OwnerChanged
-            ))
-        ));
-        let first_cell = first
-            .admit_cell_in(
-                private.private_scope(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
+        let first_scope = first.mint_isolated_scope_with_lease().unwrap();
+        let second_scope = second.mint_isolated_scope_with_lease().unwrap();
+        assert_eq!(first_scope.scope(), second_scope.scope());
+        assert_eq!(first.lib().session_id(), second.lib().session_id());
+        first
+            .validate_lexical_scope_lease(first_scope.scope(), &first_scope)
             .unwrap();
-        let second_cell = second
-            .admit_cell_in(
-                second_private.private_scope(),
-                0,
-                Arc::new(()),
-                [7; 32],
-                [8; 32],
-                Vec::new(),
-            )
+        second
+            .validate_lexical_scope_lease(second_scope.scope(), &second_scope)
             .unwrap();
-        assert_ne!(first_cell.digest(), second_cell.digest());
-        assert!(first_cell.belongs_to(&first));
-        assert!(!first_cell.belongs_to(&second));
+        assert!(second
+            .validate_lexical_scope_lease(second_scope.scope(), &first_scope)
+            .is_err());
+        assert!(first
+            .validate_lexical_scope_lease(first_scope.scope(), &second_scope)
+            .is_err());
     }
 }

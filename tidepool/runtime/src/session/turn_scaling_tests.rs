@@ -1660,10 +1660,7 @@ where
             crate::session::WorldInspectionError::Runtime(error) => ResidentError::Run(error),
             other => panic!("scaling fixture World observation failed: {other:?}"),
         })?;
-        let plan = admission
-            .world_reservation()
-            .expect("actual World reservation")
-            .plan();
+        let plan = admission.world_reservation().plan();
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind;
         match declarations {
             CellDeclarationExpectation::Total(expected) => assert_eq!(

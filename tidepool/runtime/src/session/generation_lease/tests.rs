@@ -450,7 +450,6 @@ fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_stagin
     );
     let planned_values = admission
         .world_reservation()
-        .unwrap()
         .items()
         .iter()
         .filter_map(|item| match item.slot() {
@@ -621,35 +620,73 @@ fn uncertain_refill_fences_previously_confirmed_tail() {
 
 #[test]
 fn fenced_run_refuses_value_only_cell_and_private_scope_activation() {
+    use crate::session::world_cell_test_support::{
+        begin_state_fixture_execution, fixture_cell_recipe, plan_state_fixture_specification_for,
+        state_source_action, InputRecipe,
+    };
+    tidepool_testing::eval_harness::require_extract();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
     let run = TestRun::new();
     let mut sibling = run.child();
     let mut session = crate::session::PersistentSession::new(Some(run.root()), 1024 * 1024);
-    let public = session.mint_scope(ScopeId::ROOT).unwrap();
-    let private = Arc::new(session.begin_private_execution(public).unwrap());
-    let accepted = session
-        .admit_cell_for_execution(
-            private.clone(),
-            0,
-            Arc::new(()),
-            [7; 32],
-            [8; 32],
-            Vec::new(),
+    let public = session.mint_notebook_scope_with_lease(None).unwrap();
+    let private = begin_state_fixture_execution(&mut session, &public, &recipe);
+    let specification = fixture_cell_recipe(
+        &recipe,
+        "let fencedValue = (1 :: Int)",
+        &crate::session::SourceImports::new(),
+    );
+    let accepted =
+        plan_state_fixture_specification_for(&mut session, private.clone(), specification.clone())
+            .unwrap();
+    assert!(session
+        .public_visibility_snapshot_in(private.private_scope())
+        .unwrap()
+        .machine_incarnation
+        .is_some());
+    assert_eq!(session.lib().generation(), Generation(0));
+    let original = private.original_source().unwrap();
+    let snapshot = state_source_action(&mut session, original.clone(), |session| {
+        session.prepare_private_execution_snapshot(private.clone())
+    })
+    .unwrap();
+    let prepared = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                crate::session::turn::prepare_world_cell_plan_admitted(
+                    owner,
+                    snapshot.world(),
+                    specification,
+                    None,
+                )
+            },
         )
         .unwrap();
-    assert!(accepted.visibility().unwrap().machine_incarnation.is_some());
-    assert_eq!(session.lib().generation(), Generation(0));
+    let plan = crate::session::turn::finish_world_cell_plan_admitted(prepared).unwrap();
     let value_generation = session.val_gen();
     let scopes = session.scope_tree().len();
     run.store.inject_fault(StoreFault::CommitError);
     assert!(sibling.reserve_declaration_generation_durable().is_err());
-    assert!(session
-        .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
-        .is_err());
+    assert!(
+        state_source_action(&mut session, original, |session| session
+            .admit_world_planned_cell_with_snapshot(private, snapshot, plan, None))
+        .is_err()
+    );
     assert_eq!(session.val_gen(), value_generation);
     assert_eq!(session.scope_tree().len(), scopes);
-    assert!(session.begin_private_execution(public).is_err());
+    assert!(session.begin_private_execution(public.scope()).is_err());
     assert_eq!(session.scope_tree().len(), scopes);
     assert_eq!(session.lib().generation(), Generation(0));
+    assert!(accepted.world_reservation().items().len() == 1);
 }
 
 #[test]
