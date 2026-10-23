@@ -16,11 +16,11 @@ import Data.ByteString.Lazy qualified as BSL
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import System.Directory (canonicalizePath, createDirectory, doesPathExist, removeFile, removePathForcibly)
-import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Environment (getEnvironment, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), isAbsolute, isRelative, makeRelative, splitDirectories)
 import System.IO (IOMode(ReadMode), hClose, openTempFile, withBinaryFile)
-import System.Process (readProcessWithExitCode)
+import System.Process (CreateProcess(env), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 
 newPacketDirectory :: FilePath -> String -> IO FilePath
 newPacketDirectory work name = bracketOnError (openTempFile work name)
@@ -87,8 +87,26 @@ runPacketProducer producer packet = do
   bracket (lookupEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")
     (maybe (unsetEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET") (setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET")) $ \_ -> do
       setEnv "TIDEPOOL_CANDIDATE_FIXTURE_PACKET" packet
-      (status, output, errors) <- readProcessWithExitCode issuer
-        ["--exact", packetProducerTest producer, "--ignored", "--nocapture"] ""
+      (status, output, errors) <- case producer of
+        AuthoredDeclarationProducer -> do
+          runner <- lookupEnv "TIDEPOOL_AUTHORED_FIXTURE_RUNNER" >>= maybe
+            (fail "authored fixture requires the declared owned libtest runner") pure
+          inherited <- getEnvironment
+          let resources = ["TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_WORKER"
+                , "TIDEPOOL_COMPILER_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT"
+                , "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"]
+              arguments = [issuer, "--exact", packetProducerTest producer
+                , "--ignored", "--expected-count", "1", "--compiler-mode", "owned-resident"
+                , "--output-dir", packet </> "authored-producer-run", "--timeout", "600"]
+                ++ concatMap (\name -> ["--resource-env", name]) resources
+              -- The outer suite owns direct GHC inputs. The nested owned runner
+              -- admits only its declared service profile, never generic loaders.
+              childEnvironment = filter ((`notElem`
+                ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES"])
+                . fst) inherited
+          readCreateProcessWithExitCode ((proc runner arguments) {env = Just childEnvironment}) ""
+        _ -> readProcessWithExitCode issuer
+          ["--exact", packetProducerTest producer, "--ignored", "--nocapture"] ""
       unless (status == ExitSuccess) $
         fail ("Rust fixture packet failed at " ++ packetProducerTest producer ++ "\n"
           ++ take 65536 output ++ take 65536 errors)

@@ -215,6 +215,30 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn('"TIDEPOOL_EXTRACT_WORKER": "$(exe :tidepool_extract_bin)"', rendered)
         self.assertIn("TIDEPOOL_EXTRACT_WORKER:executable", rendered)
         self.assertIn('"//build/package:tidepool_extract_runtime_libraries"', rendered)
+        self.assertNotIn("TIDEPOOL_AUTHORED_FIXTURE_RUNNER", rendered)
+        self.assertNotIn("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG", rendered)
+
+    def test_source_boot_authored_packets_declare_the_owned_runner_and_service(self):
+        child = component("source-boot-child", "executable", "production", ("app",), ())
+        suite = component("source-boot-product-reuse-test", "test-suite", "tests", ("test",), (),
+                          tools=[dict(package="example", component="source-boot-child",
+                                      version_range="-any")])
+        rendered = G.render(self.metadata(production=[child], tests=[suite]))
+        for name, expression, role in (
+            ("TIDEPOOL_AUTHORED_FIXTURE_RUNNER", "$(exe //build/rust:isolated_libtest)", "executable"),
+            ("TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT",
+             "$(location //build/package:compiler_service_deployment)/compiler-deployment.json", "file"),
+            ("TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
+             "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin", "file"),
+        ):
+            with self.subTest(resource=name):
+                self.assertIn(f'"{name}": "{expression}"', rendered)
+                self.assertIn(f"{name}:{role}", rendered)
+        self.assertIn('"//build/rust:isolated_libtest"', rendered)
+        self.assertIn('"//build/package:compiler_service_deployment"', rendered)
+        # The outer suite still owns direct compiler inputs for its other leaves.
+        self.assertIn('"TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)"', rendered)
+        self.assertIn('"LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)"', rendered)
 
     def test_candidate_codec_declares_issuer_without_widening_pure_encoder(self):
         encoder = G.render(self.metadata(tests=[component("execution-schema-encode", "test-suite",
