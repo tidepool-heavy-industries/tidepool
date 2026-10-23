@@ -7655,37 +7655,45 @@ lazySourceBackedge = withTiming $ withScratch $ \work -> do
       install name = copyFile (fixture name) target
       compile scope = scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile
         Nothing target [work] Nothing
+      completed label expected scope = do
+        (prepared,diagnostics) <- captureDiagnostics (compile scope)
+        unless (counterValues "transaction_reused_source_products" diagnostics == [expected]) $
+          fail (label ++ " did not exercise its expected source-reuse cut: " ++ diagnostics)
+        home prepared
       home prepared = maybe (fail "SOURCE backedge lost its completed dependency") pure
         (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) dependency)
-      field expected retained = do
+      field label expected retained = do
         identifier <- case [value | value <- typeEnvIds (md_types (hm_details retained))
             , getOccString value == "observeToken"] of
           [value] -> pure value
-          _ -> fail "SOURCE dependency lost its actual exported Id"
+          _ -> fail (label ++ ": SOURCE dependency lost its actual exported Id")
         actual <- case splitFunTys (idType identifier) of
           ([argument],_) | Just (owner,[]) <- splitTyConApp_maybe (scaledThing argument)
             , [constructor] <- tyConDataCons owner
             , [payload] <- DC.dataConOrigArgTys constructor -> pure (scaledThing payload)
-          _ -> fail "SOURCE dependency retained an abstract boot TyCon"
+          _ -> fail (label ++ ": SOURCE dependency retained an abstract boot TyCon")
         unless (eqType actual expected) $
-          fail ("SOURCE dependency retained the wrong target representation: " ++ renderType actual)
+          fail (label ++ ": SOURCE dependency retained the wrong target representation: " ++ renderType actual)
   forM_ ["LazyBackedgeDependency.hs","LazyBackedgeTarget.hs-boot"] $ \name ->
     copyFile (fixture name) (work </> name)
   install "LazyBackedgeTarget.hs"
   withResidentCompilerScopes [work] $ \runScope -> do
     -- Force the retained HMI only after its producing request and compiler-view
     -- directory have ended; the lazy HOME knot must retain actual inputs.
-    retained <- runScope (pure ()) (\scope -> compile scope >>= home)
-    field intTy retained
-    warm <- runScope (pure ()) (\scope -> compile scope >>= home)
-    field intTy warm
+    retained <- runScope (pure ()) (completed "cold SOURCE backedge" 0)
+    field "cold retained" intTy retained
+    warm <- runScope (pure ()) (completed "warm SOURCE backedge" 1)
+    field "unchanged warm" intTy warm
+    -- B depends on the unchanged SOURCE boot summary. Its source, boot
+    -- dependency digest and exact inputs still match; GHC reties its details
+    -- against the changed ordinary target without a new B frontend.
     install "LazyBackedgeTargetChanged.hs"
-    changed <- runScope (pure ()) (\scope -> compile scope >>= home)
-    field boolTy changed
-    field intTy retained
+    changed <- runScope (pure ()) (completed "changed SOURCE backedge" 1)
+    field "changed warm" boolTy changed
+    field "original after target change" intTy retained
   -- An independently booted compiler supplies the changed-source oracle.
   withResidentCompilerScopes [work] $ \runScope ->
-    runScope (pure ()) (\scope -> compile scope >>= home >>= field boolTy)
+    runScope (pure ()) (\scope -> completed "independent cold SOURCE backedge" 0 scope >>= field "independent cold" boolTy)
 
 -- Observe actual GHC finder operations, without timing thresholds or compiler
 -- authority fixtures. A missing package key must never consult an ancestor

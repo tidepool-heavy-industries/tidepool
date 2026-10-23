@@ -6513,10 +6513,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           (GutsMemoEntry (memoValidity summary (loadedFinalized loaded))
             (ValidationOnly (loadedFacts loaded) (loadedOutput loaded) (loadedAcquisition loaded))
             requestIdentity (memoDiagnosticWitnesses summary)))
-    forM_ (Map.elems cachedOnly) $ \loaded -> do
+    forM_ (Map.toList cachedOnly) $ \(owner,loaded) -> do
       liftIO (publishLoadedFinalization loaded)
-      installPreparedInterface (ms_mod_name (loadedSummary loaded))
-        (finalizedHomeModInfo (loadedFinalized loaded))
+      entry <- maybe (liftIO (throwIO (CompletedModuleHomeMissing owner))) pure
+        (Map.lookup owner validatedMemo)
+      requireLoadedMemoHome (loadedSummary loaded) entry
     summaries0 <- cpSummaries plan
     let summaries = [ ms | ms <- summaries0, ms_hsc_src ms == HsSrcFile ]
     when (null summaries) $
@@ -6873,7 +6874,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         recordValidity modSum True
                         rememberFinalized (payloadLoaded modSum (gmePayload entry))
                         when (needsPreparedInterface interfaceUse) $
-                          forM_ (cachedInterface modSum entry) (installPreparedInterface name)
+                          requireLoadedMemoHome modSum entry
                         pure (CachedObservation modSum entry)
                       _ -> do
                         recordValidity modSum False
@@ -6950,8 +6951,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         recordValidity modSum True
                         rememberFinalized loaded
                         when (needsPreparedInterface interfaceUse) $
-                          installPreparedInterface (ms_mod_name modSum)
-                            (finalizedHomeModInfo (loadedFinalized loaded))
+                          requireLoadedMemoHome modSum entry
                         pure (CachedObservation modSum entry)
                       _ -> do
                         recordValidity modSum False
@@ -7089,7 +7089,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                           modifyIORef' productInterfacesRef (Map.insert (ms_mod_name modSum)
                             (hm_iface (finalizedHomeModInfo (productFinalized moduleProduct))))
                         when (needsPreparedInterface interfaceUse) $
-                          forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
+                          requireLoadedMemoHome modSum entry
                         pure [(productOutput moduleProduct, Just (productPrepared moduleProduct))]
                     CachedObservation _ entry -> do
                       let reason
@@ -7123,7 +7123,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       , interfaceReady interfaceUse modSum entry -> do
                         recordExecutableValidity modSum True
                         when (needsPreparedInterface interfaceUse) $
-                          forM_ (cachedInterface modSum entry) (installPreparedInterface (ms_mod_name modSum))
+                          requireLoadedMemoHome modSum entry
                         pure []
                     CachedObservation _ entry ->
                       validationOnly (payloadLoaded modSum (gmePayload entry)) moduleFacts >> pure []
@@ -9464,6 +9464,17 @@ registerPreparedInterface timing requestId interfaceReuse interfaceUse front sim
     installPreparedInterface (ms_mod_name modSum) hmi
   finalized <- liftIO (newFinalizedModule hscEnv hmi cgGuts)
   pure (tidyMs + ifaceMs, finalized)
+
+-- GHC Make may have retied a reused SOURCE interface against this attempt's
+-- current target. Validate its exact installed owner without replacing its
+-- details knot or executable capacity with the earlier finalized payload.
+requireLoadedMemoHome :: ModSummary -> GutsMemoEntry -> Ghc ()
+requireLoadedMemoHome summary entry = do
+  current <- getSession
+  home <- liftIO (requireCompletedModuleHome (hsc_HPT current) entry)
+  unless (mi_module (hm_iface home) == ms_mod summary
+      && mi_hsc_src (hm_iface home) == ms_hsc_src summary) $
+    liftIO (throwIO (CompletedModuleHomeMismatch (ms_mod summary)))
 
 -- Keep request-local executable state out of the reusable prepared memo.
 installPreparedInterface :: ModuleName -> HomeModInfo -> Ghc ()
