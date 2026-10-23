@@ -60,7 +60,7 @@ import Tidepool.FatIface.Internal
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
 import Tidepool.ExactHydration (forkExactContext, ExactIfaceArtifact(..), hydrateExactScope,
   newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
-  selectVerifiedExactInterfaceProducts, hydrateExactScopeWithProducts)
+  selectVerifiedExactInterfaceProducts, verifiedExactInterface, hydrateExactScopeWithProducts)
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import qualified Data.ByteString as BS
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
@@ -209,19 +209,33 @@ scenario = do
         let thinBytes = captureArtifactBytes thinRaw
         decoder <- newRequestIfaceDecoder
         removeFile thinPath
-        (forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
-          let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" alias
-                (artifactSha256 thinBytes) []
-          closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
-            (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
-            hsc [thinArtifact] [] >>= either fail pure
-          products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
-          fresh <- forkExactContext hsc
-          (captured,_) <- hydrateExactScopeWithProducts fresh products []
-          isolated <- newFatIfaceCache
-          thin <- lookupFatIfaceExact captured isolated thinIdentityName
-          assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
-            "captured thin TYPE interface attempted a defining-file read")
+        (do
+          let capture environment alias = do
+                let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" alias
+                      (artifactSha256 thinBytes) []
+                closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
+                  (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
+                  environment [thinArtifact] [] >>= either fail pure
+                either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
+          forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
+            products <- capture hsc alias
+            fresh <- forkExactContext hsc
+            (captured,_) <- hydrateExactScopeWithProducts fresh products []
+            isolated <- newFatIfaceCache
+            thin <- lookupFatIfaceExact captured isolated thinIdentityName
+            assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
+              "captured thin TYPE interface attempted a defining-file read"
+          first <- capture hsc "primary-1/iface"
+          other <- runGhc (Just libdir) getSession
+          _ <- capture other "primary-1/iface"
+          repeated <- capture hsc "primary-1/iface"
+          firstObjects <- mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName) first
+          repeatedObjects <- mapM (\verified -> evaluate (snd (verifiedExactInterface verified)) >>= makeStableName) repeated
+          assert (firstObjects == repeatedObjects)
+            "interleaving another NameCache discarded an admitted decoded owner"
+          crossed <- try (hydrateExactScopeWithProducts other first [] >> pure ()) :: IO (Either SomeException ())
+          assert (case crossed of Left _ -> True; Right () -> False)
+            "TYPE hydration accepted an interface from another NameCache")
           `finally` BS.writeFile thinPath thinRaw
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency
