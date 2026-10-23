@@ -1814,8 +1814,10 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
         let mut writer = Materializer::new(&store);
         let missing_field = ContextRoot(writer.materialize_value(&value).unwrap());
         install(&store, writer.finish().unwrap());
-        assert!(matches!(hydrate_context(&store, &missing_field),
-            Err(SnapshotError::Malformed(message)) if message.contains(field)));
+        let outcome = hydrate_context(&store, &missing_field).err();
+        assert!(matches!(&outcome,
+            Some(SnapshotError::Malformed(message)) if message.contains(field)),
+            "removed {field}: {outcome:?}");
 
         let mut descriptor = descriptor.clone();
         let absent = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(field.as_bytes()));
@@ -1829,8 +1831,10 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
         let mut writer = Materializer::new(&store);
         let missing_map = ContextRoot(writer.materialize_value(&descriptor).unwrap());
         install(&store, writer.finish().unwrap());
-        assert!(matches!(hydrate_context(&store, &missing_map),
-            Err(SnapshotError::MissingBlock(cid)) if cid == absent));
+        let outcome = hydrate_context(&store, &missing_map).err();
+        assert!(matches!(&outcome,
+            Some(SnapshotError::MissingBlock(cid)) if *cid == absent),
+            "missing {field} block: {outcome:?}");
     }
     let restored = hydrate_context(&store, valid.root()).unwrap();
     assert!(restored.snapshot().native_components.is_empty());
