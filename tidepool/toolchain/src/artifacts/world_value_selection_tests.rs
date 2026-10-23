@@ -244,7 +244,8 @@ fn assert_private_future_dependency(
         &mut validation,
         &mut |_| {},
     )?;
-    let stage = pending.segment().originals.captured_stage();
+    let segment = pending.segment();
+    let stage = segment.originals.captured_stage();
     let mut future_edges = BTreeSet::new();
     for availability in stage.source_selection().issued_native_availability() {
         for offer in availability.offers().filter(|offer| offer.is_full()) {
@@ -282,6 +283,147 @@ fn assert_private_future_dependency(
         "the actual physical Full offer must retain a native body edge to the second produced VALUE");
     assert!(stage.issued_artifacts().selected_native_groups().is_empty());
     tracing::debug!(?future_edges, "actual private future VALUE dependency");
+
+    let items = (0..3)
+        .map(|index| {
+            let relative = PathBuf::from(format!("item-{index}"));
+            let path = checked
+                .item(index)
+                .expect("actual checked item")
+                .executable()
+                .expect("actual executable item")
+                .manifest()
+                .keys()
+                .find(|path| {
+                    path.to_str()
+                        .is_some_and(|path| path.ends_with(".prepared.cbor"))
+                })
+                .expect("actual prepared output");
+            let bytes = crate::checked_cell::world_output_bytes(checked, &relative.join(path))?;
+            let artifact = crate::prepared_artifact::PreparedArtifact::parse_shared(
+                Arc::new(bytes.as_ref().to_vec()),
+                &crate::prepared_artifact::production_requirements()?,
+                DecodeLimits::default(),
+            )?;
+            let receipt = certified_products::decode_segment_item_with_operation(
+                crate::checked_cell::world_output_bytes(
+                    checked,
+                    &relative.join("certified-products.cbor"),
+                )?,
+                &validation.inventory,
+            )
+            .map_err(compiler_evidence_failure)?;
+            Ok((artifact, receipt))
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let inventory = stage.issued_artifacts().inventory();
+    let mut cursor = segment
+        .originals
+        .bound_artifacts()
+        .map_err(compiler_evidence_failure)?;
+    let mut native_cursor = segment.native_prefix_artifacts()?;
+    for (index, (artifact, receipt)) in items.iter().enumerate() {
+        let item_types = physical.for_item(index)?;
+        let (certified, _, packages, package_selection) = segment
+            .originals
+            .select_item(
+                &mut cursor,
+                receipt.clone(),
+                &artifact.bind_package_program(),
+                Some(&item_types),
+                &mut validation,
+            )
+            .map_err(compiler_evidence_failure)?;
+        assert!(Arc::ptr_eq(certified.captured_stage(), stage));
+        assert_item_prefix_keeps_closed_indexes(
+            &certified,
+            &crate::declaration_join::ExactModuleIdentity {
+                unit: "main".into(),
+                module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                    51 + index as u64,
+                ))
+                .module_name(),
+            },
+        )?;
+        let entry = crate::checked_cell::CheckedTypedEntry::issue_world_item(
+            checked,
+            index,
+            artifact.prepared_shared(),
+            &segment.source().generated_source_owner(),
+            &certified.data().recovery_products,
+        )?;
+        let values = segment
+            .originals
+            .selected_value_entries(&certified.data().value_interfaces)
+            .cloned()
+            .collect::<Vec<_>>();
+        let catalog = segment_package_availability(&segment.originals, &packages);
+        let before_target = inventory.metrics().issued_scope_nodes;
+        let target = inventory.select_native_target(
+            certified.physical_cohort(),
+            package_selection.authenticated_imports().clone(),
+            Some(entry),
+            Some(&native_cursor),
+            &values,
+            &catalog,
+            &mut validation,
+        )?;
+        assert_eq!(inventory.metrics().issued_scope_nodes, before_target);
+        native_cursor = target.artifacts().clone();
+        if index == 0 {
+            assert!(!native_cursor.artifact_ids().contains(&later));
+            assert!(!certified
+                .source_selection()
+                .interface_only_artifact(&crate::declaration_join::ExactModuleIdentity {
+                    unit: "main".into(),
+                    module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(52))
+                        .module_name(),
+                })
+                .is_some());
+            let (later_artifact, later_receipt) = &items[2];
+            let observed = certified_products::AuthenticatedTargetImports::issue(
+                later_artifact.prepared_shared(),
+                &later_receipt.globals,
+                &validation.inventory,
+            )
+            .map_err(compiler_evidence_failure)?;
+            let later_entry = crate::checked_cell::CheckedTypedEntry::issue_world_item(
+                checked,
+                2,
+                later_artifact.prepared_shared(),
+                &segment.source().generated_source_owner(),
+                &certified.data().recovery_products,
+            )?;
+            let before_refusal = inventory.metrics().issued_scope_nodes;
+            let refusal = inventory.select_native_target(
+                certified.physical_cohort(),
+                observed,
+                Some(later_entry),
+                Some(&native_cursor),
+                &values,
+                &catalog,
+                &mut validation,
+            );
+            assert!(
+                matches!(refusal, Err(CompileError::ExtractFailed(ref detail))
+                if detail == "artifact inventory: target reaches a future value interface"),
+                "the actual dependent target must refuse its private future VALUE: {refusal:?}"
+            );
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_refusal);
+        }
+        if index == 2 {
+            assert!(native_cursor.artifact_ids().contains(&later));
+            assert!(native_cursor
+                .binding_dependencies()
+                .iter()
+                .any(|(source, target, edge)| {
+                    matches!((source, target, edge),
+                    (ArtifactBindingNode::Group(group), ArtifactBindingNode::Artifact(value),
+                        ArtifactDependency::NativeBinding { generation: 52, occurrence, .. })
+                    if future_edges.contains(&(*group, *value)) && occurrence == "laterSelection")
+                }));
+        }
+    }
     Ok(())
 }
 
