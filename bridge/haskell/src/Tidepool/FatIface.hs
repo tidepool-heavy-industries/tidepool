@@ -15,7 +15,7 @@ module Tidepool.FatIface
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
-  , ExactInterfaceFailure(..), readExactInterface, readCapturedDefiningInterface
+  , ExactInterfaceFailure(..), readHomeInterface, readExactInterface, readCapturedDefiningInterface
   , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceBytes, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
@@ -25,7 +25,7 @@ module Tidepool.FatIface
 import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.TyCon (TyCon)
-import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags, hsc_FC, hsc_HUG, hsc_units, hsc_home_unit_maybe)
+import GHC.Driver.Env (HscEnv, hsc_NC, hsc_dflags, hsc_FC, hsc_HUG, hsc_units, hsc_home_unit_maybe, hsc_home_unit, hsc_HPT)
 import GHC.Types.Name (Name, nameModule_maybe, isExternalName)
 import GHC.Types.Var (Id, isId, isLocalId)
 import GHC.Types.Id (isFCallId, isPrimOpId_maybe)
@@ -53,6 +53,8 @@ import GHC.Types.TypeEnv (emptyTypeEnv)
 import GHC.Data.Maybe (MaybeErr(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Unit.Module.Location (ModLocation, ml_hi_file)
+import GHC.Unit.Home (isHomeUnit)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 
 import Control.Concurrent.MVar
   (MVar, modifyMVar_, newMVar, readMVar)
@@ -226,7 +228,7 @@ lookupModuleOutcome env (FatIfaceCache cache) owner =
 
 -- | Load and deserialize mi_extra_decls for a single module, retaining the
 -- exact outcome for all selected-body callers.
--- Uses findAndReadIface to bypass the PIT cache (which strips mi_extra_decls).
+-- Packages bypass the PIT cache, which strips mi_extra_decls.
 loadModuleExtraDecls :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDecls hscEnv modl = do
   result <- trySynchronous (loadModuleExtraDeclsUnsafe hscEnv modl >>= evaluate)
@@ -237,6 +239,13 @@ loadModuleExtraDecls hscEnv modl = do
       logTrace logger "module.exception"
         [("module", LogText (showSDocUnsafe (ppr modl))), ("detail", LogText (show e))]
       return (FatIfaceLoadFailureOutcome (show e))
+
+-- HOME TYPE owners are already decoded in this compiler's NameCache. Their
+-- captured input aliases do not authorize reopening any filesystem location.
+readHomeInterface :: HscEnv -> Module -> IO (Either ExactInterfaceFailure ModIface)
+readHomeInterface env owner = pure $ case lookupHpt (hsc_HPT env) (moduleName owner) of
+  Just home | mi_module (hm_iface home) == owner -> Right (hm_iface home)
+  _ -> Left (ExactInterfaceReadFailure "exact HOME interface is not installed")
 
 -- | Read an already-resolved defining identity, including hidden package
 -- modules. Import visibility is not a condition for preparing a recovered
@@ -297,15 +306,17 @@ loadModuleExtraDeclsUnsafe :: HscEnv -> Module -> IO FatIfaceModule
 loadModuleExtraDeclsUnsafe hscEnv modl = do
   logger <- readLogger "tidepool.compiler.fat-iface"
   let doc = text "tidepool fat-iface lookup"
-  -- Read .hi directly from disk — bypasses PIT, mi_extra_decls intact.
-  ifaceResult <- readExactInterface hscEnv modl
+  -- HOME uses its installed owner; packages retain the defining-file route.
+  ifaceResult <- if isHomeUnit (hsc_home_unit hscEnv) (moduleUnit modl)
+    then readHomeInterface hscEnv modl
+    else fmap (fmap fst) (readExactInterface hscEnv modl)
   case ifaceResult of
     Left reason -> do
       logTrace logger "module.interface-read-refused"
         [ ("module", LogText (showSDocUnsafe (ppr modl)))
         , ("detail", LogText (renderExactInterfaceFailure reason)) ]
       return (FatIfaceLoadFailureOutcome (renderExactInterfaceFailure reason))
-    Right (iface, _) ->
+    Right iface ->
       case mi_extra_decls iface of
         Nothing -> do
           logTrace logger "module.extra-declarations-absent"

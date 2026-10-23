@@ -26,7 +26,7 @@ module Tidepool.ExactHydration
   , readVerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
   , selectVerifiedExactInterfaces
-  , VerifiedExactInterface, selectVerifiedExactInterfaceProducts, verifiedExactInterface
+  , VerifiedExactInterface, selectVerifiedExactInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , CheckedTemplateInterface(..)
@@ -199,7 +199,7 @@ runExactInterfaceOperation (ExactInterfaceOperations run) = run
 newtype CheckedValueImportAuthority = CheckedValueImportAuthority (Set.Set (String, String))
 
 newtype VerifiedExactIfaceClosure = VerifiedExactIfaceClosure
-  (Map.Map (String, String) (ExactIfaceArtifact, ModIface, [ExactIfaceArtifact]))
+  (Map.Map (String, String) (VerifiedExactInterface, [ExactIfaceArtifact]))
 
 readVerifiedExactIfaceClosure
   :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
@@ -207,12 +207,13 @@ readVerifiedExactIfaceClosure = readVerifiedExactIfaceClosureWith (BS.readFile .
 
 readVerifiedExactIfaceClosureWith :: (ExactIfaceArtifact -> IO BS.ByteString)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
-readVerifiedExactIfaceClosureWith readInput = readVerifiedExactIfaceClosureUsing (readOneWith readInput)
+readVerifiedExactIfaceClosureWith readInput = readVerifiedExactIfaceClosureUsing (readVerifiedOneWith readInput)
 
-readVerifiedExactIfaceClosureUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
+readVerifiedExactIfaceClosureUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String VerifiedExactInterface))
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
 readVerifiedExactIfaceClosureUsing readInterface env artifacts = fmap (VerifiedExactIfaceClosure . Map.fromList
-  . map (\(artifact,iface) -> ((exactUnit artifact,exactModule artifact),(artifact,iface,[artifact]))))
+  . map (\verified -> let (artifact,_) = verifiedExactInterface verified
+      in ((exactUnit artifact,exactModule artifact),(verified,[artifact]))))
   <$> readExactIfaceArtifactsUsing readInterface env artifacts
 
 readVerifiedExactIfaceClosureWithCheckedValues
@@ -223,9 +224,9 @@ readVerifiedExactIfaceClosureWithCheckedValues = readVerifiedExactIfaceClosureWi
 readVerifiedExactIfaceClosureWithCheckedValuesReader :: (ExactIfaceArtifact -> IO BS.ByteString)
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
   -> IO (Either String VerifiedExactIfaceClosure)
-readVerifiedExactIfaceClosureWithCheckedValuesReader readInput = readVerifiedExactIfaceClosureWithCheckedValuesUsing (readOneWith readInput)
+readVerifiedExactIfaceClosureWithCheckedValuesReader readInput = readVerifiedExactIfaceClosureWithCheckedValuesUsing (readVerifiedOneWith readInput)
 
-readVerifiedExactIfaceClosureWithCheckedValuesUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
+readVerifiedExactIfaceClosureWithCheckedValuesUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String VerifiedExactInterface))
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
   -> IO (Either String VerifiedExactIfaceClosure)
 readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals values
@@ -240,15 +241,16 @@ readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals 
         Left reason -> pure (Left reason)
         Right (VerifiedExactIfaceClosure captured) -> do
           aliases <- forM values $ \value -> case Map.lookup (key value) captured of
-            Just (original,iface,known)
-              | value `elem` known -> pure (Right (key value,(original,iface,known)))
-              | exactSha256 value == exactSha256 original
+            Just (verified,known)
+              | value `elem` known -> pure (Right (key value,(verified,known)))
+              | let (original,_) = verifiedExactInterface verified
+              , exactSha256 value == exactSha256 original
               , exactRequirements value == [] || exactRequirements value == exactRequirements original -> do
                   -- The closed original supplies the type dependency proof.
                   -- Verify this protected value's separate capture before its
                   -- path becomes an alias for those exact original bytes.
                   alias <- readInterface env value
-                  pure ((\_ -> (key value,(original,iface,value:known))) <$> alias)
+                  pure ((\_ -> (key value,(verified,value:known))) <$> alias)
             _ -> pure (Left "checked value alias conflicts with its captured original")
           pure $ do
             additions <- sequence aliases
@@ -265,20 +267,27 @@ selectVerifiedExactInterfaces (VerifiedExactIfaceClosure captured) artifacts =
   mapM select artifacts
   where
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
-      Just (original,iface,_) | original == artifact -> Right (original,iface)
+      Just (verified,_) | fst (verifiedExactInterface verified) == artifact -> Right (verifiedExactInterface verified)
       _ -> Left "requested exact interface differs from its verified closure"
 
--- A small projection of the verified reader's actual artifact/decoded pair.
--- No public constructor can attach another same-spelled interface to its seal.
-data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact ModIface
+-- The admitted TYPE product keeps authenticated bytes and decoded Names with
+-- their actual issuer. Its logical input alias is never a filesystem grant.
+data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact ModIface !ArtifactBytes
+  !(Char,MVar OrigNameCache)
 
 verifiedExactInterface :: VerifiedExactInterface -> (ExactIfaceArtifact,ModIface)
-verifiedExactInterface (VerifiedExactInterface artifact iface) = (artifact,iface)
+verifiedExactInterface (VerifiedExactInterface artifact iface _ _) = (artifact,iface)
+
+verifiedExactInterfaceBody :: VerifiedExactInterface -> ArtifactBytes
+verifiedExactInterfaceBody (VerifiedExactInterface _ _ body _) = body
 
 selectVerifiedExactInterfaceProducts :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
   -> Either String [VerifiedExactInterface]
-selectVerifiedExactInterfaceProducts closure artifacts =
-  map (uncurry VerifiedExactInterface) <$> selectVerifiedExactInterfaces closure artifacts
+selectVerifiedExactInterfaceProducts (VerifiedExactIfaceClosure captured) = mapM select
+  where
+    select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
+      Just (verified,_) | fst (verifiedExactInterface verified) == artifact -> Right verified
+      _ -> Left "requested exact interface differs from its verified closure"
 
 -- Completed-value wire inputs bind bytes and selected exported Names. Their
 -- type requirements come from this complete verified closure, including
@@ -289,8 +298,9 @@ selectVerifiedValueInterfaces
 selectVerifiedValueInterfaces (VerifiedExactIfaceClosure captured) artifacts = mapM select artifacts
   where
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
-      Just (original,iface,aliases)
-        | checkedValueOwner artifact
+      Just (verified,aliases)
+        | let (original,iface) = verifiedExactInterface verified
+        , checkedValueOwner artifact
         , any (\alias -> exactPath alias == exactPath artifact
             && exactSha256 alias == exactSha256 artifact) aliases
         , exactRequirements artifact == [] || exactRequirements artifact == exactRequirements original ->
@@ -812,8 +822,9 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
         unless (not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
           (mgModSummaries' sourceGraph)))
           (Left "checked recipe original collides with fresh source")
-        (artifact,iface,_) <- maybe (Left "checked recipe lacks its verified original interface") Right
+        (verified,_) <- maybe (Left "checked recipe lacks its verified original interface") Right
           (Map.lookup owner captured)
+        let (artifact,iface) = verifiedExactInterface verified
         unless (mi_module iface == original
           && show (mi_iface_hash (mi_final_exts iface)) == expectedFingerprint)
           (Left "checked recipe original fingerprint differs")
@@ -835,7 +846,8 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
         pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
     templateNodes <- forM templateGraph $ \selected -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
-      (artifact,_,_) <- maybe (Left "checked template graph interface is not retained") Right (Map.lookup owner captured)
+      (verified,_) <- maybe (Left "checked template graph interface is not retained") Right (Map.lookup owner captured)
+      let (artifact,_) = verifiedExactInterface verified
       unless (exactSha256 artifact == templateInterfaceSha256 selected)
         (Left "checked template graph interface seal changed")
       pure (artifact,templateInterfaceImports selected)
@@ -846,8 +858,9 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           && not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
             (mgModSummaries' sourceGraph)))
         (Left "checked template interface conflicts with current source")
-      (artifact,iface,_) <- maybe (Left "checked template interface is not retained") Right
+      (verified,_) <- maybe (Left "checked template interface is not retained") Right
         (Map.lookup owner captured)
+      let (artifact,iface) = verifiedExactInterface verified
       unless (exactSha256 artifact == templateInterfaceSha256 selected && mi_module iface == original)
         (Left "checked template interface seal changed")
       let matches (occurrence,declaration) =
@@ -866,8 +879,9 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
       ImportedTemplateInstances -> pure []
       OriginalPreviewInstances originalTarget -> do
         let owner = (templateInterfaceUnit originalTarget,templateInterfaceModule originalTarget)
-        (artifact,iface,_) <- maybe (Left "activation preview original target interface is not retained") Right
+        (verified,_) <- maybe (Left "activation preview original target interface is not retained") Right
           (Map.lookup owner captured)
+        let (artifact,iface) = verifiedExactInterface verified
         unless (exactSha256 artifact == templateInterfaceSha256 originalTarget
             && (unitString (moduleUnit (mi_module iface)),moduleNameString (moduleName (mi_module iface))) == owner)
           (Left "activation preview original target interface seal changed")
@@ -1051,8 +1065,8 @@ readExactIfaceArtifactsWith :: (ExactIfaceArtifact -> IO BS.ByteString)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact, ModIface)])
 readExactIfaceArtifactsWith readInput = readExactIfaceArtifactsUsing (readOneWith readInput)
 
-readExactIfaceArtifactsUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface)))
-  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
+readExactIfaceArtifactsUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String value))
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [value])
 readExactIfaceArtifactsUsing readInterface env artifacts
   | Set.size moduleNames /= length artifacts = pure (Left "duplicate exact interface owner")
   | any (\artifact -> length (exactSha256 artifact) /= 64
@@ -1073,7 +1087,7 @@ readExactIfaceArtifactsUsing readInterface env artifacts
 -- is valid only for the actual NameCache that issued those Names; a fresh cache
 -- decodes independently even when every input digest is identical.
 newtype RequestIfaceDecoder = RequestIfaceDecoder
-  (MVar (IfaceRetention,[((Char,MVar OrigNameCache),Map.Map (String,String,String) ModIface)]))
+  (MVar (IfaceRetention,[((Char,MVar OrigNameCache),Map.Map (String,String,String) VerifiedExactInterface)]))
 
 data IfaceRetention = UnrestrictedIfaceRetention | RetainedIfaceSeals (Set.Set String)
 
@@ -1100,11 +1114,16 @@ readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing
 readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
 readCapturedExactIfaceClosureWithCheckedValues decoder readInput =
-  readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedOne decoder readInput)
+  readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedVerifiedOne decoder readInput)
 
 readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface))
-readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
+readCapturedOne decoder readInput env artifact =
+  fmap verifiedExactInterface <$> readCapturedVerifiedOne decoder readInput env artifact
+
+readCapturedVerifiedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
+  -> HscEnv -> ExactIfaceArtifact -> IO (Either String VerifiedExactInterface)
+readCapturedVerifiedOne (RequestIfaceDecoder state) readInput env artifact = do
   -- HscEnv unpacks NameCache: its selector can rebox the record on every
   -- call. The mutable intern-table cell has identity even across that reboxing;
   -- the unique character also belongs to the name issuer.
@@ -1114,20 +1133,20 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
   modifyMVar state $ \(retention,universes) -> do
     let known = maybe Map.empty id (lookup cache universes)
     case Map.lookup key known of
-      Just iface -> do
+      Just (VerifiedExactInterface _ iface body issuer) -> do
         -- Authorization and a relocated alias's seal still belong to the
         -- consuming scope, even though decoding has already completed.
         token <- readInput artifact
         unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         timing <- readTimingEnabled
         emitCount timing ("exact_iface_decode_reuse." ++ exactModule artifact) 1
-        pure ((retention,universes),Right (artifact,iface))
+        pure ((retention,universes),Right (VerifiedExactInterface artifact iface body issuer))
       Nothing -> do
         token <- readInput artifact
         unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
-        result <- readOneWith (const (pure (artifactBytes token))) env artifact
+        result <- readVerifiedOneWith (const (pure (artifactBytes token))) env artifact
         let retained = case result of
-              Right (_,iface) | retains retention -> [(cache,Map.insert key iface known)]
+              Right verified | retains retention -> (cache,Map.insert key verified known) : filter ((/= cache) . fst) universes
               Right _ -> universes
               Left _ -> universes
         pure ((retention,retained),result)
@@ -1137,7 +1156,11 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
 
 readOneWith :: (ExactIfaceArtifact -> IO BS.ByteString) -> HscEnv -> ExactIfaceArtifact
   -> IO (Either String (ExactIfaceArtifact, ModIface))
-readOneWith readInput env artifact = do
+readOneWith readInput env artifact = fmap verifiedExactInterface <$> readVerifiedOneWith readInput env artifact
+
+readVerifiedOneWith :: (ExactIfaceArtifact -> IO BS.ByteString) -> HscEnv -> ExactIfaceArtifact
+  -> IO (Either String VerifiedExactInterface)
+readVerifiedOneWith readInput env artifact = do
   timing <- readTimingEnabled
   emitCount timing ("exact_iface_read_calls." ++ exactModule artifact) 1
   readResult <- try (readInput artifact) :: IO (Either IOException BS.ByteString)
@@ -1172,7 +1195,8 @@ readOneWith readInput env artifact = do
                 Left ("interface owner mismatch: " ++ exactModule artifact)
             | isJust (mi_extra_decls iface) ->
                 Left ("interface contains defining Core: " ++ exactModule artifact)
-            | otherwise -> Right (artifact, iface)
+            | otherwise -> Right (VerifiedExactInterface artifact iface (captureArtifactBytes bytes)
+                (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)))
 
 data OriginalInterfaceCaptureFailure
   = OriginalInterfaceChanged String String
@@ -1380,15 +1404,6 @@ hydrateExactScope env loaded = do
     unless (owner == mkModule (stringToUnit (exactUnit artifact))
         (mkModuleName (exactModule artifact))) $
       fail "exact hydration interface owner differs from its selected artifact"
-    -- Private originals need the same selected location as lexical imports.
-    -- Fat-interface recovery bypasses the HPT and reads through the finder.
-    if moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
-      then do
-        _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-          (GWIB (moduleName owner) NotBoot)
-          (ms_location (exactInterfaceSummary env artifact))
-        pure ()
-      else pure ()
   hydrateOriginalInterfaces env (map snd loaded)
 
 -- The interface reader and this hydration operation own the association.
@@ -1401,6 +1416,9 @@ hydratedExactInterfaces (HydratedExactInterfaces homes) = homes
 hydrateExactScopeWithProducts :: HscEnv -> [VerifiedExactInterface]
   -> [(ExactIfaceArtifact,ModIface)] -> IO (HscEnv,HydratedExactInterfaces)
 hydrateExactScopeWithProducts env verified additional = do
+  forM_ verified $ \(VerifiedExactInterface _ _ _ issuer) ->
+    unless (issuer == (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)))
+      (fail "verified interface belongs to another NameCache")
   let inputs = map verifiedExactInterface verified
       keys = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- inputs]
   unless (all (\(artifact,_) -> (exactUnit artifact,exactModule artifact) `Set.notMember` keys) additional)
