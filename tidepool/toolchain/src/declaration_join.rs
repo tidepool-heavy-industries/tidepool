@@ -2759,6 +2759,12 @@ mod authored_tests {
                 .admit_authored_publication(std::slice::from_ref(&baseline), &source_surface)
                 .unwrap(),
         );
+        let repeated_preflight = context
+            .as_ref()
+            .clone()
+            .admit_authored_publication(&[], &source_surface)
+            .expect("the actual issued SOURCE bindings remain a valid preflight");
+        assert!(repeated_preflight.same_authenticated_context(&context));
         let mut substituted = source_surface.clone();
         substituted
             .source_bindings
@@ -2774,6 +2780,13 @@ mod authored_tests {
         assert!(refusal
             .to_string()
             .contains("publication source binding differs from its exact input"));
+        let preflight_refusal = context
+            .as_ref()
+            .clone()
+            .admit_authored_publication(&[], &substituted)
+            .unwrap_err();
+        assert!(preflight_refusal.to_string().contains("publication source binding differs from its exact input"),
+            "a usable preflight must refuse the foreign binding before another compile front door can consume it");
         let baseline_adjacency = context
             .lexical_graph()
             .iter()

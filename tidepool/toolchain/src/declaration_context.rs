@@ -13491,7 +13491,9 @@ impl ExactDeclarationContext {
             });
         }
         let lexical = compose_lexical_nodes(self.lexical_graph().iter().chain(&lexical))?;
-        self.extend_selected(authored, &[], lexical, &selected)
+        let context = self.extend_selected(authored, &[], lexical, &selected)?;
+        surface.validate_source_bindings(context.compiler_source_support())?;
+        Ok(context)
     }
 
     /// Issue a facade and its selected context as one indivisible publication.
