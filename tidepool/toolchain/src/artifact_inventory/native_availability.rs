@@ -3467,13 +3467,19 @@ pub(super) fn assert_actual_emitted_dependency_policy(
         "the emitted edge names this actual dependency's native owner"
     );
     for source in [available, missing] {
-        let contribution = source
+        // Recovery may retain another acquisition for the same exact group.
+        // This premise requires the actual Full offer to remain available;
+        // it does not choose a winning contribution from their stored order.
+        assert!(source
             .native_availability()
-            .dependency_support(key, product.owner())
-            .expect("both policy variants retain actual normalized Full dependency availability");
-        assert!(contribution
-            .offer_for_group(expected_group)
-            .is_some_and(|offer| offer.same_issuance(expected_offer)));
+            .custody_contributions()
+            .iter()
+            .any(|(artifact, contribution)| {
+                *artifact == key.artifact
+                    && contribution.contains_group(expected_group)
+                    && contribution.offer().same_issuance(expected_offer)
+                    && contribution.offer().is_full()
+            }));
     }
     let catalog = NativeDependencyCatalog::from_source(available).unwrap();
     assert!(matches!(catalog.decision(&helper.descriptor.owner),
