@@ -5622,6 +5622,15 @@ impl CompilerInputProjection {
         Ok(())
     }
 
+    pub(super) fn retain_role_selection(&mut self, selected: &SelectedCompilerRole<'_>) {
+        if matches!(selected.issuer, CompilerRoleIssuer::Incoming) {
+            self.recorded_roles
+                .insert(selected.owner.clone(), selected.role.recorded_fact());
+            self.roles
+                .insert(selected.owner.clone(), selected.role.clone());
+        }
+    }
+
     /// Select each role and its issuer in one decision. Equal roles preserve
     /// receiving precedence without asking equality to recover ownership later.
     pub(super) fn merged_roles<'a>(

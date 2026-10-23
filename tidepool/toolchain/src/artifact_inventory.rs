@@ -9012,18 +9012,17 @@ impl ArtifactView {
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
         for selected_role in selected_roles {
+            let selected_role = selected_role?;
+            selected.retain_role_selection(&selected_role);
             let compiler_projection::SelectedCompilerRole {
                 owner,
                 role,
                 issuer,
-            } = selected_role?;
+            } = selected_role;
             let source = match issuer {
                 compiler_projection::CompilerRoleIssuer::Receiving => self,
                 compiler_projection::CompilerRoleIssuer::Incoming => other,
             };
-            if matches!(issuer, compiler_projection::CompilerRoleIssuer::Incoming) {
-                selected.admit_role(owner.clone(), role.clone())?;
-            }
             {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
