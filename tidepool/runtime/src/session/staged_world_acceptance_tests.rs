@@ -65,6 +65,35 @@ fn declarations_precede_first_native_demands_and_display_without_replaying_effec
                         "compiler support must not become a lexical root at item {index}"
                     );
                 }
+                for (index, selected_value, obsolete_value) in [(2, 1, None), (4, 2, Some(1))] {
+                    let original = program.items()[index]
+                        .native_products()
+                        .unwrap()
+                        .original_execution_context()
+                        .unwrap();
+                    let selected = tidepool_repr::SessionModule::val(
+                        tidepool_repr::Generation(selected_value),
+                    )
+                    .module_name();
+                    let row = original
+                        .lexical_graph()
+                        .iter()
+                        .find(|node| node.owner.unit == "main" && node.owner.module == selected)
+                        .expect("this stage retains its actual checked TYPE input");
+                    assert!(row.imports.is_empty(), "thin value interfaces define no instances");
+                    if let Some(generation) = obsolete_value {
+                        let obsolete = tidepool_repr::SessionModule::val(
+                            tidepool_repr::Generation(generation),
+                        )
+                        .module_name();
+                        assert!(
+                            !original.lexical_graph().iter().any(|node| {
+                                node.owner.unit == "main" && node.owner.module == obsolete
+                            }),
+                            "a previous value is not a compiler-instance obligation of a later stage"
+                        );
+                    }
+                }
                 let initial_context = program.items()[0]
                     .native_products()
                     .unwrap()

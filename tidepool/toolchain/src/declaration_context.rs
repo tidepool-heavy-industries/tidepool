@@ -4818,15 +4818,8 @@ impl RequestCompilerInputs {
         let metadata =
             support.type_interface_metadata(&self.metadata, std::slice::from_ref(&owner))?;
         let mut facts = primary.owner.facts.clone();
-        facts.lexical = facts.lexical.append_issued([ExactLexicalNode {
-            owner,
-            imports: value
-                .requirements()
-                .iter()
-                .filter(|owner| facts.lexical.get(owner).is_some())
-                .cloned()
-                .collect(),
-        }])?;
+        // Publication retains TYPE availability. The consuming stage selects
+        // its checked inputs; a value is not an enduring instance-scope root.
         facts.compiler_support = support.clone();
         facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
@@ -10146,26 +10139,28 @@ impl<'a> ExactProductAdmission<'a> {
             .entries;
         for (unit, module) in self.facts.checked_values.owners() {
             let owner = identity(unit, module);
-            if !exact_roots.contains(&owner) || imports.contains_key(&owner) {
+            if imports.contains_key(&owner) {
                 continue;
             }
-            if let Some(entry) = retained_interfaces.get(&owner) {
-                match &entry.payload {
-                    ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
-                        if self.facts.checked_values.matches_interface(interface) =>
-                    {
-                        // Compiler-issued thin value interfaces define no
-                        // instances. Nominal requirements are not scope edges.
-                        scaffold.push(ExactLexicalNode {
-                            owner,
-                            imports: Vec::new(),
-                        });
-                    }
-                    _ => {
-                        return Err(failure(
-                            "checked value instance evidence differs from its exact interface authority",
-                        ));
-                    }
+            let entry = retained_interfaces.get(&owner).ok_or_else(|| {
+                failure("checked value instance evidence lacks its selected interface")
+            })?;
+            match &entry.payload {
+                ArtifactPayload::Interface(interface, JoinedInterfaceRole::ValueInterface)
+                    if self.facts.checked_values.matches_interface(interface) =>
+                {
+                    // This preparation's checked inputs authorize these thin
+                    // interfaces independently of SOURCE imports. They define
+                    // no instances; nominal requirements remain TYPE edges.
+                    scaffold.push(ExactLexicalNode {
+                        owner,
+                        imports: Vec::new(),
+                    });
+                }
+                _ => {
+                    return Err(failure(
+                        "checked value instance evidence differs from its exact interface authority",
+                    ));
                 }
             }
         }
@@ -14817,25 +14812,9 @@ impl ExactDeclarationContext {
         self,
         value: Arc<CertifiedValueInterface>,
     ) -> Result<Self, CompileError> {
-        let selected = self
-            .owner
-            .facts
-            .lexical
-            .iter()
-            .map(|node| node.owner.clone())
-            .collect::<BTreeSet<_>>();
-        let mut lexical = self.owner.facts.lexical.to_vec();
-        lexical.push(ExactLexicalNode {
-            owner: identity(value.interface().unit(), value.interface().module()),
-            // Type-owner evidence retains hydration dependencies without
-            // granting their names or instances public lexical selection.
-            imports: value
-                .requirements()
-                .iter()
-                .filter(|owner| selected.contains(*owner))
-                .cloned()
-                .collect(),
-        });
+        // Keep the same boundary as World publication: nominal requirements
+        // travel in the certified interface, not the accumulated lexical graph.
+        let lexical = self.owner.facts.lexical.to_vec();
         self.extend_with_value_interfaces(&[value], lexical)
     }
 
@@ -30058,10 +30037,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
         ] {
             assert!(context.recovery_products().is_empty());
-            assert!(!context
-                .lexical_graph()
-                .iter()
-                .any(|node| node.owner == owner));
+            assert!(
+                context.lexical_graph().is_empty(),
+                "TYPE publication selects neither the value nor its nominal owners into lexical scope"
+            );
             assert!(context.artifact_view().interface_dependencies().iter().any(
                 |(_, required, dependency)| *required == entry[&owner].descriptor.id
                     && matches!(
@@ -31892,14 +31871,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 identity("fixture", "InstanceRelay"),
             ],
         );
+        let lexical = context.lexical_graph().to_vec();
         let context = (*context)
             .clone()
             .extend_program_value_interface(first)
             .unwrap();
-        assert_eq!(
-            context.lexical_graph()[1].imports,
-            vec![identity("fixture", "Public")]
-        );
+        assert_eq!(context.lexical_graph(), lexical);
         let entry = context
             .artifact_view()
             .entries_for_owners(std::iter::once(identity("fixture", "ValFirst")))
@@ -31919,14 +31896,19 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             ],
         );
         let context = context.extend_program_value_interface(second).unwrap();
+        assert_eq!(context.lexical_graph(), lexical);
+        let entry = context
+            .artifact_view()
+            .entries_for_owners(std::iter::once(identity("fixture", "ValSecond")))
+            .unwrap();
         assert_eq!(
-            context.lexical_graph()[2].imports,
-            vec![identity("fixture", "ValFirst")]
+            entry[&identity("fixture", "ValSecond")].requirements,
+            vec![
+                identity("fixture", "InstanceOwner"),
+                identity("fixture", "ValFirst")
+            ],
+            "the exact earlier value remains a TYPE dependency without becoming a lexical root"
         );
-        assert!(!context
-            .lexical_graph()
-            .iter()
-            .any(|node| node.owner.module.starts_with("Instance")));
         let forged = value("ValForged", vec![identity("fixture", "Absent")]);
         let error = context.extend_program_value_interface(forged).unwrap_err();
         assert!(matches!(error, CompileError::ArtifactInventory(error)
