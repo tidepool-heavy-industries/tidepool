@@ -99,6 +99,7 @@ pub enum BindingPromotionError {
     UnverifiableSourceSelection,
     StaleOrForeignDeclarationPreparation,
     LeaseCountExhausted,
+    ObservationOrderExhausted { order: u64 },
     MutationWitnessExhausted { revision: u64, advances: usize },
 }
 
@@ -1997,6 +1998,41 @@ impl BindingTable {
         self.changed(observation.owner);
         self.dependency_revision = self.revision;
         Some(observation)
+    }
+
+    /// Check counters before an exclusive capture inserts values and optionally
+    /// saves one automatic observation. Collection can remove each existing
+    /// observation and its live binding once; reserve that bounded worst case.
+    pub fn validate_capture_capacity(
+        &self,
+        insertions: usize,
+        observation: bool,
+    ) -> Result<(), BindingPromotionError> {
+        if observation && self.next_observation_order.checked_add(1).is_none() {
+            return Err(BindingPromotionError::ObservationOrderExhausted {
+                order: self.next_observation_order,
+            });
+        }
+        let advances = if observation {
+            self.observations
+                .len()
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(2))
+                .and_then(|count| count.checked_add(1))
+                .and_then(|count| count.checked_add(insertions))
+        } else {
+            Some(insertions)
+        };
+        let advances = advances.ok_or(BindingPromotionError::MutationWitnessExhausted {
+            revision: self.revision,
+            advances: usize::MAX,
+        })?;
+        self.revision_after(advances)
+            .ok_or(BindingPromotionError::MutationWitnessExhausted {
+                revision: self.revision,
+                advances,
+            })?;
+        Ok(())
     }
 
     /// Mark a compiler-issued binding as an automatic observation. Only the

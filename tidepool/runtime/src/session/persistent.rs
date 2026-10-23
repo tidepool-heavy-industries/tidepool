@@ -4691,83 +4691,76 @@ impl PersistentSession {
         clippy::expect_used,
         reason = "the complete sealed set is preflighted under the exclusive session checkout"
     )]
-    pub(crate) fn bind_checked_private_values_in(
+    pub(super) fn prepare_checked_private_values_in(
         &mut self,
-        completion: &super::admission::CheckedTurnCompletion,
         ticket: &super::admission::CheckedCaptureTicket,
-        scope: ScopeId,
-        entries: Vec<BindingEntry>,
-        binders: &[&super::BoundBinder],
-        stage: super::resident::CheckedCaptureStage,
-    ) -> Result<MaterializationSetCommit, SessionError> {
-        match self.admit_source_work_in(scope) {
-            Ok(()) => (),
-            Err(error) => {
-                self.discard_unbound_entries(entries);
-                return Err(error.into());
-            }
-        };
-
-        match completion.validates_private_overlay(self, scope, binders) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.discard_unbound_entries(entries);
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            Err(error) => {
-                self.discard_unbound_entries(entries);
-                return Err(error);
-            }
-        }
+        entries: &[&BindingEntry],
+        stage: &super::resident::CheckedCaptureStage,
+        observation: bool,
+    ) -> Result<u64, SessionError> {
+        let scope = ticket.scope();
+        self.admit_source_work_in(scope)?;
+        stage.validate(self, ticket)?;
+        let expected = ticket
+            .execution()
+            .bound_binder_identities()
+            .collect::<Vec<_>>();
         let handles_match = self.prepared().is_some_and(|engine| {
             entries.iter().all(|entry| {
                 engine.prepared_handle_of(entry.value.handle.raw()) == Some(entry.value.handle)
             })
         });
-        if ticket.scope() != scope
+        if !self.scopes.is_live(scope)
             || !handles_match
-            || entries.len() != binders.len()
-            || entries.iter().zip(binders).any(|(entry, binder)| {
-                entry.name.0 != binder.name
-                    || entry.id != SessionVarId::from_extract(binder.var_id)
+            || entries.len() != expected.len()
+            || entries.iter().zip(expected).any(|(entry, (name, id))| {
+                entry.name.0 != name
+                    || entry.id.raw() != id
                     || entry.scope != scope
                     || entry.module
                         != SessionModule::val(Generation(ticket.execution().generation()))
                     || entry.value.identity.unit != "main"
-                    || entry.value.identity.module != binder.module
-                    || entry.value.identity.occurrence != binder.name
+                    || entry.value.identity.module != entry.module.module_name()
+                    || entry.value.identity.occurrence != name
                     || entry.value.identity.namespace != "value"
                     || entry.value.identity.record_parent.is_some()
             })
         {
-            self.discard_unbound_entries(entries);
             return Err(SessionError::StaleStagedDeclaration);
         }
-        if let Err(error) = completion
-            .validate_capture_ticket(ticket)
-            .and_then(|()| stage.validate(self, ticket))
-        {
-            self.discard_unbound_entries(entries);
-            return Err(error);
+        let mut ids = std::collections::HashSet::new();
+        for entry in entries {
+            if !ids.insert(entry.id) || self.bindings.get(entry.id).is_some() {
+                return Err(
+                    tidepool_codegen::binding_table::BindingIdentityError { id: entry.id }.into(),
+                );
+            }
+            self.bindings.validate_bind_in(scope, entry)?;
         }
-        if let Err(error) = self.validate_binding_set_in(scope, &entries) {
-            self.discard_unbound_entries(entries);
-            return Err(error);
+        self.bindings
+            .validate_capture_capacity(entries.len(), observation)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        self.prepare_public_visibility_advance(scope)
+    }
+
+    /// The complete set was checked under exclusive checkout. Source admission
+    /// is held by the capture commit, so insertion must not reacquire that gate.
+    pub(super) fn commit_checked_private_values_in(
+        &mut self,
+        scope: ScopeId,
+        entries: Vec<BindingEntry>,
+        stage: super::resident::CheckedCaptureStage,
+        epoch: u64,
+    ) {
+        for entry in entries {
+            let record = BindRecord::of(&entry);
+            self.bindings
+                .bind_in(scope, entry)
+                .expect("prepared checked binding identity");
+            self.binding_index.on_bind_record(&record);
         }
-        let bindings = entries
-            .into_iter()
-            .map(|entry| {
-                let receipt = ValuePlaneCommit {
-                    name: entry.name.0.clone(),
-                    module: entry.module,
-                };
-                self.bind_in(scope, entry)
-                    .expect("complete checked binding set preflighted before mutation");
-                receipt
-            })
-            .collect();
         stage.commit(self);
-        Ok(MaterializationSetCommit { bindings })
+        self.commit_public_visibility_advance(scope, epoch);
     }
 
     fn validate_binding_set_in(

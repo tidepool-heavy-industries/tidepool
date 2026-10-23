@@ -3077,6 +3077,7 @@ impl CapturedCheckedValues {
 pub(crate) struct CapturedCheckedValueSet {
     payload: CapturedCheckedValuePayload,
     provenance: Arc<ProgramProvenance>,
+    observation: Option<(SessionVarId, Vec<tidepool_repr::VarId>)>,
 }
 
 /// Checked capture staging follows the item's sealed empty/value distinction.
@@ -3146,7 +3147,7 @@ impl CheckedCaptureStage {
 enum CapturedCheckedValuePayload {
     Empty,
     Values {
-        row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+        stage: CheckedCaptureStage,
         values: Vec<CapturedCheckedValue>,
     },
 }
@@ -3161,7 +3162,7 @@ impl CapturedCheckedValueSet {
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
         match &self.payload {
             CapturedCheckedValuePayload::Empty => None,
-            CapturedCheckedValuePayload::Values { row, .. } => Some(row),
+            CapturedCheckedValuePayload::Values { stage, .. } => stage.row(),
         }
     }
 
@@ -3174,32 +3175,77 @@ impl CapturedCheckedValueSet {
 }
 
 pub(crate) struct CapturedCheckedValue {
-    name: String,
-    id: SessionVarId,
-    identity: SymbolIdentity,
-    generation: Generation,
-    handle: PreparedHandle,
+    entry: BindingEntry,
+    custody: RootCustody,
 }
 
 impl CapturedCheckedValue {
     pub(crate) fn name(&self) -> &str {
-        &self.name
+        &self.entry.name.0
     }
-
     pub(crate) fn id(&self) -> SessionVarId {
-        self.id
+        self.entry.id
     }
-
     pub(crate) fn identity(&self) -> &SymbolIdentity {
-        &self.identity
+        &self.entry.value.identity
     }
-
     pub(crate) fn generation(&self) -> Generation {
-        self.generation
+        self.entry.module.gen()
+    }
+    pub(crate) fn handle(&self) -> PreparedHandle {
+        self.entry.value.handle
+    }
+}
+
+impl CapturedCheckedValueSet {
+    pub(super) fn prepare_commit(
+        &self,
+        session: &mut PersistentSession,
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<Option<u64>, SessionError> {
+        match &self.payload {
+            CapturedCheckedValuePayload::Empty => Ok(None),
+            CapturedCheckedValuePayload::Values { stage, values } => session
+                .prepare_checked_private_values_in(
+                    ticket,
+                    &values.iter().map(|value| &value.entry).collect::<Vec<_>>(),
+                    stage,
+                    self.observation.is_some(),
+                )
+                .map(Some),
+        }
     }
 
-    pub(crate) fn handle(&self) -> PreparedHandle {
-        self.handle
+    pub(super) fn commit(
+        self,
+        session: &mut PersistentSession,
+        provenance: &mut HashMap<u64, Arc<ProgramProvenance>>,
+        scope: ScopeId,
+        epoch: Option<u64>,
+    ) {
+        if let CapturedCheckedValuePayload::Values { stage, values } = self.payload {
+            let mut entries = Vec::with_capacity(values.len());
+            for mut value in values {
+                provenance.insert(value.id().raw(), Arc::clone(&self.provenance));
+                value.custody.handle.take();
+                entries.push(value.entry);
+            }
+            session.commit_checked_private_values_in(
+                scope,
+                entries,
+                stage,
+                epoch.expect("prepared value epoch"),
+            );
+            if let Some((id, dependencies)) = self.observation {
+                session.save_observation(id, &dependencies);
+                provenance.retain(|id, _| {
+                    session
+                        .bindings()
+                        .get(SessionVarId::from_extract(*id))
+                        .is_some()
+                });
+            }
+        }
     }
 }
 
@@ -9064,6 +9110,7 @@ where
                                 values: CapturedCheckedValueSet {
                                     payload: CapturedCheckedValuePayload::Empty,
                                     provenance: Arc::clone(&provenance),
+                                    observation: None,
                                 },
                             });
                         }
@@ -9083,7 +9130,12 @@ where
                             settlement,
                         )?;
                         if let Some(dependencies) = observation {
-                            self.finish_observation(binder, &dependencies);
+                            if let Some(captured) = &mut captured {
+                                captured.values.observation =
+                                    Some((SessionVarId::from_extract(binder.var_id), dependencies));
+                            } else {
+                                self.finish_observation(binder, &dependencies);
+                            }
                         }
                     }
                     PreparedTurnMode::Projected { .. } => {
@@ -9196,7 +9248,7 @@ where
         ) {
             if let Some(captured) = captured {
                 let (ticket, values) = captured.into_parts();
-                ticket.settle(&mut self.state, values)?;
+                ticket.settle(&mut self.state, values, &mut self.binding_provenance)?;
             }
         }
         Ok(outcome)
@@ -9303,9 +9355,6 @@ where
                 return Err(error.into());
             }
         };
-        let row = checked_stage
-            .as_ref()
-            .and_then(|stage| stage.row().cloned());
         let scope_is_live = self.state.scope_tree().is_live(scope);
         let engine = self.state.require_prepared()?;
         if !scope_is_live {
@@ -9351,18 +9400,34 @@ where
             };
             entries.push(entry);
         }
-        let captured_values = ticket.as_ref().map(|_| {
-            entries
-                .iter()
+        if let Some(ticket) = ticket {
+            // The completed result owns its roots while compiler and runtime
+            // publication are prepared. No binding is visible yet.
+            if private_overlay.is_none() {
+                engine.release_all(entries.iter().map(|entry| entry.value.handle));
+                return Err(SessionError::WorldCellRequiresServicePreparation.into());
+            }
+            let stage = checked_stage.take().expect("checked capture stage");
+            let values = entries
+                .into_iter()
                 .map(|entry| CapturedCheckedValue {
-                    name: entry.name.0.clone(),
-                    id: entry.id,
-                    identity: entry.value.identity.clone(),
-                    generation: entry.module.gen,
-                    handle: entry.value.handle,
+                    custody: RootCustody::new(
+                        entry.value.handle.raw(),
+                        self.custody_cleanup.clone(),
+                        Arc::clone(provenance),
+                    ),
+                    entry,
                 })
-                .collect::<Vec<_>>()
-        });
+                .collect();
+            return Ok(Some(CapturedCheckedValues {
+                ticket,
+                values: CapturedCheckedValueSet {
+                    payload: CapturedCheckedValuePayload::Values { stage, values },
+                    provenance: Arc::clone(provenance),
+                    observation: None,
+                },
+            }));
+        }
         if let PreparedBindingInstall::Host(HostBindingInstall {
             private_input: Some(private_input),
             reservation,
@@ -9399,19 +9464,6 @@ where
                 self.hidden_host_bindings
                     .insert(id, HiddenHostBinding::PrivateInput);
             }
-        } else if let Some(completion) = private_overlay {
-            self.state.bind_checked_private_values_in(
-                completion,
-                ticket
-                    .as_ref()
-                    .expect("checked overlay owns its capture ticket"),
-                scope,
-                entries,
-                &binders,
-                checked_stage
-                    .take()
-                    .expect("checked overlay owns its capture stage"),
-            )?;
         } else if matches!(&install, PreparedBindingInstall::Host(_)) {
             let entry = entries.pop().expect("one reserved host binding");
             let handle = entry.value.handle;
@@ -9439,19 +9491,7 @@ where
             self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
-        Ok(ticket.map(|ticket| CapturedCheckedValues {
-            ticket,
-            values: CapturedCheckedValueSet {
-                payload: match row {
-                    Some(row) => CapturedCheckedValuePayload::Values {
-                        row,
-                        values: captured_values.expect("checked capture carries its result set"),
-                    },
-                    None => CapturedCheckedValuePayload::Empty,
-                },
-                provenance: Arc::clone(provenance),
-            },
-        }))
+        Ok(None)
     }
 
     fn run_transient_with_sites(
@@ -11169,25 +11209,93 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn checked_capture_refuses_missing_binder_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::MissingBinder);
-    }
-
-    #[test]
-    fn checked_capture_refuses_extra_binder_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::ExtraBinder);
-    }
-
-    #[test]
-    fn checked_capture_refuses_foreign_checked_row_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::ForeignStage);
-    }
-
-    #[derive(Clone, Copy)]
-    enum CaptureRefusal {
-        MissingBinder,
-        ExtraBinder,
-        ForeignStage,
+    fn checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair() {
+        let mut fixture = checked_capture_fixture_from(
+            SessionId(1001),
+            include_str!("fixtures/checked-pattern-capture.hs"),
+        );
+        assert_eq!(fixture.bound.len(), 2);
+        let scope = fixture.execution.private_scope();
+        let module = SessionModule::val(fixture.reservation.generation());
+        let mut invalid = fixture.bound.clone();
+        invalid[1].var_id = invalid[0].var_id;
+        let before = fixture.prefix.snapshot();
+        let refused = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_projected_bind_with_sites(
+                    "pair",
+                    fixture.compiled.code(),
+                    &invalid,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == SessionVarId::from_extract(invalid[0].var_id)
+        ));
+        assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(module)
+            .is_none());
+        for binder in &fixture.bound {
+            assert!(fixture
+                .resident
+                .current_binding_in(scope, &binder.name)
+                .is_none());
+            assert!(!fixture
+                .resident
+                .binding_provenance
+                .contains_key(&binder.var_id));
+        }
+        let completed = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_projected_bind_with_sites(
+                    "pair",
+                    fixture.compiled.code(),
+                    &fixture.bound,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            completed,
+            ResidentOutcome::BindingsCommitted { .. }
+        ));
+        assert_eq!(fixture.prefix.snapshot().compiler_prefix().next_item(), 1);
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(module)
+            .is_some());
+        for binder in &fixture.bound {
+            let id = SessionVarId::from_extract(binder.var_id);
+            assert_eq!(
+                fixture
+                    .resident
+                    .current_binding_in(scope, &binder.name)
+                    .unwrap()
+                    .0,
+                id
+            );
+            assert!(fixture
+                .resident
+                .binding_provenance
+                .contains_key(&binder.var_id));
+        }
+        fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
     }
 
     struct CheckedCaptureFixture {
@@ -11202,116 +11310,14 @@ mod authored_publication_tests {
         compiled: super::super::turn::CompiledTurn,
     }
 
-    impl CheckedCaptureFixture {
-        fn capture(
-            &mut self,
-        ) -> (
-            Arc<CheckedTurnCompletion>,
-            CheckedCaptureTicket,
-            CheckedCaptureStage,
-        ) {
-            let native = self
-                .compiled
-                .certification
-                .as_ref()
-                .unwrap()
-                .checked_execution()
-                .unwrap()
-                .clone();
-            let completion = source_action(&mut self.resident, &self.original, |resident, _| {
-                self.prefix
-                    .start(&resident.state, self.execution.private_scope(), native)
-            })
-            .unwrap();
-            let ticket = completion.capture_ticket().unwrap();
-            let stage = CheckedCaptureStage::prepare(&self.resident.state, &ticket).unwrap();
-            (completion, ticket, stage)
-        }
-    }
-
-    fn checked_capture_receiver_refusal(refusal: CaptureRefusal) {
-        let mut fixture = checked_capture_fixture(SessionId(1001));
-        let mut foreign = matches!(refusal, CaptureRefusal::ForeignStage)
-            .then(|| checked_capture_fixture(SessionId(1002)));
-        let (completion, ticket, own_stage) = fixture.capture();
-        let (stage, _foreign_completion, _foreign_ticket) = match foreign.as_mut() {
-            Some(foreign) => {
-                let (completion, ticket, stage) = foreign.capture();
-                drop(own_stage);
-                (stage, Some(completion), Some(ticket))
-            }
-            None => (own_stage, None, None),
-        };
-        let binder = &fixture.bound[0];
-        let scope = fixture.execution.private_scope();
-        let mut entry = crate::session::prepared::tests::evaluated_publication_fixture(
-            &mut fixture.resident.state,
-            &binder.name,
-            fixture.reservation.generation().0,
-        );
-        entry.id = SessionVarId::from_extract(binder.var_id);
-        entry.scope = scope;
-        entry.value.identity = SymbolIdentity {
-            unit: "main".into(),
-            module: binder.module.clone(),
-            namespace: "value".into(),
-            occurrence: binder.name.clone(),
-            record_parent: None,
-        };
-        let id = entry.id;
-        let handle = entry.value.handle;
-        let mut binders = fixture.bound.clone();
-        match refusal {
-            CaptureRefusal::MissingBinder => binders.clear(),
-            CaptureRefusal::ExtraBinder => binders.push(binders[0].clone()),
-            CaptureRefusal::ForeignStage => {}
-        }
-        let binders = binders.iter().collect::<Vec<_>>();
-        let before = fixture.prefix.snapshot();
-        let result = source_action(&mut fixture.resident, &fixture.original, |resident, _| {
-            resident.state.bind_checked_private_values_in(
-                &completion,
-                &ticket,
-                scope,
-                vec![entry],
-                &binders,
-                stage,
-            )
-        });
-        match refusal {
-            CaptureRefusal::MissingBinder | CaptureRefusal::ExtraBinder => {
-                assert!(matches!(result, Err(SessionError::Compile(_))));
-            }
-            CaptureRefusal::ForeignStage => {
-                assert!(matches!(result, Err(SessionError::StaleStagedDeclaration)));
-            }
-        }
-        assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
-        assert!(fixture.resident.state.bindings().get(id).is_none());
-        assert!(fixture
-            .resident
-            .state
-            .retained_checked_value_artifact(SessionModule::val(fixture.reservation.generation()))
-            .is_none());
-        assert!(!fixture
-            .resident
-            .state
-            .binding_provenance(id.raw())
-            .is_some());
-        assert!(fixture
-            .resident
-            .state
-            .prepared()
-            .unwrap()
-            .prepared_handle_of(handle.raw())
-            .is_none());
-        assert!(fixture
-            .resident
-            .freeze_private_execution(&fixture.execution)
-            .is_err());
-    }
-
     fn checked_capture_fixture(session: SessionId) -> CheckedCaptureFixture {
+        checked_capture_fixture_from(
+            session,
+            include_str!("fixtures/checked-interface-publication.hs"),
+        )
+    }
+
+    fn checked_capture_fixture_from(session: SessionId, source: &str) -> CheckedCaptureFixture {
         use super::world_cell_test_support::{
             bootstrap_world_for, plan_fixture_cell_for, InputRecipe,
         };
@@ -11348,7 +11354,6 @@ mod authored_publication_tests {
             })
             .unwrap(),
         );
-        let source = include_str!("fixtures/checked-interface-publication.hs");
         let admission =
             plan_fixture_cell_for(&mut resident, &original, &recipe, source, execution.clone())
                 .unwrap();

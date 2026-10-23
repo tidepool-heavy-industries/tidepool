@@ -1481,11 +1481,15 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
     #[derive(Clone, Copy)]
     enum Scenario {
         Complete,
+        CompleteObservation,
+        FenceBeforeCommit,
         RevokedScope,
         RevokedOwner,
     }
     for scenario in [
         Scenario::Complete,
+        Scenario::CompleteObservation,
+        Scenario::FenceBeforeCommit,
         Scenario::RevokedScope,
         Scenario::RevokedOwner,
     ] {
@@ -1546,6 +1550,15 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
             &mut session.resident,
             original.clone(),
             |resident, report| {
+                if matches!(scenario, Scenario::CompleteObservation) {
+                    return resident.run_observation_with_sites(
+                        compiled.code(),
+                        &bound[0],
+                        reservation.generation(),
+                        true,
+                        report,
+                    );
+                }
                 resident.run_bind_with_sites(
                     "parkedValue",
                     compiled.code(),
@@ -1572,7 +1585,7 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
             })
             .unwrap();
         match scenario {
-            Scenario::Complete => {
+            Scenario::Complete | Scenario::CompleteObservation => {
                 let completed = source_action_with_original(
                     &mut session.resident,
                     original,
@@ -1599,6 +1612,65 @@ fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() 
                     ))
                 ));
                 assert_eq!(session.observed(), [1, 2]);
+            }
+            Scenario::FenceBeforeCommit => {
+                let fenced = Arc::new(std::sync::Mutex::new(None));
+                let observed_fence = fenced.clone();
+                let gate = original.source_admission().clone();
+                let pending_prefix = prefix.clone();
+                let observer = Arc::new(move |event| {
+                    if matches!(
+                        event,
+                        crate::session::resident::ResidentContinuationEvent::Retired(_)
+                    ) {
+                        assert_eq!(pending_prefix.snapshot().compiler_prefix().next_item(), 0);
+                        let gate = gate.clone();
+                        let fence = std::thread::spawn(move || gate.fence())
+                            .join()
+                            .unwrap()
+                            .unwrap();
+                        *observed_fence.lock().unwrap() = Some(fence);
+                    }
+                });
+                let refused = session
+                    .resident
+                    .with_continuation_observer(observer, |resident| {
+                        source_action_with_original(resident, original, |resident, report| {
+                            resident.resume_classified(rewrapped, (), report)
+                        })
+                    });
+                assert!(
+                    fenced.lock().unwrap().is_some(),
+                    "the actual consumed continuation reached capture"
+                );
+                assert!(matches!(
+                    refused,
+                    Err(ResidentResumeError::Consumed(ResidentError::Session(
+                        SessionError::SourceAdmission(
+                            crate::session::SourceAdmissionError::Closed { .. }
+                        )
+                    )))
+                ));
+                assert_eq!(
+                    session.observed(),
+                    [1, 2],
+                    "completed effects are not replayed or rolled back"
+                );
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+                assert!(session
+                    .resident
+                    .current_binding_in(execution.private_scope(), "parkedValue")
+                    .is_none());
+                assert!(session
+                    .resident
+                    .retained_checked_value_artifact(tidepool_repr::SessionModule::val(
+                        reservation.generation()
+                    ))
+                    .is_none());
+                assert!(session
+                    .resident
+                    .freeze_private_execution(&execution)
+                    .is_err());
             }
             Scenario::RevokedScope | Scenario::RevokedOwner => {
                 let expected = if matches!(scenario, Scenario::RevokedScope) {
