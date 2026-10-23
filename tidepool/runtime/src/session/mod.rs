@@ -19,11 +19,11 @@
 mod admission;
 mod source_admission;
 pub use source_admission::{
-    ConfirmedSourcePublication,
-    OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
-    RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView, RuntimeSourceReopen,
-    SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase, SourceFenceTransitionFailure,
+    ConfirmedSourcePublication, OwnSourceFenceReopened, RuntimeSourceAdmission,
+    RuntimeSourceCompilerTransaction, RuntimeSourceFence, RuntimeSourceFenceTransition,
+    RuntimeSourceLeaseClaim, RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView,
+    RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+    SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
@@ -101,11 +101,11 @@ pub use persistent::{
 
 pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
-    PrivateExecutionAdmission, PrivatePreparationSnapshot, ReservedNotebookScope,
-    RuntimeBindingInterfaceReservation,
+    PrivateCellPreparation, PrivateExecutionAdmission, PrivateHostCarrierPreparation,
+    PrivatePreparationSnapshot, ReservedNotebookScope, RuntimeBindingInterfaceReservation,
     RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
     RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
-    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand, PrivateCellPreparation, PrivateHostCarrierPreparation,
+    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
     UnpublishedNotebookScope,
 };
 pub use paired_publication::FinalExecutionIntent;
@@ -414,8 +414,42 @@ pub enum SessionTransitionReason {
     PublicBaselineChanged,
 }
 
+/// Incompatible immutable facts at declaration projection and commit admission.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum DeclarationFactsFailure {
+    #[error("authored declaration {generation:?} has incompatible original owner {actual:?}")]
+    AuthoredOwner {
+        generation: Generation,
+        actual: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    },
+    #[error("declaration projection has no selected original interface for {original:?}")]
+    MissingOriginalInterface {
+        original: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    },
+    #[error("authored declaration generation differs: expected={expected:?}, actual={actual:?}")]
+    AuthoredGeneration {
+        expected: Generation,
+        actual: Generation,
+    },
+    #[error("authored declaration {generation:?} parent differs: expected={expected:?}, actual={actual:?}")]
+    AuthoredParent {
+        generation: Generation,
+        expected: Generation,
+        actual: Generation,
+    },
+    #[error("declaration {generation:?} has unavailable or non-preceding parent {parent:?}")]
+    InvalidParent {
+        generation: Generation,
+        parent: Generation,
+    },
+    #[error("joined declaration does not certify reserved generation {generation:?}")]
+    JoinedGeneration { generation: Generation },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    DeclarationFacts(#[from] DeclarationFactsFailure),
     #[error(transparent)]
     TransitionRefused(#[from] SessionTransitionReason),
     #[error(transparent)]
@@ -2948,7 +2982,7 @@ impl SessionLib {
             let admission = store
                 .begin_native_transition()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            assert!(self.log.commit_reserved_authored(generation, turn));
+            self.log.commit_reserved_authored(generation, turn)?;
             self.set_scope_tip_in(scope, generation);
             complete_native_transition(Some(admission))?;
             Ok(generation)
@@ -3075,7 +3109,7 @@ impl SessionLib {
             )?;
             candidate.turn.retracts = retracts;
             let mut log = self.log.clone();
-            assert!(log.commit_reserved_authored(candidate.generation, candidate.turn.clone()));
+            log.commit_reserved_authored(candidate.generation, candidate.turn.clone())?;
             candidate.rendered = render::render_module(&log, candidate.generation, &self.env);
             let scratch = tempfile::tempdir()?;
             let staged = validate_declaration_candidate(candidate, scratch.path(), settlement)?;

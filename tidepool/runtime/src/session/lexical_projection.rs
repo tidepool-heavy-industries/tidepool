@@ -110,7 +110,14 @@ pub(super) fn prepare_authored_projection(
     if original.unit != "main"
         || original.module != tidepool_repr::SessionModule::lib(generation).module_name()
     {
-        return Err(SessionError::StaleStagedDeclaration);
+        return Err(super::DeclarationFactsFailure::AuthoredOwner {
+            generation,
+            actual: ExactModuleIdentity {
+                unit: original.unit.clone(),
+                module: original.module.clone(),
+            },
+        }
+        .into());
     }
     let owner = ExactModuleIdentity {
         unit: original.unit.clone(),
@@ -194,9 +201,11 @@ pub(super) fn issue_projection(
     let module = format!("Tidepool.Actor.Surface.H{digest}");
     let scratch = Arc::new(tempfile::tempdir()?);
     let join_inputs = context.publication_join_inputs(Arc::clone(&scratch), surface)?;
-    let original = join_inputs
-        .interface(original_tip)
-        .ok_or(SessionError::StaleStagedDeclaration)?;
+    let original = join_inputs.interface(original_tip).ok_or_else(|| {
+        super::DeclarationFactsFailure::MissingOriginalInterface {
+            original: original_tip.clone(),
+        }
+    })?;
     let input = DeclarationJoinSpec {
         expected_public_version: digest,
         public_module: None,

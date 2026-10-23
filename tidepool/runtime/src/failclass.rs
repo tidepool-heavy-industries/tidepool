@@ -99,7 +99,8 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::InvalidBindingIdentity(_)
         | SessionError::StaleStagedDeclaration
-        | SessionError::TransitionRefused(_) => {
+        | SessionError::TransitionRefused(_)
+        | SessionError::DeclarationFacts(_) => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
         // The declaration source is valid; its durable recovery artifact is
@@ -201,7 +202,9 @@ mod tests {
             R::PublicBaselineChanged,
         ] {
             let error = SessionError::from(expected);
-            assert!(matches!(&error, SessionError::TransitionRefused(actual) if *actual == expected));
+            assert!(
+                matches!(&error, SessionError::TransitionRefused(actual) if *actual == expected)
+            );
             let classified = classify_session(&error);
             assert_eq!(classified.class, FailureClass::Runtime);
             assert_eq!(classified.phase, Phase::Run);

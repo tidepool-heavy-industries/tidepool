@@ -2323,7 +2323,7 @@ mod tests {
         // A reserved node can settle without changing the generation counter.
         let generation = session.lib().generation();
         let revision = session.lib().log.publication_revision();
-        assert!(session.lib_mut().log.commit_reserved_authored(
+        session.lib_mut().log.commit_reserved_authored(
             unrelated,
             DeclTurn {
                 normalized: DeclarationSource {
@@ -2338,7 +2338,7 @@ mod tests {
                 retracts: Vec::new(),
                 parent: None,
             }
-        ));
+        ).unwrap();
         assert_eq!(session.lib().generation(), generation);
         assert_ne!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();
