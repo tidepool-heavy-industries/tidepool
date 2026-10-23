@@ -22530,505 +22530,22 @@ mod tests {
         writer.finish().unwrap();
     }
 
-    #[test]
-    fn publication_birth_native_modes_distinguish_identical_proof_graphs() {
-        use crate::exact_context::{
-            hydrate_context, take_native_fact_work, Materializer, NativeOfferSnapshotBody,
-        };
+    fn assert_retained_native_data_roundtrip(context: &ExactDeclarationContext) {
+        use crate::exact_context::{hydrate_context, Materializer};
         use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-        let base = published_original_choice_history_fixture();
-        let root = identity("fixture", "Alpha");
-        let original = base.compiler_input_projection().snapshot_roles()[&root]
-            .original()
-            .unwrap();
-        let full = base
-            .compiler_source_support()
-            .native_offers()
-            .iter()
-            .find(|offer| offer.original() == original)
-            .unwrap()
-            .clone();
-        assert!(full.is_full());
-        let partial = full
-            .within_projection(
-                base.compiler_input_projection(),
-                &ArtifactInventory::default().empty_view(),
-            )
-            .unwrap()
-            .unwrap();
-        assert!(!partial.is_full());
-        let (
-            NativeOfferSnapshotBody::Full(full_graph),
-            NativeOfferSnapshotBody::Partial(partial_graph),
-        ) = (full.snapshot_facts().body, partial.snapshot_facts().body)
-        else {
-            panic!("real Full withdrawal produces Partial")
-        };
-        assert_eq!(
-            full_graph.snapshot().as_ref(),
-            partial_graph.snapshot().as_ref()
-        );
-        assert_ne!(
-            full.snapshot_facts().identity().unwrap(),
-            partial.snapshot_facts().identity().unwrap()
-        );
-        let mut publications = Vec::new();
-        let mut sources = Vec::new();
-        for replacement in [full, partial] {
-            let offers = base
-                .compiler_source_support()
-                .native_offers()
-                .iter()
-                .map(|offer| {
-                    if offer.original() == original {
-                        replacement.clone()
-                    } else {
-                        offer.clone()
-                    }
-                })
-                .collect::<Vec<_>>();
-            let projection = base.compiler_input_projection().clone();
-            let support = recover_fixture_compiler_support(
-                projection.clone(),
-                base.artifact_view().clone(),
-                offers,
-            )
-            .unwrap();
-            let rows = RequestNativeAvailability::issue_checked(
-                &projection,
-                support.artifacts(),
-                support.native_offers(),
-            )
-            .unwrap();
-            let support = support.retain_normalized_availability(&rows).unwrap();
-            let source = ExactDeclarationContext::retained_execution_support_fixture(
-                base.owner.facts.producer,
-                support,
-                base.lexical_graph().to_vec(),
-                base.original_instance_target().unwrap().clone(),
-                &[],
-            )
-            .unwrap();
-            take_native_fact_work();
-            let published = source
-                .issue_published_source_original("same-revision", "same-input", &root)
-                .unwrap();
-            let publication_work = take_native_fact_work();
-            eprintln!(
-                "actual publication mode_full={} whole_issue_native_work={publication_work:?}",
-                replacement.is_full(),
-            );
-            publications.push(published);
-            sources.push(source);
-        }
-        let full = publications.remove(0);
-        let partial = publications.remove(0);
-        let full_role = &full.context().compiler_input_projection().snapshot_roles()[&root];
-        let partial_role = &partial
-            .context()
-            .compiler_input_projection()
-            .snapshot_roles()[&root];
-        let (
-            CompilerInputRole::PublishedSourceOriginal {
-                selection: full_selection,
-                selection_sha256: full_digest,
-                ..
-            },
-            CompilerInputRole::PublishedSourceOriginal {
-                selection: partial_selection,
-                selection_sha256: partial_digest,
-                ..
-            },
-        ) = (full_role, partial_role)
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            full_selection.snapshot().as_ref(),
-            partial_selection.snapshot().as_ref(),
-            "the discriminator changes mode, not graph custody"
-        );
-        assert_ne!(
-            full_digest, partial_digest,
-            "publication policy commits exact born availability mode"
-        );
-        assert_ne!(full_role, partial_role);
-        assert_eq!(full_role.original(), partial_role.original());
-        assert_eq!(full_role.interface(), partial_role.interface());
-        for (receiving, foreign) in [(&partial, &full), (&full, &partial)] {
-            let birth = receiving
-                .context()
-                .compiler_source_support()
-                .publication_birth_support(&root)
-                .unwrap();
-            let endorsement = PublishedOriginalEndorsement::from_acquired_support(
-                foreign.context().compiler_source_support(),
-                &root,
-            )
-            .unwrap();
-            assert!(
-                matches!(
-                    birth.publish_original(&endorsement),
-                    Err(CompileError::ArtifactInventory(error))
-                        if matches!(&error.failure,
-                            ArtifactInventoryFailure::PublicationNativeDomainMismatch { owner }
-                                if owner == &root)
-                ),
-                "equal original/interface IDs and graph cannot substitute a different birth domain"
-            );
-        }
-        assert_ne!(
-            full.context().semantic_sha256(),
-            partial.context().semantic_sha256()
-        );
-        let mode = |published: &PublishedSourceOriginalSelection| {
-            published
-                .context()
-                .compiler_source_support()
-                .native_availability()
-                .persistent_facts()[&original]
-                .mode
-                .clone()
-        };
-        assert_eq!(mode(&full), NativeTransportMode::Full);
-        assert_eq!(mode(&partial), NativeTransportMode::IssuedGroups);
-        let store = MemoryBlockstore::new();
-        let mut written = Vec::new();
-        for published in [&full, &partial] {
-            let mut writer = Materializer::new(&store);
-            let context = writer
-                .materialize_context(None, &published.context().snapshot())
-                .unwrap();
-            for (cid, bytes) in writer.finish().unwrap().into_blocks() {
-                store.put_keyed(&cid, &bytes).unwrap();
-            }
-            let decoded = hydrate_context(&store, context.root()).unwrap();
-            let view = published.context().artifact_view();
-            let graph = view.capture_graph_selection();
-            let inventory = RecoveredArtifactInventory {
-                producer: base.owner.facts.producer,
-                entries: view
-                    .entries()
-                    .into_iter()
-                    .map(|entry| (entry.descriptor.id, entry))
-                    .collect(),
-                recorded_inventory: true,
-                bindings: graph.bindings.iter().copied().collect(),
-                binding_edges: view.binding_dependencies(),
-                interfaces: view.interface_dependencies(),
-            };
-            let acquired = inventory
-                .context_for_expected_snapshot(context.root(), &decoded)
-                .unwrap();
-            let selected = acquired.published_source_original_selections().unwrap();
-            assert_eq!(selected.as_slice(), std::slice::from_ref(published));
-            assert_eq!(mode(&selected[0]), mode(published));
-            written.push(context);
-        }
-        assert_ne!(written[0].root(), written[1].root());
-        let selected_full = sources[0]
-            .compiler_source_support()
-            .source_support(&BTreeSet::from([root.clone()]))
-            .unwrap();
-        let later = partial
-            .context()
-            .as_ref()
-            .clone()
-            .extend_issued_compiler_support(&selected_full)
-            .unwrap();
-        assert_eq!(
-            later
-                .compiler_source_support()
-                .native_availability()
-                .persistent_facts()[&original]
-                .mode,
-            NativeTransportMode::Full,
-            "the later current context really has the stronger Full row"
-        );
-        let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(
-            selected[0]
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root],
-            partial
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root]
-        );
-        let birth = selected[0]
-            .context()
-            .compiler_source_support()
-            .publication_birth_support(&root)
-            .unwrap();
-        let expected_birth = partial
-            .context()
-            .compiler_source_support()
-            .publication_birth_support(&root)
-            .unwrap();
-        assert_eq!(
-            birth.artifacts().capture_graph_selection(),
-            expected_birth.artifacts().capture_graph_selection()
-        );
-        assert_eq!(
-            birth.native_availability().persistent_facts(),
-            expected_birth.native_availability().persistent_facts()
-        );
-        assert_eq!(
-            birth.native_availability().persistent_facts()[&original].mode,
-            NativeTransportMode::IssuedGroups,
-            "current Full cannot upgrade the recorded Partial birth"
-        );
-        assert_eq!(
-            mode(&selected[0]),
-            NativeTransportMode::Full,
-            "reopening preserves the actual current projection"
-        );
-    }
-
-    #[test]
-    fn publication_birth_empty_beta_survives_later_full_beta_and_recovery() {
-        use crate::artifact_inventory::IssuedNativeOffer;
-        use crate::exact_context::{hydrate_context, Materializer, NativeOfferSnapshotBody};
-        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-        let base = published_original_choice_history_fixture();
-        let root = identity("fixture", "Alpha");
-        let beta = identity("fixture", "Beta");
-        let beta_original = base.compiler_input_projection().snapshot_roles()[&beta]
-            .original()
-            .unwrap();
-        let empty = IssuedNativeOffer::issue(beta_original, base.artifact_view(), None).unwrap();
-        assert!(matches!(
-            empty.snapshot_facts().body,
-            NativeOfferSnapshotBody::Empty(_)
-        ));
-        let full_beta = base
-            .compiler_source_support()
-            .native_offers()
-            .iter()
-            .find(|offer| offer.original() == beta_original)
-            .unwrap();
-        assert!(full_beta.is_full());
-        assert!(
-            base.compiler_source_support()
-                .native_availability()
-                .rows()
-                .find(|row| row.original.descriptor.id == beta_original)
-                .unwrap()
-                .permits(7),
-            "the actual selected Beta fixture has Full group-7 authority"
-        );
-        let alpha_original = base.compiler_input_projection().snapshot_roles()[&root]
-            .original()
-            .unwrap();
-        let source_roots = base
-            .compiler_input_projection()
-            .roles()
-            .into_iter()
-            .map(|role| role.interface())
-            .chain([alpha_original])
-            .collect();
-        let birth_basis = base
-            .compiler_source_support()
-            .select_support_roots(source_roots)
-            .unwrap();
-        let birth_graph = birth_basis.artifacts().capture_graph_selection();
-        assert!(
-            birth_graph.roots.iter().any(|root| matches!(
-                root,
-                ArtifactBindingNode::Group(group)
-                    if group.binding.artifact() == alpha_original && group.original_ordinal == 7
-            )),
-            "the selected Alpha original retains its actual group-7 demand"
-        );
-        assert!(
-            birth_graph.roots.iter().all(|root| !matches!(
-                root,
-                ArtifactBindingNode::Group(group) if group.binding.artifact() == beta_original
-            )),
-            "Empty Beta contributes no executable root: {:?}",
-            birth_graph.roots
-        );
-        let selected_groups = birth_basis.artifacts().selected_native_groups();
-        assert!(selected_groups.contains(&NativeGroupKey {
-            artifact: alpha_original,
-            original_ordinal: 7,
-        }));
-        assert!(
-            selected_groups
-                .iter()
-                .all(|group| group.artifact != beta_original),
-            "Empty Beta is absent from the full selected native closure: {selected_groups:?}"
-        );
-        assert_eq!(
-            birth_basis.projection().snapshot_roles()[&beta].original(),
-            Some(beta_original),
-            "the already-issued Beta original remains selected without executable Beta groups"
-        );
-        assert!(birth_basis.projection().snapshot_roles()[&root]
-            .original()
-            .is_some());
-        let offers = birth_basis
-            .native_offers()
-            .iter()
-            .map(|offer| {
-                if offer.original() == beta_original {
-                    empty.clone()
-                } else {
-                    offer.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let projection = birth_basis.projection().clone();
-        let support = recover_fixture_compiler_support(
-            projection.clone(),
-            birth_basis.artifacts().clone(),
-            offers,
-        )
-        .unwrap();
-        assert_eq!(
-            support.artifacts().selected_native_groups(),
-            selected_groups
-        );
-        let rows = RequestNativeAvailability::issue_checked(
-            &projection,
-            support.artifacts(),
-            support.native_offers(),
-        )
-        .unwrap();
-        let support = support.retain_normalized_availability(&rows).unwrap();
-        assert_eq!(
-            support.native_availability().persistent_facts()[&beta_original].mode,
-            NativeTransportMode::IssuedGroups
-        );
-        assert!(support
-            .native_availability()
-            .rows()
-            .find(|row| row.original.descriptor.id == beta_original)
-            .unwrap()
-            .issued_ordinals()
-            .is_empty());
-        assert!(!support
-            .native_availability()
-            .rows()
-            .find(|row| row.original.descriptor.id == beta_original)
-            .unwrap()
-            .permits(7));
-        let mut lexical = base.lexical_graph().to_vec();
-        lexical
-            .iter_mut()
-            .find(|node| node.owner == root)
-            .unwrap()
-            .imports
-            .push(beta.clone());
-        lexical.push(ExactLexicalNode {
-            owner: beta.clone(),
-            imports: vec![],
-        });
-        let source = ExactDeclarationContext::retained_execution_support_fixture(
-            base.owner.facts.producer,
-            support,
-            lexical,
-            base.original_instance_target().unwrap().clone(),
-            &[],
-        )
-        .unwrap();
-        let published = source
-            .issue_published_source_original("empty-beta-revision", "empty-beta-input", &root)
-            .unwrap();
-        let born = published.context().compiler_source_support();
-        assert!(born
-            .native_offers()
-            .iter()
-            .filter(|offer| offer.original() == beta_original)
-            .all(|offer| matches!(
-                offer.snapshot_facts().body,
-                NativeOfferSnapshotBody::Empty(_)
-            )));
-        assert!(
-            born.native_offers()
-                .iter()
-                .any(|offer| offer.original() == beta_original),
-            "the Empty birth observation is present, not absent"
-        );
-        let beta_full = base
-            .compiler_source_support()
-            .source_support(&BTreeSet::from([beta.clone()]))
-            .unwrap();
-        let later = published
-            .context()
-            .as_ref()
-            .clone()
-            .extend_issued_compiler_support(&beta_full)
-            .unwrap();
-        assert_eq!(
-            later
-                .compiler_source_support()
-                .native_availability()
-                .persistent_facts()[&beta_original]
-                .mode,
-            NativeTransportMode::Full
-        );
-        assert!(later
-            .compiler_source_support()
-            .native_availability()
-            .rows()
-            .find(|row| row.original.descriptor.id == beta_original)
-            .unwrap()
-            .permits(7));
-        let selected = later.published_source_original_selections().unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(
-            selected[0]
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root],
-            published
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root]
-        );
-        let selected_birth = selected[0]
-            .context()
-            .compiler_source_support()
-            .publication_birth_support(&root)
-            .unwrap();
-        assert_eq!(
-            selected_birth.artifacts().capture_graph_selection(),
-            born.artifacts().capture_graph_selection()
-        );
-        assert_eq!(
-            selected_birth.native_availability().persistent_facts(),
-            born.native_availability().persistent_facts()
-        );
-        let born_beta = selected_birth
-            .native_availability()
-            .rows()
-            .find(|row| row.original.descriptor.id == beta_original)
-            .unwrap();
-        assert_eq!(born_beta.mode, NativeTransportMode::IssuedGroups);
-        assert!(born_beta.issued_ordinals().is_empty());
-        let selected_beta = selected[0]
-            .context()
-            .compiler_source_support()
-            .native_availability()
-            .rows()
-            .find(|row| row.original.descriptor.id == beta_original)
-            .unwrap();
-        assert_eq!(selected_beta.mode, NativeTransportMode::Full);
-        assert!(selected_beta.permits(7));
         let store = MemoryBlockstore::new();
         let mut writer = Materializer::new(&store);
-        let receipt = writer.materialize_context(None, &later.snapshot()).unwrap();
+        let receipt = writer
+            .materialize_context(None, &context.snapshot())
+            .unwrap();
         for (cid, bytes) in writer.finish().unwrap().into_blocks() {
             store.put_keyed(&cid, &bytes).unwrap();
         }
         let decoded = hydrate_context(&store, receipt.root()).unwrap();
-        let view = later.artifact_view();
+        let view = context.artifact_view();
         let graph = view.capture_graph_selection();
         let inventory = RecoveredArtifactInventory {
-            producer: base.owner.facts.producer,
+            producer: context.owner.facts.producer,
             entries: view
                 .entries()
                 .into_iter()
@@ -23042,48 +22559,232 @@ mod tests {
         let restored = inventory
             .context_for_expected_snapshot(receipt.root(), &decoded)
             .unwrap();
-        let restored_birth = restored.published_source_original_selections().unwrap();
-        assert_eq!(restored_birth.len(), 1);
+        assert!(context.same_authenticated_context(&restored));
         assert_eq!(
-            restored_birth[0]
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root],
-            published
-                .context()
-                .compiler_input_projection()
-                .snapshot_roles()[&root]
+            context
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts(),
+            restored
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts(),
         );
-        let restored_support = restored_birth[0]
-            .context()
-            .compiler_source_support()
-            .publication_birth_support(&root)
+        assert_eq!(
+            context
+                .compiler_source_support()
+                .native_offer_observations()
+                .unwrap(),
+            restored
+                .compiler_source_support()
+                .native_offer_observations()
+                .unwrap(),
+        );
+        assert!(restored
+            .published_source_original_selections()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn retained_native_modes_distinguish_identical_proof_graphs_without_publication() {
+        use crate::exact_context::NativeOfferSnapshotBody;
+        let base = published_original_choice_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let original = base.compiler_input_projection().snapshot_roles()[&root]
+            .original()
             .unwrap();
-        assert_eq!(
-            restored_support.artifacts().capture_graph_selection(),
-            born.artifacts().capture_graph_selection()
-        );
-        assert_eq!(
-            restored_support.native_availability().persistent_facts(),
-            born.native_availability().persistent_facts()
-        );
-        assert!(restored_support
+        let full = base
+            .compiler_source_support()
             .native_offers()
             .iter()
-            .filter(|offer| offer.original() == beta_original)
-            .all(|offer| matches!(
-                offer.snapshot_facts().body,
-                NativeOfferSnapshotBody::Empty(_)
-            )));
+            .find(|offer| offer.original() == original)
+            .unwrap()
+            .clone();
+        let partial = full
+            .within_projection(
+                base.compiler_input_projection(),
+                &ArtifactInventory::default().empty_view(),
+            )
+            .unwrap()
+            .unwrap();
+        let (
+            NativeOfferSnapshotBody::Full(full_graph),
+            NativeOfferSnapshotBody::Partial(partial_graph),
+        ) = (full.snapshot_facts().body, partial.snapshot_facts().body)
+        else {
+            panic!("withdrawal must preserve a distinct Partial observation")
+        };
         assert_eq!(
-            restored_birth[0]
-                .context()
+            full_graph.snapshot().as_ref(),
+            partial_graph.snapshot().as_ref()
+        );
+        assert_ne!(
+            full.snapshot_facts().identity().unwrap(),
+            partial.snapshot_facts().identity().unwrap()
+        );
+        let mut contexts = Vec::new();
+        for offer in [full, partial] {
+            let offers = base
+                .compiler_source_support()
+                .native_offers()
+                .iter()
+                .map(|current| {
+                    if current.original() == original {
+                        offer.clone()
+                    } else {
+                        current.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let projection = base.compiler_input_projection().clone();
+            let support = recover_fixture_compiler_support(
+                projection.clone(),
+                base.artifact_view().clone(),
+                offers,
+            )
+            .unwrap();
+            let availability = RequestNativeAvailability::issue_checked(
+                &projection,
+                support.artifacts(),
+                support.native_offers(),
+            )
+            .unwrap();
+            let context = ExactDeclarationContext::retained_execution_support_fixture(
+                base.owner.facts.producer,
+                support
+                    .retain_normalized_availability(&availability)
+                    .unwrap(),
+                base.lexical_graph().to_vec(),
+                identity("fixture", "PrivateSourceTarget"),
+                &[],
+            )
+            .unwrap();
+            assert_retained_native_data_roundtrip(&context);
+            contexts.push(context);
+        }
+        assert_ne!(contexts[0].semantic_sha256(), contexts[1].semantic_sha256());
+        assert_eq!(
+            contexts[0].compiler_input_roles(),
+            contexts[1].compiler_input_roles()
+        );
+        assert_eq!(
+            contexts[0]
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&original]
+                .mode,
+            NativeTransportMode::Full
+        );
+        assert_eq!(
+            contexts[1]
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts()[&original]
+                .mode,
+            NativeTransportMode::IssuedGroups
+        );
+    }
+
+    #[test]
+    fn empty_native_offer_and_later_full_availability_roundtrip_as_retained_data() {
+        use crate::artifact_inventory::IssuedNativeOffer;
+        use crate::exact_context::NativeOfferSnapshotBody;
+        let base = published_original_choice_history_fixture();
+        let beta = identity("fixture", "Beta");
+        let beta_original = base.compiler_input_projection().snapshot_roles()[&beta]
+            .original()
+            .unwrap();
+        let empty = IssuedNativeOffer::issue(beta_original, base.artifact_view(), None).unwrap();
+        assert!(matches!(
+            empty.snapshot_facts().body,
+            NativeOfferSnapshotBody::Empty(_)
+        ));
+        let roots = base
+            .compiler_input_projection()
+            .roles()
+            .into_iter()
+            .map(|role| role.interface())
+            .collect();
+        let selected = base
+            .compiler_source_support()
+            .select_support_roots(roots)
+            .unwrap();
+        let offers = selected
+            .native_offers()
+            .iter()
+            .map(|offer| {
+                if offer.original() == beta_original {
+                    empty.clone()
+                } else {
+                    offer.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let projection = selected.projection().clone();
+        let support = recover_fixture_compiler_support(
+            projection.clone(),
+            selected.artifacts().clone(),
+            offers,
+        )
+        .unwrap();
+        let availability = RequestNativeAvailability::issue_checked(
+            &projection,
+            support.artifacts(),
+            support.native_offers(),
+        )
+        .unwrap();
+        let empty_context = ExactDeclarationContext::retained_execution_support_fixture(
+            base.owner.facts.producer,
+            support
+                .retain_normalized_availability(&availability)
+                .unwrap(),
+            base.lexical_graph().to_vec(),
+            identity("fixture", "PrivateSourceTarget"),
+            &[],
+        )
+        .unwrap();
+        let empty_facts = empty_context
+            .compiler_source_support()
+            .native_availability()
+            .persistent_facts();
+        assert_eq!(
+            empty_facts[&beta_original].mode,
+            NativeTransportMode::IssuedGroups
+        );
+        assert!(empty_context
+            .compiler_source_support()
+            .native_availability()
+            .rows()
+            .find(|row| row.original.descriptor.id == beta_original)
+            .unwrap()
+            .issued_ordinals()
+            .is_empty());
+        let full_beta = base
+            .compiler_source_support()
+            .source_support(&BTreeSet::from([beta]))
+            .unwrap();
+        let later = empty_context
+            .clone()
+            .extend_issued_compiler_support(&full_beta)
+            .unwrap();
+        assert_eq!(
+            later
                 .compiler_source_support()
                 .native_availability()
                 .persistent_facts()[&beta_original]
                 .mode,
             NativeTransportMode::Full
         );
+        assert_eq!(
+            empty_context
+                .compiler_source_support()
+                .native_availability()
+                .persistent_facts(),
+            empty_facts
+        );
+        assert_retained_native_data_roundtrip(&empty_context);
+        assert_retained_native_data_roundtrip(&later);
     }
 
     #[test]
