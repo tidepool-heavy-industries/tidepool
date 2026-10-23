@@ -89,6 +89,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   interface/native edges and executable group demand, and validates them against
   the certified payloads before restoring compiler roles. A completed source-compilation instance
   proof remains transaction-owned rather than reconstructed from durable bytes.
+  Restoring or rebinding an exact snapshot authenticates and attaches its recorded
+  owners; it does not replay live custody-growth operations. Preserve exact roots,
+  custody seeds (including overlap with selected roots), namespace and proof scopes
+  through the final consumer. Test repeated restoration and baseline binding with
+  actual linked closures, not only isolated map round trips.
 - Compiler Worlds support empty and TYPE-only contexts as well as published
   source and notebook declarations. Import lines carry syntax; published sources
   retain lexical proof through `with_published_source_originals`, while notebook

@@ -4029,6 +4029,10 @@ impl RequestCompilerInputs {
             };
             let chosen = self.native_selection.advertised.0.get(owner).copied();
             if role.original().is_some() && chosen.is_some_and(|id| Some(id) != role.original()) {
+                tracing::warn!(target: "tidepool::artifact_inventory::admission",
+                    obligation = "demanded_original_matches_advertisement", ?owner,
+                    selected_original = ?role.original(), advertised_original = ?chosen,
+                    "native owner selection conflicts with its carried role");
                 budget.strings(owner.unit.len().saturating_add(owner.module.len()))?;
                 return Err(
                     admission_failure(ArtifactInventoryFailure::NativeOwnerAmbiguity {
@@ -4246,6 +4250,11 @@ impl NativeInputSelection {
                     .insert(owner.clone(), row.original.descriptor.id)
                     .is_some_and(|previous| previous != row.original.descriptor.id)
             {
+                tracing::warn!(target: "tidepool::artifact_inventory::admission",
+                    obligation = "unique_direct_native_advertisement", ?owner,
+                    original = ?row.original.descriptor.id, canonical = ?row.canonical,
+                    selected_original = ?role.original(), mode = ?row.mode,
+                    "multiple native originals match the selected direct canonical binding");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeOwnerAmbiguity {
                         owner: owner.clone(),
@@ -4404,6 +4413,10 @@ impl NativeInputSelection {
                 .insert(entry.descriptor.owner.clone(), offer.original())
                 .is_some_and(|previous| previous != offer.original())
             {
+                tracing::warn!(target: "tidepool::artifact_inventory::admission",
+                    obligation = "unique_qualified_native_original", owner = ?entry.descriptor.owner,
+                    original = ?offer.original(),
+                    "multiple private native originals qualify in the receiving namespace");
                 return Err(admission_failure(
                     ArtifactInventoryFailure::NativeOwnerAmbiguity {
                         owner: entry.descriptor.owner.clone(),

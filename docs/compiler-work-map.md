@@ -1,7 +1,8 @@
 # Compiler work and authority map
 
 This map was checked against joined source `f5e8cb121a` (2026-10-22), with the
-checked-value instance-scope boundary updated for `c92fb6217b`.
+checked-value instance-scope boundary updated for `c92fb6217b`, and publication,
+TYPE and exact restoration boundaries updated through `ccc5dedfe2`.
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -228,8 +229,14 @@ of reconstructing them from module names, generation labels or retained catalogs
   a presumed checked-value instance leaf or mere artifact custody. The
   [SourceScope/Context9 contract](../plans/shared-warm-compiler/completion/linked-code-ownership/source-scope.md)
   is implemented in the joined source, including separate snapshot facts and
-  restore validation against actual selected support. Context9 restoration and
-  publication still require executed positive and refusal histories.
+  restore validation against actual selected support. The selected facade import
+  route requires its actual selected interface plus immutable adjacency; it does
+  not grant fresh SOURCE authority. Context9 restores native offers and acquired
+  closures against the held exact selection and attaches the authenticated owners
+  without repeating live custody-growth composition. Baseline rebinding follows
+  the same rule: exact seeds and proof scopes must remain equal. At `ccc5dedfe2`,
+  cold attachment passes in the staged runtime history; subsequent World bootstrap
+  still refuses ambiguous native ownership. The final cold consumer is unqualified.
 - **Acquired-prefix work:** `AcquiredNativeClosures::append` in
   [compiler_projection.rs](../tidepool/toolchain/src/artifact_inventory/compiler_projection.rs)
   retains actual immutable owners, shared component/closure records and a
