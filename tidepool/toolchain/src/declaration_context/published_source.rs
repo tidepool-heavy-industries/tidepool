@@ -563,9 +563,15 @@ impl CompletedOriginalExecution<'_> {
     pub(crate) fn issue_published_source_original(
         &self,
         revision: &str,
-        input_identity: &str,
+        input: &crate::compile_input::SealedOriginalCompileInput,
         root: &ExactModuleIdentity,
     ) -> Result<Arc<PublishedSourceOriginalSelection>, CompileError> {
+        if !Arc::ptr_eq(self.evidence(), &input.issued_original_execution()) {
+            return Err(failure(
+                "published source input belongs to another original execution",
+            ));
+        }
+        let input_identity = input.original_input_identity();
         let original = self.context().as_ref();
         if !original.source_scope().admits(root) {
             return Err(failure("published root lacks an admitted source scope"));

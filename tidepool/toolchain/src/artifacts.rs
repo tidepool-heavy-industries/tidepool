@@ -3712,11 +3712,7 @@ impl SealedTurnProducts {
         })?;
         self.original_execution()?
             .completed()?
-            .issue_published_source_original(
-                revision,
-                original.original_input_identity(),
-                public_root,
-            )
+            .issue_published_source_original(revision, original, public_root)
     }
 
     pub fn native_source_products(&self) -> Result<ResolvedNativeSourceProducts<'_>, CompileError> {

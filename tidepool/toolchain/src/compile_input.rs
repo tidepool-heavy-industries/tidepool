@@ -833,6 +833,12 @@ mod tests {
             &root.path().join("entry"),
         )
         .unwrap();
+        let other_entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            root.path(),
+            &root.path().join("other-entry"),
+        )
+        .unwrap();
         let proof = entry.products().original_compile_input.as_ref().unwrap();
         let validated = proof
             .validated_original_source(
@@ -849,6 +855,27 @@ mod tests {
         else {
             panic!("ordinary output must retain actual original execution");
         };
+        let other_input = other_entry
+            .products()
+            .original_compile_input
+            .as_ref()
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &original,
+            &other_input.issued_original_execution()
+        ));
+        assert_eq!(
+            proof.original_input_identity(),
+            other_input.original_input_identity(),
+            "equal input observations do not pair separate output issuers"
+        );
+        let mismatch = original
+            .completed()
+            .unwrap()
+            .issue_published_source_original("revision", other_input, original.target())
+            .unwrap_err();
+        assert!(matches!(mismatch, CompileError::ExtractFailed(message)
+            if message == "exact declaration context: published source input belongs to another original execution"));
         assert!(Arc::ptr_eq(&original, &proof.original_execution));
         assert!(Arc::ptr_eq(
             &original,
