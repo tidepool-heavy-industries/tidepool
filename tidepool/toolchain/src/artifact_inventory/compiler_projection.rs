@@ -2303,7 +2303,7 @@ impl SelectedCompilerInterfaces<'_> {
                 },
             )?;
         }
-        let mut selected = projection
+        let selected = projection
             .roles
             .keys()
             .map(|owner| {
@@ -3645,18 +3645,6 @@ impl CompilerSourceSupport {
             .try_fold(artifacts, |view, completion| {
                 view.retain_custody(completion.artifacts())
             })?;
-        for (owner, _) in incoming.selected.iter() {
-            let row = selected.rows.get_mut(owner).expect("incoming admitted row");
-            let mut custody_changed = false;
-            for (binding, entry) in row.bindings_mut() {
-                let retained = &artifacts.lease.payloads[&binding.artifact];
-                custody_changed |= !Arc::ptr_eq(entry, retained);
-                *entry = Arc::clone(retained);
-            }
-            if custody_changed {
-                changed.insert(owner.clone());
-            }
-        }
         let mut input_decisions = self.input_decisions.clone();
         input_decisions.merge_selected(&incoming.input_decisions.for_exact_roles(&projection))?;
         let mut native_availability = match self
