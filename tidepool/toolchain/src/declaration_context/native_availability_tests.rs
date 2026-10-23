@@ -952,7 +952,8 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
     let groups = private.native_offers[0]
         .issued_group_carriers()
         .unwrap()
-        .into_keys()
+        .keys()
+        .cloned()
         .collect::<BTreeSet<_>>();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups.first().unwrap().original_ordinal, 7);
@@ -2188,7 +2189,8 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 let expected = chosen
                     .issued_group_carriers()
                     .unwrap()
-                    .into_keys()
+                    .keys()
+                    .cloned()
                     .filter(|group| group.original_ordinal == ordinal)
                     .collect::<BTreeSet<_>>();
                 let actual = support.groups().collect::<BTreeSet<_>>();
@@ -3267,7 +3269,8 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     let expected = offer
         .issued_group_carriers()
         .unwrap()
-        .into_keys()
+        .keys()
+        .cloned()
         .filter(|group| {
             group.binding.artifact() == entry.descriptor.id && group.original_ordinal == 9001
         })
@@ -5899,7 +5902,8 @@ fn selected_authored_availability_refuses_source_original_spelling_with_full_gro
     let issued = full
         .issued_group_carriers()
         .unwrap()
-        .into_keys()
+        .keys()
+        .cloned()
         .filter(|group| group.binding.artifact() == original)
         .map(|group| group.original_ordinal)
         .collect::<BTreeSet<_>>();
@@ -7284,7 +7288,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
                     native_context
                         .compiler_input_projection()
                         .snapshot_roles()
-                        .into_keys()
+                        .keys()
+                        .cloned()
                         .collect(),
                 )
                 .unwrap(),
@@ -7334,7 +7339,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
                     native_context
                         .compiler_input_projection()
                         .snapshot_roles()
-                        .into_keys()
+                        .keys()
+                        .cloned()
                         .collect(),
                 )
                 .unwrap(),
@@ -8202,7 +8208,8 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
                     let expected = offer
                         .issued_group_carriers()
                         .unwrap()
-                        .into_keys()
+                        .keys()
+                        .cloned()
                         .filter(|group| {
                             group.binding.artifact() == entry.descriptor.id
                                 && group.original_ordinal == 9001
@@ -9848,7 +9855,8 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                             original
                                 .compiler_input_projection()
                                 .snapshot_roles()
-                                .into_keys()
+                                .keys()
+                                .cloned()
                                 .collect(),
                         )
                         .unwrap(),
@@ -9902,7 +9910,7 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
         if changed_canonical {
             assert!(
                 matches!(contexts[0].clone().extend_type_interfaces(&SelectedTypeInterfaces {
-            support: contexts[1].compiler_source_support().selected_interfaces().unwrap().type_interfaces_for_owners(contexts[1].compiler_input_projection().snapshot_roles().into_keys().collect()).unwrap(),
+            support: contexts[1].compiler_source_support().selected_interfaces().unwrap().type_interfaces_for_owners(contexts[1].compiler_input_projection().snapshot_roles().keys().cloned().collect()).unwrap(),
             producer: contexts[1].toolchain_identity_sha256(), identity: OnceLock::new(),
         }),
                 Err(CompileError::ArtifactInventory(error))
@@ -10413,7 +10421,8 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
                     fallback_context
                         .compiler_input_projection()
                         .snapshot_roles()
-                        .into_keys()
+                        .keys()
+                        .cloned()
                         .collect(),
                 )
                 .unwrap(),
@@ -10438,7 +10447,8 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
                     fallback_context
                         .compiler_input_projection()
                         .snapshot_roles()
-                        .into_keys()
+                        .keys()
+                        .cloned()
                         .collect(),
                 )
                 .unwrap(),
@@ -10621,7 +10631,8 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
     assert_eq!(
         full.issued_group_carriers()
             .unwrap()
-            .into_keys()
+            .keys()
+            .cloned()
             .collect::<BTreeSet<_>>(),
         retained_groups,
         "checked offer membership must match the exact retained issued groups",
