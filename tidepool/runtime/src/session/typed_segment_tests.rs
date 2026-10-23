@@ -93,7 +93,7 @@ impl SemanticSession {
         durable: bool,
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
+        let root = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
         std::fs::create_dir(root.path().join("support")).unwrap();
         std::fs::write(
             root.path().join("support/SegmentProbeSupport.hs"),
