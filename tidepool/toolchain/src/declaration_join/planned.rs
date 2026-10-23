@@ -1780,7 +1780,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_closure_refuses_package_drift_and_zero_group_home_downgrade() {
+    fn authored_closure_preserves_package_custody_and_refuses_zero_group_home_downgrade() {
         use crate::certified_products::{
             encode_home_certification, fixture_finalized_product,
             tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
@@ -1893,21 +1893,44 @@ mod tests {
             "zero-group home cannot be treated as a package"
         );
         let originals = issued_originals(&products[..1]).unwrap();
+        let captured = originals.products()[0]
+            .original_native()
+            .unwrap()
+            .package_interfaces()
+            .get(&(external_unit.into(), "External".into()))
+            .unwrap()
+            .clone();
+        assert_eq!(captured.sha256(), &digest);
+        assert_eq!(captured.bytes().as_ref(), &[0x43]);
         std::fs::write(&package_path, [0x44]).unwrap();
+        assert_eq!(std::fs::read(&package_path).unwrap(), [0x44]);
+        // Recovered originals own immutable package interfaces. Their original
+        // selection paths do not replace that custody during later admission.
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-        assert!(
-            ValidatedAuthoredClosure::admit(
-                &originals,
-                [1; 32],
-                &evidence,
-                None,
-                &BTreeMap::from([(owner.clone(), vec![])]),
-                None,
-                &[root.path().to_path_buf()],
-                &mut validation,
-            )
-            .is_err(),
-            "a later admission must reread live package bytes"
+        let retained = ValidatedAuthoredClosure::admit(
+            &originals,
+            [1; 32],
+            &evidence,
+            None,
+            &BTreeMap::from([(owner.clone(), vec![])]),
+            None,
+            &[root.path().to_path_buf()],
+            &mut validation,
+        )
+        .expect("held package custody survives ambient selection-path drift")
+        .materialize()
+        .unwrap();
+        assert_eq!(captured.sha256(), &digest);
+        assert_eq!(captured.bytes().as_ref(), &[0x43]);
+        let interfaces = std::fs::read_dir(retained.directory.path().join("package-code"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "hi"))
+            .collect::<Vec<_>>();
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(
+            std::fs::read(&interfaces[0]).unwrap().as_slice(),
+            captured.bytes().as_ref()
         );
     }
 
