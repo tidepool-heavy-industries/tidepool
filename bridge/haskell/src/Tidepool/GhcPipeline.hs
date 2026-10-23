@@ -1963,20 +1963,22 @@ stageHeldWorldDependencies executor
       -- The normal cycle already validated each selected source version before
       -- entering the working memo. Only captured source owners can be added;
       -- private value aliases and earlier checking targets have no such row.
-      additions = Map.fromListWith Map.union
-        [(owner,Map.singleton (memoSelectionKey validity)
-          (Map.singleton validity (CompletedModuleVersion entry home context epoch products)))
-        | entry <- Map.elems eligible
+      selectedEntries =
+        [entry | entry <- Map.elems eligible
         , let owner = payloadOwner (gmePayload entry)
         , let validity = gmeValidity entry
-        , let home = retainCompletedModuleHome (lookupHpt (hsc_HPT final) (moduleName owner))
-        , let products = maybe [] pure (payloadProduct (gmePayload entry))
         , let previousVersion = do
                 bySelection <- Map.lookup owner previous
                 byValidity <- Map.lookup (memoSelectionKey validity) bySelection
                 Map.lookup validity byValidity
         , maybe True (\node -> gmeCycle (completedModuleEntry node) /= gmeCycle entry
             || completedModuleEpoch node /= epoch) previousVersion]
+  additions <- Map.fromListWith Map.union <$> forM selectedEntries (\entry -> do
+    let owner = payloadOwner (gmePayload entry)
+        validity = gmeValidity entry
+        products = maybe [] pure (payloadProduct (gmePayload entry))
+    node <- issueCompletedModuleVersion (hsc_HPT final) entry context epoch products
+    pure (owner,Map.singleton (memoSelectionKey validity) (Map.singleton validity node)))
   evictCompilerRecovery recovery (== target)
   _ <- evaluate (Map.size additions)
   pending <- newIORef (Just (WorldDependencyAdditions additions emptyWorldCanonicalRecovery))
@@ -3808,17 +3810,34 @@ data RecoveryContext = RecoveryContext
 
 data CompletedModuleVersion = CompletedModuleVersion
   { completedModuleEntry :: GutsMemoEntry
-  , completedModuleHome :: !(Maybe HomeModInfo)
+  , completedModuleHome :: !HomeModInfo
   , completedModuleRecovery :: RecoveryContext
   , completedModuleEpoch :: Word64
   , completedModuleProducts :: [ModuleProduct]
   }
 
--- Retain the selected home, rather than a lookup closure over the full HscEnv.
--- The strict field forces the Maybe; its selected payload must also be in WHNF.
-retainCompletedModuleHome :: Maybe HomeModInfo -> Maybe HomeModInfo
-retainCompletedModuleHome Nothing = Nothing
-retainCompletedModuleHome (Just home) = home `seq` Just home
+data CompletedModuleFailure
+  = CompletedModuleHomeMissing Module
+  | CompletedModuleHomeMismatch Module
+  deriving Show
+instance Exception CompletedModuleFailure
+
+-- The completion owner retains the exact installed HMI, including its lazy
+-- details knot and current executable capacity. A finalized interface is not
+-- a substitute for a missing or incompatible installed home.
+issueCompletedModuleVersion :: HomePackageTable -> GutsMemoEntry -> RecoveryContext
+  -> Word64 -> [ModuleProduct] -> IO CompletedModuleVersion
+issueCompletedModuleVersion homes entry recovery epoch products = do
+  let owner = payloadOwner (gmePayload entry)
+      finalized = hm_iface (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
+  home <- maybe (throwIO (CompletedModuleHomeMissing owner)) pure
+    (lookupHpt homes (moduleName owner))
+  let actual = hm_iface home
+  unless (mi_module actual == owner && mi_module finalized == owner
+      && mi_hsc_src actual == mi_hsc_src finalized
+      && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts finalized))
+    (throwIO (CompletedModuleHomeMismatch owner))
+  pure (CompletedModuleVersion entry home recovery epoch products)
 
 data CompletedOriginalVersion = CompletedOriginalVersion
   { completedOriginalHome :: HomeModInfo
@@ -5781,8 +5800,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , let owner = ms_mod summary
               , Just entry <- [Map.lookup owner validEntries]
               , Just node <- [Map.lookup owner selectedVersions]
-              , let hmi = fromMaybe (finalizedHomeModInfo (payloadFinalized (gmePayload entry)))
-                      (completedModuleHome node)
+              , let hmi = completedModuleHome node
               , isNothing (lookupHpt (hsc_HPT current) (ms_mod_name summary))
               , let finalized = hm_iface (finalizedHomeModInfo (loadedFinalized
                       (payloadLoaded summary (gmePayload entry))))
@@ -9130,15 +9148,16 @@ residentCompileOne guard producer selection retained universeRef active interpre
   -- environment. SOURCE backedges may keep the target HMI in this closure.
   closed <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) final)
   let completedHomes = hsc_HPT closed
-  let sourceNodes = Map.fromListWith Map.union
-        [(owner,Map.singleton (memoSelectionKey (gmeValidity entry))
-            (Map.singleton (gmeValidity entry) (CompletedModuleVersion entry home recoveryContext epoch (maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
-                (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))))))
-        | entry <- Map.elems admittedSnapshot
-        , let owner = payloadOwner (gmePayload entry)
-        , owner /= targetOwner
-        , let home = retainCompletedModuleHome (lookupHpt completedHomes (moduleName owner))]
-      originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
+  sourceNodes <- liftIO $ Map.fromListWith Map.union <$> forM
+    [entry | entry <- Map.elems admittedSnapshot
+      , payloadOwner (gmePayload entry) /= targetOwner] (\entry -> do
+        let owner = payloadOwner (gmePayload entry)
+            validity = gmeValidity entry
+            products = maybe [] (\product' -> [product' | preparedSiteDependenciesEquivalent
+              (productPrepared product') (productPrepared product')]) (payloadProduct (gmePayload entry))
+        node <- issueCompletedModuleVersion completedHomes entry recoveryContext epoch products
+        pure (owner,Map.singleton (memoSelectionKey validity) (Map.singleton validity node)))
+  let originalVersions = Map.fromList [((owner,digest,localIncarnation owner),
           CompletedOriginalVersion home recoveryContext epoch)
         | scope <- maybe [] pure (pvExactScope variant), (artifact,_,_) <- scopeInterfaces scope
         , let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
@@ -9169,8 +9188,8 @@ preferModuleVersion incoming previous = selected
   where
     selected
       | completedModuleEpoch incoming /= completedModuleEpoch previous = incoming
-      | maybe False hasCode (completedModuleHome incoming)
-          && not (maybe False hasCode (completedModuleHome previous)) = incoming
+      | hasCode (completedModuleHome incoming)
+          && not (hasCode (completedModuleHome previous)) = incoming
       | isJust (payloadProduct (gmePayload (completedModuleEntry incoming)))
           && isNothing (payloadProduct (gmePayload (completedModuleEntry previous))) = incoming
       | otherwise = previous
