@@ -146,6 +146,7 @@ struct NativeTransportCoverage {
     duplicate_joins: usize,
     reversed_joins: usize,
     joined_preparations: usize,
+    raw_alias_refusals: usize,
     namespace_pins: usize,
     output_request_preparations: usize,
     dependent_issuances: usize,
@@ -677,16 +678,6 @@ fn replay_native_transport_history(
     let after_retention = retained.capture_graph_selection();
     assert_eq!(after_retention.roots, before_retention.roots);
     assert_eq!(after_retention.namespace, before_retention.namespace);
-    let request = ExactCompileContext::new(base_context.clone())
-        .prepare_compilation_with_private_input(
-            &root.path().join("request"),
-            PRODUCER,
-            None,
-            Some(joined),
-        )
-        .unwrap();
-    coverage.joined_preparations += 1;
-    let inputs = request.compiler_inputs();
     let winning_indices = if same_root { vec![0] } else { vec![0, 1] };
     let expected_native = winning_indices
         .iter()
@@ -708,6 +699,75 @@ fn replay_native_transport_history(
                 .unwrap()
         })
         .collect::<BTreeSet<_>>();
+    let expected_scoped = winning_indices
+        .iter()
+        .flat_map(|index| expected[*index].keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        joined_support
+            .artifacts()
+            .selected_native_binding_rows()
+            .1
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        expected_scoped
+    );
+    assert_eq!(
+        joined_support
+            .artifacts()
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter_map(|root| match root {
+                ArtifactBindingNode::Group(group) => Some(group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        expected_parent_roots
+    );
+    let raw_aliases = overlap && !same_root;
+    if raw_aliases {
+        let left = child(0).0;
+        let right = child(1).0;
+        assert_ne!(left, right);
+        assert_eq!(left.binding.artifact(), right.binding.artifact());
+        assert_eq!(left.original_ordinal, right.original_ordinal);
+        assert!(expected_scoped.contains(&left) && expected_scoped.contains(&right));
+        // These recovered graphs own exact scoped nodes, not a shared physical
+        // product issuance. Actual shared-issuer aliases have separate positive
+        // coverage in retained_group_materialization_keeps_scope_aliases_on_cold_and_cache_hits.
+        let operation = InventoryOperation::new(Default::default());
+        for binding in [left, right] {
+            assert!(joined_support
+                .acquired_native_closures()
+                .group_owner(binding, &operation)
+                .unwrap()
+                .is_none());
+        }
+    }
+    let request = ExactCompileContext::new(base_context.clone())
+        .prepare_compilation_with_private_input(
+            &root.path().join("request"),
+            PRODUCER,
+            None,
+            Some(joined),
+        );
+    if raw_aliases {
+        let error = request
+            .err()
+            .expect("raw scoped aliases lack a shared physical row issuer");
+        assert!(
+            matches!(&error, CompileError::ExtractFailed(detail)
+            if detail == "exact declaration context: scoped aliases have competing physical row issuers"),
+            "raw alias export must refuse at the physical row owner: {error:?}"
+        );
+        coverage.raw_alias_refusals += 1;
+        return;
+    }
+    let request = request.unwrap();
+    coverage.joined_preparations += 1;
+    let inputs = request.compiler_inputs();
     assert_eq!(
         inputs.metadata().retained.selected_native_groups.as_ref(),
         &expected_native
@@ -1330,15 +1390,16 @@ fn private_transport_preserves_independent_closures_and_exact_demand() {
     assert_eq!(coverage.equal_payload_scopes, 16);
     assert_eq!(coverage.captures, 72);
     assert_eq!(coverage.partial_with_ambient_full, 24);
-    assert_eq!(coverage.issued_demand_preservations, 24);
-    assert_eq!(coverage.joined_preparations, 24);
+    assert_eq!(coverage.issued_demand_preservations, 16);
+    assert_eq!(coverage.joined_preparations, 16);
+    assert_eq!(coverage.raw_alias_refusals, 8);
     assert_eq!(coverage.namespace_pins, 24);
-    assert_eq!(coverage.output_request_preparations, 24);
-    assert_eq!(coverage.dependent_issuances, 24);
-    assert_eq!(coverage.private_output_handoffs, 24);
-    assert_eq!(coverage.recoveries, 48);
-    assert_eq!(coverage.produced_demands, 24);
-    assert_eq!(coverage.recovered_input_refusals, 48);
+    assert_eq!(coverage.output_request_preparations, 16);
+    assert_eq!(coverage.dependent_issuances, 16);
+    assert_eq!(coverage.private_output_handoffs, 16);
+    assert_eq!(coverage.recoveries, 32);
+    assert_eq!(coverage.produced_demands, 16);
+    assert_eq!(coverage.recovered_input_refusals, 32);
     assert_eq!(coverage.unselected_root_ambiguities, 8);
     assert!(coverage.successful_demands > 0 && coverage.ambiguous_demands > 0);
     tracing::debug!(?coverage, "native transport deterministic support");
