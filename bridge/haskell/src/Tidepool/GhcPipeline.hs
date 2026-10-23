@@ -308,7 +308,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -2902,10 +2902,13 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
     WorldCellNameSource {} -> do
       emitWorldAcquisitionRejection "world cell name imports" path (moduleDemandFailureDetail reason)
       throwIO WorldCellUnsupported) pure $
-    case typedPurposePlan purpose of
-      Just plan -> segmentModuleDemand <$> prepareSegmentDemand plan effective capturedSource
-      Nothing | isJust (worldPlannedDeclaration purpose) || originalPurpose purpose == WorldObservationCompile -> prepareModuleDemand effective capturedSource
-      _ -> Left UnprovedRootAbstraction
+    do
+      capturedImports <- either (Left . ModuleDemandParseRejected path) Right
+        (parseCapturedGeneratedImports effective capturedSource)
+      case typedPurposePlan purpose of
+        Just plan -> segmentModuleDemand <$> prepareSegmentDemand plan capturedImports
+        Nothing | isJust (worldPlannedDeclaration purpose) || originalPurpose purpose == WorldObservationCompile -> prepareModuleDemand capturedImports
+        _ -> Left UnprovedRootAbstraction
   case operation of
     WorldCellSource {} -> pure ()
     WorldCellNameSource {} -> pure ()

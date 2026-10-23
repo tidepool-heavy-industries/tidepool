@@ -53,7 +53,7 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ImportSyntax.Internal
   ( CellSourceSpan(..), LocatedImport(..), ImportIntent(..)
   , ProtectedImports(..), protectedImportsRendering )
-import Tidepool.TurnSource (ImportRendering, renderImportBinder)
+import Tidepool.TurnSource (ImportRendering, renderImportBinder, appendImportRendering, literalImportRendering)
 
 -- Render only the imports already attached to this exact checked item. The
 -- returned syntax carries no new lexical or native grant; subsequent admission
@@ -70,9 +70,10 @@ checkedItemImportRendering scope item = do
         (ProtectedImports ("import " ++ owner ++ "\n"))) (itemPlannedDeclaration item)
       values = case itemValueImports item of
         [] -> Nothing
-        imports -> Just (protectedImportsRendering (ProtectedImports (concat
-          ["import " ++ owner ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n"
-          | (owner,names) <- imports])))
+        imports -> Just (foldl appendImportRendering (literalImportRendering "")
+          [protectedImportsRendering (ProtectedImports
+            ("import " ++ owner ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n"))
+          | (owner,names) <- imports])
       namespaces = maybe [] (\((_,owner),_) -> [mkModuleName owner]) (itemPlannedDeclaration item)
         ++ map (mkModuleName . fst) (itemValueImports item)
   pure (CheckedItemImportRendering original values namespaces)
