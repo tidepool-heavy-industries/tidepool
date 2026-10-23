@@ -820,9 +820,7 @@ mod lazy_tests {
             Generation(0),
         )
         .unwrap();
-        let context =
-            tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap();
+        let context = tidepool_toolchain::declaration_join::ExactDeclarationContext::empty();
         let (candidate, context) = graph
             .stage_compiler_context(
                 &artifact_root,
