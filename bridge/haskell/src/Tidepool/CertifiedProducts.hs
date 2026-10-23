@@ -76,7 +76,7 @@ import Tidepool.ModuleCandidates
 import Tidepool.PackageWitness
   ( PackageImportRoot(..), PackageImportEvidence(..), packageImportRoot, validatePackageImportRoot
   , decodeCapturedPackageImports )
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface, readHomeInterface)
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), OriginalInterfaceArtifacts, originalInterfaceSha256 )
 import Tidepool.FinalizedModule (homeInterfaceUsageOwners)
@@ -711,8 +711,10 @@ encodeCertifiedOriginalProductsWithCapture outputRoot prior originalInterfaces p
     let owner = mkModule (stringToUnit (T.unpack (productUnit product))) (mkModuleName (T.unpack (productModule product)))
     selected <- case Map.lookup (moduleName owner) interfaces of
       Just iface | mi_module iface == owner -> pure (Right iface)
-      _ -> fmap (either (const (Left "original interface usage inventory unavailable")) (Right . fst))
-        (readExactInterface env owner)
+      _ -> fmap (either (const (Left "original interface usage inventory unavailable")) Right)
+        (if toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env
+          then readHomeInterface env owner
+          else fmap (fmap fst) (readPackageInterface env owner))
     retainedSeals <- case selected of
       Left _ -> pure Map.empty
       Right iface -> fmap Map.fromList $ forM (homeInterfaceUsageOwners env iface) $ \(unit,name) -> do
@@ -1471,7 +1473,7 @@ loadPackageInterface env owner = do
   case found of
     Left reason -> pure (Left reason)
     Right witness -> do
-      exact <- readExactInterface env owner
+      exact <- readPackageInterface env owner
       case exact of
         Right (iface, location) | ml_hi_file location == packagePath witness ->
           pure (Right (iface, witness))

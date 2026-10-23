@@ -134,7 +134,7 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Utils.Fingerprint (fingerprint0, fingerprintByteString, fingerprintString)
 import GHC.Unit.Module.ModIface (ModIface, mi_module, mi_extra_decls, mi_exports, mi_insts, mi_fam_insts, mi_deps, mi_iface_hash, mi_orphan, mi_final_exts, mi_decls, mi_hsc_src)
 import GHC.Builtin.Names (gHC_PRIM)
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.FatIface.Internal (withCapturedIface)
 import Tidepool.ResumePackage (resolveResumeInterface)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
@@ -1373,7 +1373,7 @@ originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ direc
       case admitted of
         Nothing -> pure Nothing
         Just original -> do
-          full <- readExactInterface env owner
+          full <- readPackageInterface env owner
           case full of
             Right (interface, location)
               | mi_module interface == owner

@@ -48,7 +48,7 @@ import Tidepool.FatIface
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , lookupFatIfaceComponents, privateOriginalDependencies
-  , readHomeInterface, readExactInterface, newFatIfaceCache
+  , readHomeInterface, readPackageInterface, newFatIfaceCache
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, sameOwnerInterfaceContext, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
@@ -58,7 +58,7 @@ import Tidepool.FatIface.Internal
   , privateComponents
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
-import Tidepool.ExactHydration (forkExactContext, ExactIfaceArtifact(..), hydrateExactScope,
+import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceArtifact(..), hydrateExactScope,
   newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, hydrateExactScopeWithProducts)
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
@@ -183,7 +183,15 @@ scenario = do
       liftIO $ do
         home <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
           (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
-        (original,_) <- readExactInterface hsc (mi_module home) >>= either (fail . show) pure
+        let original = home
+        packageRead <- readPackageInterface hsc (mi_module original)
+        assert (case packageRead of Left _ -> True; Right _ -> False)
+          "package interface reader accepted a HOME input"
+        empty <- freshExactContext hsc
+        missingCache <- newFatIfaceCache
+        missing <- lookupFatIfaceExact empty missingCache privateCallerName
+        assert (case missing of FatIfaceLoadFailure{} -> True; _ -> False)
+          "missing HOME owner reopened an existing physical interface"
         let mutable = work </> "FatFixture.hi"
             artifact = ExactIfaceArtifact "main" "FatFixture" "primary-0/iface" "" []
         bytes <- BS.readFile mutable
