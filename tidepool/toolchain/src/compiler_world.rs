@@ -4634,6 +4634,7 @@ pub fn plan_cell(
 /// Physical completion of one world-bound preparation. Only the checked
 /// program issuer in this module can turn these observations into authority.
 struct WorldCellOutputAdmission {
+    compiler_observation: WorldCellCompilerObservation,
     request_correlation: String,
     plan_receipt_sha256: [u8; 32],
     pub(crate) origin: tidepool_extract_cmd::CompilerTransactionOrigin,
@@ -5215,6 +5216,36 @@ impl CheckedWorldCellItem {
     }
 }
 
+/// Diagnostics from the same physical World preparation response. These
+/// observations grant no execution or native-product authority.
+pub struct WorldCellCompilerObservation {
+    stderr: Arc<[u8]>,
+    diagnostics: Vec<crate::diag::ExtractDiag>,
+}
+impl WorldCellCompilerObservation {
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
+    }
+    pub fn diagnostics(&self) -> &[crate::diag::ExtractDiag] {
+        &self.diagnostics
+    }
+}
+
+/// All module rows emitted by one authenticated stage's physical native packet.
+/// This is distinct from its selected targets, demand and retained custody.
+pub struct WorldStageNativeEmission {
+    first_ordinal: usize,
+    owners: Vec<crate::declaration_join::ExactModuleIdentity>,
+}
+impl WorldStageNativeEmission {
+    pub fn first_ordinal(&self) -> usize {
+        self.first_ordinal
+    }
+    pub fn owners(&self) -> &[crate::declaration_join::ExactModuleIdentity] {
+        &self.owners
+    }
+}
+
 /// The SAME-certified checked World CellProgram. It can only be issued from
 /// one physical `WorldCellOutputAdmission`; a raw completion or a decoded
 /// receipt is not authority. It binds the reservation, logical world, labeled
@@ -5246,6 +5277,53 @@ impl CheckedWorldCellProgram {
     #[cfg(test)]
     pub(crate) fn assert_captured_stage_output_refusals(&self) {
         answer_tests::assert_captured_stage_output_refusals(self);
+    }
+
+    pub fn compiler_observation(&self) -> &WorldCellCompilerObservation {
+        &self.output.compiler_observation
+    }
+
+    /// Decode the complete emitted packet of each actual stage, including rows
+    /// outside executable demand. Reads use captured bytes, never scratch paths.
+    /// Ordinary preparation does not pay for this additional diagnostic decode.
+    pub fn emitted_native_modules(&self) -> Result<Vec<WorldStageNativeEmission>, CompileError> {
+        let requirements = crate::prepared_artifact::production_requirements()?;
+        self.output
+            .validation
+            .inventory
+            .reserve::<WorldStageNativeEmission>(self.output.stages.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let mut emissions = Vec::with_capacity(self.output.stages.len());
+        for stage in &self.output.stages {
+            let reference = stage.outputs().module_products();
+            let file = self
+                .output
+                .captured_files
+                .get(reference.relative())
+                .ok_or_else(|| source_failure("World stage lost its captured native packet"))?;
+            let modules = self
+                .output
+                .validation
+                .inventory
+                .parse_module_products(file.bytes(), &requirements)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            self.output
+                .validation
+                .inventory
+                .reserve::<crate::declaration_join::ExactModuleIdentity>(modules.len())
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            emissions.push(WorldStageNativeEmission {
+                first_ordinal: stage.ordinals()[0],
+                owners: modules
+                    .into_iter()
+                    .map(|module| crate::declaration_join::ExactModuleIdentity {
+                        unit: module.unit,
+                        module: module.module,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(emissions)
     }
 
     pub fn reservation(&self) -> &Arc<crate::cell_plan::CompilerWorldCellReservation> {
@@ -5819,19 +5897,31 @@ fn prepare_world_cell_outputs(
             &run.output.stderr,
         );
         let native_demands = native_demands?;
-        crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
+        let report = crate::diag::decode_extract_result(
+            run.success(),
+            &run.output.stdout,
+            &run.output.stderr,
+        )?;
         let bytes = crate::certified_products::read_bounded_with_operation(
             &output,
             8 << 20,
             &validation.inventory,
         )
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        validation
+            .inventory
+            .charge(run.output.stderr.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         admit_world_preparation_response(
             origin,
             run.request_correlation,
             reservation,
             directory,
             &bytes,
+            WorldCellCompilerObservation {
+                stderr: Arc::from(run.output.stderr),
+                diagnostics: report.diagnostics,
+            },
             validation,
             native_demands,
         )
@@ -6513,6 +6603,7 @@ fn admit_world_preparation_response(
     reservation: Arc<crate::cell_plan::CompilerWorldCellReservation>,
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
+    compiler_observation: WorldCellCompilerObservation,
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
     mut native_demands: native_demand::WorldDependencyObservations,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
@@ -6893,6 +6984,7 @@ fn admit_world_preparation_response(
         .reserve::<Arc<CheckedValueArtifact>>(demanded.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     Ok(Ok(WorldCellOutputAdmission {
+        compiler_observation,
         request_correlation,
         plan_receipt_sha256: plan_digest,
         origin,

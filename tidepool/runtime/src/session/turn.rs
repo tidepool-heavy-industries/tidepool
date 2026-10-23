@@ -3554,6 +3554,7 @@ fn prepare_cell_program_admitted_inner(
             admission.initial_value_generation().0,
             "",
         )?;
+        checked.warnings = output.compiler_observation().diagnostics().to_vec();
         checked.authority = Some(program.checked_cell().clone());
         checked.admission = Some(admission.clone());
         tracing::debug!(target: "exomonad_harness::timing", logical_world = ?output.logical().logical_id(), certificate = ?output.certificate_sha256(), origin = ?output.origin(), "world cell compiler output prepared");
