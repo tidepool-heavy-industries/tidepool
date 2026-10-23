@@ -3180,6 +3180,9 @@ pub(crate) struct CapturedCheckedValue {
 }
 
 impl CapturedCheckedValue {
+    pub(crate) fn defining_scope(&self) -> ScopeId {
+        self.entry.scope
+    }
     pub(crate) fn name(&self) -> &str {
         &self.entry.name.0
     }
@@ -9992,7 +9995,9 @@ where
                 .map_err(ResidentError::from)
                 .map_err(ResidentResumeError::Rejected)?;
         }
-        let running = checked.as_ref().map(|completion| RunningCheckedTicket::new(Arc::clone(completion)));
+        let running = checked
+            .as_ref()
+            .map(|completion| RunningCheckedTicket::new(Arc::clone(completion)));
         let resumed = self
             .reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
             .map_err(|error| {

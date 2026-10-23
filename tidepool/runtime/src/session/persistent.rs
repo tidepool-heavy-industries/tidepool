@@ -935,7 +935,7 @@ impl PersistentSession {
         };
         let inputs = prefix
             .scoped_inputs_for(self, execution)
-            .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+            .map_err(|error| PreparedRuntimeError::CheckedInputs(Box::new(error)))?;
         let instantiation =
             self.instantiate_native_plan_in(scope, &plan, selection, |requirement| {
                 inputs.resolve_native_requirement(execution.item(), requirement)
@@ -1012,7 +1012,7 @@ impl PersistentSession {
         if let ResolvedNativeInputs::Scoped(inputs) = &resolved.inputs {
             inputs
                 .validate_live(self)
-                .map_err(|_| PreparedRuntimeError::SourceScopeAdmission)?;
+                .map_err(|error| PreparedRuntimeError::CheckedInputs(Box::new(error)))?;
         }
         let plan = resolved.instantiation.plan();
         let admitted_metadata = self.stage_install_metadata(

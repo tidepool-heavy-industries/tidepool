@@ -30,6 +30,7 @@ pub(in crate::session) struct ScopedResolvedValue {
     pub(in crate::session) handle: PreparedHandle,
     name: String,
     evidence: ScopedValueEvidence,
+    _bindings: Arc<super::super::resident::BindingLease>,
 }
 
 impl ScopedResolvedValue {
@@ -199,11 +200,12 @@ impl ScopedResolvedInputs {
             for value in captured.values() {
                 next.insert(Arc::new(ScopedResolvedValue {
                     id: value.id(),
-                    defining_scope: next.scope.scope(),
+                    defining_scope: value.defining_scope(),
                     identity: value.identity().clone(),
                     generation: value.generation().0,
                     handle: value.handle(),
                     name: value.name().to_owned(),
+                    _bindings: Arc::clone(value.binding_lease()),
                     evidence: ScopedValueEvidence::Produced {
                         row: Arc::clone(row),
                         provenance: Arc::clone(captured.provenance()),
@@ -356,6 +358,7 @@ impl PersistentSession {
     fn resolved_value(
         &self,
         entry: &tidepool_codegen::binding_table::BindingEntry,
+        bindings: Arc<super::super::resident::BindingLease>,
     ) -> Result<Arc<ScopedResolvedValue>, SessionError> {
         if self
             .prepared()
@@ -389,50 +392,34 @@ impl PersistentSession {
             handle: entry.value.handle,
             name: entry.name.0.clone(),
             evidence,
+            _bindings: bindings,
         }))
     }
 
     pub(super) fn bind_world_scoped_inputs(
-        &self,
+        &mut self,
         program: &tidepool_toolchain::checked_cell::CellProgram,
         scope: Arc<RuntimeLexicalScopeLease>,
     ) -> Result<ScopedResolvedInputs, SessionError> {
         use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
         self.validate_lexical_scope_lease(scope.scope(), &scope)?;
-        let scoped = self.scoped_prepared_bindings_in(scope.scope());
-        let mut owner = ScopedResolvedInputs::empty(scope);
-        let mut stages = BTreeMap::new();
+        let mut stage_terminals = BTreeMap::new();
         for item in program.items() {
             let checked = item.checked_item();
-            let dependencies = checked
-                .world_stage_dependencies()
-                .ok_or(super::super::SessionTransitionReason::WrongPhase)?;
             let stage = checked
                 .world_selected_runtime_inputs()
                 .ok_or(super::super::SessionTransitionReason::WrongPhase)?
                 .stage_first_ordinal();
-            if stages.contains_key(&stage) {
-                continue;
-            }
-            let mut uses = Vec::new();
-            for terminal in dependencies.terminals() {
-                let module = tidepool_repr::SessionModule::val(Generation(terminal.generation()));
-                let entry = scoped
-                    .get(&(terminal.identity(), module))
-                    .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
-                let value = self.resolved_value(entry)?;
-                if !terminal.matches_checked_value(value.checked_row()?)? {
-                    return Err(super::super::SessionTransitionReason::PreparedValueChanged.into());
-                }
-                owner.insert(Arc::clone(&value))?;
-                let value = Arc::clone(
-                    owner
-                        .value(terminal.identity(), terminal.generation())
-                        .expect("inserted exact scoped value"),
+            if let std::collections::btree_map::Entry::Vacant(entry) = stage_terminals.entry(stage)
+            {
+                entry.insert(
+                    checked
+                        .world_stage_dependencies()
+                        .ok_or(super::super::SessionTransitionReason::WrongPhase)?
+                        .terminals()
+                        .collect::<Vec<_>>(),
                 );
-                uses.push(ScopedTerminalUse { terminal, value });
             }
-            stages.insert(stage, uses);
         }
         let own_values = program
             .slots()
@@ -443,42 +430,85 @@ impl PersistentSession {
                 _ => None,
             })
             .collect::<std::collections::BTreeSet<_>>();
-        for (identity, generation) in program
-            .items()
-            .iter()
-            .filter_map(|item| item.native())
-            .flat_map(|native| native.required_native_imports())
+        let scoped = self.scoped_prepared_bindings_in(scope.scope());
+        let mut selected_ids = BTreeMap::new();
+        for (identity, generation) in stage_terminals
+            .values()
+            .flatten()
+            .map(|terminal| (terminal.identity(), terminal.generation()))
+            .chain(
+                program
+                    .items()
+                    .iter()
+                    .filter_map(|item| item.native())
+                    .flat_map(|native| native.required_native_imports())
+                    .filter(|(identity, generation)| {
+                        !(own_values.contains(generation)
+                            && identity.unit == "main"
+                            && identity.module
+                                == tidepool_repr::SessionModule::val(Generation(*generation))
+                                    .module_name())
+                    }),
+            )
         {
-            if own_values.contains(&generation)
-                && identity.unit == "main"
-                && identity.module
-                    == tidepool_repr::SessionModule::val(Generation(generation)).module_name()
-            {
-                continue;
-            }
             let entry = scoped
                 .get(&(
                     identity,
                     tidepool_repr::SessionModule::val(Generation(generation)),
                 ))
                 .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
-            owner.insert(self.resolved_value(entry)?)?;
+            selected_ids.insert((identity.clone(), generation), entry.id);
+        }
+        drop(scoped);
+        // This is the existing binding owner's real dependency custody, issued
+        // before a compiler owner can outlive the mutable session checkout.
+        let bindings = Arc::new(self.lease_binding_ids(selected_ids.values().copied()));
+        let mut owner = ScopedResolvedInputs::empty(scope);
+        for id in selected_ids.into_values() {
+            let entry = self
+                .bindings()
+                .get(id)
+                .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
+            owner.insert(self.resolved_value(entry, Arc::clone(&bindings))?)?;
+        }
+        let mut stages = BTreeMap::new();
+        for (stage, terminals) in stage_terminals {
+            let mut uses = Vec::with_capacity(terminals.len());
+            for terminal in terminals {
+                let value = Arc::clone(
+                    owner
+                        .value(terminal.identity(), terminal.generation())
+                        .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?,
+                );
+                if !terminal.matches_checked_value(value.checked_row()?)? {
+                    return Err(super::super::SessionTransitionReason::PreparedValueChanged.into());
+                }
+                uses.push(ScopedTerminalUse { terminal, value });
+            }
+            stages.insert(stage, uses);
         }
         owner.stages = Arc::new(stages);
         Ok(owner)
     }
 
     pub(super) fn capture_admitted_scoped_inputs(
-        &self,
+        &mut self,
         scope: Arc<RuntimeLexicalScopeLease>,
     ) -> Result<ScopedResolvedInputs, SessionError> {
         self.validate_lexical_scope_lease(scope.scope(), &scope)?;
+        let ids = self
+            .scoped_prepared_bindings_in(scope.scope())
+            .into_values()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let bindings = Arc::new(self.lease_binding_ids(ids.iter().copied()));
         let mut owner = ScopedResolvedInputs::empty(scope);
-        for entry in self
-            .scoped_prepared_bindings_in(owner.scope.scope())
-            .values()
-        {
-            owner.insert(self.resolved_value(entry)?)?;
+        for id in ids {
+            let entry = self
+                .bindings()
+                .get(id)
+                .ok_or(super::super::SessionTransitionReason::RetainedValueUnavailable)?;
+            owner.insert(self.resolved_value(entry, Arc::clone(&bindings))?)?;
         }
         Ok(owner)
     }

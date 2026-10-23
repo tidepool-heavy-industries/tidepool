@@ -295,6 +295,8 @@ impl Default for PackageOwnerDiagnosticLimits {
 pub enum PreparedRuntimeError {
     #[error(transparent)]
     SourceAdmission(#[from] super::SourceAdmissionError),
+    #[error("checked runtime inputs refused: {0}")]
+    CheckedInputs(#[source] Box<super::SessionError>),
     #[error(transparent)]
     ConstructorMetadata(#[from] tidepool_repr::datacon_table::ConstructorMetadataMismatch),
     #[error(transparent)]
@@ -559,6 +561,7 @@ impl PreparedRuntimeError {
     pub fn stage(&self) -> PreparedFailureStage {
         match self {
             Self::SourceAdmission(_)
+            | Self::CheckedInputs(_)
             | Self::Parse(_)
             | Self::ConstructorMetadata(_)
             | Self::ConstructorMetadataCollision(_)
@@ -676,9 +679,10 @@ impl PreparedRuntimeError {
                 PreparedFailureKind::Integrity
             }
             Self::Cancelled => PreparedFailureKind::Cancelled,
-            Self::Compile(_) | Self::NativeSourceEvidence(_) | Self::SourceAdmission(_) => {
-                PreparedFailureKind::Rejected
-            }
+            Self::Compile(_)
+            | Self::NativeSourceEvidence(_)
+            | Self::SourceAdmission(_)
+            | Self::CheckedInputs(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
             Self::Handler { .. } => PreparedFailureKind::Language,
             Self::Install(error) | Self::Run(error) => match error {

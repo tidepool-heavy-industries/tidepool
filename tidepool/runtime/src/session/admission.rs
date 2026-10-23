@@ -3508,7 +3508,7 @@ fn prepare_checked_snapshot(
             }
         }
     }
-    let retained = session.retain_current_lexical_scope(scope)?;
+    let retained = Arc::clone(&admission._retained_scope);
     let scoped_inputs = state
         .snapshot()
         .scoped_inputs
@@ -5007,7 +5007,7 @@ impl PersistentSession {
     }
 
     pub fn begin_cell_program(
-        &self,
+        &mut self,
         settled: super::SettledCellProgram,
     ) -> Result<Option<Arc<RuntimeCheckedPrefix>>, SessionError> {
         settled.checkpoint()?;
@@ -5026,7 +5026,7 @@ impl PersistentSession {
     }
 
     fn begin_world_cell_program(
-        &self,
+        &mut self,
         admission: Arc<RuntimeCellAdmission>,
         program: Arc<tidepool_toolchain::checked_cell::CellProgram>,
         settled: super::SettledCellProgram,
@@ -7187,7 +7187,7 @@ mod tests {
                 let ledger = Arc::new(
                     session
                         .capture_admitted_scoped_inputs(
-                            session.retain_current_lexical_scope(public).unwrap(),
+                            session.prepared_lexical_scope_lease(public).unwrap(),
                         )
                         .unwrap(),
                 );
@@ -7204,7 +7204,7 @@ mod tests {
                 session.bind_in(public, replacement).unwrap();
                 assert!(session
                     .capture_admitted_scoped_inputs(
-                        session.retain_current_lexical_scope(public).unwrap()
+                        session.prepared_lexical_scope_lease(public).unwrap()
                     )
                     .unwrap()
                     .value(&replacement_identity, 913)
@@ -7457,7 +7457,7 @@ mod tests {
             let identity = first.value.identity.clone();
             let root = first.value.handle;
             session.bind_in(public, first).unwrap();
-            let lease = session.retain_current_lexical_scope(public).unwrap();
+            let lease = session.prepared_lexical_scope_lease(public).unwrap();
             let owner = session
                 .capture_admitted_scoped_inputs(Arc::clone(&lease))
                 .unwrap();
@@ -7474,7 +7474,7 @@ mod tests {
             session.bind_in(public, later).unwrap();
             let next = session
                 .capture_admitted_scoped_inputs(
-                    session.retain_current_lexical_scope(public).unwrap(),
+                    session.prepared_lexical_scope_lease(public).unwrap(),
                 )
                 .unwrap();
             assert!(next.value(&later_identity, 461).is_some());
@@ -7483,7 +7483,7 @@ mod tests {
             let _isolated_source = session.adopt_initial_notebook_scope(isolated).unwrap();
             let isolated = session
                 .capture_admitted_scoped_inputs(
-                    session.retain_current_lexical_scope(isolated).unwrap(),
+                    session.prepared_lexical_scope_lease(isolated).unwrap(),
                 )
                 .unwrap();
             assert!(isolated.value(&identity, 460).is_none());
@@ -7551,14 +7551,14 @@ mod tests {
             let sibling = session.mint_scope(ScopeId::ROOT).unwrap();
             let before = session
                 .capture_admitted_scoped_inputs(
-                    session.retain_current_lexical_scope(scope).unwrap(),
+                    session.prepared_lexical_scope_lease(scope).unwrap(),
                 )
                 .unwrap();
             assert!(!before.value(&key.0, key.1).is_some());
             session.bind_in(scope, unbound).unwrap();
             let admitted = session
                 .capture_admitted_scoped_inputs(
-                    session.retain_current_lexical_scope(scope).unwrap(),
+                    session.prepared_lexical_scope_lease(scope).unwrap(),
                 )
                 .unwrap();
             assert!(admitted.value(&key.0, key.1).is_some());
@@ -7571,7 +7571,7 @@ mod tests {
             assert_ne!(handle, 0);
             let unrelated = session
                 .capture_admitted_scoped_inputs(
-                    session.retain_current_lexical_scope(sibling).unwrap(),
+                    session.prepared_lexical_scope_lease(sibling).unwrap(),
                 )
                 .unwrap();
             assert!(!unrelated.value(&key.0, key.1).is_some());
