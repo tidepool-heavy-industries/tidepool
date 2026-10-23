@@ -5705,7 +5705,7 @@ fn prepare_world_cell_outputs(
         let run = bound
             .execute_with_native_demand(&command, owner, &mut resolver)
             .map_err(CompileError::CompilerEndpoint);
-        let (native_demands, refusal) = resolver.finish();
+        let native_demands = resolver.finish();
         let run = run?;
 
         diagnostics.completed(
@@ -5714,9 +5714,7 @@ fn prepare_world_cell_outputs(
             run.success(),
             &run.output.stderr,
         );
-        if let Some(refusal) = refusal {
-            return Err(refusal);
-        }
+        let native_demands = native_demands?;
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
         let bytes = crate::certified_products::read_bounded_with_operation(
             &output,
