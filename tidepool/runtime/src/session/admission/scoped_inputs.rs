@@ -239,9 +239,9 @@ impl ScopedResolvedInputs {
         item: &tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<(), SessionError> {
         session.validate_lexical_scope_lease(self.scope.scope(), &self.scope)?;
-        let Some(inputs) = item.world_selected_runtime_inputs() else {
-            return Ok(());
-        };
+        let inputs = item
+            .world_selected_runtime_inputs()
+            .ok_or(super::super::SessionTransitionReason::WrongPhase)?;
         let stage = self
             .stages
             .get(&inputs.stage_first_ordinal())
