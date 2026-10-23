@@ -40,7 +40,7 @@ module Tidepool.ExactHydration
   , generatedActivationPreviewRecipe, captureGeneratedScaffoldTarget
   , CapturedGeneratedScaffoldSource, captureGeneratedScaffoldSource
   , capturedGeneratedScaffoldBytes, capturedGeneratedScaffoldPath
-  , capturedSourceImportOrigins
+  , capturedSourceImportOrigins, capturedGeneratedScaffoldOrigins, parseCapturedGeneratedImports
   , IssuedSourceImports, issueSourceImports, sourceImportsSnapshot
   , sourceImportsHomeRoles
   , permitsGeneratedScaffoldImport
@@ -87,8 +87,9 @@ import GHC.Unit.Home.ModInfo
 import GHC.Iface.Load (readIface, loadInterface, WhereFrom(..))
 import GHC.Driver.Session (DynFlags, importPaths, ghcMode, GhcMode(CompManager), xopt)
 import GHC.Driver.Config.Parser (initParserOpts)
-import qualified GHC.Parser as Parser (parseHeader)
-import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import qualified GHC.Parser as Parser (parseHeader, parseModule)
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP, getPsErrorMessages)
+import GHC.Types.Error (isEmptyMessages)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, fsLit)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef', atomicModifyIORef')
@@ -143,6 +144,7 @@ import System.Directory (canonicalizePath)
 import GHC.Fingerprint.Type (Fingerprint)
 import System.IO (fixIO)
 import Tidepool.TurnSource (preambleImportMarker, ImportOrigin(..), ImportRendering, importRenderingSource, importRenderingOrigins)
+import Tidepool.ImportSyntax (ImportDescriptor, describeImport, CapturedImportSyntax, captureImportSyntax)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -343,7 +345,7 @@ data GeneratedScaffoldRecipe = GeneratedScaffoldRecipe FilePath String BS.ByteSt
   GeneratedScaffoldInstanceScope GeneratedScaffoldPurpose [(Int,Int,ImportOrigin)]
   deriving (Eq)
 
-newtype TemplateImportShape = TemplateImportShape String
+newtype TemplateImportShape = TemplateImportShape ImportDescriptor
   deriving (Eq)
 
 instance Show TemplateImportShape where
@@ -401,7 +403,7 @@ captureProtectedTemplateImportsAt marker flags source = do
         owner = moduleNameString (unLoc (ideclName declaration))
         line = 1 + length (filter (== '\n') before)
         imported = take (end-start) (drop start source)
-        shape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+    shape <- TemplateImportShape <$> either (Left . show) Right (describeImport declaration)
     pure (ProtectedTemplateImport owner line (start-first) imported shape)
   case insertionBoundaries of
     [] -> pure (ProtectedTemplateImports source False occurrences)
@@ -574,6 +576,30 @@ capturedGeneratedScaffoldBytes (CapturedGeneratedScaffoldSource _ bytes _) = byt
 
 capturedGeneratedScaffoldPath :: CapturedGeneratedScaffoldSource -> FilePath
 capturedGeneratedScaffoldPath (CapturedGeneratedScaffoldSource path _ _) = path
+
+-- Call only after the root's effective flags and compile-purpose policy have
+-- been admitted. Parsing does not load interfaces or execute finite TH syntax.
+-- The resulting raw AST is retained for demand analysis and driver matching.
+parseCapturedGeneratedImports :: DynFlags -> CapturedGeneratedScaffoldSource
+  -> Either String CapturedImportSyntax
+parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource path bytes _) =
+  case unP Parser.parseModule parser of
+    PFailed _ -> Left "GHC could not parse the captured generated root"
+    POk state parsed -> do
+      unless (isEmptyMessages (getPsErrorMessages state))
+        (Left "GHC reported errors in the captured generated root")
+      _ <- capturedSourceImportOrigins captured parsed
+      either (Left . show) Right (captureImportSyntax parsed)
+  where
+    parser = initParserState (initParserOpts flags)
+      (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
+      (mkRealSrcLoc (mkFastString path) 1 1)
+
+-- This projection is DATA until parseCapturedGeneratedImports has checked
+-- complete occurrence coverage and the higher owner has bound the root.
+capturedGeneratedScaffoldOrigins :: CapturedGeneratedScaffoldSource -> [ImportOrigin]
+capturedGeneratedScaffoldOrigins (CapturedGeneratedScaffoldSource _ _ census) =
+  [origin | (_,_,origin) <- census]
 
 capturedSourceImportOrigins :: CapturedGeneratedScaffoldSource -> Located (HsModule GhcPs)
   -> Either String [ImportOrigin]

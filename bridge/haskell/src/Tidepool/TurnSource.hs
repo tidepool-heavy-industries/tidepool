@@ -18,7 +18,9 @@ module Tidepool.TurnSource
   , preambleDefaultDeclaration, preambleImportMarker, preambleDefaultMarker, importQualifierNamespaces
   , PreparedDeclarationTemplate, prepareDeclarationTemplate, renderPreparedDeclaration
   , ImportOrigin(..)
-  , ImportRendering, literalImportRendering, locatedImportRendering, appendImportRendering
+  , ImportRendering, literalImportRendering, appendImportRendering
+  , AuthoredImports, InheritedImports, ProtectedImports
+  , authoredImportsRendering, inheritedImportsRendering, protectedImportsRendering
   , replaceImportRendering, importRenderingSource, importRenderingOrigins
   , spliceImportRendering
   , qualifyCompilerDefaultRendering, prepareDeclarationTemplateWithImports
@@ -50,22 +52,13 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Tidepool.ExtractUtil (shaHex)
-
--- Import origin is recorded before rendering merges compiler and authored
--- syntax. It classifies source reachability, never TYPE or native permission.
-data ImportOrigin = AuthoredCurrent | InheritedLexical | ProtectedCompiler
-  deriving (Eq, Ord, Show)
-
--- Physical decoded-character ranges move with the source edits that render
--- imports. GHC's BufPos uses these offsets, independently of LINE pragmas.
-data ImportRendering = ImportRendering String [(Int, Int, ImportOrigin)]
-  deriving (Eq, Show)
+import Tidepool.ImportSyntax.Internal
+  ( ImportOrigin(..), ImportRendering(..)
+  , AuthoredImports, InheritedImports, ProtectedImports(..)
+  , authoredImportsRendering, inheritedImportsRendering, protectedImportsRendering )
 
 literalImportRendering :: String -> ImportRendering
 literalImportRendering source = ImportRendering source []
-
-locatedImportRendering :: ImportOrigin -> String -> ImportRendering
-locatedImportRendering origin source = ImportRendering source [(0, length source, origin)]
 
 importRenderingSource :: ImportRendering -> String
 importRenderingSource (ImportRendering source _) = source
@@ -183,7 +176,7 @@ qualifyCompilerDefaultRendering (PrimitiveCompilerDefault templateNamespaces) im
         ++ " " ++ moduleNameString (moduleName (nameModule name)) ++ " as " ++ moduleNameString alias ++ "\n"
       qualified alias name = moduleNameString alias ++ "." ++ occNameString (nameOccName name)
       imports = foldl appendImportRendering (literalImportRendering "")
-        (map (locatedImportRendering ProtectedCompiler)
+        (map (protectedImportsRendering . ProtectedImports)
           [primitive intAlias intTyConName, primitive doubleAlias doubleTyConName
           ,"import qualified \"text\" Data.Text as " ++ moduleNameString textAlias ++ "\n"])
       replacement = appendImportRendering imports (literalImportRendering

@@ -26,7 +26,8 @@ module Tidepool.Binders
   , renderCellSplitError
   , PragmaKind(..)
   , LocatedPragma(..)
-  , LocatedImport(..), ImportIntent(..)
+  , LocatedImport, ImportIntent(..)
+  , locatedImportSpan, locatedImportSource, locatedImportIntent, locatedImportNamespaces
   , SourcePrologue(..)
   , DeclarationSource(..)
   , CellSourcePlan(..)
@@ -85,7 +86,6 @@ import GHC.Parser.Lexer
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString, unpackFS)
-import GHC.Types.PkgQual (RawPkgQual(..))
 import GHC.Types.SrcLoc (mkRealSrcLoc, advanceSrcLoc, realSrcSpanStart, realSrcSpanEnd, srcLocLine)
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString, isSymOcc)
@@ -111,11 +111,16 @@ import Tidepool.ExecutionSchema (TypeIdentity)
 import Tidepool.HostBindingAuthority (HostBindingAuthority(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
+import Tidepool.ImportSyntax.Internal
+  ( CellSourceSpan(..), LocatedImport(..), ImportIntent(..)
+  , locatedImportSpan, locatedImportSource, locatedImportIntent, locatedImportNamespaces
+  , AuthoredImports(..), InheritedImports(..), ProtectedImports(..)
+  , authoredImportsRendering, inheritedImportsRendering, protectedImportsRendering )
 import Tidepool.TurnSource
   ( CompilerDefaultRecipe, emptyCompilerDefaultRecipe
   , captureCompilerDefaultRecipe
   , importQualifierNamespaces
-  , ImportOrigin(..), ImportRendering, literalImportRendering, locatedImportRendering
+  , ImportRendering, literalImportRendering
   , appendImportRendering, replaceImportRendering, importRenderingSource
   , qualifyCompilerDefaultRendering, prepareDeclarationTemplateWithImports
   , renderPreparedDeclarationWithImports, preparedDeclarationImportOffset )
@@ -261,15 +266,6 @@ data StmtBinders = StmtBinders
   , sbDeclItems :: [ExportItem]
   } deriving (Eq, Show)
 
--- | Exact cell coordinates reported by GHC's lexer. Lines and columns are
--- one-based, matching GHC diagnostics.
-data CellSourceSpan = CellSourceSpan
-  { cellStartLine :: Int
-  , cellStartColumn :: Int
-  , cellEndLine :: Int
-  , cellEndColumn :: Int
-  } deriving (Eq, Show)
-
 -- | One source item in a notebook cell. Lexical items retain complete original
 -- lines. Parsed statement fragments retain their original columns and interior
 -- bytes; preceding statements on the first line become column-preserving spaces.
@@ -318,38 +314,6 @@ data LocatedPragma = LocatedPragma
   { locatedPragmaKind :: PragmaKind
   , locatedPragmaSpan :: CellSourceSpan
   , locatedPragmaSource :: String
-  } deriving (Eq, Show)
-
--- Only an import parsed from the submitted prologue demands current source.
--- Imports installed by checking/program scaffolds retain their exact owners.
-data ImportIntent
-  = AuthoredSourceImport ModuleName RawPkgQual
-  | InheritedLexicalImport
-  | ProtectedCompilerImport
-
-instance Eq ImportIntent where
-  AuthoredSourceImport leftOwner leftQualifier == AuthoredSourceImport rightOwner rightQualifier =
-    leftOwner == rightOwner && sameQualifier leftQualifier rightQualifier
-    where
-      sameQualifier NoRawPkgQual NoRawPkgQual = True
-      sameQualifier (RawPkgQual left) (RawPkgQual right) = left == right
-      sameQualifier _ _ = False
-  InheritedLexicalImport == InheritedLexicalImport = True
-  ProtectedCompilerImport == ProtectedCompilerImport = True
-  _ == _ = False
-
-instance Show ImportIntent where
-  show (AuthoredSourceImport owner qualifier) =
-    "AuthoredSourceImport " ++ moduleNameString owner ++ " "
-      ++ showSDocOneLine defaultSDocContext (ppr qualifier)
-  show InheritedLexicalImport = "InheritedLexicalImport"
-  show ProtectedCompilerImport = "ProtectedCompilerImport"
-
-data LocatedImport = LocatedImport
-  { locatedImportSpan :: CellSourceSpan
-  , locatedImportSource :: String
-  , locatedImportIntent :: ImportIntent
-  , locatedImportNamespaces :: [ModuleName]
   } deriving (Eq, Show)
 
 data SourcePrologue = SourcePrologue
@@ -970,10 +934,11 @@ renderDeclarationForTemplate template source =
 locatedImportsRendering :: [LocatedImport] -> ImportRendering
 locatedImportsRendering = foldl appendImportRendering (literalImportRendering "") . map render
   where
-    render imported = locatedImportRendering (case locatedImportIntent imported of
-      AuthoredSourceImport _ _ -> AuthoredCurrent
-      InheritedLexicalImport -> InheritedLexical
-      ProtectedCompilerImport -> ProtectedCompiler) (locatedImportSource imported ++ "\n")
+    render imported = case locatedImportIntent imported of
+      AuthoredSourceImport _ _ -> authoredImportsRendering (AuthoredImports source)
+      InheritedLexicalImport -> inheritedImportsRendering (InheritedImports source)
+      ProtectedCompilerImport -> protectedImportsRendering (ProtectedImports source)
+      where source = locatedImportSource imported ++ "\n"
 
 renderDeclarationForTemplateWithImports :: String -> DeclarationSource -> Either String (ImportRendering,Int)
 renderDeclarationForTemplateWithImports template source = do

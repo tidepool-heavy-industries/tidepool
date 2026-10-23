@@ -148,7 +148,11 @@ library tidepool-extract-internal
     Tidepool.TypedSegment
     Tidepool.TypedSegment.Source
     Tidepool.TurnSource
+    Tidepool.ImportSyntax
+    Tidepool.ImportAdmission
   other-modules:   Tidepool.FinalizedModule.Internal
+                   Tidepool.ImportSyntax.Internal
+                   Tidepool.CheckedCell.Internal
                    Tidepool.LocalNativeDeclaration
                    Tidepool.ResumePackage
                    Tidepool.TypedSegment.Types
