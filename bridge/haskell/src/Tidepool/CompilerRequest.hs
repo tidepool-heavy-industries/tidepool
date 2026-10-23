@@ -54,6 +54,7 @@ import Tidepool.CompilerProducts
   , currentOriginalBindingsExcept, currentReconciledOriginalProducts )
 import Tidepool.DiagJson (InputRejection(..), SourceRejection(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), ExactInterfaceOperations, OriginalInterfaceArtifacts)
+import Tidepool.ImportAdmission (compilationScope)
 import Tidepool.ExactScope
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), WireProgram(..), SiteRow(..), ProjectedGroup(..), GlobalDecl(..) )
