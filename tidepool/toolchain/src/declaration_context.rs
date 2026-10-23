@@ -34744,9 +34744,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
         }
         .unwrap_err();
-        assert_context_refusal(
-            &hidden_refusal,
-            "program support cannot select a retained hidden owner",
+        assert!(
+            matches!(&hidden_refusal, CompileError::SourceAdmission(error)
+            if error.owner == identity("fixture", "Consumer")
+                && error.boundary == SourceAdmissionBoundary::FiniteRequest
+                && error.claim == Some(SourceLexicalClaim::FreshSource)
+                && error.held == Some(ArtifactKind::OriginalModule)
+                && error.reason == SourceAdmissionRefusal::HiddenOriginalPromotion),
+            "the fresh-source claim must refuse at its held Original owner: {hidden_refusal:?}"
         );
 
         let before = projected.context().semantic_sha256();
