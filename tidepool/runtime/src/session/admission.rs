@@ -2829,7 +2829,7 @@ impl RuntimeCheckedPrefix {
         session: &PersistentSession,
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+    ) -> Result<RunningCheckedTicket, SessionError> {
         if let Some(private) = self.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -2947,11 +2947,16 @@ impl RuntimeCheckedPrefix {
             }
             state.begin_running(execution)
         })??;
-        super::complete_native_transition(admission)?;
-        Ok(Arc::new(CheckedTurnCompletion {
+        let completion = Arc::new(CheckedTurnCompletion {
             prefix: self.clone(),
             running,
-        }))
+        });
+        // Settlement may fail or unwind after the phase changed. Release the
+        // phase lock before its existing failure guard can settle that state.
+        drop(state);
+        let ticket = RunningCheckedTicket::new(Arc::clone(&completion));
+        super::complete_native_transition(admission)?;
+        Ok(ticket)
     }
 }
 
@@ -2987,6 +2992,38 @@ pub(crate) struct CheckedTurnCompletion {
     prefix: Arc<RuntimeCheckedPrefix>,
     running: Arc<RunningCheckedItem>,
 }
+
+/// The active invocation owns failure settlement until it transfers the
+/// obligation to a captured result or the actual parked continuation.
+pub(crate) struct RunningCheckedTicket {
+    completion: Option<Arc<CheckedTurnCompletion>>,
+}
+
+impl RunningCheckedTicket {
+    pub(crate) fn new(completion: Arc<CheckedTurnCompletion>) -> Self {
+        Self {
+            completion: Some(completion),
+        }
+    }
+
+    pub(crate) fn completion(&self) -> &Arc<CheckedTurnCompletion> {
+        self.completion.as_ref().expect("an active running ticket")
+    }
+
+    pub(crate) fn handoff(mut self) {
+        self.completion.take();
+    }
+}
+
+impl Drop for RunningCheckedTicket {
+    fn drop(&mut self) {
+        if let Some(completion) = &self.completion {
+            completion.fail();
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(RunningCheckedTicket: Clone, Copy);
 
 /// The exact running operation transfers its one capture obligation. Dropping
 /// an uncommitted capture cannot make a successful private frontier.

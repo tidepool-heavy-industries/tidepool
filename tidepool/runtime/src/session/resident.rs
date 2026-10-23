@@ -21,7 +21,7 @@ use tidepool_repr::execution_schema::{
     ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
 };
 
-use super::admission::{CheckedCaptureTicket, CheckedTurnCompletion};
+use super::admission::{CheckedCaptureTicket, CheckedTurnCompletion, RunningCheckedTicket};
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement, HOME_UNIT};
 use super::turn::{TurnCode, TurnPurpose};
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -3257,32 +3257,6 @@ enum PreparedExecutionPurpose<'a> {
     },
 }
 
-/// The active invocation owns failure settlement until it transfers the
-/// obligation to a captured result or the actual parked continuation.
-struct RunningCheckedTicket {
-    completion: Option<Arc<CheckedTurnCompletion>>,
-}
-
-impl RunningCheckedTicket {
-    fn completion(&self) -> &Arc<CheckedTurnCompletion> {
-        self.completion.as_ref().expect("an active running ticket")
-    }
-
-    fn handoff(mut self) {
-        self.completion.take();
-    }
-}
-
-impl Drop for RunningCheckedTicket {
-    fn drop(&mut self) {
-        if let Some(completion) = &self.completion {
-            completion.fail();
-        }
-    }
-}
-
-static_assertions::assert_not_impl_any!(RunningCheckedTicket: Clone, Copy);
-
 enum TurnInstallationAdmission<'a> {
     Compilation,
     ActivationPreviewFresh(&'a RuntimeActivationPreviewAdmission),
@@ -3406,11 +3380,7 @@ impl PreparedCheckedTurn {
         session: &PersistentSession,
         scope: ScopeId,
     ) -> Result<RunningCheckedTicket, SessionError> {
-        self.prefix
-            .start(session, scope, self.execution)
-            .map(|completion| RunningCheckedTicket {
-                completion: Some(completion),
-            })
+        self.prefix.start(session, scope, self.execution)
     }
 }
 
@@ -4950,16 +4920,6 @@ where
         }
         self.settle_dropped_custody();
         self.state.adopt_checked_declaration(admission)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_checked_item_for_test(
-        &self,
-        prefix: &Arc<super::RuntimeCheckedPrefix>,
-        scope: ScopeId,
-        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<super::admission::CheckedTurnCompletion>, SessionError> {
-        prefix.start(&self.state, scope, execution)
     }
 
     /// Finalize the current writes selected by this resident owner. Private
@@ -10096,9 +10056,7 @@ where
                 .map_err(ResidentError::from)
                 .map_err(ResidentResumeError::Rejected)?;
         }
-        let running = checked.as_ref().map(|completion| RunningCheckedTicket {
-            completion: Some(Arc::clone(completion)),
-        });
+        let running = checked.as_ref().map(|completion| RunningCheckedTicket::new(Arc::clone(completion)));
         let resumed = self
             .reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
             .map_err(|error| {
