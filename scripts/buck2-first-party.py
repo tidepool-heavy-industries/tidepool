@@ -1947,6 +1947,8 @@ tidepool_buildscript_run(
                 'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes',
                 'declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand',
                 'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner',
+                'declaration_context::native_availability_tests::retained_template_capture_uses_selected_canonical_with_historical_custody',
+                'declaration_context::native_availability_tests::retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody',
             ]
             toolchain_resident_cases = (
                 toolchain_existing_resident_cases + toolchain_output_context_cases
@@ -2385,6 +2387,8 @@ tidepool_buildscript_run(
                 "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes",
                 "declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand",
                 "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner",
+                "declaration_context::native_availability_tests::retained_template_capture_uses_selected_canonical_with_historical_custody",
+                "declaration_context::native_availability_tests::retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody",
             ]
             rules.append("\n".join([
                 "tidepool_rust_test_cases(",
@@ -2395,8 +2399,8 @@ tidepool_buildscript_run(
                 f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
                 "    exact_tests = [",
                 render_strings(source_proof_cases, 8),
-                "    ],", "    expected_count = 4,", "    ignored = True,",
-                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 2460000,",
+                "    ],", f"    expected_count = {len(source_proof_cases)},", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 3660000,",
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
