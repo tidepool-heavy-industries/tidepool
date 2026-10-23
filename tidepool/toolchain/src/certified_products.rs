@@ -25061,8 +25061,8 @@ pub(crate) mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        // Physical issuance needs the actual future TYPE dependency. The item
-        // projection below removes its compiler role without granting a value.
+        // Physical issuance needs the actual future TYPE dependency. The private
+        // handoff below removes its compiler role without granting a value.
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let mut physical = CertifiedSourceSelection::from_compiler_projection(
             &projection,

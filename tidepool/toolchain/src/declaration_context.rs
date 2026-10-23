@@ -29910,7 +29910,8 @@ mod tests {
             )
         });
         // Current-source replay and native availability are separate proofs.
-        // These zero-group originals have genuine production recovery witnesses.
+        // These representation fixtures authenticate recovery evidence separately
+        // from current-source replay.
         let products = crate::certified_products::tests::recovered_witness_fixtures(&products)
             .into_iter()
             .map(|recovered| recovered.product)
@@ -33037,7 +33038,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     }
 
     #[test]
-    fn program_support_refuses_ambiguous_selected_source_owner() {
+    fn completed_source_observation_rejects_duplicate_module_owners() {
         let directory = tempfile::tempdir().unwrap();
         let admission = support_admission(directory.path());
         let mut evidence = Arc::unwrap_or_clone(admission.evidence).into_evidence();

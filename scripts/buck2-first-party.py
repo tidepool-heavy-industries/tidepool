@@ -2021,6 +2021,8 @@ tidepool_buildscript_run(
                 'certified_products::tests::publication_request_history::generated_publication_support_and_recovery_preserve_issuer_selection',
             ]
             toolchain_source_admission_cases = [
+                'certified_products::tests::native_request_history::actual_source_handoff_preserves_sealed_native_dependency',
+                'certified_products::tests::promotion_import_history::retained_core_promotion_rekeys_nonempty_source_import_history',
                 'declaration_context::tests::exact_product_binding_preserves_lexical_evidence_and_request_identity',
                 'declaration_context::tests::generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot',
                 'declaration_context::tests::terminal_output_source_scope_keeps_required_owners_and_canonical_identity',

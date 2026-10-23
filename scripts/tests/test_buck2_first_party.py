@@ -1751,6 +1751,8 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             'declaration_context::native_availability_tests::retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody': 'owned-resident',
         }
         expected_modes.update({name: 'owned-resident' for name in (
+            'certified_products::tests::native_request_history::actual_source_handoff_preserves_sealed_native_dependency',
+            'certified_products::tests::promotion_import_history::retained_core_promotion_rekeys_nonempty_source_import_history',
             'declaration_context::tests::exact_product_binding_preserves_lexical_evidence_and_request_identity',
             'declaration_context::tests::generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot',
             'declaration_context::tests::terminal_output_source_scope_keeps_required_owners_and_canonical_identity',
