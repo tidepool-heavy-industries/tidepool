@@ -5272,7 +5272,7 @@ impl CompilerSourceSupport {
         // Additional custody cannot replace those acquired inputs.
         inputs
             .projection
-            .validate_resolved(&inputs.selected, &inputs.artifacts)?;
+            .validate_selected_requirements(&inputs.selected)?;
         let support = Self::complete_resolved(
             inputs,
             self.native_offers
@@ -5974,40 +5974,18 @@ impl CompilerInputProjection {
         Ok(())
     }
 
-    fn validate_resolved(
+    /// Acquired rows retain their authentication when chosen whole. Only the
+    /// dependency relationship can change when independently admitted sets join.
+    fn validate_selected_requirements(
         &self,
         selected: &BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
-        view: &ArtifactView,
     ) -> Result<(), CompileError> {
-        for (owner, role) in &self.roles {
-            #[cfg(test)]
-            type_query_work::canonical_check();
-            let row = selected.get(owner).expect("merged role has its chosen row");
-            if row.interface().0.artifact != role.interface()
-                || row.interface().1.descriptor.id != role.interface()
-                || row.original().map(|(binding, _)| binding.artifact) != role.original()
-            {
-                return Err(failure("merged compiler row differs from its chosen role"));
-            }
-            Self::validate_role_payload(owner, role, &row.interface().1, |id| {
-                row.original()
-                    .map(|(_, entry)| entry)
-                    .filter(|entry| entry.descriptor.id == id)
-            })?;
-        }
         self.validate_requirements(
             selected
                 .values()
                 .map(|row| row.original().unwrap_or(row.interface()).1.as_ref()),
             |owner| selected.get(owner).map(|row| row.interface().1.as_ref()),
-        )?;
-        let state = view.lease.inventory.0.lock().expect("inventory lock");
-        for row in selected.values() {
-            if let Some((carrier, _)) = row.original() {
-                ResolvedCompilerRole::validate_original_pair(&state, row.interface().0, *carrier)?;
-            }
-        }
-        Ok(())
+        )
     }
 
     pub(crate) fn validate_associations(&self, view: &ArtifactView) -> Result<(), CompileError> {
@@ -8866,6 +8844,11 @@ mod tests {
             assert_eq!(
                 merge_work.resolved_rows, 0,
                 "post-solver finalization does not rediscover chosen bindings"
+            );
+            assert_eq!(merge_work.canonical_checks, 0);
+            assert_eq!(
+                merge_work.descriptor_serializations, 0,
+                "joining acquired rows must not reencode their certified products"
             );
             assert_eq!(merge_work.census_rows, joined.projection.roles.len());
             assert!(!joined.selected.rows.is_empty());

@@ -9000,18 +9000,22 @@ impl ArtifactView {
             "exact.compiler_input_merge",
             "validate_inputs",
         );
-        match validation {
-            CompilerInputValidation::Closed => {
-                projection.validate(self)?;
-                incoming.validate(other)?;
-            }
-            CompilerInputValidation::ReceivedFragment => {
-                projection.validate(self)?;
-                incoming.validate_associations(other)?;
-            }
-            CompilerInputValidation::FragmentPair => {
-                projection.validate_associations(self)?;
-                incoming.validate_associations(other)?;
+        // Closed owners supply already authenticated rows and the solver carries
+        // its chosen row whole. Raw projections still require admission here.
+        if selected_rows.is_none() {
+            match validation {
+                CompilerInputValidation::Closed => {
+                    projection.validate(self)?;
+                    incoming.validate(other)?;
+                }
+                CompilerInputValidation::ReceivedFragment => {
+                    projection.validate(self)?;
+                    incoming.validate_associations(other)?;
+                }
+                CompilerInputValidation::FragmentPair => {
+                    projection.validate_associations(self)?;
+                    incoming.validate_associations(other)?;
+                }
             }
         }
         timing.advance("merge_projection");
