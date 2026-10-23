@@ -236,13 +236,18 @@ impl NativeAuthoredDeclarationAdmission {
                 "authored World original differs from its admitted generated source",
             ));
         }
-        let generation = match program.reservation().slots().get(ordinal) {
+        let generation = match program
+            .reservation()
+            .items()
+            .get(ordinal)
+            .map(|item| item.slot())
+        {
             Some(CheckedPlannedCellSlot::Declaration {
                 declaration: generation,
-            }) if declaration => *generation,
+            }) if declaration => generation,
             Some(CheckedPlannedCellSlot::Prologue {
                 declaration: generation,
-            }) if !declaration => *generation,
+            }) if !declaration => generation,
             _ => {
                 return Err(contract(
                     "authored World stage differs from its reserved slot",

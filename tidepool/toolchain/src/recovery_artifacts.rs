@@ -854,6 +854,8 @@ pub enum RecoveryAdmissionFailure {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryArtifactError {
+    #[error("World program cursor refused: {0}")]
+    WorldProgramCursor(#[source] crate::declaration_context::WorldProgramCursorFailure),
     #[error("selected original {artifact:?} is outside retained custody")]
     MissingRetainedCustody {
         artifact: crate::artifact_inventory::ArtifactId,
@@ -922,6 +924,9 @@ fn recovery_validation_error(
     use crate::certified_products::CertificationError;
     use tidepool_repr::execution_schema::ParseError;
     match error {
+        CertificationError::WorldProgramCursor(cause) => {
+            RecoveryArtifactError::WorldProgramCursor(cause)
+        }
         CertificationError::Interrupted(error) => RecoveryArtifactError::Io(error),
         CertificationError::MissingRetainedCustody { artifact } => {
             RecoveryArtifactError::MissingRetainedCustody { artifact }

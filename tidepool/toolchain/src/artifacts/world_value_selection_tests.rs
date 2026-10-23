@@ -969,58 +969,27 @@ fn prepare_checked_with_template(
         1,
         [b"compiler-only physical selection control".to_vec()],
     )?;
-    let slots = values
+    let requests = values
         .iter()
-        .map(|(value, _)| CheckedPlannedCellSlot::Bind { value: *value })
-        .collect();
-    let binders = values
-        .iter()
-        .map(|(generation, name)| {
-            vec![(
-                (*name).into(),
-                tidepool_repr::SessionVarId::from_extract(
-                    tidepool_codegen::prepared_program::session_var_id(
-                        &tidepool_repr::SessionModule::val(tidepool_repr::Generation(*generation))
+        .map(
+            |(generation, name)| crate::cell_plan::WorldCellReservationRequest::Bind {
+                value: *generation,
+                bindings: vec![(
+                    (*name).into(),
+                    tidepool_repr::SessionVarId::from_extract(
+                        tidepool_codegen::prepared_program::session_var_id(
+                            &tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                                *generation,
+                            ))
                             .module_name(),
-                        name,
+                            name,
+                        ),
                     ),
-                ),
-            )]
-        })
+                )],
+            },
+        )
         .collect();
-    let reservation = plan.reserve(
-        plan.issue_admission_token(
-            subject,
-            slots
-                .into_iter()
-                .zip(binders)
-                .map(|(slot, bindings)| {
-                    use crate::cell_plan::WorldCellReservationRequest as Request;
-                    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
-                    match slot {
-                        Slot::Prologue { declaration } => {
-                            assert!(bindings.is_empty());
-                            Request::Prologue { declaration }
-                        }
-                        Slot::Declaration { declaration } => {
-                            assert!(bindings.is_empty());
-                            Request::Declaration { declaration }
-                        }
-                        Slot::Bind { value } => Request::Bind { value, bindings },
-                        Slot::Expression {
-                            capture,
-                            observation_name,
-                        } => {
-                            assert_eq!(bindings.len(), 1);
-                            let binding = bindings.into_iter().next().unwrap();
-                            assert_eq!(binding.0, observation_name);
-                            Request::Expression { capture, binding }
-                        }
-                    }
-                })
-                .collect(),
-        )?,
-    )?;
+    let reservation = plan.reserve(plan.issue_admission_token(subject, requests)?)?;
     crate::compiler_world::admit_world_cell_program(
         endpoint,
         reservation,
