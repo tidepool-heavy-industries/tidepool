@@ -18037,9 +18037,7 @@ pub(crate) fn prepared_target_fixture(
 }
 
 #[cfg(test)]
-pub(crate) use tests::{
-    assert_source_selected_receipt_pairing, generated_source_admission_fixture,
-};
+pub(crate) use tests::assert_source_selected_receipt_pairing;
 
 #[cfg(test)]
 pub(crate) use native_availability_tests::assert_selected_authored_private_inputs;
@@ -29024,25 +29022,6 @@ mod tests {
         assert!(type_only.recovery_products().is_empty());
         assert!(!context.recovery_products().is_empty());
         assert_ne!(type_only.semantic_sha256(), expected);
-    }
-
-    pub(crate) fn generated_source_admission_fixture(
-        root: &Path,
-        request: &ExactCompilationRequest,
-    ) -> (ExactSourceAdmission, String) {
-        std::fs::create_dir_all(root).unwrap();
-        let receipt = import_receipt(root, request, "Unadmitted");
-        let mut value = read_receipt(&receipt);
-        value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
-            .as_array_mut()
-            .unwrap()[3] = Value::Array(vec![]);
-        value.as_array_mut().unwrap()[10] = Value::Array(vec![]);
-        write_receipt(&receipt, &value);
-        let admission = request
-            .validate_receipt(&receipt, None, request.context())
-            .unwrap();
-        let source = std::fs::read_to_string(root.join("Consumer.hs")).unwrap();
-        (admission, source)
     }
 
     fn import_receipt(root: &Path, request: &ExactCompilationRequest, imported: &str) -> PathBuf {
