@@ -8,6 +8,7 @@ import CompilerRequestTest (checkedPublicModuleHistories, worldAcquisitionDiagno
 import BoundedReadTest (boundedReadChecks)
 import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, worldCellAdmissionParse, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries)
 import RequestInputsTest (compilerServiceBootBoundaries, worldCanonicalOriginalReuse, worldCarriedImportTypes)
+import RequestInputsTest (bufferedImportSyntaxBoundaries)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -43,6 +44,7 @@ tests = testGroup "source-boot"
   , testCase "validation timing outcomes" validationTimingControl
   , testCase "compiler timing producer consumer roundtrip" compilerTimingRoundtrip
   , testCase "compiler task attempt histories" compilerTaskAttemptHistories
+  , testCase "in-memory GHC import syntax correspondence" bufferedImportSyntaxBoundaries
   , testCase "fresh output seal set laws" freshOutputSealSetLaws
   , testCase "request input admission boundaries" requestInputBoundaries
   , testCase "World residency uses shared bytes across END and eviction" worldResidencyBoundaries

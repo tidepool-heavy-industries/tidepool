@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -25,7 +25,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
+import System.Directory (canonicalizePath, copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.Posix.Files (createSymbolicLink)
 import System.FilePath ((</>), takeDirectory, makeRelative, takeExtension)
 import System.IO (hClose, hFlush, hGetLine, hPutStrLn, openTempFile, Handle, stderr, stdout, utf8, BufferMode(NoBuffering), hGetEncoding, hGetBuffering, hSetEncoding, hSetBuffering, hSetBinaryMode)
@@ -44,7 +44,16 @@ import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
-import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst))
+import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst)
+  , Ghc, ParsedModule(..), Target(..), guessTarget, setTargets, depanal, parseModule
+  , ms_mod_name, ms_hspp_opts)
+import GHC.Data.FastString (mkFastString)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Driver.Config.Parser (initParserOpts)
+import GHC.Parser qualified as Parser
+import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
 import GHC.Unit.State (UnitState(..))
@@ -57,7 +66,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_details)
 import GHC.Unit.Module.ModDetails (md_types)
-import GHC.Driver.Session (importPaths)
+import GHC.Driver.Session (DynFlags, importPaths)
 import GHC.Driver.Env (hsc_units)
 import Control.Monad.IO.Class (liftIO)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
@@ -117,6 +126,9 @@ import Tidepool.GhcPipeline
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents
   , withResidentCompilerScopes, scopedRunGhc )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
+import Tidepool.ImportSyntax
+  ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
+  , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment, captureSupportedPackageProfileWith)
 import Tidepool.ArtifactBytes
@@ -151,6 +163,113 @@ import CodecFixtureSupport
   , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics, requireUserError
   , rootedProfileIdentity, rootedProfilePath, rootedProfileSha256, withRootedCompilerEnvironment, withQuietStdout)
+
+-- These controls prove syntax correspondence, not source permission. The disk
+-- target is invalid Haskell throughout: only GHC's targetContents path can
+-- supply the successful driver parse, including its preprocessing locations.
+bufferedImportSyntaxBoundaries :: IO ()
+bufferedImportSyntaxBoundaries = withTiming $ withScratch $ \work ->
+  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \compiler -> do
+    let first = "import Data.List (sort, nub)"
+        second = "import qualified Data.Maybe as Chosen"
+        render prefix imports = prefix ++ "module InMemoryImportRoot where\n"
+          ++ unlines imports ++ "entry = ()\n"
+        baseline = render "" [first,second]
+        variations =
+          [ baseline
+          , render "-- λ 界 before the module\n" [first,second]
+          , render "" ["import Data.List\n  (sort,\n   nub)",second]
+          , render "" ["{-# LINE 901 \"virtual-import-root.hs\" #-}\n" ++ first,second]
+          , render "" [first,first,second]
+          ]
+        check source = scopedRunGhc compiler $ do
+          (captured,parsed) <- bufferedParsedImports work source
+          matched <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
+          let before = capturedImportOccurrences captured
+              after = driverImportOccurrences matched
+          liftIO $ unless (not (null before)
+              && map importOccurrenceDescriptor before == map importOccurrenceDescriptor after
+              && map importOccurrenceId before == map importOccurrenceId after
+              && Set.size (Set.fromList (map importOccurrenceId after)) == length after)
+            (fail "buffered driver lost ordered syntax or distinct duplicate occurrence identities")
+          pure parsed
+    forM_ variations (void . check)
+    parsed <- check baseline
+    let flags = ms_hspp_opts (pm_mod_summary parsed)
+        path = work </> "InMemoryImportRoot.hs"
+        refuse label changed = do
+          captured <- parseCapturedImports flags path changed
+          unless (case matchDriverImports captured parsed of Left _ -> True; Right _ -> False)
+            (fail ("driver correspondence accepted " ++ label))
+    forM_
+      [ ("missing occurrence",render "" [first])
+      , ("extra duplicate occurrence",render "" [first,first,second])
+      , ("reordered occurrences",render "" [second,first])
+      , ("changed import-list order",render "" ["import Data.List (nub, sort)",second])
+      , ("changed qualifier",render "" [first,"import Data.Maybe as Chosen"])
+      , ("changed alias",render "" [first,"import qualified Data.Maybe as Other"])
+      , ("changed hiding selection",render "" ["import Data.List hiding (sort, nub)",second])
+      ] (uncurry refuse)
+    let extensions = "{-# LANGUAGE PackageImports, ImportQualifiedPost, ExplicitNamespaces #-}\n"
+    forM_
+      [ ("qualification position","import qualified Data.Maybe as Chosen"
+          ,"import Data.Maybe qualified as Chosen")
+      , ("package qualifier","import \"base\" Data.Maybe","import Data.Maybe")
+      , ("SOURCE flag","import Data.Maybe","import {-# SOURCE #-} Data.Maybe")
+      , ("safe flag","import Data.Maybe","import safe Data.Maybe")
+      , ("explicit namespace","import Data.Maybe (type Maybe)","import Data.Maybe (Maybe)")
+      , ("child order","import Data.Maybe (Maybe(Just, Nothing))"
+          ,"import Data.Maybe (Maybe(Nothing, Just))")
+      , ("all children","import Data.Maybe (Maybe(..))","import Data.Maybe (Maybe(Just, Nothing))")
+      ] $ \(label,original,changed) -> do
+        actual <- check (render extensions [original])
+        different <- parseCapturedImports (ms_hspp_opts (pm_mod_summary actual)) path
+          (render extensions [changed])
+        unless (case matchDriverImports different actual of Left _ -> True; Right _ -> False)
+          (fail ("driver correspondence erased " ++ label))
+    -- Generate complete sequences, including duplicates. Each successful
+    -- comparison reaches real GHC preprocessing; mutation captures are DATA
+    -- parsed from other source, never manufactured driver or grant values.
+    propertyResult <- quickCheckWithResult stdArgs
+        { maxSuccess=24, maxSize=6, replay=Just (mkQCGen 749103,0) } $
+      forAllShrink (resize 6 (listOf1 (elements [first,second])))
+        (filter (not . null) . shrinkList (const [])) $ \imports -> ioProperty $ do
+          actual <- check (render "" imports)
+          let actualFlags = ms_hspp_opts (pm_mod_summary actual)
+          missing <- parseCapturedImports actualFlags path (render "" (tail imports))
+          extra <- parseCapturedImports actualFlags path (render "" (head imports:imports))
+          pure (length (capturedImportOccurrences missing) == length imports - 1
+            && case (matchDriverImports missing actual,matchDriverImports extra actual) of
+              (Left _,Left _) -> True
+              _ -> False)
+    unless (isSuccess propertyResult) (fail "buffered import sequence property failed")
+
+bufferedParsedImports :: FilePath -> String -> Ghc (CapturedImportSyntax,ParsedModule)
+bufferedParsedImports work source = do
+  let path = work </> "InMemoryImportRoot.hs"
+      diskTrap = "this is not a Haskell module: disk source must not be parsed\n"
+  liftIO (writeFile path diskTrap)
+  modified <- liftIO (getModificationTime path)
+  target <- guessTarget path Nothing Nothing
+  setTargets [target {targetContents=Just (stringToStringBuffer source,modified)}]
+  graph <- depanal [] False
+  summary <- case [summary | ModuleNode _ summary <- mgModSummaries' graph
+      , ms_mod_name summary == mkModuleName "InMemoryImportRoot"] of
+    [value] -> pure value
+    _ -> liftIO (fail "in-memory import target has no unique actual GHC summary")
+  parsed <- parseModule summary
+  captured <- liftIO (parseCapturedImports (ms_hspp_opts summary) path source)
+  unchanged <- liftIO (readFile path)
+  liftIO $ unless (unchanged == diskTrap)
+    (fail "in-memory import control replaced its invalid disk discriminator")
+  pure (captured,parsed)
+
+parseCapturedImports :: DynFlags -> FilePath -> String -> IO CapturedImportSyntax
+parseCapturedImports flags path source =
+  case unP Parser.parseModule (initParserState (initParserOpts flags)
+      (stringToStringBuffer source) (mkRealSrcLoc (mkFastString path) 1 1)) of
+    PFailed _ -> fail "import correspondence control contains invalid raw syntax"
+    POk _ parsed -> either (fail . show) pure (captureImportSyntax parsed)
 
 foreign import ccall unsafe "memfd_create" createArena :: CString -> CUInt -> IO CInt
 foreign import ccall unsafe "fcntl" sealArena :: CInt -> CInt -> CInt -> IO CInt
