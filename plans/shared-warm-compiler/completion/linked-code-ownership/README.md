@@ -82,10 +82,12 @@ fallback. Dormant availability is not executable demand.
 ## Current evidence and decisions
 
 The controlling implementation contract is [option C](next-review.md): one
-root-scoped import-admission owner. Ordered syntax matching, opaque captures and
-closed native refiners are joined; the upper admission and Pipeline migration
-is still in progress. These partial changes are not a compilable release claim.
-Root directly owns the demand-analysis migration, and N owns its test callers.
+root-scoped import-admission owner. Ordered syntax matching, opaque captures,
+closed native refiners and the upper Pipeline admission are joined. The actual
+root parse is carried through planning; selected owners resolve after exact
+interface installation and completion follows the successful whole compile.
+Production internal/worker targets compile at `78dd2f92a1`. Joined test-caller
+repairs are still under execution; this is not G2 or release qualification.
 
 At `1b72968bc1`, root-role refusal passed 1/1 and the source-proof cohort passed
 3/4. The remaining assertion confused Full body availability with Empty execution

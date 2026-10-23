@@ -41,7 +41,8 @@ establish different facts.
 |---|---|
 | Captured | Immutable root/source, ordered occurrences, issuer-derived origins, effective parser/purpose policy. |
 | Scoped | Actual demand-selected early prerequisites from finite or World issuers; not driver selection. |
-| Resolved | Ordered structural correspondence to driver imports, selected owners and prerequisite reconciliation. |
+| Matched (private data) | Ordered structural correspondence to the actual root parse and captured origins; no selected-owner claim. |
+| Resolved | Actual selected owners, resolved after the frontend installs its exact source-less interfaces, and prerequisite reconciliation. |
 | Prepared | Certified transformation lineage paired inseparably with the exact NativeParsedModule entering typechecking. |
 | Completed | Compact actual consumed decisions and terminal projections; no Finder. |
 
@@ -56,12 +57,21 @@ Import correspondence proves only the import sequence. The actual driver parse
 must also belong to the captured target contents, full Module identity, source
 path, GHC summary fingerprint, effective policy and request/stage/attempt.
 Parse once after the actual downsweep: protected-source qualification needs
-that result before planning/loading. Retain it in Resolved and reuse it through
-all three frontend routes, checking their actual summaries against its owner.
+that result before planning/loading. Retain it in the private Matched driver;
+early Finder resolution would precede selective source-less interface hydration.
+Borrow this same parse for quotation policy and current-source qualification.
+Resolve actual owners after the frontend's prerequisite installation, then
+reuse the owned driver through all three frontend routes. Check full Module,
+source kind, path, source hash and effective source policy. A boot summary is a
+different input from a regular summary of the same Module. Backend/output policy
+may change during planning; private summary rebinding preserves the parsed body,
+imports and occurrence lineage.
 Delete discarded early parses and later reparses rather than postponing required
-qualification. Prepared owns the exact refined input; successful typechecking
-issues Completed. An earlier root receipt is pending and cannot feed a terminal
-writer. Reusing an immutable recipe in a fresh attempt remains valid; mixing
+qualification. Prepared owns the exact refined input; actual target typecheck
+success is retained privately until the whole compilation succeeds, then issues
+Completed. An earlier root receipt is pending and cannot feed a terminal writer.
+The target cannot borrow a previous attempt's completion; dependency reuse stays
+separate. Reusing an immutable recipe in a fresh attempt remains valid; mixing
 issued stages from different attempts does not.
 
 The lower AST bundles are only `DriverImportSyntax` and
