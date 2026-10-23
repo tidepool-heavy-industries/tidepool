@@ -1,116 +1,29 @@
 use super::*;
 
-/// Exact dependency grants remain attached to their issuing owner. Source and
-/// request rows share permissions independently of their supporting proofs.
-pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
-
-enum DependencyGrantSource<'a> {
-    Source(&'a CompilerSourceSupport),
-    Request(&'a crate::declaration_context::ContinuationNativeInputs<'a>),
-}
+/// Exact dependency grants borrow the actual selected source owner.
+pub(crate) struct NativeDependencyCatalog<'a>(&'a CompilerSourceSupport);
 
 impl<'a> NativeDependencyCatalog<'a> {
-    pub(crate) fn from_request(
-        inputs: &'a crate::declaration_context::ContinuationNativeInputs<'a>,
-    ) -> Self {
-        Self(DependencyGrantSource::Request(inputs))
-    }
-
     pub(crate) fn from_source(source: &'a CompilerSourceSupport) -> Result<Self, CompileError> {
-        Ok(Self(DependencyGrantSource::Source(source)))
-    }
-
-    fn current_product<'b>(
-        &'b self,
-        key: NativeGroupKey,
-        entry: &'b Arc<ArtifactEntry>,
-    ) -> Result<Option<crate::certified_products::CurrentProductRef<'b>>, CompileError> {
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => inputs.current_product(key, entry),
-            DependencyGrantSource::Source(_) => Ok(None),
-        }
+        Ok(Self(source))
     }
 
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
-        match &self.0 {
-            DependencyGrantSource::Source(source) => source.input_decisions(),
-            DependencyGrantSource::Request(inputs) => inputs.input_decisions(),
-        }
+        self.0.input_decisions()
     }
 
     pub(super) fn original_namespace_pair(
         &self,
         owner: &ExactModuleIdentity,
     ) -> Result<Option<(ArtifactBinding, ArtifactBinding)>, CompileError> {
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => inputs.original_namespace_pair(owner),
-            DependencyGrantSource::Source(source) => {
-                Ok(source.world_primary_type_row(owner).and_then(|row| {
-                    row.original_binding
-                        .map(|original| (*original, *row.interface_binding))
-                }))
-            }
-        }
+        Ok(self.0.world_primary_type_row(owner).and_then(|row| {
+            row.original_binding
+                .map(|original| (*original, *row.interface_binding))
+        }))
     }
 
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
-        match &self.0 {
-            DependencyGrantSource::Source(source) => source.compiler_roles().native_decision(owner),
-            DependencyGrantSource::Request(inputs) => inputs.native_decision(owner),
-        }
-    }
-
-    /// Borrow historical qualifications only when this request's actual rows
-    /// permit every exact binding. A retained Full offer alone grants nothing.
-    pub(crate) fn qualified_availability(
-        &self,
-        roles: AdmittedCompilerRoles<'_>,
-        namespace: &ArtifactView,
-        advertised: &BTreeSet<NativeGroupKey>,
-        new_products: &[IssuedNativeOffer],
-    ) -> Result<Vec<QualifiedNativeAvailability>, CompileError> {
-        let DependencyGrantSource::Request(inputs) = &self.0 else {
-            return Err(failure("request qualifications require a request catalog"));
-        };
-        let mut qualifications = Vec::new();
-        for row in inputs.availability_rows() {
-            for offer in row.offers() {
-                let Some(qualification) = offer.qualified_private_availability(roles, namespace)
-                else {
-                    continue;
-                };
-                if !new_products
-                    .iter()
-                    .any(|product| product.original() == qualification.original())
-                    || !advertised
-                        .iter()
-                        .any(|key| key.artifact == qualification.original())
-                {
-                    continue;
-                }
-                let mut permitted = true;
-                for group in qualification.groups() {
-                    let key = NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    };
-                    let Some(entry) = offer.0.custody.lease.payloads.get(&key.artifact) else {
-                        return Err(failure("qualified native group lacks its issued payload"));
-                    };
-                    let ArtifactPayload::Original(product) = &entry.payload else {
-                        return Err(failure("qualified native group lacks original payload"));
-                    };
-                    if !self.groups(key, product.owner())?.contains(group) {
-                        permitted = false;
-                        break;
-                    }
-                }
-                if permitted && !qualifications.contains(qualification) {
-                    qualifications.push(qualification.clone());
-                }
-            }
-        }
-        Ok(qualifications)
+        self.0.compiler_roles().native_decision(owner)
     }
 
     fn group_supports(
@@ -136,21 +49,7 @@ impl<'a> NativeDependencyCatalog<'a> {
                 }
             }
         }
-        let source = match &self.0 {
-            DependencyGrantSource::Source(source) => {
-                source.native_availability().dependency_support(key, owner)
-            }
-            DependencyGrantSource::Request(_) => None,
-        };
-        let request = match &self.0 {
-            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
-            DependencyGrantSource::Source(_) => None,
-        };
-        let request = request
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row.dependency_support(key, owner));
-        for support in source.into_iter().chain(request) {
+        if let Some(support) = self.0.native_availability().dependency_support(key, owner) {
             for group in support.groups() {
                 if let Some(offer) = support.offer_for_group(group) {
                     supports.entry(group).or_insert(offer);
@@ -158,18 +57,6 @@ impl<'a> NativeDependencyCatalog<'a> {
             }
         }
         supports.into_iter().collect()
-    }
-
-    fn groups(
-        &self,
-        key: NativeGroupKey,
-        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
-    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
-        Ok(self
-            .group_supports(key, owner)
-            .into_iter()
-            .map(|(group, _)| group)
-            .collect())
     }
 }
 
@@ -1548,74 +1435,30 @@ pub(super) fn bind_certified_input_demand(
     })
 }
 
-/// Fresh bodies can depend on an available group without selecting it for
-/// execution. Resolve only their certified imports from the supplied offers;
-/// proof roots remain separate from these dependency choices.
+/// Carried source inputs cannot issue a fresh physical product. New bodies
+/// enter through the completed current-cohort issuer instead.
 pub(super) fn bind_fresh_product_dependencies(
-    state: &mut InventoryState,
-    parent: &ArtifactView,
-    consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    entries: &impl ArtifactEntryMap<ArtifactId>,
+    _state: &mut InventoryState,
+    _parent: &ArtifactView,
+    _consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    _entries: &impl ArtifactEntryMap<ArtifactId>,
     fresh: &BTreeSet<NativeGroupKey>,
-    catalog: &NativeDependencyCatalog<'_>,
+    _catalog: &NativeDependencyCatalog<'_>,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
-    let mut acquisition = CertifiedNativeDemandAcquisition {
+    if let Some(group) = fresh.iter().next() {
+        return Err(native_admission_failure(
+            *group,
+            NativeAdmissionRefusal::CurrentProductNotCompleted {
+                original: group.artifact,
+                original_ordinal: group.original_ordinal,
+            },
+        ));
+    }
+    Ok(CertifiedNativeDemandAcquisition {
         entries: BTreeMap::new(),
         bindings: BTreeMap::new(),
         offers: Vec::new(),
-    };
-    let mut pending = fresh.iter().copied().collect::<Vec<_>>();
-    while let Some(group) = pending.pop() {
-        if acquisition.bindings.contains_key(&group) {
-            continue;
-        }
-        let entry = entries
-            .get(&group.artifact)
-            .ok_or_else(|| failure("fresh native product lacks physical payload"))?;
-        let current = catalog.current_product(group, entry)?.ok_or_else(|| {
-            native_admission_failure(
-                group,
-                NativeAdmissionRefusal::CurrentProductNotCompleted {
-                    original: group.artifact,
-                    original_ordinal: group.original_ordinal,
-                },
-            )
-        })?;
-        let resolved = if let Some(binding) = verified_current_product(&current)? {
-            let support = current.own_group_support(binding).ok_or_else(|| {
-                native_admission_failure(
-                    group,
-                    NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: binding },
-                )
-            })?;
-            let support = NativeSupportRef::checked(state, parent, binding, support)?;
-            let issued = support.describe(binding)?;
-            support.acquire(state, entries, &mut acquisition.entries, &issued)?;
-            if let Some(offer) = support.offer {
-                acquisition.offers.push(offer.clone());
-            }
-            VerifiedNativeBinding::CurrentIssued(issued)
-        } else {
-            let dependencies = current_product_dependencies(
-                state,
-                parent,
-                entries,
-                &mut acquisition.entries,
-                &mut acquisition.offers,
-                &current,
-            )?;
-            pending.extend(dependencies.iter().filter_map(
-                |dependency| match dependency.target() {
-                    NativeGroupTarget::NewGroup(group) => Some(*group),
-                    NativeGroupTarget::ExactGroup(_) | NativeGroupTarget::CurrentIssued(_) => None,
-                },
-            ));
-            VerifiedNativeBinding::NewCurrent { dependencies }
-        };
-        acquisition.bindings.insert(group, resolved);
-    }
-    acquisition.validate_dependency_namespace(entries, consumed_namespace)?;
-    Ok(acquisition)
+    })
 }
 
 impl CertifiedNativeDemandAcquisition {
@@ -2427,123 +2270,6 @@ impl CheckedNativeAvailability {
             offers: IssuedNativeOffer::issue_custody(admitted, originals)?,
             entries,
             roots: originals.iter().copied().collect(),
-        })
-    }
-
-    pub(crate) fn validate_request(
-        self,
-        baseline_groups: &BTreeSet<NativeGroupKey>,
-        catalog: &NativeDependencyCatalog<'_>,
-        roles: AdmittedCompilerRoles<'_>,
-        namespace: &ArtifactView,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let advertised = self.advertised_groups(baseline_groups)?;
-        let preferred =
-            catalog.qualified_availability(roles, namespace, &advertised, &self.offers)?;
-        self.validate_advertised(advertised, &preferred, roles, validation)
-    }
-
-    fn advertised_groups(
-        &self,
-        baseline: &BTreeSet<NativeGroupKey>,
-    ) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
-        let mut advertised = baseline.clone();
-        for offer in &self.offers {
-            let entry = self
-                .entries
-                .get(&offer.original())
-                .ok_or_else(|| failure("private original is outside retained custody"))?;
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(failure("private original lacks original payload"));
-            };
-            advertised.extend(
-                crate::certified_products::original_available_groups(product)
-                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                    .map(|group| NativeGroupKey {
-                        artifact: offer.original(),
-                        original_ordinal: group.original_ordinal(),
-                    }),
-            );
-        }
-        Ok(advertised)
-    }
-
-    fn validate_advertised(
-        self,
-        advertised: BTreeSet<NativeGroupKey>,
-        preferred: &[QualifiedNativeAvailability],
-        roles: AdmittedCompilerRoles<'_>,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let mut qualifications = BTreeMap::new();
-        for qualification in preferred {
-            if qualifications
-                .insert(qualification.original(), qualification.clone())
-                .is_some_and(|prior| prior != *qualification)
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::BindingAmbiguity {
-                        artifact: qualification.original(),
-                    },
-                ));
-            }
-        }
-        for offer in &self.offers {
-            if let Some(qualification) = offer.full_qualification() {
-                if qualifications
-                    .insert(qualification.original(), qualification.clone())
-                    .is_some_and(|prior| prior != *qualification)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: qualification.original(),
-                        },
-                    ));
-                }
-            }
-        }
-        // Full validation covers the advertised products and their issued
-        // dependency closures. Other retained bodies are byte custody, not
-        // competing members of this request's original namespace.
-        let mut required_originals = self.roots.clone();
-        required_originals.extend(advertised.iter().map(|key| key.artifact));
-        required_originals.extend(roles.iter().filter_map(|(_, role)| role.original()));
-        for qualification in qualifications.values() {
-            required_originals.insert(qualification.original());
-            required_originals.extend(
-                qualification
-                    .groups()
-                    .iter()
-                    .map(|group| group.binding.artifact()),
-            );
-        }
-        let mut originals = BTreeMap::new();
-        for id in required_originals {
-            let entry = self.entries.get(&id).ok_or_else(|| {
-                CompileError::CompilerEvidence(Box::new(
-                    crate::certified_products::CertificationError::MissingRetainedCustody {
-                        artifact: id,
-                    },
-                ))
-            })?;
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact: id },
-                ));
-            };
-            originals.insert(id, product);
-        }
-        crate::certified_products::validate_available_originals_with_validation(
-            &originals,
-            &advertised,
-            &qualifications.into_values().collect::<Vec<_>>(),
-            validation,
-        )
-        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        Ok(ValidatedFreshNativeAvailability {
-            roots: self.roots,
-            offers: self.offers,
         })
     }
 }

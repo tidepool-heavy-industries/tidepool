@@ -925,25 +925,28 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
     let offered = identity("fixture", "PrivateFragment");
     assert_eq!(
         private
-            .projection
+            .role_projection()
             .snapshot_roles()
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([offered.clone(), dependency.clone()])
     );
-    private.projection.validate(&private.artifacts).unwrap();
+    private
+        .role_projection()
+        .validate(&private.issued_artifacts())
+        .unwrap();
     assert_eq!(
-        private.native_availability.rows().map(|row| row.original.descriptor.id).collect::<BTreeSet<_>>(),
-        BTreeSet::from([private.native_offers[0].original()]),
+        private.native_availability().rows().map(|row| row.original.descriptor.id).collect::<BTreeSet<_>>(),
+        BTreeSet::from([private.native_offers()[0].original()]),
         "normalizing a fresh fragment against its effective namespace must not grant baseline bodies"
     );
     assert!(private
-        .native_availability
+        .native_availability()
         .rows()
         .all(|row| row.original.descriptor.owner != dependency));
-    assert_eq!(private.native_offers.len(), 1);
-    let groups = private.native_offers[0]
+    assert_eq!(private.native_offers().len(), 1);
+    let groups = private.native_offers()[0]
         .issued_group_carriers()
         .unwrap()
         .keys()
@@ -951,10 +954,10 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
         .collect::<BTreeSet<_>>();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups.first().unwrap().original_ordinal, 7);
-    assert!(private.native_offers[0].is_full());
+    assert!(private.native_offers()[0].is_full());
     let before = baseline.semantic_sha256();
     let roots = baseline.artifact_view().selected_native_groups();
-    let original = private.native_offers[0].original();
+    let original = private.native_offers()[0].original();
     let root = tempfile::tempdir().unwrap();
     let request = ExactCompileContext::new(baseline.clone())
         .prepare_compilation_with_private_input(root.path(), PRODUCER, None, Some(private.clone()))
@@ -1012,7 +1015,7 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
         baseline.compiler_input_projection().snapshot_roles()[&dependency].interface();
     assert!(
         private
-            .artifacts
+            .issued_artifacts()
             .artifact_ids()
             .contains(&required_interface),
         "the refusal control retains the exact dependency bytes privately"
@@ -1021,7 +1024,7 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
     let incomplete = CompilerInputProjection::from_issued_entries(&[output]).unwrap();
     let error = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
         &incomplete,
-        &private.artifacts.metadata_snapshot(),
+        &private.issued_artifacts().metadata_snapshot(),
         &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
     )
     .expect_err("retained type bytes cannot replace the selected required type role");
@@ -1681,10 +1684,9 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         namespace
     );
     {
-        let continuation =
-            ContinuationNativeInputs::from_selection(&selected, inputs.projection()).unwrap();
+        let source = inputs.compiler_source_support();
         let catalog =
-            crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
+            crate::artifact_inventory::NativeDependencyCatalog::from_source(source).unwrap();
         let a_interface = Arc::new(ArtifactEntry::canonical(
             recovered[0].product.module_interface().clone(),
         ));
@@ -1703,25 +1705,28 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
             "the actual B original selects its own groups; A stays canonical-only"
         );
         assert!(
-            ancestor_offer
-                .qualified_private_availability(&effective, &receiver)
-                .is_some(),
+            ancestor_offer.qualifies_assembly(effective.role_view(), &receiver),
             "the retained Full would qualify without the actual physical row restriction"
         );
-        let advertised = BTreeSet::from([NativeGroupKey {
-            artifact: a_id,
-            original_ordinal: 7,
-        }]);
+        assert!(matches!(
+            catalog.decision(&identity(
+                &recovered[1].product.owner().unit,
+                &recovered[1].product.owner().module,
+            )),
+            crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
+                if choices.values().copied().collect::<BTreeSet<_>>() == BTreeSet::from([selected_b7])
+        ));
         assert!(
-            catalog
-                .qualified_availability(
-                    &effective,
-                    &receiver,
-                    &advertised,
-                    std::slice::from_ref(&ancestor_offer)
+            source
+                .native_availability()
+                .dependency_support(
+                    NativeGroupKey {
+                        artifact: a_id,
+                        original_ordinal: 7
+                    },
+                    recovered[0].product.owner(),
                 )
-                .unwrap()
-                .is_empty(),
+                .is_none(),
             "B's IssuedGroups row must not turn its retained Full A proof into A permission"
         );
     }
@@ -1744,15 +1749,16 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         "a B receipt must release unrelated C payload ownership"
     );
 
-    let continuation =
-        ContinuationNativeInputs::from_selection(&selected, &private.projection).unwrap();
-    let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
+    let catalog = crate::artifact_inventory::NativeDependencyCatalog::from_source(
+        private.compiler_source_support(),
+    )
+    .unwrap();
     let admitted = private
-        .projection
+        .role_projection()
         .admit_interfaces_with_native_offers(
-            &private.artifacts,
+            &private.issued_artifacts(),
             vec![],
-            &private.native_offers,
+            &private.native_offers(),
             &catalog,
         )
         .unwrap();
@@ -2307,9 +2313,9 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     .unwrap();
     projection
         .admit_interfaces_with_native_offers(
-            &private.artifacts,
+            &private.issued_artifacts(),
             vec![],
-            &private.native_offers,
+            &private.native_offers(),
             &catalog,
         )
         .expect("typed admission accepts the same exact dependency closure");
@@ -2342,9 +2348,9 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     );
     let typed = selected_projection
         .admit_interfaces_with_native_offers(
-            &private.artifacts,
+            &private.issued_artifacts(),
             vec![replacement],
-            &private.native_offers,
+            &private.native_offers(),
             &catalog,
         )
         .expect("type-only custody does not consume the incompatible native backedge");
@@ -3083,7 +3089,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
     ));
     let private = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     assert!(private
-        .projection
+        .role_projection()
         .roles()
         .iter()
         .all(|role| role.original().is_none()));
@@ -6697,7 +6703,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .expect("fully selected current authored body has an exact issuer");
         assert_eq!(
             private
-                .projection
+                .role_projection()
                 .roles()
                 .iter()
                 .filter_map(|role| role.original())
@@ -6760,7 +6766,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             .unwrap();
         assert_eq!(
             exact
-                .projection
+                .role_projection()
                 .roles()
                 .iter()
                 .filter_map(CompilerInputRole::original)
@@ -7443,7 +7449,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .unwrap()
             .expect("bounded native availability retains its exact Original identity");
         assert_eq!(
-            private.projection.snapshot_roles()[&identity(&owner.unit, &owner.module)].original(),
+            private.role_projection().snapshot_roles()[&identity(&owner.unit, &owner.module)]
+                .original(),
             Some(authored_root)
         );
         let before = partial.clone();
@@ -9598,7 +9605,7 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
     let inputs = request.compiler_inputs();
     let private = OriginalCompilerInputs::from_issued_support(inputs.compiler_source_support());
     assert!(private
-        .artifacts
+        .issued_artifacts()
         .artifact_ids()
         .contains(&old_entry.descriptor.id));
     let clean = issue(baseline.clone(), "clean");
@@ -10258,7 +10265,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
                 .unwrap()
                 .unwrap();
             let reused_role = reused
-                .projection
+                .role_projection()
                 .snapshot_roles()
                 .get(&entry.descriptor.owner)
                 .unwrap();
@@ -11539,8 +11546,6 @@ fn source_support_retains_every_original_in_a_shared_native_contribution() {
             .expect("the native consumer resolves each required exact child after narrowing");
         }
     }
-
-
 }
 
 #[test]
