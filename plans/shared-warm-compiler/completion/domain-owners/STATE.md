@@ -15,7 +15,7 @@ separate source checkout. No new cold build lanes while scratch headroom is narr
 ## Integrated source
 
 All P1–P17 source groups and their external consumers are consolidated. The
-selected-owner closeout is joined through `daef8b8259`; execution remains pending.
+selected-owner closeout is joined through `c8ab6a1f5a`; execution remains pending.
 
 - One persistent selected-row map carries the actual canonical/Original
   acquisition, publication birth, and native decision. Derived projection records
@@ -31,7 +31,7 @@ selected-owner closeout is joined through `daef8b8259`; execution remains pendin
 - Fixture histories use actual captured-source/World issuers. The planner derives
   its source from the admitted execution instead of accepting a second source.
 - Actor initial captured facades enter the notebook before World birth and survive
-  durable recovery. A source-admission ordering review follow-up is in progress.
+  durable recovery. The source-admission ordering repair is joined.
 
 Independent source review accepted the selected-row/live-birth closure. The
 runtime deletion is under independent review. These are source conclusions,
@@ -54,16 +54,28 @@ not passing compiler, runtime, recovery or Persona evidence.
 
 ## Current evidence
 
-The latest completed joined compile at `477331b315` failed in 26.58 seconds:
-39 diagnostic locations, primarily callers of deliberately removed equality and
-reconstruction APIs. Zero tests executed. Production and cfg repairs have since
-joined; the remaining fixture migration must join before the next check.
+At `e48858e087`, six exact toolchain ownership controls executed: five passed and
+one failed in the reference reconstruction after actual merge and independent
+raw graph checks had succeeded. `f68e61c66c` repairs the oracle by comparing graph,
+role and decision facts separately from actual winning acquisitions. Independent
+review accepted that repair; its rerun is pending.
 
 Evidence:
-`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/4773-joined-cfg-six-checkpoint.json`.
-Earlier `a3d1` failures included a shared fixture-module path/import cascade and
-an actor helper placed on only one of its two calling types; those boundaries
-were repaired in `43d248de0a`. Do not count each cascading diagnostic as a defect.
+`/srv/swarm/evidence/inanna/c-ownership-20261022/validation/e488-toolchain-ownership-controls-six-summary.json`.
+
+All known joined compilation errors through `d5e9d7371f` have source repairs at
+`c8ab6a1f5a`. The warm validator is finishing the pinned d5e9 host compilation
+before advancing. Remaining d5e9 errors are four optional-accessor calls left
+behind by the mandatory World reservation, one borrowed-view move and one
+property-macro formatting error. No release/bundle execution is inferred from
+individual compilation progress.
+
+The joined closeout also fixes completed-output selection to use its own issued
+offer rather than broad private availability. TYPE-only extension preserves
+existing executable roots after source visibility is narrowed. Both have actual
+compiler-produced history controls added to the crossed-acquisition case.
+Initial facade adoption now holds its source prerequisite before mutation;
+refusal/retry and reopened-context execution controls are included.
 
 Retain prior executed evidence at its actual revision:
 - `aa93ccab0e`: five focused owner/publication/recovery controls passed, including

@@ -18,7 +18,9 @@ Do not add counts from different checkpoints into one passing suite.
    real crossed-target installer refusal followed by honest execution, and the
    newly added package lifetime/prior Source histories.
 4. Run notebook5, N2 publication14, private custody3, World input2, runtime owner6,
-   typed segment World semantics18 plus separately registered finite component3.
+   typed segment World semantics and the separately registered
+   `runtime_world_segment_component_tests` controls. The former finite runtime
+   entrypoints are deleted; use each current target's declared count.
    HOME/PACKAGE owner/lifetime component4, source membership2, closed runtime vacancy1 and abort composition
    complement the required authored notebook history; they do not replace it.
 5. Ordinary query/discovery/status; successful/frozen/cancelled/caller-loss default
