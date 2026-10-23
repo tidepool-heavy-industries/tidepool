@@ -14601,7 +14601,8 @@ pub(crate) fn certify_products_with_validation(
         if original.interface_bytes() != *interface
             || original.product_bytes() != *product_bytes
             || original.package_imports_bytes() != *package_bytes
-            || original.source_sha256() != Some(*source_sha)
+            // Sharing compares immutable identity, not current SOURCE admission.
+            || original.module_interface().source_sha256() != *source_sha
             || original.module_interface().certificate_bytes() != canonical.certificate_bytes()
         {
             return Err(CertificationError::Mismatch("shared original native bytes"));
@@ -32446,6 +32447,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         let mut prior = vec![initial.data().recovery_products[0].clone()];
+        assert!(prior[0].source_admission().is_some());
+        assert_eq!(
+            prior[0].source_sha256(),
+            Some(prior[0].module_interface().source_sha256())
+        );
         let mut context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&{
@@ -32732,6 +32738,13 @@ None,
                 .iter()
                 .find(|product| product.owner() == &owner)
                 .unwrap();
+            // Retained Core preserves canonical identity without issuing SOURCE.
+            assert_eq!(
+                current.module_interface().source_sha256(),
+                canonical.source_sha256()
+            );
+            assert!(current.source_sha256().is_none());
+            assert!(current.source_admission().is_none());
             assert_eq!(current.original_native().groups.len(), 2);
             assert!(issued
                 .data()
