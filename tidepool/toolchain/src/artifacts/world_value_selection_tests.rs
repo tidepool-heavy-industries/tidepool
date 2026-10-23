@@ -1054,13 +1054,13 @@ fn assert_physical_selection(
             recaptured.current_interface(generation)?.artifact_id()
         );
     }
-    let decoded = crate::declaration_context::decode_world_source_receipt(checked, 0)?;
-    let segment = decoded.issue_segment_originals(
-        None,
+    let pending = crate::declaration_context::WorldProgramContinuation::begin(checked).open_next(
+        checked,
         &physical,
         &mut validation,
-        crate::declaration_context::WorldProgramContinuation::begin(checked),
+        &mut |_| {},
     )?;
+    let segment = pending.segment();
     let input = operand.checked_row().certified_interface().artifact_id();
     assert!(
         segment

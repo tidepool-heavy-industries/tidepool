@@ -365,15 +365,10 @@ pub(crate) fn assert_actual_world_original_package_refusals(
     let first = *stage.ordinals().first().unwrap();
     let end = stage.ordinals().last().unwrap() + 1;
     let segment_outputs = produced.for_segment(first..end).unwrap();
-    let segment = crate::declaration_context::decode_world_source_receipt(checked, stage.index())
-        .unwrap()
-        .issue_segment_originals(
-            None,
-            &segment_outputs,
-            &mut validation,
-            crate::declaration_context::WorldProgramContinuation::begin(checked),
-        )
+    let pending = crate::declaration_context::WorldProgramContinuation::begin(checked)
+        .open_next(checked, &segment_outputs, &mut validation, &mut |_| {})
         .unwrap();
+    let segment = pending.segment();
     let mut cursor = crate::declaration_context::bind_certified_segment_artifacts_with_validation(
         &segment.originals,
         &mut validation,
