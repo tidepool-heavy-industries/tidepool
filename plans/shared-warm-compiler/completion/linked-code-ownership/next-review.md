@@ -140,13 +140,21 @@ Restricted-alias, physical-span (including 24 generated cases), and planned-
 declaration lifecycle controls retain their earlier focused passes.
 
 At `1d5c7d86f8`, Context9 missing-field/storage controls, carried World TYPE/global
-Names, and mixed World sealing each pass 1/1. The staged runtime history now reaches
-a later Rust boundary and refuses `main:Tidepool.TextFormat` for missing exact
-original source-import evidence. Root, P and H are tracing the actual completed
-receipt through source-claim admission and lexical closure before choosing a
-repair. Determine whether an issued SOURCE fact is dropped or a protected TYPE
-dependency is being over-requested; neither invent empty adjacency nor promote
-retained TYPE custody. Prior-World/runtime recovery and ordinary G2 remain pending.
+Names, and mixed World sealing each pass 1/1. The staged runtime history exposed
+discarded lexical reconstruction inside authored artifact validation. Both callers
+already retain the actual SourceScope; that obsolete traversal and adapter are
+deleted, preserving canonical dependency validation. The `f5e8cb121a` execution
+cleared the old `TextFormat` refusal but reached retained-template capture with
+incomplete original instance evidence. A bounded diagnostic now distinguishes an
+unknown environment from its missing-owner census; root and the independent
+reviewer are tracing the actual stage selection before changing that contract.
+
+The planned validator's package-path mutation control also expected recovered
+immutable custody to reread an ambient path. Its corrected control checks exact
+retained bytes after mutation; the existing fresh-path refusal control remains
+separate. Both need joined execution. Prior-source adjacency widening remains an
+unproven follow-up, not a demonstrated production defect or release blocker.
+Prior-World/runtime recovery and ordinary G2 remain pending.
 Exact commands, source pins, cleanup outcomes and limits remain in V's records.
 
 ## Parallel corrections
