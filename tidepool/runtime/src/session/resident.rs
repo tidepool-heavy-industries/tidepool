@@ -11174,6 +11174,57 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn checked_capture_stage_requires_its_actual_issued_ticket_and_session() {
+        fn stage(
+            fixture: &mut CheckedCaptureFixture,
+        ) -> (
+            RunningCheckedTicket,
+            CheckedCaptureTicket,
+            CheckedCaptureStage,
+        ) {
+            let native = fixture
+                .compiled
+                .certification
+                .as_ref()
+                .unwrap()
+                .checked_execution()
+                .unwrap()
+                .clone();
+            let running = source_action(&mut fixture.resident, &fixture.original, |resident, _| {
+                fixture
+                    .prefix
+                    .start(&resident.state, fixture.execution.private_scope(), native)
+            })
+            .unwrap();
+            let ticket = running.completion().capture_ticket().unwrap();
+            let stage = CheckedCaptureStage::prepare(&fixture.resident.state, &ticket).unwrap();
+            (running, ticket, stage)
+        }
+        let mut own = checked_capture_fixture(SessionId(1002));
+        let mut foreign = checked_capture_fixture(SessionId(1003));
+        let (_own_running, own_ticket, own_stage) = stage(&mut own);
+        let (_foreign_running, foreign_ticket, foreign_stage) = stage(&mut foreign);
+        own_stage
+            .validate(&own.resident.state, &own_ticket)
+            .unwrap();
+        foreign_stage
+            .validate(&foreign.resident.state, &foreign_ticket)
+            .unwrap();
+        assert!(matches!(
+            foreign_stage.validate(&own.resident.state, &own_ticket),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            own_stage.validate(&foreign.resident.state, &own_ticket),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(own.resident.state.binding_provenance_is_empty());
+        assert!(foreign.resident.state.binding_provenance_is_empty());
+        assert_eq!(own.prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert_eq!(foreign.prefix.snapshot().compiler_prefix().next_item(), 0);
+    }
+
+    #[test]
     fn checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair() {
         let mut fixture = checked_capture_fixture_from(
             SessionId(1001),
@@ -11218,6 +11269,46 @@ mod authored_publication_tests {
                 .state
                 .binding_provenance(binder.var_id)
                 .is_some());
+        }
+        let mut extra = fixture.bound.clone();
+        let mut added = extra[1].clone();
+        added.var_id ^= 1 << 63;
+        extra.push(added);
+        for malformed in [&fixture.bound[..1], extra.as_slice()] {
+            let refused = source_action(
+                &mut fixture.resident,
+                &fixture.original,
+                |resident, report| {
+                    resident.run_projected_bind_with_sites(
+                        "pair",
+                        fixture.compiled.code(),
+                        malformed,
+                        fixture.reservation.generation(),
+                        report,
+                    )
+                },
+            );
+            assert!(matches!(
+                refused,
+                Err(ResidentError::Session(SessionError::Compile(_)))
+            ));
+            assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
+            assert!(fixture
+                .resident
+                .state
+                .retained_checked_value_artifact(module)
+                .is_none());
+            for binder in &fixture.bound {
+                assert!(fixture
+                    .resident
+                    .current_binding_in(scope, &binder.name)
+                    .is_none());
+                assert!(fixture
+                    .resident
+                    .state
+                    .binding_provenance(binder.var_id)
+                    .is_none());
+            }
         }
         let completed = source_action(
             &mut fixture.resident,

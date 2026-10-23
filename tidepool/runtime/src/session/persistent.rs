@@ -242,8 +242,6 @@ pub struct DurablePublicBootstrap {
     context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
-/// The exact checked interface prepared before a host value enters the heap.
-/// Dropping an uncommitted token reaps only the file this staging operation created.
 /// Complete checked binding publication prepared by this session owner.
 /// Fields stay private so a caller cannot replace its entries, row or epoch.
 pub(super) struct PreparedCheckedBindings {
@@ -257,6 +255,8 @@ pub(super) struct PreparedCheckedBindings {
 
 static_assertions::assert_not_impl_any!(PreparedCheckedBindings: Clone, Copy);
 
+/// The exact checked interface prepared before a host value enters the heap.
+/// Dropping an uncommitted token reaps only the file this staging operation created.
 pub(super) struct StagedCheckedValueInterface {
     interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
