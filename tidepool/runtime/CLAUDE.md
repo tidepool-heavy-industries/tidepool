@@ -100,6 +100,12 @@ authorize publication. Prepared cells and renderers retain their exact compiler
 scope origin; another scope cannot publish them even if its own close is clean.
 Nested uncertainty is aggregated by the compiler owner.
 
+Only a completed private runtime frontier can issue a frozen World execution.
+It retains the actual World association, private scope lease and selected completed
+values together. Recovered compiler facts do not establish live values or completed
+execution. Repeated freezing preserves the same selected binding identities; a
+publication retry refreshes only its public merge baseline.
+
 Execution intent retains the exact original declaration and value identities.
 A declaration publication captures its relevant public predecessors before
 issuing an affine join reservation. Reservation and durable allocation changes
