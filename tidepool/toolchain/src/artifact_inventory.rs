@@ -8980,6 +8980,21 @@ impl ArtifactView {
         left: &CompilerSourceSupport,
         right: &CompilerSourceSupport,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::Closed)
+    }
+
+    fn merge_admitted_output_fragments(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::FragmentPair)
+    }
+
+    fn merge_acquired_compiler_rows(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+        validation: CompilerInputValidation,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
         let mut selected = BTreeMap::new();
         let (artifacts, projection, input_decisions) =
             left.artifacts().merge_compiler_inputs_inner(
@@ -8990,7 +9005,7 @@ impl ArtifactView {
                     left: Some(left.input_decisions()),
                     right: Some(right.input_decisions()),
                 },
-                CompilerInputValidation::Closed,
+                validation,
                 Some(AdmittedCompilerRowMerge {
                     receiving: left.compiler_roles(),
                     incoming: right.compiler_roles(),
