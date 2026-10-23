@@ -125,6 +125,9 @@ pub enum CompileFailureCause {
     CompilerCloseUnconfirmed,
     CompilerActionRetired,
     ExtractorContract,
+    LexicalGraph {
+        failure: crate::exact_context::LexicalGraphError,
+    },
     InputRejected,
     SourceDiagnostics,
     WorkerFailure,
@@ -464,6 +467,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         // malformed extractor artifact or impossible internal request shape.
         CompileError::SessionValueSelection(_)
         | CompileError::ExtractFailed(_)
+        | CompileError::LexicalGraph(_)
         | CompileError::SourceAdmission(_)
         | CompileError::ExactImportWitness(_)
         | CompileError::ArtifactInventory(_)
@@ -579,6 +583,9 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::ExtractFailed(_)
         | CompileError::SourceAdmission(_)
         | CompileError::ExactImportWitness(_) => CompileFailureCause::ExtractorContract,
+        CompileError::LexicalGraph(error) => CompileFailureCause::LexicalGraph {
+            failure: error.as_ref().clone(),
+        },
         CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
             failure: error.as_ref().into(),
         },

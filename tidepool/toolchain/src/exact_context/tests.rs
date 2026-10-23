@@ -3,6 +3,93 @@ use proptest::prelude::*;
 use std::collections::BTreeMap;
 
 #[test]
+fn lexical_append_rejects_duplicate_edges_without_changing_held_facts() {
+    let owner = ExactModuleIdentity {
+        unit: "main".into(),
+        module: "Owner".into(),
+    };
+    let dependency = ExactModuleIdentity {
+        unit: "main".into(),
+        module: "Dependency".into(),
+    };
+    let valid = ExactLexicalNode {
+        owner: owner.clone(),
+        imports: vec![dependency.clone()],
+    };
+    let malformed = ExactLexicalNode {
+        owner: owner.clone(),
+        imports: vec![dependency.clone(), dependency.clone()],
+    };
+    let empty = ExactLexicalSnapshot::default();
+    let held = empty.append_issued([valid.clone()]).unwrap();
+    for baseline in [&empty, &held] {
+        let error = baseline.append_issued([malformed.clone()]).unwrap_err();
+        assert!(matches!(&error, crate::CompileError::LexicalGraph(cause)
+        if cause.as_ref() == &LexicalGraphError::DuplicateImport {
+            owner: owner.clone(), import: dependency.clone(),
+        }));
+        let envelope = crate::classify_compile(&error);
+        assert_eq!(envelope.class, crate::FailureClass::VersionSkew);
+        assert_eq!(
+            envelope.cause,
+            Some(crate::failclass::CompileFailureCause::LexicalGraph {
+                failure: LexicalGraphError::DuplicateImport {
+                    owner: owner.clone(),
+                    import: dependency.clone(),
+                },
+            })
+        );
+    }
+    assert_eq!(held.get(&owner), Some(&valid));
+    assert!(empty.facts.is_empty());
+    assert!(matches!(
+        empty.replace(vec![malformed]),
+        Err(crate::CompileError::LexicalGraph(_))
+    ));
+}
+
+proptest! {
+    #[test]
+    fn lexical_composition_preserves_row_identity(
+        edges in proptest::collection::btree_set(0u16..128, 0..24),
+        repeat in 1usize..12,
+    ) {
+        let owner = ExactModuleIdentity { unit: "main".into(), module: "Owner".into() };
+        let imports = edges.iter().map(|i| ExactModuleIdentity {
+            unit: "main".into(), module: format!("Dependency{i}"),
+        }).collect::<Vec<_>>();
+        let row = ExactLexicalNode { owner: owner.clone(), imports };
+        let mut reordered = row.clone();
+        reordered.imports.reverse();
+        let empty = ExactLexicalSnapshot::default();
+        let held = empty.append_issued([row.clone()]).unwrap();
+        let repeated = held.append_issued(std::iter::repeat_n(reordered.clone(), repeat)).unwrap();
+        prop_assert_eq!(&held, &repeated);
+        prop_assert!(Arc::ptr_eq(&held.rows, &repeated.rows));
+        let recomputed = empty.replace(vec![row.clone()]).unwrap();
+        prop_assert_eq!(&held, &recomputed);
+        let duplicate = empty.replace(vec![row.clone(), reordered]).unwrap_err();
+        prop_assert!(matches!(duplicate, crate::CompileError::LexicalGraph(cause)
+            if matches!(*cause, LexicalGraphError::DuplicateOwner { .. })));
+
+        let mut changed = row.clone();
+        changed.imports.push(ExactModuleIdentity { unit: "other".into(), module: "NewDependency".into() });
+        for (first, second) in [(row.clone(), changed.clone()), (changed, row)] {
+            let selected = empty.append_issued([first.clone()]).unwrap();
+            let expected = selected.get(&owner).unwrap().imports.clone();
+            let error = selected.append_issued([second.clone()]).unwrap_err();
+            let mut incoming = second.imports;
+            incoming.sort();
+            prop_assert!(matches!(error, crate::CompileError::LexicalGraph(cause)
+                if *cause == LexicalGraphError::ConflictingAdjacency {
+                    owner: owner.clone(), previous: expected, incoming,
+                }));
+            prop_assert_eq!(selected.get(&owner).unwrap().owner.clone(), owner.clone());
+        }
+    }
+}
+
+#[test]
 fn lexical_append_shares_unchanged_facts_and_refuses_changed_adjacency() {
     for width in [1, 32, 128] {
         let owner = |index| ExactModuleIdentity {
@@ -148,10 +235,13 @@ fn context_source_scope_refuses_mismatched_fact_owner() {
             unit: "main".into(),
             module: "WrongKey".into(),
         },
-        ImmutableLexicalFactRef::new(ExactLexicalNode {
-            owner,
-            imports: vec![],
-        })
+        ImmutableLexicalFactRef::new(
+            CanonicalLexicalNode::try_from(ExactLexicalNode {
+                owner,
+                imports: vec![],
+            })
+            .unwrap(),
+        )
         .unwrap(),
     );
     let store = MemoryBlockstore::new();

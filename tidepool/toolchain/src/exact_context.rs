@@ -1516,6 +1516,53 @@ fn hydrate_selection_owned<BS: Blockstore>(
     })
 }
 
+/// A lexical refusal preserves the exact conflicting facts for its consumer.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LexicalGraphError {
+    #[error("duplicate selected lexical owner {}:{}", owner.unit, owner.module)]
+    DuplicateOwner {
+        owner: ExactModuleIdentity,
+        previous: Vec<ExactModuleIdentity>,
+        incoming: Vec<ExactModuleIdentity>,
+    },
+    #[error("conflicting selected lexical imports for {}:{}", owner.unit, owner.module)]
+    ConflictingAdjacency {
+        owner: ExactModuleIdentity,
+        previous: Vec<ExactModuleIdentity>,
+        incoming: Vec<ExactModuleIdentity>,
+    },
+    #[error("duplicate selected lexical import {}:{} -> {}:{}", owner.unit, owner.module, import.unit, import.module)]
+    DuplicateImport {
+        owner: ExactModuleIdentity,
+        import: ExactModuleIdentity,
+    },
+}
+
+impl From<LexicalGraphError> for crate::CompileError {
+    fn from(error: LexicalGraphError) -> Self {
+        Self::LexicalGraph(Box::new(error))
+    }
+}
+
+/// Canonicalization validates one supplied row, without merging its edges.
+struct CanonicalLexicalNode(ExactLexicalNode);
+
+impl TryFrom<ExactLexicalNode> for CanonicalLexicalNode {
+    type Error = LexicalGraphError;
+
+    fn try_from(mut node: ExactLexicalNode) -> Result<Self, Self::Error> {
+        node.imports.sort();
+        if let Some(pair) = node.imports.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(LexicalGraphError::DuplicateImport {
+                owner: node.owner,
+                import: pair[0].clone(),
+            });
+        }
+        Ok(Self(node))
+    }
+}
+
 /// Canonical immutable lexical facts share resident nodes and their encoded bytes.
 #[derive(Clone, Debug)]
 pub struct ImmutableLexicalFactRef {
@@ -1530,11 +1577,8 @@ impl PartialEq for ImmutableLexicalFactRef {
 }
 impl Eq for ImmutableLexicalFactRef {}
 impl ImmutableLexicalFactRef {
-    fn new(mut node: ExactLexicalNode) -> Result<Self, SnapshotError> {
-        node.imports.sort();
-        if node.imports.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(malformed("duplicate selected lexical import"));
-        }
+    fn new(node: CanonicalLexicalNode) -> Result<Self, SnapshotError> {
+        let node = node.0;
         let bytes: Arc<[u8]> = fvm_ipld_encoding::to_vec(&node).map_err(malformed)?.into();
         let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes));
         Ok(Self {
@@ -1566,23 +1610,25 @@ impl ExactLexicalSnapshot {
     ) -> Result<Self, crate::CompileError> {
         let mut facts = self.facts.clone();
         let mut changed = false;
-        for mut node in nodes {
+        for node in nodes {
             #[cfg(test)]
             LEXICAL_APPEND_WORK.with(|work| {
                 let (rows, issued) = work.get();
                 work.set((rows + 1, issued));
             });
-            node.imports.sort();
-            node.imports.dedup();
-            if let Some(previous) = facts.get(&node.owner) {
-                if previous.node.as_ref() != &node {
-                    return Err(crate::CompileError::ExtractFailed(
-                        "program support changed its selected source graph".into(),
-                    ));
+            let node = CanonicalLexicalNode::try_from(node)?;
+            if let Some(previous) = facts.get(&node.0.owner) {
+                if previous.node.as_ref() != &node.0 {
+                    return Err(LexicalGraphError::ConflictingAdjacency {
+                        owner: node.0.owner,
+                        previous: previous.node.imports.clone(),
+                        incoming: node.0.imports,
+                    }
+                    .into());
                 }
                 continue;
             }
-            let owner = node.owner.clone();
+            let owner = node.0.owner.clone();
             let fact = ImmutableLexicalFactRef::new(node)
                 .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
             #[cfg(test)]
@@ -1613,7 +1659,7 @@ impl ExactLexicalSnapshot {
     ) -> Result<Self, crate::CompileError> {
         let mut facts = self.facts.clone();
         let mut selected = std::collections::BTreeSet::new();
-        for mut node in nodes {
+        for node in nodes {
             if !selected.insert(node.owner.clone()) {
                 tracing::debug!(
                     target: "exomonad_harness::compiler::lexical",
@@ -1624,19 +1670,21 @@ impl ExactLexicalSnapshot {
                     backtrace = %std::backtrace::Backtrace::force_capture(),
                     "refused duplicate lexical owner"
                 );
-                return Err(crate::CompileError::ExtractFailed(format!(
-                    "duplicate selected lexical owner {}:{}",
-                    node.owner.unit, node.owner.module
-                )));
+                return Err(LexicalGraphError::DuplicateOwner {
+                    previous: facts[&node.owner].node.imports.clone(),
+                    owner: node.owner,
+                    incoming: node.imports,
+                }
+                .into());
             }
-            node.imports.sort();
+            let node = CanonicalLexicalNode::try_from(node)?;
             if facts
-                .get(&node.owner)
-                .is_some_and(|previous| previous.node.as_ref() == &node)
+                .get(&node.0.owner)
+                .is_some_and(|previous| previous.node.as_ref() == &node.0)
             {
                 continue;
             }
-            let owner = node.owner.clone();
+            let owner = node.0.owner.clone();
             let fact = ImmutableLexicalFactRef::new(node)
                 .map_err(|error| crate::CompileError::ExtractFailed(error.to_string()))?;
             facts.insert(owner, fact);
