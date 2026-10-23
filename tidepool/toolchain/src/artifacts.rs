@@ -9242,7 +9242,37 @@ mod module_product_tests {
                     } else {
                         vec![CheckedPlannedCellSlot::Bind { value: 1 }]
                     };
-                    let token = plan.issue_admission_token(subject, slots, binders)?;
+                    let token = plan.issue_admission_token(
+                        subject,
+                        slots
+                            .into_iter()
+                            .zip(binders)
+                            .map(|(slot, bindings)| {
+                                use crate::cell_plan::WorldCellReservationRequest as Request;
+                                use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+                                match slot {
+                                    Slot::Prologue { declaration } => {
+                                        assert!(bindings.is_empty());
+                                        Request::Prologue { declaration }
+                                    }
+                                    Slot::Declaration { declaration } => {
+                                        assert!(bindings.is_empty());
+                                        Request::Declaration { declaration }
+                                    }
+                                    Slot::Bind { value } => Request::Bind { value, bindings },
+                                    Slot::Expression {
+                                        capture,
+                                        observation_name,
+                                    } => {
+                                        assert_eq!(bindings.len(), 1);
+                                        let binding = bindings.into_iter().next().unwrap();
+                                        assert_eq!(binding.0, observation_name);
+                                        Request::Expression { capture, binding }
+                                    }
+                                }
+                            })
+                            .collect(),
+                    )?;
                     let reservation = plan.reserve(token)?;
                     let checked = crate::compiler_world::admit_world_cell_program(
                         &endpoint,
@@ -9682,8 +9712,39 @@ mod module_product_tests {
                             )]
                         })
                         .collect();
-                    let reservation =
-                        plan.reserve(plan.issue_admission_token(subject, slots, binders)?)?;
+                    let reservation = plan.reserve(
+                        plan.issue_admission_token(
+                            subject,
+                            slots
+                                .into_iter()
+                                .zip(binders)
+                                .map(|(slot, bindings)| {
+                                    use crate::cell_plan::WorldCellReservationRequest as Request;
+                                    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+                                    match slot {
+                                        Slot::Prologue { declaration } => {
+                                            assert!(bindings.is_empty());
+                                            Request::Prologue { declaration }
+                                        }
+                                        Slot::Declaration { declaration } => {
+                                            assert!(bindings.is_empty());
+                                            Request::Declaration { declaration }
+                                        }
+                                        Slot::Bind { value } => Request::Bind { value, bindings },
+                                        Slot::Expression {
+                                            capture,
+                                            observation_name,
+                                        } => {
+                                            assert_eq!(bindings.len(), 1);
+                                            let binding = bindings.into_iter().next().unwrap();
+                                            assert_eq!(binding.0, observation_name);
+                                            Request::Expression { capture, binding }
+                                        }
+                                    }
+                                })
+                                .collect(),
+                        )?,
+                    )?;
                     let checked = crate::compiler_world::admit_world_cell_program(
                         &endpoint,
                         reservation,
