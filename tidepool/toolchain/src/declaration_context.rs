@@ -26740,23 +26740,68 @@ mod tests {
         let weak = Arc::downgrade(retained);
         let owned = retained.directory().path().to_path_buf();
         let paths = first.artifacts.clone();
+        let files_before = private_directory_file_bytes(&owned);
+        assert!(!files_before.is_empty());
+        assert!(Arc::ptr_eq(
+            retained,
+            &first
+                .compiler_inputs()
+                .artifacts()
+                .retained_materialization(&first.transport_metadata)
+                .unwrap()
+                .unwrap(),
+        ));
+        let stopped_transport = NativeCompilerTransport::lower(Arc::clone(&first.inputs)).unwrap();
         let stopped = with_compiler_transaction_cancellable(
             cancelled(),
             |_| {},
-            || context.prepare_compilation(&scratch.path().join("stopped-warm"), &producer),
+            || {
+                stopped_transport
+                    .prepare(
+                        &scratch.path().join("stopped-warm"),
+                        &producer,
+                        None,
+                        RequestInputTransport::OwnedArena,
+                    )?
+                    .into_request()
+            },
         );
         assert!(
             matches!(stopped.action, Err(CompileError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted)
         );
         assert_eq!(stopped.close, CompilerTransactionClose::NotStarted);
+        assert!(Arc::ptr_eq(
+            retained,
+            &first
+                .compiler_inputs()
+                .artifacts()
+                .retained_materialization(&first.transport_metadata)
+                .unwrap()
+                .unwrap(),
+        ));
+        assert_eq!(private_directory_file_bytes(&owned), files_before);
+
         assert!(owned.is_dir());
         assert!(paths
             .iter()
             .all(|artifact| artifact.interface.path.is_file()));
+        let fresh_transport = NativeCompilerTransport::lower(Arc::clone(&first.inputs)).unwrap();
         let fresh = with_compiler_transaction_cancellable(
             CompilerTransactionCancellation::new(),
             |_| {},
-            || context.prepare_compilation(&scratch.path().join("fresh"), &producer),
+            || {
+                let prepared = fresh_transport.prepare(
+                    &scratch.path().join("fresh"),
+                    &producer,
+                    None,
+                    RequestInputTransport::OwnedArena,
+                )?;
+                assert!(
+                    prepared.reused,
+                    "fresh scope borrows this issued view's cache winner"
+                );
+                prepared.into_request()
+            },
         );
         let recovered = fresh.action.unwrap();
         assert_eq!(fresh.close, CompilerTransactionClose::NotStarted);
@@ -26765,12 +26810,23 @@ mod tests {
             &recovered.materialization
         ));
         assert_eq!(recovered.artifacts, paths);
+        assert!(Arc::ptr_eq(&first.inputs, &recovered.inputs));
+        assert_eq!(private_directory_file_bytes(&owned), files_before);
+
         drop(context);
         drop(first);
         assert!(weak.upgrade().is_some());
         drop(recovered);
         assert!(weak.upgrade().is_none());
         assert!(!owned.exists());
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|artifact| artifact.interface.path.exists())
+                .count(),
+            0,
+            "last issued owner releases every interface alias, including private value backing"
+        );
     }
 
     #[test]
