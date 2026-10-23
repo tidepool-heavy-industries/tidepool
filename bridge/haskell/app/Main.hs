@@ -150,8 +150,6 @@ import Tidepool.Session
   , SessionModule(..), SessionModuleKind(..), Generation(..)
   , preparedApplyEntryTargetName, preparedApplyValueTargetName
   , sessionHiPath, sessionModuleString, capturedSessionInterface, capturedSessionInterfaceEvidence )
-import Tidepool.FatIface
-  ( readExactInterface )
 import Tidepool.SessionArtifacts
   ( prepareSessionBindings, sessionBindingRepresentations, writeSessionBindings, parseValModule
   , emitHostBindingInterface
@@ -1388,18 +1386,6 @@ prepareOriginalCellDeclaration bound template outDir scope exact admission initi
       "authored declarations use the compiler-reserved __result binder")
     rejectPlan InvalidOriginalReservation = throwIO InvalidDeclarationReservation
     rejectPlan rejection = throwIO (InvalidDeclarationWrapper (show rejection))
-
--- Retain checked supporting originals in this cell's private scope. Cached
--- products keep their producer's bytes and version; fresh products use the
--- validated source witness. Neither path replaces an admitted hidden owner.
-programInterfaceRequirements :: PreparedPipelineResult -> String -> String -> IO [(String, String)]
-programInterfaceRequirements prepared unit owner = do
-  source <- programSourceRequirements prepared unit owner
-  iface <- case Map.lookup (mkModuleName owner) (pprProductInterfaces prepared) of
-    Just value | unitString (moduleUnit (mi_module value)) == unit -> pure value
-    _ -> fmap fst <$> readExactInterface (prHscEnv (pprPipelineResult prepared))
-      (mkModule (stringToUnit unit) (mkModuleName owner)) >>= either (fail . show) pure
-  pure (nub (source ++ homeInterfaceUsageOwners (prHscEnv (pprPipelineResult prepared)) iface))
 
 exactProgramProductVersion :: ExactScope -> String -> String -> String -> BS.ByteString -> BS.ByteString -> BS.ByteString -> String
 exactProgramProductVersion scope unit owner source =
