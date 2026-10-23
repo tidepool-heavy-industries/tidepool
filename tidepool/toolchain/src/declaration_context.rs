@@ -29348,11 +29348,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .program_admission()
             .in_program_context(original.clone())
             .unwrap();
-        assert!(captured_request
+        captured_request
             .receipt_admission()
             .product_admission(&admission)
             .original_execution_fixture(&artifacts)
-            .is_ok());
+            .expect("the successor fixture must report its actual refusal envelope");
         assert_eq!(
             read_receipt(&receipt).as_array().unwrap()[8..],
             source_fields
