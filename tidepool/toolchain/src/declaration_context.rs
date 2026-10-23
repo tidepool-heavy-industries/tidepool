@@ -3315,6 +3315,18 @@ pub(crate) struct NativePackageObligation {
     pub(crate) interface_digest: [u8; 32],
 }
 
+/// A borrowed retained import at its exact selected body occurrence. Keeping
+/// the slot and full binding prevents equal symbols in different historical
+/// selections from collapsing into one runtime requirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct NativeRetainedOccurrence<'a> {
+    pub(crate) demander: crate::artifact_inventory::NativeGroupBinding,
+    pub(crate) global_index: u32,
+    pub(crate) binding: &'a crate::artifact_inventory::ArtifactBinding,
+    pub(crate) identity: &'a tidepool_repr::execution_schema::SymbolIdentity,
+    pub(crate) generation: u64,
+}
+
 /// One selected immutable body occurrence and its exact inherited native edges.
 /// Code equality cannot merge these occurrence-specific dependency choices.
 #[derive(Clone)]
@@ -3399,12 +3411,12 @@ impl DemandCertifiedGroups {
         Some((binding, self.rows.get(&binding)?))
     }
 
-    /// Borrow package obligations along one use's already issued exact edges.
-    /// This observation never constructs a selected row or a new demand owner.
-    pub(crate) fn package_obligations_for_use(
+    /// Traverse only the rows reached by one already issued use. Both package
+    /// and retained-value observations share this exact occurrence closure.
+    fn rows_for_use(
         &self,
         reference: &crate::certified_products::ReceiptImportOwner,
-    ) -> Result<Vec<&NativePackageObligation>, CompileError> {
+    ) -> Result<Vec<(crate::artifact_inventory::NativeGroupBinding, &SelectedNativeGroupRow)>, CompileError> {
         if !self.contains_original_use(reference) {
             return Err(failure(
                 "native package query exceeds its resolved use owner",
@@ -3418,20 +3430,15 @@ impl DemandCertifiedGroups {
         budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
         let mut pending = vec![root];
         let mut queued = BTreeSet::from([root]);
-        let mut obligations = Vec::new();
+        let mut rows = Vec::new();
         while let Some(binding) = pending.pop() {
             budget.checkpoint()?;
             let row = self
                 .rows
                 .get(&binding)
                 .ok_or_else(|| failure("native package query lost an issued dependency row"))?;
-            let start = self
-                .package_obligations
-                .partition_point(|obligation| obligation.demander < binding);
-            let tail = &self.package_obligations[start..];
-            let end = tail.partition_point(|obligation| obligation.demander == binding);
-            budget.reserve::<&NativePackageObligation>(end)?;
-            obligations.extend(tail[..end].iter());
+            budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, &SelectedNativeGroupRow)>(1)?;
+            rows.push((binding, row));
             for dependency in &row.dependencies {
                 if !queued.contains(dependency) {
                     budget.reserve::<crate::artifact_inventory::NativeGroupBinding>(2)?;
@@ -3440,10 +3447,54 @@ impl DemandCertifiedGroups {
                 }
             }
         }
-        // Preserve the full projection's canonical obligation order using only
-        // references to the existing immutable rows.
+        Ok(rows)
+    }
+
+    /// Borrow package obligations along one use's already issued exact edges.
+    /// This observation never constructs a selected row or a new demand owner.
+    pub(crate) fn package_obligations_for_use(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+    ) -> Result<Vec<&NativePackageObligation>, CompileError> {
+        let budget = NativeDemandBudget(Some(&self.operation));
+        let mut obligations = Vec::new();
+        for (binding, _) in self.rows_for_use(reference)? {
+            let start = self.package_obligations.partition_point(|obligation| obligation.demander < binding);
+            let tail = &self.package_obligations[start..];
+            let end = tail.partition_point(|obligation| obligation.demander == binding);
+            budget.reserve::<&NativePackageObligation>(end)?;
+            obligations.extend(tail[..end].iter());
+        }
         obligations.sort_unstable();
         Ok(obligations)
+    }
+
+    pub(crate) fn retained_occurrences_for_use(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+    ) -> Result<Vec<NativeRetainedOccurrence<'_>>, CompileError> {
+        let budget = NativeDemandBudget(Some(&self.operation));
+        let mut occurrences = Vec::new();
+        for (demander, row) in self.rows_for_use(reference)? {
+            for (index, import) in row.imports().iter().enumerate() {
+                budget.checkpoint()?;
+                if let crate::certified_products::SelectedNativeImport::Retained {
+                    binding, identity, generation,
+                } = import {
+                    budget.reserve::<NativeRetainedOccurrence<'_>>(1)?;
+                    occurrences.push(NativeRetainedOccurrence {
+                        demander,
+                        global_index: u32::try_from(index)
+                            .map_err(|_| failure("native import index exceeds format"))?,
+                        binding,
+                        identity,
+                        generation: *generation,
+                    });
+                }
+            }
+        }
+        occurrences.sort_unstable();
+        Ok(occurrences)
     }
 
     /// Follow roots recorded by the original choice issuer and their exact
