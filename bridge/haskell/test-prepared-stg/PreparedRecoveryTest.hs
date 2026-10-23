@@ -87,7 +87,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.FatIface
   ( newFatIfaceCache, newOwnerInterfaceCache, lookupFatIfaceComponents
   , FatIfaceComponentLookup(..), fatSelectionComponents
-  , readExactInterface, readCapturedDefiningInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..)
+  , readPackageInterface, readCapturedDefiningInterface, lookupFatIfaceExact, FatIfaceLookup(..), FatIfaceMissing(..)
   , OwnerInterfaceContext, copyOwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface
   , selectOwnerInterfaceCaches, evictOwnerInterfaceMatching, sameOwnerInterfaceContext )
 import Tidepool.PreparedRecovery
@@ -1735,7 +1735,7 @@ verifyRecoveryPublication env context modules original = do
       found -> fail ("expected one genuine fst recovery input, got " ++ show (length found))
   owner <- maybe (fail "genuine fst input has no defining owner") pure
     (nameModule_maybe (varName root))
-  (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  (_,location) <- readPackageInterface env owner >>= either (fail . show) pure
   originalBytes <- BS.readFile (ml_hi_file location)
   bracket (openTempFile "/tmp" "tidepool-recovery-broken-interface")
     (\(path,handle) -> hClose handle >> removeFile path) $ \(path,handle) -> do

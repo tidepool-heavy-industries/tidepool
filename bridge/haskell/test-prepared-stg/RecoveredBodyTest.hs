@@ -53,7 +53,7 @@ import Tidepool.ExecutionSchema
   , TopBinding(..), ValueRef(..), WireProgram(..) )
 import Tidepool.FatIface
   ( FatIfaceLookup(..), newFatIfaceCache, lookupFatIfaceExact
-  , readExactInterface
+  , readPackageInterface
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), pprPipelineResult, pprModules, prHscEnv, runPipelineSelected )
@@ -280,7 +280,7 @@ assertRecoveredDictionaryBody = do
         wanted = Set.fromList [varName identifier
           | modul <- ownerUnits, (Stg.StgTopLifted binding, _) <- pmBindings modul
           , (identifier, _) <- stgPairs binding]
-    (iface, _) <- liftIO $ readExactInterface env owner
+    (iface, _) <- liftIO $ readPackageInterface env owner
       >>= either (const (fail "dictionary defining interface is unreadable")) pure
     ifaceBindings <- maybe (fail "dictionary owner has no canonical fat Core") pure (mi_extra_decls iface)
     original <- liftIO $ initIfaceCheck (text "dictionary order oracle") env $ do
