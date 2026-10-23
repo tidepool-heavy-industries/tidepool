@@ -26,7 +26,7 @@ pub(crate) use compiler_projection::{
 };
 pub use compiler_projection::{
     AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
-    CompilerRoleFacts, PublicationFactsRef, PublicationNativeAuthority,
+    CompilerRoleFacts, PublicationBirthFacts, PublicationFactsRef,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -21860,7 +21860,7 @@ mod tests {
                 },
             ),
             selection_sha256: [5; 32],
-            native_authority: PublicationNativeAuthority::capture(&birth).unwrap(),
+            native_authority: PublicationBirthFacts::capture(&birth).unwrap(),
         };
         let mut projection = CompilerInputProjection::default();
         projection

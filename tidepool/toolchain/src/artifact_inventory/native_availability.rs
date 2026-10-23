@@ -4596,7 +4596,7 @@ mod normalized_dependency_tests {
                     original_input_identity: "pending fixture input".into(),
                     selection: ExactArtifactSelection::capture(&artifacts),
                     selection_sha256: [0; 32],
-                    native_authority: PublicationNativeAuthority::capture(&birth).unwrap(),
+                    native_authority: PublicationBirthFacts::capture(&birth).unwrap(),
                 },
             )
             .unwrap();
