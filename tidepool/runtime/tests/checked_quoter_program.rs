@@ -279,7 +279,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             producer,
             original,
             &references,
-            &module_interfaces,
+            &original_context,
             SourceReplay::Unavailable,
         );
         eprintln!(
@@ -304,7 +304,7 @@ fn assert_original_durability(
     producer: [u8; 32],
     original: &tidepool_toolchain::recovery_artifacts::CertifiedRecoveryProduct,
     references: &[tidepool_toolchain::recovery_artifacts::RecoveryArtifactRef],
-    module_interfaces: &[tidepool_toolchain::recovery_artifacts::RecoveryModuleInterfaceRef],
+    issued: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
     replay: SourceReplay,
 ) {
     let is_owner = |unit: &str, module: &str| {
@@ -321,15 +321,69 @@ fn assert_original_durability(
         SourceReplay::Available => assert!(reference.execution_source.is_some()),
         SourceReplay::Unavailable => assert!(reference.execution_source.is_none()),
     }
-    let recovered =
-        tidepool_toolchain::declaration_join::ExactDeclarationContext::capture_recovery(
-            durable,
-            references,
-            module_interfaces,
-            &[],
-            Vec::new(),
-        )
+    use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+    use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
+    use tidepool_toolchain::declaration_join::{
+        RecoveredArtifactAcquisition, RecoveryPayloadReference,
+    };
+    use tidepool_toolchain::exact_context::{hydrate_context, Materializer};
+    let snapshot = issued.snapshot();
+    let blocks = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&blocks);
+    let persisted = writer.materialize_context(None, &snapshot).unwrap();
+    for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+        blocks.put_keyed(&cid, &bytes).unwrap();
+    }
+    let acquired = hydrate_context(&blocks, persisted.root()).unwrap();
+    let graph = acquired.snapshot().graph_selection().unwrap();
+    let mut payload_ids = graph
+        .bindings
+        .iter()
+        .map(|binding| binding.artifact)
+        .collect::<BTreeSet<_>>();
+    payload_ids.extend(snapshot.native_package_artifacts_introduced(None));
+    let payloads = issued
+        .materialize_recovery_artifacts(durable, &payload_ids)
         .unwrap();
+    let descriptors = payloads
+        .iter()
+        .map(|reference| match reference {
+            RecoveryPayloadReference::Original(reference) => {
+                ArtifactDescriptor::from_recovery_product(reference)
+            }
+            RecoveryPayloadReference::Canonical(reference) => {
+                ArtifactDescriptor::from_recovery_module_interface(reference)
+            }
+            RecoveryPayloadReference::Join(reference) => {
+                ArtifactDescriptor::from_recovery_join(reference)
+            }
+            RecoveryPayloadReference::Value(reference) => {
+                ArtifactDescriptor::from_recovery_value_interface(reference)
+            }
+            RecoveryPayloadReference::PackageCode(reference) => {
+                ArtifactDescriptor::from_recovery_package_code(reference)
+            }
+        })
+        .collect::<Vec<_>>();
+    let recovered = RecoveredArtifactAcquisition::new(durable)
+        .capture_payloads_bound(
+            &payloads,
+            &descriptors,
+            &graph.bindings,
+            &acquired.snapshot().binding_dependencies().unwrap(),
+        )
+        .unwrap()
+        .context_for_expected_snapshot(persisted.root(), &acquired)
+        .unwrap();
+    assert_eq!(
+        recovered.artifact_view().capture_graph_selection(),
+        issued.artifact_view().capture_graph_selection()
+    );
+    assert_eq!(
+        recovered.compiler_input_roles(),
+        issued.compiler_input_roles()
+    );
+    assert_eq!(recovered.lexical_graph(), issued.lexical_graph());
     let recovered_products = recovered.recovery_products();
     let matching = recovered_products
         .iter()
@@ -382,19 +436,25 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
     )
     .unwrap();
     let include = [root.path().to_path_buf()];
-    let compiled = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::compile_invocation(
-            &tidepool_toolchain::artifacts::CompileInvocation {
-                source: include_str!("fixtures/CheckedOriginalReplayProbe.hs"),
-                targets: &["result"],
-                include: &include,
-                fallback_module_name: "CheckedOriginalReplayProbe",
-            },
-            |_, _, _| {},
+    let probe = root.path().join("CheckedOriginalReplayProbe.hs");
+    std::fs::write(
+        &probe,
+        include_str!("fixtures/CheckedOriginalReplayProbe.hs"),
+    )
+    .unwrap();
+    let frozen =
+        tidepool_toolchain::artifacts::FrozenEntrySources::capture(&include, &probe).unwrap();
+    let entry = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::prepare_frozen_production_entry(
+            &frozen,
+            root.path(),
+            &root.path().join("entry"),
             settlement,
         )
     })
     .unwrap();
+    let compiled = entry.products();
+    let issued = compiled.original_execution_context().unwrap();
     let originals = compiled
         .recovery_products
         .iter()
@@ -413,7 +473,7 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
                     && binder.occurrence == "value"
             })
     }));
-    let descriptors = compiled.artifact_view.descriptors();
+    let descriptors = compiled.artifact_view().descriptors();
     let matching = descriptors
         .iter()
         .filter(|descriptor| {
@@ -433,21 +493,12 @@ fn fixture_original_source_recipe_survives_recovery_without_compile_time_executi
         &compiled.recovery_products,
     )
     .unwrap();
-    let interfaces = references
-        .iter()
-        .map(|reference| {
-            reference
-                .module_interface
-                .clone()
-                .expect("native original retains its issued canonical interface")
-        })
-        .collect::<Vec<_>>();
     assert_original_durability(
         durable.path(),
         producer,
         original,
         &references,
-        &interfaces,
+        &issued,
         SourceReplay::Available,
     );
 }
