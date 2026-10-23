@@ -54,12 +54,18 @@ sourceDependencyQuery = SourceDependencyQuery . Set.toAscList . Set.fromList
 nativeDependencyQuery :: [NativeOriginalUse] -> NativeDependencyQuery
 nativeDependencyQuery = NativeDependencyQuery . Set.toAscList . Set.fromList
 
-newtype SourceDependencyReply = SourceDependencyReply
-  { sourceDependencyRetained :: [RetainedOccurrence] }
+newtype SourceDependencyReply = SourceDependencyReply [RetainedOccurrence]
 data NativeDependencyReply = NativeDependencyReply
-  { nativeDependencyPackages :: !(Map.Map SymbolIdentity BS.ByteString)
-  , nativeDependencyRetained :: ![RetainedOccurrence]
-  }
+  !(Map.Map SymbolIdentity BS.ByteString) ![RetainedOccurrence]
+
+sourceDependencyRetained :: SourceDependencyReply -> [RetainedOccurrence]
+sourceDependencyRetained (SourceDependencyReply retained) = retained
+
+nativeDependencyPackages :: NativeDependencyReply -> Map.Map SymbolIdentity BS.ByteString
+nativeDependencyPackages (NativeDependencyReply packages _) = packages
+
+nativeDependencyRetained :: NativeDependencyReply -> [RetainedOccurrence]
+nativeDependencyRetained (NativeDependencyReply _ retained) = retained
 
 -- Only the private wire decoder carries both fields. Semantic consumers
 -- receive the branch-specific reply, and SOURCE has no package surface.
