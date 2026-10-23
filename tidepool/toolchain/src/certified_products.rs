@@ -26378,11 +26378,15 @@ pub(crate) mod tests {
                     &IssuedGroupCandidates::bind(Arc::from([]), &current).unwrap(),
                 )
                 .unwrap();
+            let canonical = current
+                .iter()
+                .map(|product| product.module_interface().clone())
+                .collect::<Vec<_>>();
             let output =
                 crate::declaration_context::certified_product_artifact_view_with_validation(
                     producer.sha256(),
                     &current,
-                    &[],
+                    &canonical,
                     &[],
                     Some(request.compiler_inputs().artifacts()),
                     NativeArtifactDemand::ScopeInterfaces,
@@ -26391,25 +26395,57 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(output.selected_native_groups().is_empty());
             assert!(selection.new_product_native_requirements().next().is_none());
+            let acquired = output.entries();
             let entries = current
                 .iter()
                 .map(|product| {
-                    Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap())
+                    let id = ArtifactEntry::original(producer.sha256(), product.clone())
+                        .unwrap()
+                        .descriptor
+                        .id;
+                    acquired
+                        .iter()
+                        .find(|entry| entry.descriptor.id == id)
+                        .expect("current Original has an actual output acquisition")
+                        .clone()
                 })
                 .collect::<Vec<_>>();
+            let produced = current
+                .iter()
+                .zip(&entries)
+                .flat_map(|(product, original)| {
+                    let canonical_id =
+                        ArtifactEntry::canonical_artifact_id(product.module_interface());
+                    let canonical = acquired
+                        .iter()
+                        .find(|entry| entry.descriptor.id == canonical_id)
+                        .expect("current canonical certificate has an actual output acquisition");
+                    [canonical.clone(), original.clone()]
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(produced.len(), 2 * current.len());
+            for entry in &produced {
+                assert!(
+                    acquired.iter().any(|actual| Arc::ptr_eq(actual, entry)),
+                    "only exact current producer acquisitions enter stage completion"
+                );
+            }
             let parent = &products[2].product;
             let parent_entry = entries
                 .iter()
                 .find(|entry| entry.descriptor.owner.module == "CohortParent")
                 .unwrap();
             let inventory = output.inventory();
+            let missing_producer = inventory
+                .bind_segment(&output, vec![], &selection, &mut validation)
+                .err()
+                .expect("whole output custody cannot replace current producer acquisitions");
+            assert!(
+                matches!(missing_producer, crate::CompileError::ExtractFailed(ref detail)
+                if detail == "artifact inventory: compiler output lacks its actual canonical producer or matching carried row")
+            );
             let bound = inventory
-                .bind_segment(
-                    &output,
-                    vec![],
-                    &selection,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                )
+                .bind_segment(&output, produced, &selection, &mut validation)
                 .unwrap();
             let observations = source_target_observations(&[(parent, 5)]);
             let prepared = prepared_target_fixture(&observations);
