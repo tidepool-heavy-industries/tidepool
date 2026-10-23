@@ -53,7 +53,8 @@ import Data.Text.Encoding qualified as TE
 import GHC (runGhc, getSession, setSession, getSessionDynFlags, setSessionDynFlags, SafeHaskellMode(Sf_None), ms_mod, ms_mod_name, ms_location, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
-import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy, splitFunTys, splitTyConApp_maybe)
+import GHC.Core.Multiplicity (scaledThing)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (instEnvElts, is_cls_nm, is_dfun_name)
@@ -7608,11 +7609,10 @@ verifyHydration work cold = do
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
 
--- Observe actual GHC finder operations, without timing thresholds or compiler
--- authority fixtures. A missing package key must never consult an ancestor
--- attempt; package results survive while source choices and file hashes do not.
+-- END releases the active environment while completed dependency owners stay
+-- selectable from the fixed compiler universe in the next request.
 compilerBootStateIsolation :: IO ()
-compilerBootStateIsolation = withScratch $ \work -> do
+compilerBootStateIsolation = withTiming $ withScratch $ \work -> do
   let helper = mkModuleName "BootDependency"
       target = work </> "BootTarget.hs"
   writeFile (work </> "BootDependency.hs")
@@ -7623,8 +7623,8 @@ compilerBootStateIsolation = withScratch $ \work -> do
       initial <- scopedRunGhc scope getSession
       unless (isNothing (lookupHpt (hsc_HPT initial) helper)) $
         fail "new compiler scope inherited a HOME interface before compilation"
-      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
-      unless (fmap renderType (crResultType result) == Just "Int") $
+      result <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult result)) == Just "Int") $
         fail "boot-state producer changed the checked result type"
       observed <- scopedRunGhc scope getSession
       unless (isJust (lookupHpt (hsc_HPT observed) helper)) $
@@ -7637,11 +7637,59 @@ compilerBootStateIsolation = withScratch $ \work -> do
         fail "END published the previous attempt's HOME table, graph or targets"
       unless (names == (nsUniqChar (hsc_NC initial),nsNames (hsc_NC initial))) $
         fail "new scope replaced the fixed boot NameCache owner"
-      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
-      unless (fmap renderType (crResultType result) == Just "Int"
-          && isJust (lookupHpt (hsc_HPT (crHscEnv result)) helper)) $
-        fail "fresh scope could not select its completed dependency after END"
+      (result,diagnostics) <- captureDiagnostics $
+        scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult result)) == Just "Int"
+          && isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) helper)
+          && counterValues "transaction_reused_source_products" diagnostics == [1]) $
+        fail ("fresh scope did not reuse its completed dependency after END: " ++ diagnostics)
 
+-- SOURCE backedges must tie the current target's real TyCon, even when the
+-- boot interface and dependency source are unchanged. Nominal eqType alone
+-- cannot detect an old TyCon with the same Name and a stale representation.
+lazySourceBackedge :: IO ()
+lazySourceBackedge = withTiming $ withScratch $ \work -> do
+  let target = work </> "LazyBackedgeTarget.hs"
+      dependency = mkModuleName "LazyBackedgeDependency"
+      fixture name = "test-source-boot/fixtures" </> name
+      install name = copyFile (fixture name) target
+      compile scope = scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile
+        Nothing target [work] Nothing
+      home prepared = maybe (fail "SOURCE backedge lost its completed dependency") pure
+        (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) dependency)
+      field expected retained = do
+        identifier <- case [value | value <- typeEnvIds (md_types (hm_details retained))
+            , getOccString value == "observeToken"] of
+          [value] -> pure value
+          _ -> fail "SOURCE dependency lost its actual exported Id"
+        actual <- case splitFunTys (idType identifier) of
+          ([argument],_) | Just (owner,[]) <- splitTyConApp_maybe (scaledThing argument)
+            , [constructor] <- tyConDataCons owner
+            , [payload] <- DC.dataConOrigArgTys constructor -> pure (scaledThing payload)
+          _ -> fail "SOURCE dependency retained an abstract boot TyCon"
+        unless (eqType actual expected) $
+          fail ("SOURCE dependency retained the wrong target representation: " ++ renderType actual)
+  forM_ ["LazyBackedgeDependency.hs","LazyBackedgeTarget.hs-boot"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  install "LazyBackedgeTarget.hs"
+  withResidentCompilerScopes [work] $ \runScope -> do
+    -- Force the retained HMI only after its producing request and compiler-view
+    -- directory have ended; the lazy HOME knot must retain actual inputs.
+    retained <- runScope (pure ()) (\scope -> compile scope >>= home)
+    field intTy retained
+    warm <- runScope (pure ()) (\scope -> compile scope >>= home)
+    field intTy warm
+    install "LazyBackedgeTargetChanged.hs"
+    changed <- runScope (pure ()) (\scope -> compile scope >>= home)
+    field boolTy changed
+    field intTy retained
+  -- An independently booted compiler supplies the changed-source oracle.
+  withResidentCompilerScopes [work] $ \runScope ->
+    runScope (pure ()) (\scope -> compile scope >>= home >>= field boolTy)
+
+-- Observe actual GHC finder operations, without timing thresholds or compiler
+-- authority fixtures. A missing package key must never consult an ancestor
+-- attempt; package results survive while source choices and file hashes do not.
 packageFinderHistoryIsolation :: IO ()
 packageFinderHistoryIsolation = withScratch $ \work -> do
   libdir <- getLibdir
