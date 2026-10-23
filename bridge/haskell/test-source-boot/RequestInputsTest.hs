@@ -52,6 +52,7 @@ import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
+import GHC.LanguageExtensions.Type (Extension(ImplicitPrelude))
 import GHC.Hs (HsModule(..), ImportDecl(..), ImportDeclQualifiedStyle(..), ImportListInterpretation(..), IE(..), IEWrappedName(..))
 import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.SrcLoc (GenLocated(..), mkRealSrcLoc, unLoc)
@@ -68,7 +69,7 @@ import GHC.Types.Name (nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_details)
 import GHC.Unit.Module.ModDetails (md_types)
-import GHC.Driver.Session (DynFlags, importPaths)
+import GHC.Driver.Session (DynFlags, importPaths, xopt)
 import GHC.Driver.Env (hsc_units)
 import Control.Monad.IO.Class (liftIO)
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder)
@@ -265,6 +266,8 @@ bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
           ]
     (captured,matched,environment) <- scopedRunGhc compiler $ do
       (captured,parsed) <- bufferedParsedImports work source
+      liftIO $ unless (xopt ImplicitPrelude (ms_hspp_opts (pm_mod_summary parsed)))
+        (fail "synthetic Prelude control requires its actual driver ImplicitPrelude policy")
       matched <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
       environment <- getSession
       pure (captured,matched,environment)

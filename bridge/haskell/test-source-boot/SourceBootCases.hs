@@ -87,8 +87,9 @@ import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLog
 import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
 import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
-import GHC.Types.PkgQual (PkgQual(..))
+import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
+import GHC.Types.SourceText (sl_fs)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
 import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
@@ -194,8 +195,10 @@ import Tidepool.ExactHydration
   , generatedScaffoldRecipeWithImportRendering, sourceImportsSnapshot, sourceImportsHomeRoles
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.TypedSegment.Source
-  ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope )
-import Tidepool.ExactHydration (captureGeneratedScaffoldSource)
+  ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope
+  , moduleImportRequests, moduleDemandCapturedImports )
+import Tidepool.ExactHydration (captureGeneratedScaffoldSource, parseCapturedGeneratedImports)
+import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPackageFacts, serializeOriginalInterface, ExactContextForkFailure(..))
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProof, admittedOriginalInterface)
@@ -247,7 +250,7 @@ import Tidepool.ExactScope
   )
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell (CheckedSignature(..), RequestTypeSignatures(..), RequestHelperRecipe(..), captureCheckedSignature, encodeCheckedSignature, decodeCheckedSignature, encodeRequestTypeSignatures
-  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule(..), thenNativeModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
+  , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness, validateCheckedTypeWitnessBytes, resolveCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes, resolveNativeAnnotations, annotateNativeModule, NativeParsedModule, nativeParsedModule, nativeTypeUses, unannotatedModule, typecheckNativeModule, typecheckNativeModuleWithDiagnostics)
 import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImportMarker
   , literalImportRendering, appendImportRendering, replaceImportRendering, importRenderingSource)
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..)
@@ -4658,7 +4661,14 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
       _ -> fail "native signature target summary missing"
     runGhc (Just libdir) $ do
       setSession (crHscEnv checked)
-      parsed <- parseModule summary
+      -- This component checks annotation of actual GHC parses. Syntax DATA
+      -- does not issue a Prepared admission or source/interface permission.
+      let matchedNative :: ParsedModule -> IO NativeParsedModule
+          matchedNative actual = do
+            captured <- either (fail . show) pure (captureImportSyntax (pm_parsed_source actual))
+            driver <- either (fail . show) pure (matchDriverImports captured actual)
+            pure (unannotatedModule (beginImportRefinement driver))
+      parsed <- parseModule summary >>= liftIO . matchedNative
       rewritten <- liftIO (rewriteCheckedAnnotations (crHscEnv checked) signatures parsed)
       rechecked <- typecheckNativeModule rewritten
       let (environment, _) = tm_internals_ rechecked
@@ -4678,33 +4688,53 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
       expected <- maybe (fail "native nominal type missing") pure inputType
       let parseSlot body = do
             liftIO (writeFile target ("module CheckedNativeSignatures where\n" ++ body))
-            parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target })
-      slot <- parseSlot "__result :: TidepoolActivationInput\n__result = undefined\nwarningProbe = ()\n"
+            parseModule (summary { ms_hspp_buf = Nothing, ms_hspp_file = target
+                , ms_hspp_opts = wopt_set (ms_hspp_opts summary) Opt_WarnMissingSignatures })
+              >>= liftIO . matchedNative
+      slot <- parseSlot (unlines
+        [ "import qualified Data.Maybe as DemandMaybe (Maybe(..))"
+        , "import qualified Data.List as DemandList (sort)"
+        , "__result :: TidepoolActivationInput"
+        , "__result = undefined"
+        , "warningProbe = ()"
+        ])
       -- Demand renaming and final checking consume the SAME resolved native
       -- product. The raw placeholder must fail before that annotation.
       nativeSlots <- liftIO (resolveNativeAnnotations (crHscEnv checked) Nothing (Just (1,signature)))
       native <- liftIO (annotateNativeModule nativeSlots slot)
       source <- liftIO (readFile target)
-      let slotFlags = ms_hspp_opts (pm_mod_summary slot)
+      let slotFlags = ms_hspp_opts (pm_mod_summary (nativeParsedModule slot))
       recipe <- liftIO (generatedCheckingTemplateRecipe slotFlags (CheckedTemplateImports [] [])
         source source target "CheckedNativeSignatures" >>= either fail pure)
       captured <- liftIO (captureGeneratedScaffoldSource recipe target >>= either fail pure)
-      demand <- either (fail . show) pure (prepareModuleDemand slotFlags captured)
+      capturedImports <- either (liftIO . fail) pure (parseCapturedGeneratedImports slotFlags captured)
+      demand <- either (fail . show) pure (prepareModuleDemand capturedImports)
       scope <- liftIO (newSegmentDemandScope (crHscEnv checked) (Map.empty :: Map.Map String ()))
       rawDemand <- liftIO (moduleInputOccurrences (crHscEnv checked) scope demand)
       liftIO $ unless (case rawDemand of Left _ -> True; _ -> False)
         (fail "raw native type placeholder unexpectedly passed demand renaming")
       annotatedDemand <- liftIO (annotateModuleDemand nativeSlots demand)
+      let sameQualifier NoRawPkgQual NoRawPkgQual = True
+          sameQualifier (RawPkgQual left) (RawPkgQual right) = sl_fs left == sl_fs right
+          sameQualifier _ _ = False
+          sameRequest (leftName,leftQualifier,leftBoot) (rightName,rightQualifier,rightBoot) =
+            leftName == rightName && sameQualifier leftQualifier rightQualifier && leftBoot == rightBoot
+          importsBefore = moduleImportRequests demand
+          importsAfter = moduleImportRequests annotatedDemand
+      liftIO $ do
+        capturedOwner <- evaluate capturedImports >>= makeStableName
+        demandOwner <- evaluate (moduleDemandCapturedImports demand) >>= makeStableName
+        annotatedOwner <- evaluate (moduleDemandCapturedImports annotatedDemand) >>= makeStableName
+        unless (capturedOwner == demandOwner && demandOwner == annotatedOwner
+            && map (\(owner,_,_) -> moduleNameString owner) importsBefore == ["Data.Maybe","Data.List"]
+            && length importsBefore == length importsAfter
+            && and (zipWith sameRequest importsBefore importsAfter))
+          (fail "native demand annotation changed its actual captured owner or ordered import requests")
       demanded <- liftIO (moduleInputOccurrences (crHscEnv checked) scope annotatedDemand)
       liftIO $ unless (case demanded of Right [] -> True; _ -> False)
         (fail "resolved native annotation failed demand renaming")
-      let warningSource = nativeParsedModule native
-          warningSummary = pm_mod_summary warningSource
-          warningNative = native { nativeParsedModule = warningSource
-            { pm_mod_summary = warningSummary { ms_hspp_opts = wopt_set
-                (ms_hspp_opts warningSummary) Opt_WarnMissingSignatures } } }
       ((nativeEnvironment, _), nativeDiagnostics) <- liftIO
-        (typecheckNativeModuleWithDiagnostics (crHscEnv checked) warningNative)
+        (typecheckNativeModuleWithDiagnostics (crHscEnv checked) native)
       liftIO $ unless (not (isEmptyMessages nativeDiagnostics))
         (fail "native typecheck hook dropped missing-signature diagnostics")
       let actualInput = [idType identifier | identifier <- typeEnvIds (tcg_type_env nativeEnvironment)
@@ -4759,8 +4789,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         noHelpers <- parseSlot "__result :: Int\n__result = 0\n"
         rewritten <- liftIO (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract noHelpers)
         _ <- typecheckNativeModule rewritten
-        composed <- liftIO (thenNativeModule native
-          (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract))
+        composed <- liftIO (rewriteRequestTypes (crHscEnv checked) NoRequestHelpers contract native)
         liftIO $ unless (nameSetElemsStable (nativeTypeUses composed)
             == nameSetElemsStable (nativeTypeUses native))
           (fail "helper-free request transform dropped native input dependency uses")

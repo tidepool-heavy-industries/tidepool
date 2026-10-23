@@ -57,6 +57,7 @@ demandScopeChecks = do
             ["module MalformedModule where", "root = ("])
           "DeclarationQuote" -> pure (unlines
             ["{-# LANGUAGE QuasiQuotes #-}", "module DeclarationQuote where"
+            ,"import qualified MissingDemandQuoteInterface as NeverLoad"
             ,"[doesNotExist| refuse before rename |]"])
           _ -> readFile ("test-cell-splitter/fixtures/demand-scope" </> name ++ ".hs")
         actual <- liftIO (sourceModuleFlags initial source)
@@ -89,16 +90,19 @@ demandScopeChecks = do
             case associateSegmentDemandName exported "input" 999 scope of
               Left ConflictingDemandName -> pure ()
               _ -> fail "duplicate exact Name association was accepted"
-          case prepareModuleDemand actual captured of
-            Left (ModuleDemandParseRejected actualPath diagnostic)
-              | expected == SyntaxRefusal && actualPath == path && not (null diagnostic) ->
+          case fmap prepareModuleDemand (parseCapturedGeneratedImports actual captured) of
+            Left diagnostic
+              | expected == SyntaxRefusal && capturedGeneratedScaffoldPath captured == path
+              , diagnostic `elem` ["GHC could not parse the captured generated root"
+                  ,"GHC reported errors in the captured generated root"] ->
                   putStrLn (name ++ ": " ++ diagnostic)
-            Left (ModuleDemandQuasiQuoteRejected actualPath quotes)
+            Left diagnostic -> fail (name ++ ": wrong capture parsing refusal " ++ diagnostic)
+            Right (Left (ModuleDemandQuasiQuoteRejected actualPath quotes))
               | expected == QuoteRefusal && actualPath == path && quotes == ["doesNotExist"] -> pure ()
-            Left failure -> fail (name ++ ": wrong parsing refusal " ++ show failure)
-            Right _ | expected `elem` [SyntaxRefusal,QuoteRefusal] ->
+            Right (Left failure) -> fail (name ++ ": wrong demand refusal " ++ show failure)
+            Right (Right _) | expected `elem` [SyntaxRefusal,QuoteRefusal] ->
               fail (name ++ ": refused source passed the parser gate")
-            Right parsed -> do
+            Right (Right parsed) -> do
               let sealedPath = capturedGeneratedScaffoldPath captured
                   sealedBytes = capturedGeneratedScaffoldBytes captured
               unless (moduleDemandMatchesSource parsed sealedPath sealedBytes
@@ -111,14 +115,15 @@ demandScopeChecks = do
                       (typedSegmentPlan (replicate 64 '0') checker
                         [TypedItemPlan 0 "item" 1 (LetItem "marker" [])])
                 plan <- makePlan root
-                typed <- either (fail . show) pure (prepareSegmentDemand plan actual captured)
+                typed <- either (fail . show) pure
+                  (prepareSegmentDemand plan (moduleDemandCapturedImports parsed))
                 typedDemand <- typedSegmentInputOccurrences environment scope typed
                 unless (typedDemand == demanded
                     && moduleDemandMatchesSource (segmentModuleDemand typed) sealedPath sealedBytes
                     && segmentDemandMatchesSource typed sealedPath sealedBytes)
                   (fail "typed root wrapper changed its module proof or demand")
                 wrong <- makePlan "missingTypedCheckerRoot"
-                case prepareSegmentDemand wrong actual captured of
+                case prepareSegmentDemand wrong (moduleDemandCapturedImports parsed) of
                   Left UnprovedRootAbstraction -> pure ()
                   _ -> fail "typed root wrapper admitted a plan without its unique checker root"
               else pure ()
@@ -189,8 +194,10 @@ observationContributionChecks directory flags = liftIO $ do
     recipe <- generatedCheckingTemplateRecipe flags (CheckedTemplateImports [] [])
       prefix source path name >>= either fail pure
     captured <- captureGeneratedScaffoldSource recipe path >>= either fail pure
+    capturedImports <- either (fail . ("operand capture " ++)) pure
+      (parseCapturedGeneratedImports flags captured)
     parsed <- either (fail . (("operand control " ++ show ordinal ++ " must parse before its contribution check: ") ++) . show) pure
-      (prepareModuleDemand flags captured)
+      (prepareModuleDemand capturedImports)
     let actual = validateObservationContribution (length prefix) mode [] parsed
     unless (case actual of Right () -> accepted; Left _ -> not accepted)
       (fail ("wrong observation contribution result " ++ show ordinal ++ ": " ++ show actual))
