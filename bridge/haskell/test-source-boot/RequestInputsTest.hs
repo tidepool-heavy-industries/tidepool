@@ -2312,11 +2312,11 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                     , domain == worldSourceDomainSha256 (worldInputsSources facts) -> pure ()
                   _ -> fail "World native certificate lost its actual base/source-domain recipe provenance"
                 itemSha <- case deserialiseFromBytes decodeTerm (BL.fromStrict output) of
-                  Right (remaining,TList [TString "TPCWPREP5",_,_,_
+                  Right (remaining,TList [TString "TPCWPREP6",_,_,_
                     ,TList [TString "prepared",TList [TList [TInt 0,TInt 1,TBytes sha]]]
                     ,_,TList common,TList [_]
                     ,TList [TList [identity@(TList [TString "exec",TString _]),TList [TInt 0]
-                      ,TList refs,TList []]]]) | BL.null remaining -> do
+                      ,TList refs,TList [],TList []]]]) | BL.null remaining -> do
                         unless (map (\entry -> case entry of
                             TList [TString name,TBytes _] -> T.unpack name
                             _ -> "") refs == map ("stage-0/" ++)
@@ -2458,17 +2458,17 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                             (fail "virtualized declaration prefix lost its actual lexical import evidence")
                         bytes <- BS.readFile (worldCellPrepareOutput ownPrepare)
                         case deserialiseFromBytes decodeTerm (BL.fromStrict bytes) of
-                          Right (remaining,TList [TString "TPCWPREP5",_,_,_
+                          Right (remaining,TList [TString "TPCWPREP6",_,_,_
                             ,TList [TString "prepared",TList completed],_,_,TList typed,TList stages])
                               | BL.null remaining -> do
                                 let stageKind entry = case entry of
-                                      TList [TList (TString kind:_),TList _,TList _,TList _] -> kind
+                                      TList [TList (TString kind:_),TList _,TList _,TList _,TList _] -> kind
                                       _ -> "invalid"
                                     stageOrdinals entry = case entry of
-                                      TList [_,TList ordinals,_,TList _] -> ordinals
+                                      TList [_,TList ordinals,_,TList _,TList _] -> ordinals
                                       _ -> []
                                     stageReferences entry = case entry of
-                                      TList [_,_,_,TList references] -> references
+                                      TList [_,_,_,TList references,TList _] -> references
                                       _ -> []
                                     referencesAt ordinal = case drop ordinal stages of
                                       entry:_ -> stageReferences entry
