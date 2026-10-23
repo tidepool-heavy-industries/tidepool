@@ -767,9 +767,22 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   identifier <- case binders of
     [binder] -> pure (bbVarId binder)
     _ -> fail "checked command has another binder inventory"
+  consumerSource <- T.unpack . TE.decodeUtf8 <$> BS.readFile consumerPath
+  let submittedImports = "import Tidepool.Command.Types (Command)\nimport Tidepool.Session.Val.G7 (cmd)\n"
+  template <- either fail pure (replaceTemplateMarker submittedImports preambleImportMarker consumerSource)
+  flags <- defaultParserDynFlags
+  authored <- analyzeCellWithFlags flags template (submittedImports ++ "cmd") >>= either (fail . show) pure
+  rendering <- either fail pure $ replaceImportRendering preambleImportMarker
+    (appendImportRendering (locatedImportsRendering (prologueImports (cellPlanPrologue authored)))
+      (literalImportRendering preambleImportMarker)) (literalImportRendering template)
+  writeFile consumerPath (importRenderingSource rendering)
+  protected <- either fail pure
+    (captureProtectedTemplateImports flags template >>= renderProtectedTemplateImports 0)
+  recipe <- generatedCheckingTemplateRecipeWithImportRendering flags (CheckedTemplateImports [] [])
+    protected template rendering consumerPath "CheckedCommandConsumer" >>= either fail pure
   withResidentPipelineSelected includes $ \compile ->
-    forM_ [(value,GeneralCompile),(alias,CheckedItemCompile [] Nothing
-        [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]])]
+    forM_ [(value,GeneralCompile),(alias,GeneratedScaffoldCompile recipe (CheckedItemCompile [] Nothing
+        [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]]))]
       $ \(input,purpose) -> do
         capture <- admitCheckedScope base includes [input]
         checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
