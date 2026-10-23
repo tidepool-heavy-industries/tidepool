@@ -12927,28 +12927,23 @@ pub(crate) mod test_support {
         let directory = compiler_input_directory()?;
         let sources = directory.path().join("sources");
         std::fs::create_dir(&sources)?;
-        let support = include_str!("../tests/fixtures/native-publication/SourceOriginalSupport.hs");
-        std::fs::write(
-            sources.join("PublicationHelper.hs"),
-            support.replace("module SourceOriginalSupport", "module PublicationHelper"),
-        )?;
-        std::fs::write(
-            sources.join("SourceOriginalSupport.hs"),
-            support
-                .replace("where\n", "where\n\nimport qualified PublicationHelper\n")
-                .replace("second = 23", "second = PublicationHelper.second"),
-        )?;
+        for (name, source) in [
+            (
+                "PublicationHelper.hs",
+                include_str!("../tests/fixtures/sealed-publication/PublicationHelper.hs"),
+            ),
+            (
+                "SourceOriginalSupport.hs",
+                include_str!("../tests/fixtures/sealed-publication/SourceOriginalSupport.hs"),
+            ),
+            (
+                "PublicationTarget.hs",
+                include_str!("../tests/fixtures/sealed-publication/PublicationTarget.hs"),
+            ),
+        ] {
+            std::fs::write(sources.join(name), source)?;
+        }
         let target = sources.join("PublicationTarget.hs");
-        std::fs::write(
-            &target,
-            include_str!("../tests/fixtures/native-publication/PublicationTarget.hs")
-                .replace("where\n", "where\n\nimport qualified PublicationHelper\n")
-                .replace("(Int, Int)", "(Int, Int, Int)")
-                .replace(
-                    "__prepared = (first, second)",
-                    "__prepared = (first, second, PublicationHelper.first)",
-                ),
-        )?;
         let includes = vec![sources];
         let frozen = FrozenEntrySources::capture(&includes, &target)?;
         let endpoint = ExtractCmd::new()?.bind()?;
