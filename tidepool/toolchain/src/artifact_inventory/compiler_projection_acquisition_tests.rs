@@ -635,7 +635,7 @@ fn assert_completed_output_keeps_actual_producer_with_private_equal_offer(
         "private A grants no authored source reuse"
     );
     let source = std::fs::read_to_string(fixture.includes[0].join("PublicationTarget.hs")).unwrap();
-    let compiled = crate::artifacts::test_support::compile_invocation_in_context(
+    let refused = crate::artifacts::test_support::compile_invocation_in_context(
         &crate::artifacts::CompileInvocation {
             source: &source,
             targets: &["__prepared"],
@@ -644,80 +644,313 @@ fn assert_completed_output_keeps_actual_producer_with_private_equal_offer(
         },
         Arc::new(context),
         |_, _, _| {},
-    )
-    .expect("actual completed B is unambiguous beside equal-fact private A availability");
-    let actual_product = compiled
-        .recovery_products
-        .iter()
-        .find(|product| {
-            product.owner().unit == owner.unit && product.owner().module == owner.module
-        })
-        .expect("TYPE input forces the actual compiler to produce B from source");
-    let ArtifactPayload::Original(prior_product) = &prior_offer.original_acquisition().payload
-    else {
-        unreachable!()
+    );
+    let Err(CompileError::InputRejected(diagnostics)) = refused else {
+        panic!("generic Exact TYPE input must not grant current authored SOURCE lookup");
     };
-    assert!(actual_product.source_admission().is_some());
-    assert!(
-        !Arc::ptr_eq(
-            actual_product.source_admission().unwrap(),
-            prior_product.source_admission().unwrap()
-        ),
-        "the control must issue an independent actual completed source observation B"
-    );
-    assert_eq!(
-        actual_product, prior_product,
-        "B and private A have equal immutable facts"
-    );
-    let output = compiled
-        .issued_output
-        .as_ref()
-        .expect("the actual compiler owns its completed output");
-    assert!(output.source_selection().issued_native_availability()
-        .flat_map(|row| row.offers()).any(|offer| offer.same_issuance(prior_offer)),
-        "the completed selection must still retain actual A private availability as the crossed control");
-    let own_offer = output
-        .source_selection()
-        .completed_compiler_output_offer(owner)
-        .unwrap()
-        .expect("the completed B receipt retains its own native offer");
-    assert!(!own_offer.same_issuance(prior_offer));
-    let support = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
-    let selected = support
-        .compiler_roles()
-        .original_acquisition(owner)
-        .unwrap();
-    let ArtifactPayload::Original(selected_product) = &selected.payload else {
-        unreachable!()
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message,
+        "OriginalSourceSelectionRejected (ExecutionSourceUnavailable (\"main\",\"PublicationHelper\"))");
+    assert_world_completed_output_keeps_actual_producer(fixture, &types, prior_offer, owner);
+}
+
+fn assert_world_completed_output_keeps_actual_producer(
+    fixture: &crate::artifacts::test_support::SourcePublicationEntryFixture,
+    private: &CompilerSourceSupport,
+    prior_offer: &IssuedNativeOffer,
+    owner: &ExactModuleIdentity,
+) {
+    use crate::cell_plan::{WorldCellAdmissionSubject, WorldCellReservationRequest};
+    use crate::compiler_world::{
+        CapturedCompilerSourceRoot, CapturedCompilerSources, CompilerWorldLexicalSurface,
+        VisibleWorldBindings, WorldSourceSelection,
     };
-    assert!(
-        selected_product.same_admission_and_transport(actual_product),
-        "fresh row construction carries completed B's actual admission and transport"
+    use tidepool_extract_cmd::{
+        settle_compiler_transaction_cancellable, CompilerTransactionCancellation,
+        CompilerTransactionClose, CompilerTransactionOrigin,
+    };
+
+    let root_owner = Arc::new(crate::artifacts::test_support::compiler_input_directory().unwrap());
+    let helper_body = std::fs::read(fixture.includes[0].join("PublicationHelper.hs")).unwrap();
+    let mut source_roots = vec![CapturedCompilerSourceRoot {
+        manifest: crate::cache::SourceRootManifest::from_file_digests([(
+            std::path::PathBuf::from("PublicationHelper.hs"),
+            blake3::hash(&helper_body).to_hex().to_string(),
+        )])
+        .unwrap(),
+        bodies: BTreeMap::from([(
+            std::path::PathBuf::from("PublicationHelper.hs"),
+            Arc::<[u8]>::from(helper_body),
+        )]),
+    }];
+    let prelude = std::path::PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("the declared source compiler owns its renderer source roots"),
     );
-    assert!(
-        Arc::ptr_eq(selected, own_offer.original_acquisition()),
-        "fresh row construction carries B's exact own-offer acquisition"
-    );
-    if let InputNativeDecision::IssuedChoices(groups) =
-        support.compiler_roles().native_decision(owner)
-    {
-        for group in groups.values() {
-            let selected = support
-                .compiler_roles()
-                .selected_native_support(owner, *group)
-                .unwrap();
-            assert!(selected
-                .acquisitions()
+    let mut pending = vec![prelude.clone()];
+    let mut bodies = BTreeMap::new();
+    let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "hs") {
+                let body = std::fs::read(&path).unwrap();
+                remaining = remaining
+                    .checked_sub(body.len() as u64)
+                    .expect("declared source capture remains inside its owner allowance");
+                bodies.insert(
+                    path.strip_prefix(&prelude).unwrap().to_path_buf(),
+                    Arc::<[u8]>::from(body),
+                );
+            }
+        }
+    }
+    source_roots.push(CapturedCompilerSourceRoot {
+        manifest: crate::cache::SourceRootManifest::from_file_digests(
+            bodies
                 .iter()
-                .any(|offer| offer.same_issuance(own_offer)));
+                .map(|(path, body)| (path.clone(), blake3::hash(body).to_hex().to_string())),
+        )
+        .unwrap(),
+        bodies,
+    });
+    let sources = Arc::new(
+        CapturedCompilerSources::from_captured_roots(
+            source_roots,
+            Arc::from(&b"actual-crossed-producer-world"[..]),
+            root_owner,
+        )
+        .unwrap(),
+    );
+    let source =
+        WorldSourceSelection::new(*sources.seal(), "actual-crossed-producer-world").unwrap();
+    let mut primary = None;
+    let mut preceding_origin = None;
+    for phase in 0..2 {
+        let settled = settle_compiler_transaction_cancellable(
+            CompilerTransactionCancellation::new(),
+            |_| {},
+            || {
+                let configured = crate::toolchain::CompilerDeploymentConfiguration::from_env()
+                    .expect("the test uses its declared compiler deployment");
+                let (endpoint, _, _) =
+                    crate::toolchain::bind_admitted_extract_endpoint(&configured)
+                        .expect("the matched compiler endpoint is admitted");
+                let endpoint = crate::toolchain::AdmittedCompilerEndpoint::from_bound(endpoint)
+                    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+                let world = crate::compiler_world::open_world(
+                    crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
+                        primary.clone(),
+                        VisibleWorldBindings::from_published_bindings(0, std::iter::empty())?,
+                        Arc::clone(&sources),
+                        CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
+                    )?,
+                    &endpoint,
+                )?;
+                let plan = crate::compiler_world::plan_cell(&endpoint, &world,
+                    Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+                        source: if phase == 0 { "import PublicationHelper ()" }
+                            else { "import qualified PublicationHelper\nlet answer = PublicationHelper.second" }.into(),
+                        template: include_str!("../../tests/fixtures/world-native/CellTemplate.hs").into(),
+                        turn_templates: Vec::new(),
+                    }), None,
+                )?;
+                assert_eq!(plan.items().len(), if phase == 0 { 1 } else { 2 });
+                let origin =
+                    CompilerTransactionOrigin::current().expect("actual compiler source operation");
+                if let Some(previous) = &preceding_origin {
+                    assert_ne!(
+                        &origin, previous,
+                        "B owns a separate actual physical source transaction"
+                    );
+                }
+                let subject = WorldCellAdmissionSubject::for_source_transaction(
+                    &origin,
+                    [47; 16],
+                    phase,
+                    1,
+                    1,
+                    [b"actual source grant for crossed producer control".to_vec()],
+                )?;
+                let mut requests = vec![WorldCellReservationRequest::Prologue {
+                    declaration: 90 + phase * 2,
+                }];
+                if phase == 1 {
+                    requests.push(WorldCellReservationRequest::Bind {
+                        value: 93,
+                        bindings: vec![(
+                            "answer".into(),
+                            tidepool_repr::SessionVarId::from_extract(
+                                tidepool_codegen::prepared_program::session_var_id(
+                                    &tidepool_repr::SessionModule::val(tidepool_repr::Generation(
+                                        93,
+                                    ))
+                                    .module_name(),
+                                    "answer",
+                                ),
+                            ),
+                        )],
+                    });
+                }
+                let reservation = plan.reserve(plan.issue_admission_token(subject, requests)?)?;
+                let checked = crate::compiler_world::admit_world_cell_program(
+                    &endpoint,
+                    reservation,
+                    source.clone(),
+                    source.clone(),
+                    &origin,
+                )?
+                .map_err(|refusal| {
+                    CompileError::ExtractFailed(format!(
+                        "actual producer World refused: {refusal:?}"
+                    ))
+                })?;
+                let emissions = checked.emitted_native_modules()?;
+                let mut products = Vec::new();
+                let prepared =
+                    crate::artifacts::prepare_world_cell_program_observing_home_contracts(
+                        Arc::clone(&checked),
+                        &mut |_, originals| {
+                            let stage = originals.captured_stage();
+                            for entry in stage
+                                .producer_certificates()
+                                .iter()
+                                .filter(|entry| &entry.descriptor.owner == owner)
+                            {
+                                if let ArtifactPayload::Original(product) = &entry.payload {
+                                    products.push((product.clone(), Arc::clone(stage)));
+                                }
+                            }
+                        },
+                    )?;
+                Ok::<_, CompileError>((prepared, checked, products, emissions, origin))
+            },
+        );
+        assert!(matches!(settled.close(), CompilerTransactionClose::Clean));
+        let cancellation = settled
+            .host_admission_cancellation()
+            .expect("actual post-END owner")
+            .clone();
+        let (prepared, _checked, products, emissions, origin) = settled
+            .into_outcome()
+            .action
+            .expect("the real World source grant completes the selected producer phase");
+        let program = prepared
+            .seal(&cancellation)
+            .expect("seal the same actual completed World output");
+        let continuation = program
+            .items()
+            .last()
+            .expect("the actual phase has a source item")
+            .compiler_context();
+        if phase == 0 {
             assert!(
-                !selected
-                    .acquisitions()
+                continuation.source_scope().admits(owner),
+                "the first actual import issues SOURCE-H"
+            );
+            assert!(continuation.compiler_roles().get(owner).is_some());
+            assert!(
+                continuation
+                    .compiler_roles()
+                    .original_acquisition(owner)
+                    .is_none(),
+                "the empty import must issue TYPE-H without a native Original role"
+            );
+            assert!(
+                !emissions
+                    .iter()
+                    .any(|stage| stage.owners().iter().any(|emitted| emitted == owner)),
+                "the first phase must not already produce native H"
+            );
+            let attached = continuation
+                .as_ref()
+                .clone()
+                .retain_issued_native_inputs(
+                    &crate::declaration_context::OriginalCompilerInputs::from_issued_support(
+                        private,
+                    ),
+                )
+                .unwrap();
+            assert!(attached
+                .compiler_roles()
+                .original_acquisition(owner)
+                .is_none());
+            assert!(
+                attached
+                    .compiler_source_support()
+                    .native_offers()
                     .iter()
                     .any(|offer| offer.same_issuance(prior_offer)),
-                "private equal-fact A cannot contribute to B's selected native decision"
+                "actual private A stays held before B"
             );
+            assert!(
+                attached
+                    .compiler_source_support()
+                    .native_availability()
+                    .issued_row(prior_offer.original())
+                    .is_some_and(|row| row.offers().any(|offer| offer.same_issuance(prior_offer))),
+                "A must remain in actual private request availability, not only byte custody"
+            );
+            preceding_origin = Some(origin);
+            primary = Some(Arc::new(attached));
+            continue;
         }
+        assert!(
+            emissions
+                .iter()
+                .any(|stage| stage.owners().iter().any(|emitted| emitted == owner)),
+            "the second actual phase must emit H's native module packet"
+        );
+        let ArtifactPayload::Original(prior_product) = &prior_offer.original_acquisition().payload
+        else {
+            unreachable!()
+        };
+        let mut actual = products
+            .into_iter()
+            .filter(|(product, _)| !product.same_admission_and_transport(prior_product));
+        let (product, stage) = actual
+            .next()
+            .expect("B must be a separate actual H completion, not cached A");
+        assert!(
+            actual.all(|(other, _)| other.same_admission_and_transport(&product)),
+            "one independent physical H product is carried through later stage projections"
+        );
+        assert_eq!(
+            &product, prior_product,
+            "private A and produced B have equal immutable facts"
+        );
+        assert!(product.source_admission().is_some());
+        assert!(!Arc::ptr_eq(
+            product.source_admission().unwrap(),
+            prior_product.source_admission().unwrap()
+        ));
+        let offer = stage
+            .source_selection()
+            .completed_compiler_output_offer(owner)
+            .unwrap()
+            .expect("the actual physical B receipt retains its own contribution");
+        let ArtifactPayload::Original(offered_product) = &offer.original_acquisition().payload
+        else {
+            unreachable!()
+        };
+        assert!(offered_product.same_admission_and_transport(&product));
+        assert!(!offer.same_issuance(prior_offer));
+        assert!(
+            stage
+                .source_selection()
+                .issued_native_availability()
+                .flat_map(|row| row.offers())
+                .any(|offer| offer.same_issuance(prior_offer)),
+            "A remains privately held beside physical B"
+        );
+        let receiving = primary.as_ref().unwrap();
+        assert_whole_selected_row(
+            receiving.compiler_source_support(),
+            continuation.compiler_source_support(),
+            owner,
+        );
     }
 }
 
