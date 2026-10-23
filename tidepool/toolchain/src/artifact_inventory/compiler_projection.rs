@@ -9470,23 +9470,15 @@ mod tests {
             )
         };
         let import = |product: &crate::recovery_artifacts::CertifiedRecoveryProduct, ordinal| {
-            let finalized = crate::certified_products::finalize_original_for_inventory(
-                product.clone(),
-                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-            )
-            .unwrap();
             let definitions =
-                crate::certified_products::original_native_group_definitions(&finalized, ordinal)
-                    .unwrap();
+                crate::certified_products::original_native_group_definitions(product, ordinal).unwrap();
             let binder = match &definitions.bindings()[0] {
                 tidepool_repr::execution_schema::Group::NonRecursive(binding) => &binding.identity,
-                tidepool_repr::execution_schema::Group::Recursive(bindings) => {
-                    &bindings[0].identity
-                }
+                tidepool_repr::execution_schema::Group::Recursive(bindings) => &bindings[0].identity,
             }
             .clone();
             PendingImportOwner::Source {
-                owner: finalized.owner().clone(),
+                owner: product.owner().clone(),
                 original_ordinal: ordinal,
                 binder,
             }
