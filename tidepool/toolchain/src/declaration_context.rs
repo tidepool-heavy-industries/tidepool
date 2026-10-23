@@ -30911,23 +30911,15 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
 
     const RECEIVER_INTERFACE_SOURCE: &str = "module Tidepool.Agent.Ref where\n";
 
-    fn interface_only_agent_ref_admission(root: &Path, unit: &str) -> ExactSourceAdmission {
+    fn interface_only_agent_ref_admission(
+        root: &Path,
+        request: &ExactCompilationRequest,
+        unit: &str,
+    ) -> ExactSourceAdmission {
         let source = RECEIVER_INTERFACE_SOURCE;
         let path = root.join("Ref.hs");
         std::fs::write(&path, source).unwrap();
-        let context = Arc::new(
-            ExactDeclarationContext::from_authenticated_interfaces(
-                program_test_producer_sha256(),
-                &ArtifactInventory::default().empty_view(),
-                CompilerInputProjection::default(),
-            )
-            .unwrap(),
-        );
-        let request_root = tempfile::tempdir_in(root).unwrap();
-        let request = context
-            .prepare_compilation(request_root.path(), PROGRAM_TEST_PRODUCER)
-            .unwrap();
-        let receipt = support_receipt(root, &request);
+        let receipt = support_receipt(root, request);
         let mut value = read_receipt(&receipt);
         let fields = value.as_array_mut().unwrap();
         let mut evidence: crate::cache::DependencyEvidence =
@@ -31031,7 +31023,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_fixture_support(
                 baseline,
                 &support,
-                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                &[interface_only_agent_ref_admission(
+                    directory.path(),
+                    &request,
+                    "main",
+                )],
                 None,
             )
             .unwrap();
@@ -31107,7 +31103,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_fixture_support(
                 baseline,
                 &interface_only_agent_ref_offer(program_test_producer_sha256(), "main"),
-                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                &[interface_only_agent_ref_admission(
+                    directory.path(),
+                    &request,
+                    "main",
+                )],
                 None,
             )
             .unwrap();
@@ -31201,6 +31201,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &interface_only_agent_ref_offer(program_test_producer_sha256(), "foreign"),
                 &[interface_only_agent_ref_admission(
                     directory.path(),
+                    &request,
                     "foreign",
                 )],
                 None,
@@ -31213,35 +31214,30 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap_err(),
         );
         let support = interface_only_agent_ref_offer(program_test_producer_sha256(), "main");
-        let hidden = Arc::new(
-            (*empty)
-                .clone()
-                .extend_issued_compiler_support(
-                    &recover_fixture_compiler_support(
-                        support.projection().clone(),
-                        support.artifacts().clone(),
-                        [],
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
-        );
-        let mut request = hidden
+        let mut request = empty
             .prepare_compilation(&directory.path().join("request-20"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
+        let admission = interface_only_agent_ref_admission(directory.path(), &request, "main");
+        let hidden = request
+            .admit_fixture_support(
+                empty.clone(),
+                &support,
+                std::slice::from_ref(&admission),
+                None,
+            )
             .unwrap();
         let retained = request
             .admit_fixture_support(
                 hidden.clone(),
                 &support,
-                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                std::slice::from_ref(&admission),
                 None,
             )
             .unwrap();
         assert!(retained.lexical_graph().is_empty());
         assert!(retained.recovery_products().is_empty());
         assert!(hidden.lexical_graph().is_empty());
-        let uncaptured = interface_only_agent_ref_admission(directory.path(), "main");
-        let mut uncaptured = Arc::unwrap_or_clone(uncaptured.evidence).into_evidence();
+        let mut uncaptured = Arc::unwrap_or_clone(admission.evidence).into_evidence();
         uncaptured.modules[0].source = directory.path().join("uncaptured.hs");
         assert!(crate::cache::CompletedSourceEvidence::from_normalized(
             uncaptured,
@@ -31272,7 +31268,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .admit_fixture_support(
                 empty.clone(),
                 &interface_only_agent_ref_offer([3; 32], "main"),
-                &[interface_only_agent_ref_admission(directory.path(), "main")],
+                &[interface_only_agent_ref_admission(
+                    directory.path(),
+                    &foreign,
+                    "main"
+                )],
                 None,
             )
             .is_err());
