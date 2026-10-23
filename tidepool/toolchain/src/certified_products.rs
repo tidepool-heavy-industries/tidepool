@@ -5399,12 +5399,13 @@ impl ReceiptNativeSelection {
     fn original_identity(&self) -> ReceiptOriginalIdentity {
         match &self.state {
             ReceiptNativeState::PendingCurrent { original, .. } => *original,
-            _ => ReceiptOriginalIdentity::Bound(
-                self.state
-                    .issued_row()
-                    .expect("completed or input owner")
-                    .original_artifact_id(),
-            ),
+            ReceiptNativeState::Input(row) => {
+                ReceiptOriginalIdentity::Bound(row.original_artifact_id())
+            }
+            ReceiptNativeState::CompletedCurrent { receipt, .. }
+            | ReceiptNativeState::CompletedPrior(receipt) => {
+                ReceiptOriginalIdentity::Bound(receipt.row().original_artifact_id())
+            }
         }
     }
     fn original_artifact_id(&self) -> CertResult<crate::artifact_inventory::ArtifactId> {

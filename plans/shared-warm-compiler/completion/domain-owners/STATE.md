@@ -1,50 +1,74 @@
 # Current implementation and qualification
 
-Updated2026-10-23. G2/G3 remain unqualified.
-Root: /srv/swarm/checkouts/tidepool-domain-runtime-join-20261023,
-branch integration/g2-domain-runtime-20261023. Accepted plan: LIVE-COMPLETION.md.
+Updated 2026-10-23. G2/G3 remain unqualified.
+Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
+`integration/g2-domain-runtime-20261023`. Accepted plan: `LIVE-COMPLETION.md`.
+Current implementation checkpoint: `b4933926fb` (joined validation pending).
 
-| Work | Owner | Current evidence |
+| Work | State | Evidence / remaining check |
 |---|---|---|
-| Receiver-bound checked extension | root | compiled at9db5; promotion and equal-witness controls passed |
-| Independent reconcile vs strict append fixture | selected_owner_histories | integrated e7fe; advanced past append, later source-availability failure under investigation |
-| Direct selected owner + captured product phases | selected_row_closeout | slice582f held for item row/index-base ownership correction; phase migration follows |
-| Prepared exact transport and backing | prepared_transport_owner | integrated9db5, compiled; two fixture-premise repairs integrated a840, rerun pending |
-| Explicit Haskell fixture producer contracts | interface_backing_impl | integrated9db5; full11/11 and sourceboot4/4 passed |
-| Actual independent producer-B World history | selected_owner_histories | source candidate; new-owner native-choice oracle under correction; unexecuted |
-| Phase-specific external consumers | root | two caller ports prepared against agreed PendingProducts/CapturedProducts API; uncompiled until core lands |
-| Warm validation | validation_resume |9db5 settled; next a840 transport4, then reviewed core World canary |
+| Receiver-bound checked extension | Integrated | Promotion and equal-witness controls passed at 9db5; decisions are applied once |
+| Strict append versus independent reconciliation | Integrated | Actual source-grant premise corrected; joined history execution pending |
+| Actual selected rows and paired index base | Integrated | de968 compiled; World capture/publication advanced; direct new-value closure regression added |
+| Pending certificate data / mandatory captured products | Integrated | Consuming capture, legal native phases, all known caller migrations; next joined compile b493 |
+| Prepared exact request/backing owner | Integrated | All four transport controls have passing evidence across 9db5/a840/de968 |
+| Module-local Haskell fixture producers | Integrated | FatIface 11/11 and sourceboot 4/4 passed at 9db5 |
+| Independent producer-B history | Integrated, source-reviewed | Exact producer, own-offer choices, selected acquisitions and recorded indexes asserted; execution pending |
+| Actual World declaration/capture history | Still failing at de968 | Initial capture/publication pass; post-declaration reuse rejects Val.G1.historyValue0 |
 
-Root and astra_selection_spine_design review selection completion. Root and
-astra_dependency_plan_impl review physical transport. astra_joined_test_review
-accepted the checked-extension source and discriminating fixture assertions.
-All findings retain normal refusal boundaries; no tests manufacture successful
-source or execution authority.
+The live projection-to-receipt reconstruction route, optional capture fallback,
+unchecked stage attachment, and native origin/version/availability cross-product
+are deleted. Input, pending-current, completed-current and completed-prior native
+states retain their actual owners. Item projection shares a physical stage while
+advancing its selected prefix. Physical issuance and Receiving selection remain
+distinct. Raw reconstruction remains test-only; recovery authenticates records.
 
-## Last actual outcomes
+## Current failure and discriminating observation
 
--9db5e947ee: toolchain production/cfg compilation passed;22 tests executed,
- 19 passed and3 failed. FatIface11/11; sourceboot4/4; focused Rust4/7.
-- The two Rust transport failures used an obsolete blanket second-packet refusal
-  and an ineligible replay-root fixture. Reviewed test repairs are integrated a840.
-- The authored-promotion history reached a later PublicationHelper source refusal.
-  Its fixture replaces a published row with reusable support before requesting an
-  authored import. Preserve the native-availability discriminator while establishing
-  the actual source-grant prerequisite; do not relax production refusal.
--2de75d9177: host cfg compiled successfully, zero execution claim.
-- The actual World capture/barrier remains unqualified after its634040d5e5 fresh
-  TYPE failure. The new slice must pass the complete history before broad gates.
+At de968 the actual World test reaches `segmentRecord historyCaptured` in the
+second cell. The compiler reports `UnavailableOriginalHomeDependencies` for
+`Tidepool.Session.Val.G1.historyValue0` after final prepared projection. Cleanup
+is confirmed; no passing G2 outcome is inferred from the later failure point.
 
-The obsolete input->metadata->receipt->selected-row route must be deleted in this
-tranche, not kept behind the first symptom fix. Mandatory captured products replace
-optional stage fallback. Fresh physical evidence remains separate from unchanged
-Receiving selection. Item projection shares stage ownership without recapture.
+Authored native declarations intentionally differ from SOURCE grants. Current
+projection checks executable HOME imports before acquiring native dependency
+replies; retained native terminals cannot yet contribute to that projection.
+Whether optimization also erased the exact declaration use remains unproven.
+Root added bounded structured trace events (`projection.input_generations` and
+`projection.original_import_refused`) for the next exact canary. Do not relabel
+native declarations SOURCE, admit a missing Val as Original, or eagerly acquire
+all pre-optimization native calls: those changes would weaken existing contracts.
+If exact use preservation requires a new optimization/authority boundary, retain
+the diagnostic evidence and make that design decision explicitly.
 
-Use VALIDATION.md and ../deepseek-g2-closeout/TEST-GATES.md for the unchanged G2
-acceptance workflow. Run actual World early after a sound first slice, then joined
-cohorts and one matched frozen Persona bundle. All final coverage remains pending.
+## Compilation and execution evidence
 
-Warm checkout: /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020.
-Only validator advances its source while pin/command is active. Recent scratch108GiB;
-reserve100GiB+prospective growth, use existing pinned local-only Buck configuration.
-Evidence: /srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
+- 9db5: toolchain production/cfg passed; 22 executions, 19 passed / 3 failed.
+  The two transport fixture premises are repaired and subsequently pass. The
+  authored promotion fixture now preserves its genuine Published source grant.
+- de968: toolchain/runtime production/cfg passed (14 consumers); graph transport
+  passed; actual World history fails at the later reuse boundary above.
+- 5a2, 2393 and ea23: phase migration compile attempts failed; zero tests ran.
+  Diagnostics reduced 86 -> 8 -> 1; b493 repairs the last observed caller error.
+  These counts are compile diagnostics, not independent product bugs.
+- 2de75d9177: host cfg compiled; later joined host compilation remains pending.
+
+Next: compile b493 and execute the selected owner/phase/value-index controls,
+then the trace-enabled actual World history. Maintained G2 cohorts and matched
+frozen Persona qualification follow only after that path works. No new bundle,
+Persona launch, or G2/G3 acceptance is claimed.
+
+Warm checkout: `/srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020`.
+Validator owns its source pin while commands run. Preserve 100 GiB scratch plus
+prospective growth; use admitted local-only Buck with existing warm outputs.
+Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
+
+## Bounded adjacent finding
+
+The joined-interface materializer keys `.hi` and `.packages` by only the `.hi`
+digest although their artifact descriptor commits both. Exact package-module
+witnesses can vary independently from interface package-unit metadata. This is a
+source-established contract gap, not an executed genuine collision or current
+release failure. A future repair should key the pair by both digests and first
+retain a real same-owner producer witness. Existing writes refuse mismatches
+without overwriting prior files. Canonical/native variants remain unproven.

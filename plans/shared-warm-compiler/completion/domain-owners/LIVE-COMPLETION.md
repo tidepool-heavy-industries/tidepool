@@ -96,11 +96,12 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-Six pure ownership controls passed at c8ab6a1f5a. Actual World history fails because
-fresh TYPE provenance is lost. Authored-promotion history fails because its
-independent scopes use strict append. At36243a15 sourceboot passed4/4 and FatIface
-passed2/3; the private-helper producer premise still fails. Host cfg remains pending.
-Evidence: /srv/swarm/evidence/inanna/c-ownership-20261022/validation/.
+The accepted structural boundaries are integrated through `b4933926fb`;
+see `STATE.md` for exact compile/execution evidence and pending gates. The actual
+World history now passes initial capture/declaration/publication, then fails at
+retained-value reuse through an authored native declaration. This is a distinct
+boundary under direct root investigation; G2/G3 remain unqualified.
+Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
 
 Warm validation checkout: /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020.
 The validator owns its immutable source pin while commands run. Recheck actual
