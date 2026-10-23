@@ -16,13 +16,14 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
-import GHC.Builtin.Types (intTy)
+import GHC.Builtin.Types (intTy, intTyCon)
+import GHC.Core.TyCon (tyConName)
 import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding, isFCallId)
 import GHC.Tc.Types (tcg_rdr_env)
-import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameOccName, isExternalName)
+import GHC.Types.Name (mkExternalName, mkSystemName, nameModule_maybe, nameModule, nameOccName, isExternalName)
 import GHC.Types.Name.Occurrence (mkVarOcc, occNameString)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.Unique (mkUnique)
@@ -63,14 +64,15 @@ import Tidepool.ExactHydration (forkExactContext, freshExactContext, ExactIfaceA
   newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
   selectVerifiedExactInterfaceProducts, verifiedExactInterface, capturedInterfaceInputs,
   hydrateInterfaceInputs, hydratedExactEnvironment, restoreHydratedInterfaceEnvironment,
-  readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor,
+  readVerifiedExactIfaceClosure, captureCompletedInterfaceInputs, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface,
   newOriginalInterfaceArtifactsWithSessionCaptures,
   InterfaceInputFailure(..))
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), Generation(..), sessionModuleString, sessionHiPath
-  , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings
+  , mkThinSessionIface, writeSessionIface, injectSessionIfaceWithBindings, injectCapturedSessionIfaceWithBindings
   , capturedSessionInterfaceBody, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner )
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
+import Tidepool.PackageWitness (PackageImportEvidence(..), packageImportRoot, encodePackageImports)
 import qualified Data.ByteString as BS
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
@@ -141,11 +143,26 @@ verifyCompletedInterfaceMerges libdir work environment = do
   let selected = SessionModule ValMod (Generation 991337)
   interface <- mkThinSessionIface environment selected [(mkVarOcc "value",intTy)]
   writeSessionIface environment work selected interface
-  (injected,_,capture) <- injectSessionIfaceWithBindings work selected environment
-  let (_,body) = capturedSessionInterfaceBody capture
-      artifact = ExactIfaceArtifact "main" (sessionModuleString selected) (sessionHiPath work selected)
+  body <- captureArtifactBytes <$> BS.readFile (sessionHiPath work selected)
+  root <- packageImportRoot environment (nameModule (tyConName intTyCon)) >>= either fail pure
+  let artifact = ExactIfaceArtifact "main" (sessionModuleString selected) (sessionHiPath work selected)
         (artifactSha256 body) []
-      (_,actualHome) = capturedSessionCompilerProduct capture
+      packages = captureArtifactBytes (encodePackageImports artifact (PackageImportEvidence [root] []))
+      changedPackages = captureArtifactBytes (encodePackageImports artifact (PackageImportEvidence [] []))
+  (injected,_,capture) <- injectCapturedSessionIfaceWithBindings selected body packages [] environment
+  let (_,actualHome) = capturedSessionCompilerProduct capture
+  checked <- either throwIO pure (checkCapturedSessionInterface artifact body packages capture)
+  assert (sameCapturedSessionInterfaceOwner capture checked)
+    "selected sidecar check replaced the actual completed issuer"
+  forM_ [(artifact,changedPackages),(artifact {exactRequirements=[("main","AbsentNominalOwner")]},packages)] $
+    \(selectedArtifact,selectedPackages) ->
+      assert (case checkCapturedSessionInterface selectedArtifact body selectedPackages capture of
+        Left InterfaceSessionAliasMismatch{} -> True; _ -> False)
+        "completed issuer reuse ignored a changed package token or nominal requirement"
+  (_,_,bareCapture) <- injectSessionIfaceWithBindings work selected environment
+  assert (case checkCapturedSessionInterface artifact body packages bareCapture of
+      Left InterfaceSessionAliasMismatch{} -> True; _ -> False)
+    "completed issuer reuse accepted absent package evidence"
   empty <- either throwIO pure (capturedInterfaceInputs [])
   completed <- captureCompletedInterfaceInputs injected empty [(artifact,capture)] []
   decoded <- readVerifiedExactIfaceClosure environment [artifact] >>= either fail pure
@@ -157,13 +174,13 @@ verifyCompletedInterfaceMerges libdir work environment = do
   forM_ [[completed,aliased],[aliased,completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
     retained <- captureCompletedInterfaceInputs injected merged [] []
-    borrowed <- either throwIO pure (capturedSessionInterfaceFor retained alias)
+    borrowed <- either throwIO pure (capturedSessionInterfaceFor retained alias body packages)
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) borrowed)
       "completed input retention lost an authenticated logical receiving alias"
   actualIdentity <- evaluate actualHome >>= makeStableName
   forM_ [[completed,decoded],[decoded,completed]] $ \inputs -> do
     merged <- either throwIO pure (mergeCapturedInterfaceInputs inputs)
-    reused <- either throwIO pure (capturedSessionInterfaceFor merged artifact)
+    reused <- either throwIO pure (capturedSessionInterfaceFor merged artifact body packages)
     assert (maybe False (sameCapturedSessionInterfaceOwner capture) reused)
       "another selected role lost its actual completed session issuer"
     fresh <- freshExactContext environment
@@ -184,7 +201,7 @@ verifyCompletedInterfaceMerges libdir work environment = do
   assert (case mergeCapturedInterfaceInputs [completed,foreignInput] of
       Left InterfaceNameCacheMismatch -> True; _ -> False)
     "captured merge accepted an interface from another NameCache"
-  (_,_,otherCapture) <- injectSessionIfaceWithBindings work selected environment
+  (_,_,otherCapture) <- injectCapturedSessionIfaceWithBindings selected body packages [] environment
   otherCompleted <- captureCompletedInterfaceInputs injected empty [(artifact,otherCapture)] []
   assert (case mergeCapturedInterfaceInputs [completed,otherCompleted] of
       Left InterfaceCompletedOwnerConflict{} -> True; _ -> False)

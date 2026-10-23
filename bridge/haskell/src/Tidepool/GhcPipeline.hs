@@ -272,7 +272,7 @@ import Tidepool.ExtractRequest
   , StructuredNameNamespace(..), InspectionProvenance(..) )
 import Tidepool.Session
   ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
-  , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence, capturedSessionInterfaceEvidenceBodies
+  , Generation(..), sessionModuleString, capturedSessionInterfaceEvidence
   , isSessionScopeActive, injectSessionScopeWithCaptures, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceBody, capturedSessionCompilerProduct, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName
   , injectCapturedSessionIfaceWithBindings )
@@ -315,7 +315,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, VerifiedExactInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct, HydratedExactInterfaces, InterfaceInputFailure(..), CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs, selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs, capturedSessionInterfaceFor, checkCapturedSessionInterface, VerifiedExactInterface, verifiedInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -3818,10 +3818,9 @@ hydrateWorldCellOperand _ environment Nothing = pure (environment,Nothing)
 hydrateWorldCellOperand available environment (Just operand) = do
   let artifact = worldCellOperandInterface operand
   selectedInputs <- either throwIO pure (selectCapturedInterfaceInputs available [artifact])
-  retained <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact)
+  retained <- either throwIO pure (capturedSessionInterfaceFor selectedInputs artifact (worldCellOperandBody operand) (worldCellOperandPackages operand))
   (owner,capture) <- case retained of
     Just actual -> do
-      requireSelectedSessionCapture artifact (worldCellOperandBody operand) (worldCellOperandPackages operand) actual
       hydrated <- hydrateInterfaceInputs environment selectedInputs
       pure (hydrated,actual)
     Nothing -> do
@@ -3841,17 +3840,6 @@ hydrateWorldCellOperand available environment (Just operand) = do
     [actual] -> pure actual
     _ -> throwIO WorldCellCorrupt
   pure (hydratedExactEnvironment owner,Just (WorldCellOperandProjection operand owner capture name))
-
--- A receiving role selects the full captured value input, including package
--- obligations. Equal interface bytes alone cannot substitute prior sidecars.
-requireSelectedSessionCapture :: ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
-  -> CapturedSessionInterface -> IO ()
-requireSelectedSessionCapture artifact body packages capture =
-  case capturedSessionInterfaceEvidenceBodies capture of
-    Just (issuedPackages,_,required)
-      | snd (capturedSessionInterfaceBody capture) == body
-      , issuedPackages == packages,required == exactRequirements artifact -> pure ()
-    _ -> throwIO (InterfaceSessionAliasMismatch (exactUnit artifact,exactModule artifact))
 
 worldDemandSymbol :: WorldDemandBinding -> SymbolIdentity
 worldDemandSymbol (WorldBaseBinding binding) = worldBindingSymbol binding
@@ -3966,8 +3954,8 @@ resolveWorldCellInputs owner facts privateInputs path consumer sourceOwners envi
         , actual == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
         , bytes == body] of
       capture:_ -> do
-        requireSelectedSessionCapture artifact body packages capture
-        pure (current,capture:captures)
+        selected <- either throwIO pure (checkCapturedSessionInterface artifact body packages capture)
+        pure (current,selected:captures)
       [] -> do
         selected <- maybe (throwIO WorldCellCorrupt) pure (parseSessionModule (exactModule artifact))
         (ready,_,capture) <- injectCapturedSessionIfaceWithBindings selected body packages (exactRequirements artifact) current

@@ -24,7 +24,7 @@ module Tidepool.ExactHydration
   , readCheckedValueImportAuthority
   , CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs
   , selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs
-  , capturedSessionInterfaceFor
+  , capturedSessionInterfaceFor, checkCapturedSessionInterface
   , InterfaceInputFailure(..)
   , readVerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
@@ -57,7 +57,7 @@ module Tidepool.ExactHydration
 import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner)
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceEvidenceBodies, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner)
 import Control.Monad (forM, forM_, unless, foldM)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVarMasked)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
@@ -322,14 +322,30 @@ selectCapturedInterfaceOwners inputs@(CapturedInterfaceInputs captured) owners =
 
 -- Borrow the actual successful session issuer when another selected role
 -- refers to the same value. A decoded copy cannot issue this association.
-capturedSessionInterfaceFor :: CapturedInterfaceInputs -> ExactIfaceArtifact
+capturedSessionInterfaceFor :: CapturedInterfaceInputs -> ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
   -> Either InterfaceInputFailure (Maybe CapturedSessionInterface)
-capturedSessionInterfaceFor inputs artifact = do
+capturedSessionInterfaceFor inputs artifact body packages = do
   CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs inputs [artifact]
   case Map.lookup (exactUnit artifact,exactModule artifact) selected of
-    Just (VerifiedExactInterface _ (CompletedHomeInterface (SessionHomeInterface capture)) _ _,_) -> Right (Just capture)
+    Just (VerifiedExactInterface _ (CompletedHomeInterface (SessionHomeInterface capture)) _ _,_) ->
+      Just <$> checkCapturedSessionInterface artifact body packages capture
     Just _ -> Right Nothing
     Nothing -> Left (InterfaceInputMissing (exactUnit artifact,exactModule artifact))
+
+-- Borrowing preserves the actual issuer while checking every selected value
+-- input fact. Equal interface bytes cannot replace another package obligation.
+checkCapturedSessionInterface :: ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
+  -> CapturedSessionInterface -> Either InterfaceInputFailure CapturedSessionInterface
+checkCapturedSessionInterface artifact body packages capture = do
+  let key = (exactUnit artifact,exactModule artifact)
+      (owner,actualBody) = capturedSessionInterfaceBody capture
+  unless (owner == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+      && actualBody == body && artifactSha256 body == exactSha256 artifact)
+    (Left (InterfaceSessionAliasMismatch key))
+  case capturedSessionInterfaceEvidenceBodies capture of
+    Just (actualPackages,_,required)
+      | actualPackages == packages, required == exactRequirements artifact -> Right capture
+    _ -> Left (InterfaceSessionAliasMismatch key)
 
 mergeCapturedInterfaceInputs :: [CapturedInterfaceInputs] -> Either InterfaceInputFailure CapturedInterfaceInputs
 mergeCapturedInterfaceInputs inputs = do
