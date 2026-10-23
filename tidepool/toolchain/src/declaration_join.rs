@@ -2954,6 +2954,50 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
+        assert!(context.source_scope().admits(&transitive_support));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("PrefixUnrelatedSupport.hs")).unwrap(),
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixUnrelatedSupport.hs")
+        );
+        let error = crate::artifacts::test_support::certify_authored_declaration_in_context(
+            module,
+            &path,
+            source,
+            &[root.path().to_path_buf()],
+            root.path(),
+            context.clone(),
+        )
+        .expect_err("the authored probe cannot replay a retained owner as newly selected SOURCE");
+        let CompileError::InputRejected(diagnostics) = error else {
+            panic!("retained SOURCE replay must be an input refusal: {error:?}");
+        };
+        let [diagnostic] = diagnostics.as_slice() else {
+            panic!("retained SOURCE refusal must have one complete diagnostic");
+        };
+        assert_eq!(diagnostic.severity, crate::diag::DiagnosticSeverity::Error);
+        assert!(diagnostic.span.is_none());
+        assert_eq!(
+            diagnostic.message,
+            format!(
+                "OriginalSourceSelectionRejected (ExecutionSourceUnavailable ({:?},{:?}))",
+                transitive_support.unit, transitive_support.module,
+            )
+        );
+        let fresh_support = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "PrefixFreshSupport".into(),
+        };
+        assert!(!context
+            .compiler_input_projection()
+            .snapshot_roles()
+            .contains_key(&fresh_support));
+        std::fs::write(
+            root.path().join("PrefixFreshSupport.hs"),
+            include_str!("../tests/fixtures/checked-prefix-publication/PrefixFreshSupport.hs"),
+        )
+        .unwrap();
+        let source = include_str!("../tests/fixtures/checked-prefix-publication/G2FreshSupport.hs");
+        std::fs::write(&path, source).unwrap();
         let result = crate::artifacts::test_support::certify_authored_declaration_in_context(
             module,
             &path,
@@ -2989,8 +3033,8 @@ mod authored_tests {
             endpoint.identity().producer_bytes(),
         );
         let cumulative = result.extend_source_surface(&source_surface).unwrap();
-        assert!(cumulative.roots().contains(&transitive_support));
-        assert!(!source_surface.roots().contains(&transitive_support));
+        assert!(cumulative.roots().contains(&fresh_support));
+        assert!(!source_surface.roots().contains(&fresh_support));
         let prepared = context
             .as_ref()
             .clone()
