@@ -48,7 +48,7 @@ import Tidepool.FatIface
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , lookupFatIfaceComponents, privateOriginalDependencies
-  , readExactInterface, newFatIfaceCache
+  , readHomeInterface, readExactInterface, newFatIfaceCache
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, sameOwnerInterfaceContext, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
@@ -58,9 +58,12 @@ import Tidepool.FatIface.Internal
   , privateComponents
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
-import Tidepool.ExactHydration (forkExactContext, ExactIfaceArtifact(..), hydrateExactScope)
+import Tidepool.ExactHydration (forkExactContext, ExactIfaceArtifact(..), hydrateExactScope,
+  newRequestIfaceDecoder, readCapturedExactIfaceClosureWithCheckedValues,
+  selectVerifiedExactInterfaceProducts, hydrateExactScopeWithProducts)
+import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
+import qualified Data.ByteString as BS
 import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
-import GHC.Unit.Module.Location (ml_hi_file)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
@@ -174,39 +177,47 @@ scenario = do
       missingId <- lookupName missingIdentityName >>= \case
         Just (AnId identifier) -> pure identifier
         _ -> fail "missing-interface identity has no genuine exported Id"
-      -- A private captured owner can be absent from the lexical import graph.
-      -- Its immutable HPT interface must also replace the mutable finder path.
+      -- Production input aliases name captured bytes, never physical files.
+      -- Retain the decoded owner after its original file is removed; private
+      -- original lookup must consume HPT rather than reopening that alias.
       liftIO $ do
-        original <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
+        home <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
           (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
+        (original,_) <- readExactInterface hsc (mi_module home) >>= either (fail . show) pure
         let mutable = work </> "FatFixture.hi"
-            captured = work </> "captured-FatFixture.hi"
-            artifact = ExactIfaceArtifact "main" "FatFixture" captured "" []
-        copyFile mutable captured
+            artifact = ExactIfaceArtifact "main" "FatFixture" "primary-0/iface" "" []
+        bytes <- BS.readFile mutable
         removeFile mutable
         (do
-          let alternative = work </> "captured-alternative-FatFixture.hi"
-          copyFile captured alternative
-          _ <- foldM (\environment path -> do
-              let selected = artifact { exactPath = path }
+          _ <- foldM (\environment alias -> do
+              let selected = artifact { exactPath = alias }
               hydrated <- hydrateExactScope environment [(selected, original)]
-              resolved <- readExactInterface hydrated (mi_module original)
+              resolved <- readHomeInterface hydrated (mi_module original)
               case resolved of
-                Right (_, location) -> assert (ml_hi_file location == path)
-                  "exact hydration retained a different captured owner location"
-                Left failure -> fail ("selected captured interface unreadable: " ++ show failure)
+                Right iface -> assert (mi_module iface == mi_module original)
+                  "in-memory HOME interface lost its owner"
+                Left failure -> fail ("captured HOME interface unreadable: " ++ show failure)
               isolated <- newFatIfaceCache
               recovered <- lookupFatIfaceExact hydrated isolated privateCallerName
               assertPrivateScope privateCallerName recovered
-              pure hydrated) hsc [captured, captured, alternative, captured]
-          removeFile captured
-          missing <- hydrateExactScope hsc [(artifact, original)]
-          isolated <- newFatIfaceCache
-          refused <- lookupFatIfaceExact missing isolated privateCallerName
-          assert (case refused of FatIfaceLoadFailure{} -> True; _ -> False)
-            "missing selected captured interface fell back to another owner"
-          copyFile alternative captured)
-          `finally` copyFile captured mutable
+              pure hydrated) hsc ["primary-0/iface", "primary-0/iface", "primary-7/iface"]
+          pure ()) `finally` BS.writeFile mutable bytes
+        -- Exercise the captured input owner and its NameCache-bound decoder
+        -- with the same logical alias shape used by World TYPE input transport.
+        thinBytes <- captureArtifactBytes <$> BS.readFile (work </> "ThinFixture.hi")
+        let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" "primary-1/iface"
+              (artifactSha256 thinBytes) []
+        decoder <- newRequestIfaceDecoder
+        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
+          (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
+          hsc [thinArtifact] [] >>= either fail pure
+        products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
+        fresh <- forkExactContext hsc
+        (captured,_) <- hydrateExactScopeWithProducts fresh products []
+        isolated <- newFatIfaceCache
+        thin <- lookupFatIfaceExact captured isolated thinIdentityName
+        assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
+          "captured thin TYPE interface attempted a defining-file read"
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency
       localResult <- liftIO (lookupFatIfaceExact hsc cache
