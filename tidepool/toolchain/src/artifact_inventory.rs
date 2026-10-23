@@ -9087,6 +9087,23 @@ impl ArtifactView {
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
         let mut selected_original_owners = BTreeSet::new();
         let mut input_decisions = compiler_projection::RecordedInputNativeDecisions::default();
+        // Query only roots already selected by each source. This local index
+        // prevents one full root scan for every unresolved Original row.
+        let source_groups =
+            matches!(demand, CompilerNativeDemand::SourceSelections { .. }).then(|| {
+                [self, other].map(|source| {
+                    let mut groups = BTreeMap::<ArtifactId, Vec<NativeGroupBinding>>::new();
+                    for root in source.lease.selection.roots.keys() {
+                        if let InventoryNodeKey::Group(group) = root {
+                            groups
+                                .entry(group.binding.artifact())
+                                .or_default()
+                                .push(*group);
+                        }
+                    }
+                    groups
+                })
+            });
         let root_carrier = |source: &Self, state: &InventoryState, root: InventoryNodeKey| {
             let InventoryNodeKey::Group(group) = root else {
                 return Err(failure("native merge requires an exact Group root"));
@@ -9191,14 +9208,16 @@ impl ArtifactView {
                         let carrier = namespace[&original];
                         let canonical = namespace[&role.interface()];
                         let state = source.lease.inventory.0.lock().expect("inventory lock");
-                        for root in source.roots() {
-                            let InventoryNodeKey::Group(group) = root else {
-                                continue;
+                        let actual_groups = source_groups.as_ref().and_then(|sources| {
+                            let groups = match issuer {
+                                compiler_projection::CompilerRoleIssuer::Receiving => &sources[0],
+                                compiler_projection::CompilerRoleIssuer::Incoming => &sources[1],
                             };
-                            if group.binding.artifact() != original {
-                                continue;
-                            }
-                            let actual_carrier = root_carrier(source, &state, *root)?;
+                            groups.get(&original)
+                        });
+                        for group in actual_groups.into_iter().flatten() {
+                            let root = InventoryNodeKey::Group(*group);
+                            let actual_carrier = root_carrier(source, &state, root)?;
                             if actual_carrier != carrier
                                 || !state.outgoing(InventoryNodeKey::Artifact(carrier)).any(
                                     |(target, edge)| {
@@ -9311,14 +9330,12 @@ impl ArtifactView {
                 },
             );
         }
-        if matches!(demand, CompilerNativeDemand::SourceSelections { .. }) {
-            for source in [self, other] {
+        if let Some(source_groups) = &source_groups {
+            for (source, actual_groups) in [self, other].into_iter().zip(source_groups) {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
-                for root in source.roots() {
-                    let InventoryNodeKey::Group(group) = root else {
-                        continue;
-                    };
-                    let carrier = root_carrier(source, &state, *root)?;
+                for group in actual_groups.values().flatten() {
+                    let root = InventoryNodeKey::Group(*group);
+                    let carrier = root_carrier(source, &state, root)?;
                     let entry = source
                         .observed_payload(&carrier.artifact)
                         .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
