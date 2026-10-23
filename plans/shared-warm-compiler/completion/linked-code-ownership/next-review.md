@@ -96,13 +96,17 @@ Legitimate historical issued dependencies remain valid alongside newer bodies.
 
 Preserve World query failure constructor/phase/detail in bounded, filterable
 structured logging before coarse projection. Do not catch cancellation or
-replace the original result. Carried-World's first constant query failed;
-its underlying cause remains unproven pending a changed/instrumented run.
+replace the original result. The instrumented carried-World query at `ade778a5f1`
+reported the same parsed-source origin-census failure as the staged histories;
+no separate carried-TYPE defect is established by that failure.
 
 Fix obsolete native-entry error assertions while preserving four mutations,
 later checks and no-state-growth. Rebuild publication fixtures through real
 owners: Full availability with explicit Empty demand, Full positive and Empty
-refusal. Do not invent UnissuedPolicy. Historical tests retain A, select B,
+refusal. Inspect demand on the actual prepared request, then consume it through
+target admission: a body-support query must remain true for both modes and does
+not authorize execution. Empty must refuse with the exact root-choice cause.
+Do not invent UnissuedPolicy. Historical tests retain A, select B,
 introduce unrelated interface-only C, and refuse A as a substitute for B while
 allowing an actual historical A request. Do not assert actual TH canonical
 equality; existing component controls own same-canonical alternative bodies.
@@ -119,6 +123,10 @@ equality; existing component controls own same-canonical alternative bodies.
 | A: g2_actor_custody | Exact native-entry refusal tests. |
 | H: g2_custody | Production publication/reuse and historical fixture premises. |
 | V: g2_validation | Exact joined pins, warm compilation and counted execution. |
+
+Root also owns `TypedSegment/Source.hs` during the C join. Its demand proof now
+consumes the opaque generated-import capture instead of parsing and classifying
+the source again. N owns directly affected test callers; P owns Pipeline callers.
 
 Use isolated source branches. Communicate shared API changes directly.
 Only P edits GhcPipeline after root's seed commit. Current scratch is about

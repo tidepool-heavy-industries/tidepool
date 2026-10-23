@@ -81,13 +81,20 @@ fallback. Dormant availability is not executable demand.
 
 ## Current evidence and decisions
 
-The current review checkpoint is [the next-wave brief](next-review.md), based on
-executed code `1c56d053aa`. All nine selected targets compile. Small histories
-expose a shared captured-versus-preprocessed import-coordinate defect, one stale
-typed refusal assertion, an incompletely diagnosed World query refusal, and two
-invalid publication-fixture premises. Checked-value TYPE closure and two genuine
-publication/recovery controls pass. Validation has settled and released its pin;
-the brief names bounded owners, design decisions and exact next evidence.
+The controlling implementation contract is [option C](next-review.md): one
+root-scoped import-admission owner. Ordered syntax matching, opaque captures and
+closed native refiners are joined; the upper admission and Pipeline migration
+is still in progress. These partial changes are not a compilable release claim.
+Root directly owns the demand-analysis migration, and N owns its test callers.
+
+At `1b72968bc1`, root-role refusal passed 1/1 and the source-proof cohort passed
+3/4. The remaining assertion confused Full body availability with Empty execution
+demand. Its reviewed correction inspects demand after request preparation and
+checks the real target selector's exact Empty refusal; execution is pending the
+joined candidate. The method is now named `has_native_group_support`, making its
+narrower contract explicit. The native-entry repair passed earlier. Instrumented
+carried-World execution established the shared import-census defect rather than
+a separate TYPE failure. V's ledger below retains exact commands and evidence.
 
 At joined checkpoint `72c34141e3`, linked-code consumers, independent source
 scope, source-import protocol 4 and Context9 are consolidated. The first joined
