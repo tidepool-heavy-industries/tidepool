@@ -8540,7 +8540,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             let chosen = inventory
                 .admit_recovery_selection(
                     initial,
-                    vec![],
+                    vec![entry.clone()],
                     &ordinals
                         .iter()
                         .map(|ordinal| NativeGroupKey {
@@ -8556,13 +8556,20 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 NativeOriginalRequirement::from_selected_view(id, &chosen).unwrap(),
             )
             .unwrap();
+            let mut issuer_projection = projection.clone();
+            issuer_projection
+                .admit_role(
+                    entry.descriptor.owner.clone(),
+                    CompilerInputRole::ReusableOriginal {
+                        interface,
+                        original: id,
+                    },
+                )
+                .unwrap();
             let available =
-                fixture_support_with_issued_offers(projection, chosen, [available_offer]).unwrap();
+                fixture_support_with_issued_offers(issuer_projection, chosen, [available_offer])
+                    .unwrap();
             let initial_graph = initial.capture_graph_selection();
-            assert_eq!(
-                available.artifacts().capture_graph_selection().namespace,
-                initial_graph.namespace
-            );
             assert_eq!(
                 full_support.artifacts().capture_graph_selection().namespace,
                 initial_graph.namespace
@@ -8570,16 +8577,14 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             // Only the checked availability owner transfers permission. Raw Full
             // custody independently preserves proof scopes without selecting groups.
             let support = baseline
-                .retain_offers(
-                    full_support
-                        .native_offers()
-                        .iter()
-                        .chain(available.native_offers().iter())
-                        .cloned(),
-                )
+                .retain_template_availability(&available)
                 .unwrap()
-                .retain_normalized_availability(available.native_availability())
+                .retain_offers(full_support.native_offers().iter().cloned())
                 .unwrap();
+            assert_eq!(
+                support.artifacts().capture_graph_selection().namespace,
+                initial_graph.namespace
+            );
             assert_eq!(
                 support.recorded_input_decisions(),
                 baseline.recorded_input_decisions()
@@ -10094,19 +10099,108 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
         .unwrap();
     let role =
         published.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner].clone();
-    let empty = published
+    let expected_published_choices = published
         .compiler_source_support()
-        .select_support_roots(
+        .recorded_input_decisions()[&entry.descriptor.owner]
+        .groups
+        .clone();
+    let mut withdrawn_graph = published.artifact_view().capture_graph_selection();
+    let group_roots = withdrawn_graph
+        .roots
+        .iter()
+        .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    withdrawn_graph
+        .roots
+        .retain(|node| !matches!(node, ArtifactBindingNode::Group(_)));
+    withdrawn_graph.custody_roots.extend(group_roots);
+    withdrawn_graph.custody_roots.sort();
+    withdrawn_graph.custody_roots.dedup();
+    let withdrawn = published
+        .artifact_view()
+        .select_issued(
+            withdrawn_graph
+                .namespace
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect(),
+            &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
+                withdrawn_graph,
+            ),
+        )
+        .unwrap();
+    assert!(withdrawn.selected_native_groups().is_empty());
+    let withdrawn_support = restore_fixture_support_in_view(&published, withdrawn).unwrap();
+    let mut cases = vec![
+        (
+            published.compiler_source_support().clone(),
+            expected_published_choices.clone(),
+        ),
+        (withdrawn_support, expected_published_choices),
+    ];
+    let type_baseline = published
+        .compiler_source_support()
+        .selected_interfaces()
+        .unwrap()
+        .type_interfaces_for_owners(
             published
                 .compiler_input_projection()
-                .roles()
-                .into_iter()
-                .map(|role| role.interface())
+                .snapshot_roles()
+                .keys()
+                .cloned()
                 .collect(),
         )
         .unwrap()
-        .finalize_namespace()
+        .retain_custody(published.artifact_view())
         .unwrap();
+    for selected in [fixture.own_ordinals.clone(), vec![]] {
+        let selected = selected
+            .into_iter()
+            .map(|original_ordinal| NativeGroupKey {
+                artifact: entry.descriptor.id,
+                original_ordinal,
+            })
+            .collect();
+        let view = type_baseline
+            .artifacts()
+            .inventory()
+            .admit_recovery_selection(type_baseline.artifacts(), vec![entry.clone()], &selected)
+            .unwrap();
+        let mut projection = type_baseline.projection().clone();
+        projection
+            .admit_role(
+                entry.descriptor.owner.clone(),
+                CompilerInputRole::ReusableOriginal {
+                    interface: role.interface(),
+                    original: entry.descriptor.id,
+                },
+            )
+            .unwrap();
+        let issued = fixture_compiler_support(projection, view);
+        let choices = issued.recorded_input_decisions()[&entry.descriptor.owner]
+            .groups
+            .clone();
+        assert_eq!(
+            choices.is_empty(),
+            selected.is_empty(),
+            "the checked ingress owns explicit Full versus Empty input choices"
+        );
+        let available = issued
+            .retain_offers(
+                published
+                    .compiler_source_support()
+                    .native_offers()
+                    .iter()
+                    .cloned(),
+            )
+            .unwrap()
+            .retain_normalized_availability(
+                published.compiler_source_support().native_availability(),
+            )
+            .unwrap();
+        cases.push((available, choices));
+    }
     let fresh = recovered_witness_fixtures(&[fixture_finalized_product(
         original_groups_fixture_with_interface(
             "FreshBesidePublishedZeroDemand",
@@ -10119,27 +10213,38 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
     )])
     .remove(0)
     .product;
-    for full_demand in [true, false] {
-        let support = if full_demand {
-            published.compiler_source_support().clone()
-        } else {
-            empty.clone()
-        };
+    for (support, expected_choices) in cases {
+        let role = support.projection().snapshot_roles()[&entry.descriptor.owner].clone();
         assert!(support
             .native_offers()
             .iter()
             .any(|offer| offer.original() == entry.descriptor.id && offer.is_full()));
+        assert_eq!(
+            support
+                .native_availability()
+                .issued_row(entry.descriptor.id)
+                .unwrap()
+                .mode,
+            NativeTransportMode::Full,
+            "input choice and Full native availability are independent"
+        );
         let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
         assert!(matches!(
             support.checked_native_input_decision(entry.descriptor.id, canonical, native.owner()).unwrap(),
             crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
-                if choices.is_empty() != full_demand
+                if choices == &expected_choices
         ));
-        let context = published
-            .clone()
-            .rebuild(|facts| facts.compiler_support = support)
-            .finish()
-            .unwrap();
+        let context = if role.is_published_source_original() {
+            published
+                .clone()
+                .rebuild(|facts| facts.compiler_support = support)
+        } else {
+            ExactDeclarationContext::empty()
+                .extend_issued_compiler_support(&support)
+                .unwrap()
+        }
+        .finish()
+        .unwrap();
         assert_eq!(
             context.compiler_input_projection().snapshot_roles()[&entry.descriptor.owner],
             role
@@ -10168,7 +10273,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
             assert!(matches!(
                 reused.issued_input_decisions().unwrap().for_role(&entry.descriptor.owner, reused_role),
                 crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
-                    if choices.is_empty() != full_demand
+                    if choices == &expected_choices
             ));
             let directory = tempfile::tempdir().unwrap();
             let request = ExactCompileContext::new(Arc::new(context.clone()))
@@ -10189,7 +10294,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
                     .checked_native_input_decision(entry.descriptor.id, canonical, native.owner())
                     .unwrap(),
                 crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
-                    if choices.is_empty() != full_demand
+                    if choices == &expected_choices
             ));
             let mut validation = PackageInterfaceValidation::default();
             let mut selection =
@@ -10259,22 +10364,22 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
                     &mut validation,
                 )
                 .map(|_| ());
-            if full_demand {
+            if expected_choices.contains_key(&fixture.first) {
                 assert!(
                     admitted.is_ok(),
-                    "issued Full demand must reach native admission: {admitted:?}"
+                    "the exact issued input choice must reach native admission: {admitted:?}"
                 );
             } else {
                 assert!(
                     matches!(&admitted, Err(CompileError::ArtifactInventory(error))
                     if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
                         if artifact == entry.descriptor.id && original_ordinal == fixture.first)
-                    && matches!(&error.native_refusal,
+                    && (!expected_choices.is_empty() || matches!(&error.native_refusal,
                         Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty {
                             owner,
                             original_ordinal,
-                        }) if owner == &entry.descriptor.owner && *original_ordinal == fixture.first)),
-                    "Full availability cannot resurrect explicit Empty demand: {admitted:?}"
+                        }) if owner == &entry.descriptor.owner && *original_ordinal == fixture.first))),
+                    "Full availability cannot invent an unselected input group: {admitted:?}"
                 );
             }
         }
@@ -11655,7 +11760,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             })
             .collect();
         let chosen = inventory
-            .admit_recovery_selection(initial, vec![], &selected)
+            .admit_recovery_selection(initial, vec![entry.clone()], &selected)
             .unwrap();
         // The selected groups issue this mode. Broader Full proofs are retained
         // afterward without widening the normalized permission row.
@@ -11665,7 +11770,17 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             NativeOriginalRequirement::from_selected_view(entry.descriptor.id, &chosen).unwrap(),
         )
         .unwrap();
-        let support = fixture_support_with_issued_offers(projection.clone(), chosen, [offer])
+        let mut issuer_projection = projection.clone();
+        issuer_projection
+            .admit_role(
+                owner.clone(),
+                CompilerInputRole::ReusableOriginal {
+                    interface: projection.snapshot_roles()[&owner].interface(),
+                    original: entry.descriptor.id,
+                },
+            )
+            .unwrap();
+        let support = fixture_support_with_issued_offers(issuer_projection, chosen, [offer])
             .unwrap()
             .retain_offers(full_support.native_offers().iter().cloned())
             .unwrap();
