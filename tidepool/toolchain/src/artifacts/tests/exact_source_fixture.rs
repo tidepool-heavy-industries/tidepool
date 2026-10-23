@@ -8,7 +8,7 @@ use crate::declaration_context::{
 pub(crate) struct ExactSourceFixture {
     _directory: TempDir,
     applied: AppliedModuleCandidateOffer,
-    endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    compiler: tidepool_extract_cmd::CompilerIdentity,
     source_path: PathBuf,
     source: String,
     inspection_output: PathBuf,
@@ -54,7 +54,7 @@ impl ExactSourceFixture {
         let mut fixture = Self {
             _directory: directory,
             applied,
-            endpoint,
+            compiler: endpoint.identity().clone(),
             source_path,
             source: source.to_owned(),
             inspection_output,
@@ -62,7 +62,7 @@ impl ExactSourceFixture {
             admissions: Vec::new(),
             runs: Vec::new(),
         };
-        fixture.execute()?;
+        fixture.execute(endpoint)?;
         Ok(fixture)
     }
 
@@ -80,7 +80,14 @@ impl ExactSourceFixture {
                 ))
             })
             .collect::<Result<Vec<_>, std::io::Error>>()?;
-        self.execute()?;
+        let (endpoint, _) = crate::toolchain::bind_extract_endpoint()
+            .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
+        if endpoint.identity() != &self.compiler {
+            return Err(CompileError::ExtractFailed(
+                "repeated exact-source inspection selected another compiler".into(),
+            ));
+        }
+        self.execute(endpoint)?;
         assert_eq!(self.receipts.len(), previous.len() + 1);
         for (path, receipt, snapshot) in previous {
             assert_eq!(std::fs::read(&path)?, receipt);
@@ -92,13 +99,17 @@ impl ExactSourceFixture {
         Ok(())
     }
 
-    fn execute(&mut self) -> Result<(), CompileError> {
+    fn execute(
+        &mut self,
+        endpoint: tidepool_extract_cmd::CompilerEndpoint,
+    ) -> Result<(), CompileError> {
+        let applied = &self.applied;
         let run = test_support::with_settlement(|settlement| {
             let outcome = tidepool_extract_cmd::with_compiler_transaction(settlement, || {
                 let run = CompileError::compiler_invocation_result(
-                    self.endpoint.execute_with_input_files(
-                        self.applied.command(),
-                        self.applied.input_transport_files(),
+                    endpoint.execute_with_input_files(
+                        applied.command(),
+                        applied.input_transport_files(),
                         |_| {},
                     ),
                 )?;
