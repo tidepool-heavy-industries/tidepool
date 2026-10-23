@@ -204,20 +204,25 @@ scenario = do
           pure ()) `finally` BS.writeFile mutable bytes
         -- Exercise the captured input owner and its NameCache-bound decoder
         -- with the same logical alias shape used by World TYPE input transport.
-        thinBytes <- captureArtifactBytes <$> BS.readFile (work </> "ThinFixture.hi")
-        let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" "primary-1/iface"
-              (artifactSha256 thinBytes) []
+        let thinPath = work </> "ThinFixture.hi"
+        thinRaw <- BS.readFile thinPath
+        let thinBytes = captureArtifactBytes thinRaw
         decoder <- newRequestIfaceDecoder
-        closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
-          (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
-          hsc [thinArtifact] [] >>= either fail pure
-        products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
-        fresh <- forkExactContext hsc
-        (captured,_) <- hydrateExactScopeWithProducts fresh products []
-        isolated <- newFatIfaceCache
-        thin <- lookupFatIfaceExact captured isolated thinIdentityName
-        assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
-          "captured thin TYPE interface attempted a defining-file read"
+        removeFile thinPath
+        (forM_ ["primary-1/iface", "primary-1/iface", "primary-9/iface"] $ \alias -> do
+          let thinArtifact = ExactIfaceArtifact "main" "ThinFixture" alias
+                (artifactSha256 thinBytes) []
+          closure <- readCapturedExactIfaceClosureWithCheckedValues decoder
+            (\requested -> if requested == thinArtifact then pure thinBytes else fail "unexpected captured input")
+            hsc [thinArtifact] [] >>= either fail pure
+          products <- either fail pure (selectVerifiedExactInterfaceProducts closure [thinArtifact])
+          fresh <- forkExactContext hsc
+          (captured,_) <- hydrateExactScopeWithProducts fresh products []
+          isolated <- newFatIfaceCache
+          thin <- lookupFatIfaceExact captured isolated thinIdentityName
+          assert (case thin of FatIfaceMissing NoExtraDeclarations -> True; _ -> False)
+            "captured thin TYPE interface attempted a defining-file read")
+          `finally` BS.writeFile thinPath thinRaw
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency
       localResult <- liftIO (lookupFatIfaceExact hsc cache
