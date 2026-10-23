@@ -3203,6 +3203,11 @@ mod authored_tests {
             .find(|row| row.group().owner() == &result_owner)
             .expect("the consumer selects its retained authored implementation");
         assert_eq!(inherited.binding().artifact(), result_root);
+        assert!(context
+            .artifact_view()
+            .capture_graph_selection()
+            .native_groups
+            .contains(&inherited.binding()));
         assert!(
             inherited.physical_current().is_none(),
             "a retained implementation is not a current physical output"

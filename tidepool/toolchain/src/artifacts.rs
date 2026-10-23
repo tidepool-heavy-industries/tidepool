@@ -548,6 +548,9 @@ pub struct CompiledArtifacts {
     /// transaction. These are raw products until graph evidence assigns
     /// exact module versions and every import owner.
     pub module_products: Vec<RawModuleProduct>,
+    /// Rows certified by this physical output's demand issuer. Inherited
+    /// source implementations remain with their completed target owner and
+    /// are inspected through `native_source_products`.
     pub certified_groups: Arc<[certified_products::PendingCertifiedGroup]>,
     pub recovery_products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     pub(crate) issued_output: Option<crate::declaration_context::IssuedOriginalOutput>,
