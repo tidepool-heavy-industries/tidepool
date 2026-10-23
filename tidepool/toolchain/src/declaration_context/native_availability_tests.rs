@@ -7819,10 +7819,10 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
 }
 
 struct CompiledPublicationFixture {
-    _directory: tempfile::TempDir,
-    _entry: crate::artifacts::ProductionEntryOutput,
+    _fixture: crate::artifacts::test_support::SourcePublicationEntryFixture,
     producer: Vec<u8>,
     source: Arc<ExactDeclarationContext>,
+    execution: Arc<OriginalExecutionEvidence>,
     original: Arc<ArtifactEntry>,
     own_ordinals: Vec<u32>,
     first: u32,
@@ -7830,90 +7830,33 @@ struct CompiledPublicationFixture {
 }
 
 fn compiled_publication_fixture() -> CompiledPublicationFixture {
-    let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
-    let sources = directory.path().join("sources");
-    std::fs::create_dir(&sources).unwrap();
-    let target = sources.join("PublicationTarget.hs");
-    std::fs::write(
-        &target,
-        include_str!("../../tests/fixtures/native-publication/PublicationTarget.hs"),
-    )
-    .unwrap();
-    std::fs::write(
-        sources.join("SourceOriginalSupport.hs"),
-        include_str!("../../tests/fixtures/native-publication/SourceOriginalSupport.hs"),
-    )
-    .unwrap();
-    let endpoint = tidepool_extract_cmd::ExtractCmd::new()
-        .unwrap()
-        .bind()
+    let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
+        .expect("the real completed entry retains source and native admission");
+    let execution = fixture
+        .entry
+        .products()
+        .original_execution_evidence()
         .unwrap();
-    let producer = endpoint.identity().producer_bytes().to_vec();
-    let frozen = crate::artifacts::FrozenEntrySources::capture(&[sources], &target).unwrap();
-    let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
-        &frozen,
-        directory.path(),
-        &directory.path().join("entry"),
-    )
-    .expect("the real completed entry retains source and native admission");
-    let source = entry.products().original_execution_context().unwrap();
+    execution
+        .completed()
+        .expect("the actual fixture output retains its complete instance census");
+    let source = execution.context().clone();
     assert_eq!(
         source.toolchain_identity_sha256(),
-        CanonicalProducerIdentity::from_producer_bytes(&producer).sha256()
+        CanonicalProducerIdentity::from_producer_bytes(&fixture.producer_bytes).sha256()
     );
-    let original = source
-        .artifact_view()
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.descriptor.owner.module == "SourceOriginalSupport"
-                && matches!(entry.payload, ArtifactPayload::Original(_))
-        })
-        .expect("the compiler captured the actual imported source Original");
-    assert!(source.source_scope().admits(&original.descriptor.owner));
+    assert!(source.source_scope().admits(&fixture.root.descriptor.owner));
     assert!(source.lexical_graph().iter().any(|node| {
-        &node.owner == source.original_instance_target().unwrap()
-            && node.imports.contains(&original.descriptor.owner)
+        &node.owner == execution.target() && node.imports.contains(&fixture.root.descriptor.owner)
     }));
-    let ArtifactPayload::Original(product) = &original.payload else {
-        unreachable!()
-    };
-    let own_ordinals = original
-        .native_group_ordinals
-        .iter()
-        .copied()
-        .collect::<Vec<_>>();
-    let ordinal = |name: &str| {
-        let selected = own_ordinals
-            .iter()
-            .copied()
-            .filter(|ordinal| {
-                crate::certified_products::original_native_group_definitions(product, *ordinal)
-                    .unwrap()
-                    .export_contracts()
-                    .any(|contract| {
-                        let contract = contract.unwrap();
-                        contract.identity.unit == original.descriptor.owner.unit
-                            && contract.identity.module == original.descriptor.owner.module
-                            && contract.identity.occurrence == name
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(selected.len(), 1, "one authenticated group defines {name}");
-        selected[0]
-    };
-    let first = ordinal("first");
-    let second = ordinal("second");
-    assert_ne!(
-        first, second,
-        "the source exports occupy distinct actual groups"
-    );
+    let own_ordinals = fixture.root.native_group_ordinals.iter().copied().collect();
+    let [first, second] = fixture.root_ordinals;
     CompiledPublicationFixture {
-        _directory: directory,
-        _entry: entry,
-        producer,
+        producer: fixture.producer_bytes.clone(),
+        original: fixture.root.clone(),
+        _fixture: fixture,
         source,
-        original,
+        execution,
         own_ordinals,
         first,
         second,
@@ -7937,6 +7880,12 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
         hydrate_context(&store, receipt.root()).unwrap()
     };
     let fixture = compiled_publication_fixture();
+    let publication = fixture
+        ._fixture
+        .entry
+        .products()
+        .published_source_original_selection("revision", &fixture.original.descriptor.owner)
+        .unwrap();
     let mut histories = 0;
     for (ordinals, published) in [fixture.own_ordinals.clone(), vec![fixture.second], vec![]]
         .into_iter()
@@ -7948,13 +7897,21 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
             let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer);
             let entry = fixture.original.clone();
             let id = entry.descriptor.id;
-            let entries = fixture.source.artifact_view().entries();
-            let inventory = ArtifactInventory::default();
-            let initial = inventory
-                .admit_shared_with_demand(
-                    &inventory.empty_view(),
-                    entries.clone(),
-                    NativeArtifactDemand::ScopeInterfaces,
+            let source = if published {
+                publication.context()
+            } else {
+                &fixture.source
+            };
+            let inventory = source.artifact_view().inventory();
+            let initial = source
+                .artifact_view()
+                .select_roots(
+                    source
+                        .compiler_input_projection()
+                        .roles()
+                        .iter()
+                        .map(CompilerInputRole::interface)
+                        .collect(),
                 )
                 .unwrap();
             assert!(initial.selected_native_groups().is_empty());
@@ -7973,7 +7930,7 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                         .collect(),
                 )
                 .unwrap();
-            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            let projection = source.compiler_input_projection().clone();
             let full_support = fixture_compiler_support(projection.clone(), full.clone());
             let full_offer = full_support
                 .native_offers()
@@ -8028,13 +7985,11 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 support.recorded_input_decisions(),
                 baseline.recorded_input_decisions()
             );
-            fixture
-                .source
+            source
                 .source_scope()
-                .preserve_support(fixture.source.compiler_source_support(), &support)
+                .preserve_support(source.compiler_source_support(), &support)
                 .unwrap();
-            let context = fixture
-                .source
+            let context = source
                 .as_ref()
                 .clone()
                 .rebuild(|facts| facts.compiler_support = support)
@@ -8134,19 +8089,13 @@ fn complete_snapshot_recovery_keeps_proof_only_native_offer_scopes() {
                 ),
                 "scope identity alone cannot authenticate different immutable proof facts"
             );
-            let context = if published {
-                let publication = context
-                    .issue_published_source_original("revision", "input", &entry.descriptor.owner)
-                    .unwrap();
-                assert!(publication
-                    .context()
+            assert_eq!(
+                context
                     .compiler_input_roles()
                     .iter()
-                    .any(CompilerInputRole::is_published_source_original));
-                publication.context().as_ref().clone()
-            } else {
-                context
-            };
+                    .any(CompilerInputRole::is_published_source_original),
+                published
+            );
             assert!(context.artifact_view().selected_native_groups().is_empty());
             let row = context
                 .compiler_source_support()
@@ -9097,8 +9046,68 @@ fn private_input_consumers_preserve_role_issuer_over_historical_canonical_custod
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
     use crate::artifact_inventory::IssuedNativeOffer;
+    let fixture = compiled_publication_fixture();
+    let actual_owner = fixture.original.descriptor.owner.clone();
+    let captured = CapturedTemplateImports::capture(
+        &fixture.execution,
+        &[format!("import {}\n", actual_owner.module)],
+    )
+    .unwrap()
+    .expect("the actual output admits its selected template source");
+    let actual_canonical =
+        fixture.source.compiler_input_projection().snapshot_roles()[&actual_owner].interface();
+    assert_eq!(
+        captured.evidence.graph[&actual_owner].canonical,
+        actual_canonical
+    );
+    captured
+        .evidence
+        .validate(
+            fixture.source.toolchain_identity_sha256(),
+            fixture.source.artifact_view(),
+        )
+        .unwrap();
+    let mut wrong_seal = captured.evidence.clone();
+    wrong_seal
+        .graph
+        .get_mut(&actual_owner)
+        .unwrap()
+        .interface
+        .interface_sha256[0] ^= 1;
+    assert!(wrong_seal
+        .validate(
+            fixture.source.toolchain_identity_sha256(),
+            fixture.source.artifact_view()
+        )
+        .is_err());
+    let (actual_support, _) = captured
+        .into_value_support(fixture.source.compiler_source_support().clone())
+        .unwrap();
+    assert_eq!(
+        actual_support
+            .artifacts()
+            .capture_graph_selection()
+            .namespace,
+        fixture
+            .source
+            .artifact_view()
+            .capture_graph_selection()
+            .namespace
+    );
+    assert_eq!(
+        actual_support.artifacts().capture_graph_selection().roots,
+        fixture
+            .source
+            .artifact_view()
+            .capture_graph_selection()
+            .roots
+    );
+
+    // Retained TYPE and native-availability histories do not issue another
+    // output or a completed template capture.
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let owner = ExactModuleIdentity {
         unit: "main".into(),
@@ -9210,39 +9219,32 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
             .unwrap();
             let before = original.artifact_view().capture_graph_selection();
             let before_lexical = original.lexical_graph().to_vec();
-            let retained =
-                CapturedTemplateImports::capture(&original, &["import TemplateOwner\n".into()])
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(retained.evidence.graph[&owner].canonical, expected);
+            let retained = original
+                .compiler_source_support()
+                .selected_interfaces()
+                .unwrap()
+                .support_for_owners(BTreeSet::from([owner.clone()]))
+                .unwrap()
+                .retain_template_availability(original.compiler_source_support())
+                .unwrap();
             assert_eq!(
-                retained
-                    .compiler_support
-                    .artifacts()
-                    .capture_graph_selection(),
+                retained.projection().snapshot_roles()[&owner].interface(),
+                expected
+            );
+            assert_eq!(
+                retained.artifacts().capture_graph_selection(),
                 expected_graph
             );
             assert_eq!(
-                retained.compiler_support.projection().roles(),
+                retained.projection().roles(),
                 vec![CompilerInputRole::InterfaceOnly {
                     interface: expected
                 }]
             );
             assert_eq!(original.lexical_graph(), before_lexical);
-            assert!(retained
-                .compiler_support
-                .artifacts()
-                .selected_native_groups()
-                .is_empty());
+            assert!(retained.artifacts().selected_native_groups().is_empty());
             assert_eq!(original.artifact_view().capture_graph_selection(), before);
-            retained
-                .evidence
-                .validate(producer, retained.compiler_support.artifacts())
-                .unwrap();
-            let evidence = retained.evidence.clone();
-            let (retained_support, _) = retained
-                .into_value_support(original.compiler_source_support().clone())
-                .unwrap();
+            let retained_support = original.compiler_source_support().merge(&retained).unwrap();
             let retained_again = retained_support.artifacts();
             assert_eq!(
                 retained_again.capture_graph_selection().namespace,
@@ -9307,16 +9309,6 @@ fn retained_template_capture_uses_selected_canonical_with_historical_custody() {
                     .is_err(),
                 "the owning association validator refuses a mismatched raw role key"
             );
-            let mut mismatched = evidence;
-            mismatched
-                .graph
-                .get_mut(&owner)
-                .unwrap()
-                .interface
-                .interface_sha256[0] ^= 1;
-            assert!(mismatched
-                .validate(producer, original.artifact_view())
-                .is_err());
         }
         if changed_canonical {
             assert!(
@@ -9453,49 +9445,11 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
     let ArtifactPayload::Original(native) = &entry.payload else {
         unreachable!()
     };
-    // Recover a real selected Full body before publication. The compiler's
-    // available products alone do not imply an executable Group root.
-    let entries = fixture.source.artifact_view().entries();
-    let inventory = ArtifactInventory::default();
-    let initial = inventory
-        .admit_shared_with_demand(
-            &inventory.empty_view(),
-            entries.clone(),
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
-        )
-        .unwrap();
-    let full = inventory
-        .admit_recovery_selection(
-            &initial,
-            vec![],
-            &fixture
-                .own_ordinals
-                .iter()
-                .map(|ordinal| NativeGroupKey {
-                    artifact: entry.descriptor.id,
-                    original_ordinal: *ordinal,
-                })
-                .collect(),
-        )
-        .unwrap();
-    let support = fixture_compiler_support(
-        CompilerInputProjection::from_issued_entries(&entries).unwrap(),
-        full,
-    );
-    fixture
-        .source
-        .source_scope()
-        .preserve_support(fixture.source.compiler_source_support(), &support)
-        .unwrap();
-    let source = fixture
-        .source
-        .as_ref()
-        .clone()
-        .rebuild(|facts| facts.compiler_support = support)
-        .finish()
-        .unwrap();
-    let publication = source
-        .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+    let publication = fixture
+        ._fixture
+        .entry
+        .products()
+        .published_source_original_selection("revision", &entry.descriptor.owner)
         .unwrap();
     let published = publication.context();
     let role =
@@ -9860,8 +9814,9 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         .clone()
         .extend_interface_context(&fallback_context)
         .unwrap();
-    let publication = source
-        .issue_published_source_original("revision", "input", &entry.descriptor.owner)
+    let publication = current_output
+        .products()
+        .published_source_original_selection("revision", &entry.descriptor.owner)
         .unwrap();
     let published_with_fallback = publication
         .context()
@@ -10938,25 +10893,59 @@ fn recovery_inspection_ignores_unrelated_retained_native_inventory_growth() {
 }
 
 #[test]
+#[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
 fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof_custody() {
     use crate::exact_context::{hydrate_context, Materializer};
     use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
-    let product = product("TemplatePermissionOwner", 61);
-    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
-    let entry = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+    let fixture = compiled_publication_fixture();
+    let entry = fixture.original.clone();
     let owner = entry.descriptor.owner.clone();
-    let inventory = ArtifactInventory::default();
-    let full = inventory
-        .admit_shared(&inventory.empty_view(), vec![entry.clone()])
+    let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer).sha256();
+    let source = &fixture.source;
+    let captured = CapturedTemplateImports::capture(
+        &fixture.execution,
+        &[format!("import {}\n", owner.module)],
+    )
+    .unwrap()
+    .expect("the actual output admits its selected template source");
+    captured
+        .evidence
+        .validate(producer, source.artifact_view())
         .unwrap();
-    let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-    let full_support = fixture_compiler_support(projection.clone(), full.clone());
+    let interfaces = source
+        .compiler_source_support()
+        .selected_interfaces()
+        .unwrap()
+        .support_for_owners(captured.evidence.graph.keys().cloned().collect())
+        .unwrap();
+    let (_, evidence) = captured
+        .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
+        .unwrap();
+    let inventory = source.artifact_view().inventory();
+    let initial = source
+        .artifact_view()
+        .select_roots(
+            source
+                .compiler_input_projection()
+                .roles()
+                .iter()
+                .map(CompilerInputRole::interface)
+                .collect(),
+        )
+        .unwrap();
+    let projection = source.compiler_input_projection().clone();
+    let full_support = source.compiler_source_support();
     assert!(full_support
         .native_offers()
         .iter()
         .any(|offer| offer.is_full()));
     let mut previous: Option<(Arc<TemplateImportEvidence>, ExactDeclarationContext)> = None;
-    for ordinals in [vec![7, 9001], vec![7], vec![9001], vec![]] {
+    for ordinals in [
+        fixture.own_ordinals.clone(),
+        vec![fixture.first],
+        vec![fixture.second],
+        vec![],
+    ] {
         let selected = ordinals
             .iter()
             .map(|ordinal| NativeGroupKey {
@@ -10965,44 +10954,21 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             })
             .collect();
         let chosen = inventory
-            .admit_recovery_selection(&inventory.empty_view(), vec![entry.clone()], &selected)
+            .admit_recovery_selection(&initial, vec![], &selected)
             .unwrap();
         let support = fixture_compiler_support(projection.clone(), chosen)
             .retain_offers(full_support.native_offers().iter().cloned())
             .unwrap();
         assert!(support.native_offers().iter().any(|offer| offer.is_full()));
-        let original = ExactDeclarationContext::retained_execution_support_fixture(
-            producer,
-            support,
-            vec![ExactLexicalNode {
-                owner: owner.clone(),
-                imports: vec![],
-            }],
-            owner.clone(),
-            std::slice::from_ref(&owner),
-        )
-        .unwrap();
-        let captured =
-            CapturedTemplateImports::capture(&original, &[format!("import {}\n", owner.module)])
-                .unwrap()
-                .unwrap();
-        assert!(captured
-            .compiler_support
+        let retained = interfaces.retain_template_availability(&support).unwrap();
+        assert!(retained
             .projection()
             .roles()
             .iter()
             .all(|role| role.original().is_none()));
-        assert!(captured
-            .compiler_support
-            .artifacts()
-            .selected_native_groups()
-            .is_empty());
-        let (support, evidence) = captured
-            .into_value_support(crate::artifact_inventory::CompilerSourceSupport::empty())
-            .unwrap();
-        let exported = ExactDeclarationContext::new(&[], &[], vec![])
-            .unwrap()
-            .extend_issued_compiler_support(&support)
+        assert!(retained.artifacts().selected_native_groups().is_empty());
+        let exported = ExactDeclarationContext::empty()
+            .extend_issued_compiler_support(&retained)
             .unwrap()
             .rebuild(|facts| facts.template_imports = Some(evidence.clone()))
             .finish()
@@ -11021,21 +10987,30 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 prior_context.snapshot().native_availability
             );
         }
-        previous = Some((evidence, exported.clone()));
+        previous = Some((evidence.clone(), exported.clone()));
         let root = tempfile::tempdir().unwrap();
         let request = ExactCompileContext::new(Arc::new(exported.clone()))
-            .prepare_compilation(root.path(), PRODUCER)
+            .prepare_compilation(root.path(), &fixture.producer)
             .unwrap();
         let row = request
             .compiler_inputs()
             .native_availability(entry.descriptor.id)
             .expect("explicit empty remains an issued row");
-        assert_eq!(row.mode == NativeTransportMode::Full, ordinals.len() == 2);
-        assert_eq!(row.permits(7), ordinals.contains(&7));
-        assert_eq!(row.permits(9001), ordinals.contains(&9001));
+        assert_eq!(
+            row.mode == NativeTransportMode::Full,
+            ordinals == fixture.own_ordinals
+        );
+        assert_eq!(
+            row.permits(fixture.first),
+            ordinals.contains(&fixture.first)
+        );
+        assert_eq!(
+            row.permits(fixture.second),
+            ordinals.contains(&fixture.second)
+        );
         assert_eq!(
             wire_mode(&request, &owner.module),
-            if ordinals.len() == 2 {
+            if ordinals == fixture.own_ordinals {
                 full_mode()
             } else {
                 issued_mode(&ordinals)
@@ -11055,8 +11030,14 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             .unwrap()
             .expect("captured carrier identity remains advertised without granting groups");
         assert_eq!(receipt.original.descriptor.id, entry.descriptor.id);
-        assert_eq!(receipt.permits(7), ordinals.contains(&7));
-        assert_eq!(receipt.permits(9001), ordinals.contains(&9001));
+        assert_eq!(
+            receipt.permits(fixture.first),
+            ordinals.contains(&fixture.first)
+        );
+        assert_eq!(
+            receipt.permits(fixture.second),
+            ordinals.contains(&fixture.second)
+        );
         let snapshot = exported.snapshot();
         let store = MemoryBlockstore::default();
         let mut writer = Materializer::new(&store);
@@ -11086,7 +11067,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
             reopened.snapshot().native_availability,
             snapshot.native_availability
         );
-        if ordinals.len() == 2 {
+        if ordinals == fixture.own_ordinals {
             // The real writer/acquired-root boundary can retain a narrower
             // grant with exactly the same payloads, proofs, roles and demand.
             let mut limited = snapshot.clone();
@@ -11130,7 +11111,7 @@ fn retained_template_capture_preserves_normalized_input_modes_with_broader_proof
                 )
             );
         }
-        if ordinals.len() != 2 {
+        if ordinals != fixture.own_ordinals {
             let mut widened = snapshot.clone();
             widened
                 .native_availability
