@@ -3798,7 +3798,7 @@ fn settle_checked_snapshot(
     };
     // The captured owner already installed its exact checked row together
     // with the value and provenance. This snapshot only projects that receipt.
-    let snapshot = match (state.snapshot().basis, successor.as_ref()) {
+    let snapshot = match (&state.snapshot().basis, successor.as_ref()) {
         (RuntimeCheckedPrefixBasis::World { .. }, Some(successor)) => {
             Arc::new(world_checked_snapshot(
                 Arc::clone(successor.world()),
@@ -6880,12 +6880,15 @@ impl PersistentSession {
                 {
                     return Err(SessionError::StaleStagedDeclaration);
                 }
+                let id = entry.id;
+                let defining_scope = entry.scope;
+                let row = Arc::clone(row);
                 bound.push(BoundRetainedInput {
                     terminal,
-                    id: entry.id,
-                    defining_scope: entry.scope,
+                    id,
+                    defining_scope,
                     handle,
-                    row: Arc::clone(row),
+                    row,
                 });
             }
             stages.insert(stage, bound);
