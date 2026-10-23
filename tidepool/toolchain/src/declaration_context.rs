@@ -19314,6 +19314,7 @@ mod tests {
         use crate::certified_products::tests::{
             original_groups_fixture, recovered_witness_fixtures,
         };
+        use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
         let product = original_groups_fixture(
             "Later",
             vec![(3, Vec::new()), (7, Vec::new())],
@@ -19367,9 +19368,22 @@ mod tests {
             (binding.artifact, binding.selection)
                 == (group.binding.artifact(), group.binding.selection())
         }));
-        let roles = CompilerInputProjection::from_issued_entries(&later.entries())
-            .unwrap()
-            .roles();
+        let projection = CompilerInputProjection::from_issued_entries(&later.entries()).unwrap();
+        // Graph refusal controls reuse the issuing role facts without decoding
+        // them as live roles. Successful restoration authenticates Context10 below.
+        let roles = projection.roles();
+        let support = issue_fixture_compiler_support(projection, later.clone()).unwrap();
+        let context = ExactDeclarationContext::empty()
+            .extend_issued_compiler_support(&support)
+            .unwrap();
+        let snapshot = context.snapshot();
+        assert_eq!(snapshot.graph_selection().unwrap(), selection);
+        let store = MemoryBlockstore::default();
+        let mut writer = crate::exact_context::Materializer::new(&store);
+        let written = writer.materialize_context(None, &snapshot).unwrap();
+        for (cid, bytes) in writer.finish().unwrap().into_blocks() {
+            store.put_keyed(&cid, &bytes).unwrap();
+        }
         let directory = tempfile::tempdir().unwrap();
         let products = recovery_artifacts::materialize_certified_products(
             directory.path(),
@@ -19382,13 +19396,16 @@ mod tests {
             .map(|product| product.module_interface.clone().unwrap())
             .collect::<Vec<_>>();
         let descriptors = later.descriptors();
-        let encoded = serde_json::to_vec(&(selection, edges, roles)).unwrap();
-        drop((carrier, initial, later, issuer, native, product));
-        let (selection, edges, roles): (
+        let encoded = serde_json::to_vec(&(selection, edges)).unwrap();
+        drop((
+            carrier, initial, later, issuer, native, product, support, context, snapshot,
+        ));
+        let (selection, edges): (
             ArtifactGraphSelection,
             Vec<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
-            Vec<CompilerInputRole>,
         ) = serde_json::from_slice(&encoded).unwrap();
+        let decoded = crate::exact_context::hydrate_context(&store, written.root()).unwrap();
+        assert_eq!(decoded.snapshot().graph_selection().unwrap(), selection);
         let recovered = RecoveredArtifactInventory::capture_bound(
             directory.path(),
             &products,
@@ -19445,7 +19462,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             acquired_native
-                .context_with_graph_selection(&selection, &roles, vec![])
+                .context_for_expected_snapshot(written.root(), &decoded)
                 .unwrap()
                 .artifact_view()
                 .capture_graph_selection(),
@@ -19465,7 +19482,7 @@ mod tests {
         std::fs::write(&canonical_path, canonical_bytes).unwrap();
         let restore = || {
             recovered
-                .context_with_graph_selection(&selection, &roles, vec![])
+                .context_for_expected_snapshot(written.root(), &decoded)
                 .unwrap()
         };
         let restored = restore();
@@ -21279,7 +21296,21 @@ mod tests {
             "durable role facts include complete proof availability"
         );
         let mut next = context.snapshot();
-        next.roles.insert(root, changed_role.recorded_fact());
+        let crate::exact_context::RecordedCompilerRow::Original {
+            provenance: crate::exact_context::RecordedOriginalProvenance::Published(birth),
+            ..
+        } = next.roles.get_mut(&root).unwrap()
+        else {
+            unreachable!()
+        };
+        let CompilerInputRole::PublishedSourceOriginal {
+            selection: recorded_selection,
+            ..
+        } = &changed_role
+        else {
+            unreachable!()
+        };
+        birth.selection = recorded_selection.clone();
         let store = MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let base = materializer
@@ -22456,9 +22487,12 @@ mod tests {
             let expected_facts = expected.snapshot();
             let choices = |facts: &crate::exact_context::ExactContextSnapshot| {
                 facts
-                    .input_decisions
+                    .recorded_rows()
                     .iter()
-                    .map(|(owner, decision)| (owner.clone(), decision.groups.clone()))
+                    .filter_map(|(owner, row)| {
+                        row.native_choices()
+                            .map(|choices| (owner.clone(), choices.clone()))
+                    })
                     .collect::<Vec<_>>()
             };
             assert_eq!(
@@ -22690,44 +22724,61 @@ mod tests {
         }
         #[derive(serde::Deserialize)]
         struct RoleLinks {
-            native_authority: cid::Cid,
+            provenance: ProvenanceLinks,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", content = "birth", rename_all = "snake_case")]
+        enum ProvenanceLinks {
+            Published { native_facts: cid::Cid },
         }
         #[derive(serde::Deserialize)]
         struct NativeLinks {
             version: u32,
             roles: SnapshotMapRoot,
         }
-        // Generic role transport also decodes facts only. Its mandatory domain
-        // cannot become a default-empty publication policy.
-        let raw_role = serde_json::to_value(&original_role).unwrap();
-        let decoded_role: CompilerInputRole = serde_json::from_value(raw_role.clone()).unwrap();
-        assert_eq!(decoded_role, original_role);
-        let mut missing_authority = raw_role.clone();
-        assert!(missing_authority
+        // Recorded row transport also decodes facts only. Its mandatory birth
+        // domain cannot become a default-empty publication policy.
+        let recorded_role = &birth.recorded_rows()[&root];
+        let raw_role = serde_json::to_value(recorded_role).unwrap();
+        let decoded_role: crate::exact_context::RecordedCompilerRow =
+            serde_json::from_value(raw_role.clone()).unwrap();
+        assert_eq!(&decoded_role, recorded_role);
+        let mut missing_domain = raw_role.clone();
+        assert!(missing_domain["provenance"]["birth"]
             .as_object_mut()
             .unwrap()
-            .remove("native_authority")
+            .remove("native_facts")
             .is_some());
-        assert!(serde_json::from_value::<CompilerInputRole>(missing_authority).is_err());
-        let mut malformed_authority = raw_role.clone();
-        malformed_authority["native_authority"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<CompilerInputRole>(malformed_authority).is_err());
+        assert!(
+            serde_json::from_value::<crate::exact_context::RecordedCompilerRow>(missing_domain)
+                .is_err()
+        );
+        let mut malformed_domain = raw_role.clone();
+        malformed_domain["provenance"]["birth"]["native_facts"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<crate::exact_context::RecordedCompilerRow>(malformed_domain)
+                .is_err()
+        );
         let mut missing_roles = raw_role;
-        assert!(missing_roles["native_authority"]["maps"]
+        assert!(missing_roles["provenance"]["birth"]["native_facts"]["maps"]
             .as_object_mut()
             .unwrap()
             .remove("roles")
             .is_some());
-        assert!(serde_json::from_value::<CompilerInputRole>(missing_roles).is_err());
+        assert!(
+            serde_json::from_value::<crate::exact_context::RecordedCompilerRow>(missing_roles)
+                .is_err()
+        );
 
         let context_links: ContextLinks = read_value(&store, written.root().cid()).unwrap();
         let role_cid: cid::Cid = lookup_map(&store, &context_links.roles, &root)
             .unwrap()
             .unwrap();
         let role_links: RoleLinks = read_value(&store, &role_cid).unwrap();
-        let native_links: NativeLinks = read_value(&store, &role_links.native_authority).unwrap();
-        assert_eq!(native_links.version, 2);
-        assert_ne!(native_links.roles.cid(), &role_links.native_authority);
+        let ProvenanceLinks::Published { native_facts } = role_links.provenance;
+        let native_links: NativeLinks = read_value(&store, &native_facts).unwrap();
+        assert_eq!(native_links.version, 3);
+        assert_ne!(native_links.roles.cid(), &native_facts);
         struct BrokenBlock<'a> {
             store: &'a MemoryBlockstore,
             blocked: cid::Cid,
@@ -22752,7 +22803,7 @@ mod tests {
                 unreachable!("reader never writes")
             }
         }
-        for blocked in [role_links.native_authority, *native_links.roles.cid()] {
+        for blocked in [native_facts, *native_links.roles.cid()] {
             let broken = BrokenBlock {
                 store: &store,
                 blocked,
@@ -22765,11 +22816,11 @@ mod tests {
         }
         let broken = BrokenBlock {
             store: &store,
-            blocked: role_links.native_authority,
+            blocked: native_facts,
             corrupt: true,
         };
         assert!(
-            matches!(hydrate_context(&broken, written.root()), Err(SnapshotError::Integrity(cid)) if cid == role_links.native_authority)
+            matches!(hydrate_context(&broken, written.root()), Err(SnapshotError::Integrity(cid)) if cid == native_facts)
         );
 
         drop(rows);
@@ -23006,7 +23057,7 @@ mod tests {
             .clone();
         let partial = full
             .within_projection(
-                base.compiler_input_projection(),
+                base.compiler_roles(),
                 &ArtifactInventory::default().empty_view(),
             )
             .unwrap()
@@ -23048,7 +23099,8 @@ mod tests {
             )
             .unwrap();
             let availability = RequestNativeAvailability::issue_checked(
-                &projection,
+                support.compiler_roles(),
+                &support.compiler_metadata(),
                 support.artifacts(),
                 support.native_offers(),
             )
@@ -23134,7 +23186,8 @@ mod tests {
         )
         .unwrap();
         let availability = RequestNativeAvailability::issue_checked(
-            &projection,
+            support.compiler_roles(),
+            &support.compiler_metadata(),
             support.artifacts(),
             support.native_offers(),
         )
@@ -24064,7 +24117,7 @@ mod tests {
                 .iter()
                 .map(|offer| {
                     offer
-                        .within_projection(&projection, &inventory.empty_view())
+                        .within_projection(support.compiler_roles(), &inventory.empty_view())
                         .unwrap()
                         .unwrap()
                 })
@@ -24079,12 +24132,13 @@ mod tests {
             assert!(
                 support
                     .native_availability()
-                    .validate_role_coverage(&projection)
+                    .validate_role_coverage(support.compiler_roles())
                     .is_err(),
                 "recorded roles plus offer custody alone cannot issue normalized permissions"
             );
             let rows = RequestNativeAvailability::issue_checked(
-                &projection,
+                support.compiler_roles(),
+                &support.compiler_metadata(),
                 support.artifacts(),
                 support.native_offers(),
             )
@@ -24095,7 +24149,7 @@ mod tests {
         };
         support
             .native_availability()
-            .validate_role_coverage(&projection)
+            .validate_role_coverage(support.compiler_roles())
             .unwrap();
         for row in support.native_availability().rows() {
             assert_eq!(
@@ -25076,7 +25130,10 @@ mod tests {
                 let repeated = cold
                     .native_selection
                     .availability
-                    .for_compiler_roles(cold.projection(), cold.artifacts())
+                    .for_compiler_roles(
+                        cold.compiler_source_support().compiler_roles(),
+                        cold.artifacts(),
+                    )
                     .unwrap();
                 assert_eq!(repeated.rows().count(), unrelated + 2);
                 assert_eq!(repeated.persistent_facts().len(), unrelated + 2);
@@ -25103,7 +25160,10 @@ mod tests {
         let unchanged = cold
             .native_selection
             .availability
-            .for_compiler_roles(cold.projection(), cold.artifacts())
+            .for_compiler_roles(
+                cold.compiler_source_support().compiler_roles(),
+                cold.artifacts(),
+            )
             .unwrap();
         assert!(unchanged.same_acquisition(&cold.native_selection.availability));
         assert_eq!(
@@ -25111,13 +25171,14 @@ mod tests {
             (0, 0),
             "unchanged legacy selection must not copy or insert maintained facts"
         );
-        let roles = cold
-            .projection()
-            .for_source_owners(&BTreeSet::from([parent_owner.clone()]));
+        let restricted = cold
+            .compiler_source_support()
+            .for_source_owners(&BTreeSet::from([parent_owner.clone()]))
+            .unwrap();
         let previous = cold
             .native_selection
             .availability
-            .for_compiler_roles(&roles, cold.artifacts())
+            .for_compiler_roles(restricted.compiler_roles(), restricted.artifacts())
             .unwrap();
         assert!(
             previous.0[&child].permits(9001),
@@ -25131,8 +25192,8 @@ mod tests {
             .native_selection
             .availability
             .for_compiler_roots(
-                &roles,
-                cold.artifacts(),
+                restricted.compiler_roles(),
+                restricted.artifacts(),
                 &BTreeSet::from([parent]),
                 NativeDemandBudget(Some(&operation)),
                 &mut work,
@@ -28080,7 +28141,7 @@ mod tests {
         drop(acquired);
         support
             .native_availability()
-            .validate_role_coverage(&projection)
+            .validate_role_coverage(support.compiler_roles())
             .unwrap();
         drop(narrowed);
         drop(snapshot);
