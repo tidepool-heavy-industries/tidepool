@@ -2592,16 +2592,35 @@ impl IssuedNativeOffer {
                 (NativeOfferBody::Empty, custody)
             }
             Some(proof) => {
-                if proof.original != original
-                    || proof.selection.snapshot().namespace.get(&original)
-                        != Some(&original_binding)
-                    || proof
-                        .selection
-                        .snapshot()
-                        .namespace
-                        .get(&canonical_binding.artifact)
-                        != Some(&canonical_binding)
-                {
+                // Group-root proofs deliberately omit a compiler namespace.
+                // Their authenticated root/carrier/canonical edges still name
+                // the exact acquired row; namespace presence is not required.
+                let pair_matches = {
+                    let state = source.lease.inventory.0.lock().expect("inventory lock");
+                    let graph = proof.selection.graph_selection();
+                    proof.namespace_pair_in(&state, graph, canonical_binding.artifact)
+                        == Some((original_binding, canonical_binding))
+                        && graph.roots.iter().all(|root| match root {
+                            InventoryNodeKey::Group(group)
+                                if group.binding.artifact() == original =>
+                            {
+                                state
+                                    .outgoing(*root)
+                                    .filter(|(_, edge)| **edge == ArtifactDependency::Interface)
+                                    .filter_map(|(target, _)| match target {
+                                        InventoryNodeKey::Artifact(binding)
+                                            if binding.artifact == original =>
+                                        {
+                                            Some(binding)
+                                        }
+                                        _ => None,
+                                    })
+                                    .all(|binding| binding == original_binding)
+                            }
+                            _ => true,
+                        })
+                };
+                if proof.original != original || !pair_matches {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::NativeOfferBindingMismatch {
                             owner: input.owner().clone(),
