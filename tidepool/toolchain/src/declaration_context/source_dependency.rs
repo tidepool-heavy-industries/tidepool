@@ -323,4 +323,89 @@ mod tests {
             before_graph
         );
     }
+    #[test]
+    #[ignore = "requires the declared rooted compiler service"]
+    fn source_group_metadata_refuses_missing_and_ambiguous_exact_issuers() {
+        use crate::artifact_inventory::{
+            ArtifactInventory, ArtifactInventoryFailure, NativeArtifactDemand, NativeGroupKey,
+        };
+        let fixture =
+            crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        let context = fixture
+            .entry
+            .products()
+            .original_execution_evidence()
+            .unwrap()
+            .context()
+            .clone();
+        let inventory = ArtifactInventory::default();
+        let base = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                context.artifact_view().entries(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let carrier = *base
+            .capture_graph_selection()
+            .namespace
+            .iter()
+            .find(|binding| binding.artifact == fixture.root.descriptor.id)
+            .unwrap();
+        let operation = InventoryOperation::new(Default::default());
+        let missing = base
+            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
+            .unwrap_err();
+        assert!(
+            matches!(missing, CompileError::ArtifactInventory(error) if matches!(error.failure,
+            ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
+                if artifact == carrier.artifact && original_ordinal == fixture.root_ordinals[0]))
+        );
+        let issue = |ordinals: &[u32]| {
+            inventory
+                .admit_recovery_selection(
+                    &base,
+                    vec![],
+                    &ordinals
+                        .iter()
+                        .map(|original_ordinal| NativeGroupKey {
+                            artifact: carrier.artifact,
+                            original_ordinal: *original_ordinal,
+                        })
+                        .collect(),
+                )
+                .unwrap()
+        };
+        let left = issue(&fixture.root_ordinals[..1]);
+        let right = issue(&fixture.root_ordinals);
+        let left_group = left
+            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
+            .unwrap();
+        let right_group = right
+            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
+            .unwrap();
+        assert_ne!(
+            left_group, right_group,
+            "the control holds separate group issuances for the same exact carrier and ordinal"
+        );
+        let both = left.retain_custody(&right).unwrap();
+        let before = both.capture_graph_selection();
+        let ambiguous = both
+            .acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
+            .unwrap_err();
+        assert!(
+            matches!(ambiguous, CompileError::ArtifactInventory(error) if matches!(error.failure,
+            ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == carrier.artifact))
+        );
+        assert_eq!(
+            both.capture_graph_selection(),
+            before,
+            "refusal does not choose or withdraw a held issuer"
+        );
+        assert_eq!(
+            left.acquired_original_group_for_carrier(carrier, fixture.root_ordinals[0], &operation)
+                .unwrap(),
+            left_group
+        );
+    }
 }
