@@ -29515,11 +29515,22 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .program_admission()
             .in_program_context(original.clone())
             .unwrap();
-        captured_request
+        // The completed context already holds Consumer's generated Original.
+        // Its earlier FreshSource receipt cannot authorize another promotion.
+        let refusal = captured_request
             .receipt_admission()
             .product_admission(&admission)
             .original_execution_fixture(&artifacts)
-            .expect("the successor fixture must report its actual refusal envelope");
+            .expect_err("an earlier FreshSource claim cannot be replayed against its Original");
+        assert!(
+            matches!(&refusal, CompileError::SourceAdmission(error)
+                if error.owner == identity("main", "Consumer")
+                    && error.boundary == SourceAdmissionBoundary::OriginalExecution
+                    && error.claim == Some(SourceLexicalClaim::FreshSource)
+                    && error.held == Some(crate::artifact_inventory::ArtifactKind::OriginalModule)
+                    && error.reason == SourceAdmissionRefusal::HiddenOriginalPromotion),
+            "unexpected FreshSource replay refusal: {refusal:?}"
+        );
         assert_eq!(
             read_receipt(&receipt).as_array().unwrap()[8..],
             source_fields
