@@ -644,13 +644,16 @@ pub(crate) fn assert_captured_stage_input_refusals(program: &CheckedWorldCellPro
     eprintln!(
         "actual Original stage contributions: {selected_uses} selected, {unselected_uses} unselected refusals, {foreign_stage_contributions} foreign-stage refusals"
     );
-    let (foreign, refusal) = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
+    let foreign = WorldNativeDemandResolver::new(program.reservation(), &mut validation)
         .expect("same reservation has a distinct initial request acquisition")
-        .finish();
-    assert!(refusal.is_none());
-    assert!(foreign
-        .checked_stage(program, &program.stages()[0], &validation)
-        .is_err());
+        .finish()
+        .expect("foreign request observations finish without a query refusal");
+    let refusal = foreign
+        .bind_emitted_stages(program.stages())
+        .err()
+        .expect("a distinct actual request cannot bind the original emitted stage seals");
+    assert!(matches!(refusal, CompileError::ExtractFailed(ref message)
+        if message == "dependency seal belongs to another request or stage"));
     assert!(request
         .checked_stage(program, &program.stages()[0], &validation)
         .is_ok());
