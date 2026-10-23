@@ -24723,7 +24723,9 @@ pub(crate) mod tests {
                 if actual_mode != expected {
                     unexpected.push(format!("mode={mode} broaden={broaden} expected={expected:?} actual={actual_mode:?}"));
                 }
-                eprintln!("native_availability_handoff mode={mode} broaden={broaden} actual={actual_mode:?}");
+                tracing::debug!(target: "tidepool::artifact_inventory::native_availability",
+                    phase = "native_availability_handoff", mode, broaden, actual = ?actual_mode,
+                    "carried native availability");
                 let next_selection = CertifiedSourceSelection::from_compiler_inputs(
                     next.compiler_inputs(),
                     &validation.inventory,
@@ -24793,7 +24795,9 @@ pub(crate) mod tests {
                             &mut validation,
                         )
                         .map(|selected| selected.artifacts().selected_native_groups());
-                    eprintln!("native_availability_handoff_consumer mode={mode} broaden={broaden} ordinal={ordinal} outcome={outcome:?}");
+                    tracing::debug!(target: "tidepool::artifact_inventory::native_availability",
+                        phase = "native_availability_handoff_consumer", mode, broaden, ordinal, outcome = ?outcome,
+                        "target admission from carried availability");
                     let allowed =
                         matches!(mode, "full" | "current") || (mode == "partial" && ordinal == 7);
                     if allowed {
@@ -25057,7 +25061,9 @@ pub(crate) mod tests {
                 NativeArtifactDemand::ScopeInterfaces,
             )
             .unwrap();
-        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        // The future VALUE is physical dependency custody, not a selected
+        // compiler interface or a produced-value prefix certificate.
+        let projection = CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap();
         let mut physical = CertifiedSourceSelection::from_compiler_projection(
             &projection,
             &available.metadata_snapshot(),
@@ -25066,9 +25072,6 @@ pub(crate) mod tests {
         .unwrap();
         let future_owner = (product.owner().unit.clone(), future_module);
         let mut premature = physical.clone();
-        Arc::make_mut(&mut premature.modules)
-            .remove(&future_owner)
-            .unwrap();
         assert!(matches!(
             crate::declaration_context::CapturedCompilerStage::issue(
                 &mut premature,
@@ -25143,10 +25146,12 @@ pub(crate) mod tests {
             "the control must exercise independent group and carrier scopes"
         );
         let before = inventory.metrics();
-        let mut item = physical.clone();
-        Arc::make_mut(&mut item.modules)
-            .remove(&future_owner)
-            .unwrap();
+        let item = physical.clone();
+        assert!(!physical.modules.contains_key(&future_owner));
+        assert!(completed
+            .issued_artifacts()
+            .observed_payload(&future.descriptor.id)
+            .is_some());
         assert!(Arc::ptr_eq(
             item.issued_native_availability().next().unwrap(),
             &issued
@@ -25275,6 +25280,21 @@ pub(crate) mod tests {
             &target_validation.inventory,
         )
         .unwrap();
+        let before_visibility = inventory.metrics().issued_scope_nodes;
+        let unavailable = inventory.select_native_target(
+            completed.physical_cohort(),
+            observed.clone(),
+            None,
+            Some(&current),
+            &[],
+            &BTreeMap::new(),
+            &mut target_validation,
+        );
+        assert!(
+            matches!(unavailable, Err(crate::CompileError::ExtractFailed(_))),
+            "the physical group cannot reach the future value before its visibility is issued"
+        );
+        assert_eq!(inventory.metrics().issued_scope_nodes, before_visibility);
         let next = inventory
             .select_native_target(
                 completed.physical_cohort(),
@@ -25288,8 +25308,21 @@ pub(crate) mod tests {
             .unwrap()
             .artifacts()
             .clone();
-        assert!(next.contains_namespace_artifact(future.descriptor.id));
+        assert!(next.artifact_ids().contains(&future.descriptor.id));
+        assert!(!next.contains_namespace_artifact(future.descriptor.id));
         assert_eq!(next.selected_native_groups().len(), 2);
+        let future_group = *groups
+            .iter()
+            .find(|group| group.original_ordinal == 17)
+            .unwrap();
+        assert!(next.binding_dependencies().iter().any(|(source, target, edge)| {
+            *source == crate::artifact_inventory::InventoryNodeKey::Group(future_group)
+                && matches!(target, crate::artifact_inventory::InventoryNodeKey::Artifact(binding)
+                    if binding.artifact == future.descriptor.id)
+                && matches!(edge, ArtifactDependency::NativeBinding {
+                    dependent_ordinal: 17, generation: 11, occurrence, ..
+                } if occurrence == "publishedB")
+        }));
     }
 
     pub(crate) fn assert_request_private_product_uses_carried_dependency(
