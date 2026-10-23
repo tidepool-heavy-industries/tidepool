@@ -5386,7 +5386,7 @@ impl ArtifactInventory {
         let supplied = supplied
             .iter()
             .filter(|(id, _)| planning_entries.contains_key(id))
-            .map(|(id, entry)| {
+            .map(|(id, _)| {
                 let InventoryNodeKey::Artifact(binding) =
                     resolve_row(LogicalNodeKey::Artifact(*id))?
                 else {

@@ -15342,9 +15342,7 @@ pub(crate) mod tests {
         crate::recovery_artifacts::RecoveryArtifactRef,
         crate::recovery_artifacts::RecoveryValueInterfaceRef,
     ) {
-        use crate::recovery_artifacts::{
-            CertifiedJoinedInterface, CertifiedRecoveryProduct, CertifiedValueInterface,
-        };
+        use crate::recovery_artifacts::{CertifiedJoinedInterface, CertifiedValueInterface};
         let mut wire = testing::wire_program();
         let tidepool_repr::execution_schema::Group::NonRecursive(top) = &wire.bindings[0] else {
             unreachable!()
