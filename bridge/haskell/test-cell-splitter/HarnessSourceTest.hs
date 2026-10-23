@@ -11,7 +11,7 @@ import System.IO (IOMode(ReadWriteMode), hClose, openTempFile, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (createLink, createNamedPipe, createSymbolicLink, ownerReadMode, ownerWriteMode, unionFileModes)
 import System.Timeout (timeout)
-import Tidepool.ExtractRequest (RequestField(..), AdmittedWorkerRequest, admittedSourceFiles, admittedRequestOperation, AdmittedRequestOperation(..), inspectionInputs, inspectionBatch, admitWorkerRequest, workerArgv, workerRequestFromArgv, WorkerRequest(..))
+import Tidepool.ExtractRequest (RequestField(..), AdmittedWorkerRequest, admittedSourceFiles, admittedRequestOperation, AdmittedRequestOperation(..), inspectionInputs, inspectionBatch, admitWorkerRequest, workerArgv, workerRequestFromArgv, WorkerRequest(..), traverseAdmittedSources)
 import Tidepool.HarnessSource (harnessProfilePragmaLine, spliceHarnessProfilePragma)
 
 harnessSourceChecks :: IO ()
@@ -26,6 +26,7 @@ harnessSourceChecks = withScratch $ \root -> do
   writeFile second "module Input where\nvalue = 2\n"
   originals <- mapM BS.readFile [first, second]
   ordinary <- request [Input first, Input second, OutputDir out]
+  expectFileFailure "source rewriting preserves required paths" (traverseAdmittedSources (\_ _ -> pure "") ordinary)
   ordinaryCopy <- spliceHarnessProfilePragma ordinary
   equal "ordinary mode only rewrites first input" [out </> "Input.hs", second] (admittedSourceFiles ordinaryCopy)
   copied <- readFile (out </> "Input.hs")
