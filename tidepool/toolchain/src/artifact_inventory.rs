@@ -15583,6 +15583,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires real compiler publication fixture"]
     fn ordinary_publication_and_display_preserve_the_actual_sealed_issuer() {
         let fixture =
             crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();

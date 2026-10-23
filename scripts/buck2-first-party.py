@@ -1941,6 +1941,7 @@ tidepool_buildscript_run(
             ]
             toolchain_retained_proof_cases = [
                 'artifact_inventory::tests::ordinary_publication_and_display_preserve_the_actual_sealed_issuer',
+                'certified_products::tests::publication_request_history::generated_publication_support_and_recovery_preserve_issuer_selection',
             ]
             toolchain_existing_resident_cases = [
                 'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground',

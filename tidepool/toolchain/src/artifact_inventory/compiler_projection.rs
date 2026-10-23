@@ -6902,12 +6902,11 @@ mod tests {
             proptest::prop_assert_eq!(admission_work.census_rows, entries.len());
             proptest::prop_assert_eq!(support.selected.home_units.iter().cloned().collect::<BTreeSet<_>>(), expected_home_units);
             let context = Arc::new(ExactDeclarationContext::from_authenticated_interfaces([2; 32], &view, projection).unwrap());
-            let source = crate::declaration_context::ValidatedOriginalSource::inputs_from(&context);
             let signature = type_signature("unit", "Selected");
             type_query_work::take();
             let mut narrowed = Vec::new();
             for _ in 0..queries {
-                narrowed.push(source.project_type_interfaces(&[], &[&signature]).unwrap());
+                narrowed.push(context.select_original_type_interfaces(&[], &[&signature]).unwrap());
             }
             let work = type_query_work::take();
             eprintln!("borrowed-type-query-work unrelated={unrelated} queries={queries} admission={admission_work:?} query={work:?}");
@@ -8347,8 +8346,6 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let original =
-                crate::declaration_context::ValidatedOriginalSource::inputs_from(&execution);
             assert!(execution
                 .artifact_view()
                 .entries()
@@ -8375,8 +8372,8 @@ mod tests {
             let before = inventory.metrics();
             type_query_work::take();
             scope_proof::take_ancestry_edge_visits();
-            let projected_context = original
-                .project_type_interfaces(&[], &[&signature])
+            let projected_context = execution
+                .select_original_type_interfaces(&[], &[&signature])
                 .unwrap();
             let projected = projected_context.compiler_source_support();
             let (changed, owners) = baseline
@@ -8396,7 +8393,6 @@ mod tests {
             assert!(projected.native_offers.is_empty());
             assert!(projected.native_availability.rows().next().is_none());
             assert_eq!(changed.artifacts.retained_payload_handles(), 2);
-            assert!(Arc::ptr_eq(&original.execution_context(), &execution));
             assert!(execution
                 .artifact_view()
                 .entries()
