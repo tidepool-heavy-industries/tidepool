@@ -8056,6 +8056,13 @@ mod answer_tests {
                 &InventoryOperation::new(Default::default()),
             )
         };
+        let row_seal = |byte| {
+            cid::Cid::new_v1(
+                0x71,
+                cid::multihash::Multihash::<64>::wrap(0x12, &[byte; 32]).unwrap(),
+            )
+            .to_bytes()
+        };
         let base = world_array(vec![
             world_array(vec![world_integer(0)]),
             world_text("x"),
@@ -8069,7 +8076,7 @@ mod answer_tests {
             world_integer(71),
             world_integer(900),
             world_integer(7),
-            world_blob([5; 32]),
+            world_blob(row_seal(5)),
         ]);
         let mut repeated = rows.clone();
         for row in &mut repeated {
@@ -8099,7 +8106,7 @@ mod answer_tests {
                 let Value::Array(fields) = &mut duplicate else {
                     unreachable!()
                 };
-                fields[6] = world_blob([9; 32]);
+                fields[6] = world_blob(row_seal(9));
             }
             let mut changed = rows.clone();
             let Value::Array(fields) = &mut changed[0] else {
