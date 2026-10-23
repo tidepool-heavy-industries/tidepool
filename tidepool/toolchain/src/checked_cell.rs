@@ -1044,13 +1044,25 @@ fn decode_typed_segment_plan_facts(
 
 /// Complete immutable output of one admitted compiler transaction. Preparing
 /// interfaces never asserts that the corresponding native binding is live.
-#[derive(Debug)]
 pub struct CellProgram {
     pub(crate) checked: Arc<ExactCheckedCell>,
     pub(crate) world: Arc<crate::compiler_world::CheckedWorldCellProgram>,
     pub(crate) slots: Vec<CheckedPlannedCellSlot>,
     pub(crate) items: Vec<CellProgramItem>,
 }
+
+impl std::fmt::Debug for CellProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CellProgram")
+            .field("checked", &self.checked)
+            .field("world_certificate", self.world.certificate_sha256())
+            .field("slots", &self.slots)
+            .field("items", &self.items)
+            .finish()
+    }
+}
+
 
 #[derive(Debug)]
 pub struct CellProgramItem {
