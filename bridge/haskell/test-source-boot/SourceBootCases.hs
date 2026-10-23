@@ -1085,7 +1085,7 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
     unless (isNothing completedImports)
       (fail "fresh root absorbed a prior source-selected original's current receipt")
     let checkLocal scope = compile (PreparedProducts Nothing) Set.empty
-          (ExactScopeCompile localPurpose scope) (Just session) localTarget includes Nothing
+          (ExactScopeCompile GeneralCompile scope) (Just session) localTarget includes Nothing
         recheckLocal = checkLocal selectedScope
     selectedLocal <- recheckLocal
     let selectedRows = maybe [] (maybe [] selectedOriginalRows . compilationSourceSelection)
