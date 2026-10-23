@@ -2676,12 +2676,10 @@ impl RequestNativeAvailability {
                 .then_some(*id)
             })
             .collect::<BTreeSet<_>>();
-        let payloads = artifacts.retained_payloads();
         self.for_compiler_roots(
             roles,
             artifacts,
             &direct,
-            |id| payloads.get(id).is_some(),
             NativeDemandBudget(None),
             &mut DemandNativeInputsWork::default(),
         )
@@ -2693,7 +2691,6 @@ impl RequestNativeAvailability {
         roles: &CompilerInputProjection,
         artifacts: &ArtifactView,
         direct: &BTreeSet<ArtifactId>,
-        has_payload: impl Fn(&ArtifactId) -> bool,
         budget: NativeDemandBudget<'_>,
         work: &mut DemandNativeInputsWork,
     ) -> Result<Self, CompileError> {
@@ -2785,17 +2782,6 @@ impl RequestNativeAvailability {
             let row = self.0.get(&id).ok_or_else(|| {
                 admission_failure(ArtifactInventoryFailure::NativeRootOutsideView { artifact: id })
             })?;
-            if !has_payload(&id) {
-                tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                    artifact = ?id,
-                    owner = ?row.original.descriptor.owner,
-                    direct = direct.contains(&id),
-                    caller = %std::panic::Location::caller(),
-                    "native availability payload check refused");
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootOutsideView { artifact: id },
-                ));
-            }
             let mut selected = (**row).clone();
             if selected.mode == NativeTransportMode::Full
                 && !selected.contributions.iter().any(|contribution| {
@@ -4544,36 +4530,6 @@ impl RequestCompilerInputs {
             demand.projection(),
             self.artifacts(),
             &direct,
-            |id| {
-                let payload = self.metadata.retained.artifacts.get(id);
-                let row = self.native_selection.availability.0.get(id);
-                let same_payload = payload
-                    .zip(row)
-                    .is_some_and(|(payload, row)| Arc::ptr_eq(payload, &row.original));
-                if !same_payload {
-                    tracing::debug!(target: "tidepool::artifact_inventory::ambiguity_trace",
-                        artifact = ?id,
-                        metadata_payload_present = payload.is_some(),
-                        availability_payload_present = row.is_some(),
-                        same_descriptor = payload.zip(row).is_some_and(|(payload, row)|
-                            payload.descriptor == row.original.descriptor),
-                        same_native_witness = payload.zip(row).is_some_and(|(payload, row)|
-                            match (&payload.payload, &row.original.payload) {
-                                (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =>
-                                    first.original_native().zip(second.original_native())
-                                        .is_some_and(|(first, second)| Arc::ptr_eq(first, second)),
-                                _ => false,
-                            }),
-                        same_source_digest = payload.zip(row).is_some_and(|(payload, row)|
-                            match (&payload.payload, &row.original.payload) {
-                                (ArtifactPayload::Original(first), ArtifactPayload::Original(second)) =>
-                                    first.source_sha256() == second.source_sha256(),
-                                _ => false,
-                            }),
-                        "demanded native payload identity refused");
-                }
-                same_payload
-            },
             budget,
             &mut work,
         )?;
@@ -25058,7 +25014,6 @@ mod tests {
                 &roles,
                 cold.artifacts(),
                 &BTreeSet::from([parent]),
-                |id| cold.metadata.retained.artifacts.contains_key(id),
                 NativeDemandBudget(Some(&operation)),
                 &mut work,
             )
