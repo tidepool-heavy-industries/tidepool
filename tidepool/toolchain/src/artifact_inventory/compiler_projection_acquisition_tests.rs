@@ -144,6 +144,12 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
     ] {
         assert_whole_row_precedence(&first[0], &second[1], owner);
     }
+    assert_interface_extension_preserves_native_topology(
+        &checked_inputs[0][1],
+        supports[1],
+        owner,
+        &fixture.root.descriptor.owner,
+    );
     assert_fresh_dependency_permission_boundary(
         contexts[0].as_ref(),
         &checked_inputs[0][0],
@@ -592,4 +598,111 @@ fn assert_completed_output_keeps_actual_producer_with_private_equal_offer(
             );
         }
     }
+}
+
+fn assert_interface_extension_preserves_native_topology(
+    original: &CompilerSourceSupport,
+    incoming: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+    added_owner: &ExactModuleIdentity,
+) {
+    let acquired_original = Arc::clone(
+        original
+            .compiler_roles()
+            .original_acquisition(owner)
+            .unwrap(),
+    );
+    let groups = original.artifacts().selected_native_groups();
+    assert!(
+        !groups.is_empty(),
+        "the actual helper issuer selects executable group roots"
+    );
+    let receiver = original.for_source_owners(&BTreeSet::new()).unwrap();
+    assert_eq!(
+        receiver.artifacts().selected_native_groups(),
+        groups,
+        "compiler TYPE policy does not erase separately issued native graph demand"
+    );
+    assert!(receiver
+        .compiler_roles()
+        .original_acquisition(owner)
+        .is_none());
+    let before = receiver.artifacts().capture_graph_selection();
+    let native_roots = |graph: &ArtifactGraphSelection| {
+        graph
+            .roots
+            .iter()
+            .copied()
+            .filter(|node| matches!(node, ArtifactBindingNode::Group(_)))
+            .collect::<BTreeSet<_>>()
+    };
+    assert!(!native_roots(&before).is_empty());
+    let native_edges = |support: &CompilerSourceSupport| {
+        support
+            .artifacts()
+            .binding_dependencies()
+            .into_iter()
+            .filter(|(from, _, _)| matches!(from, ArtifactBindingNode::Group(_)))
+            .collect::<BTreeSet<_>>()
+    };
+    let edges = native_edges(&receiver);
+    let canonical = receiver.selected[owner].interface().clone();
+    let recorded = receiver.recorded_rows()[owner].clone();
+    assert!(
+        recorded.native_choices().is_none(),
+        "a TYPE row has no selected native decision"
+    );
+    let addition = incoming
+        .selected_interfaces()
+        .unwrap()
+        .type_interfaces_for_owners(vec![added_owner.clone()])
+        .unwrap();
+    assert!(receiver.compiler_roles().get(added_owner).is_none());
+    let expected_addition = addition.selected[added_owner].interface().clone();
+    let extended = receiver
+        .extend_interfaces(&addition.selected_interfaces().unwrap())
+        .unwrap();
+    assert!(
+        extended.compiler_roles().get(added_owner).is_some(),
+        "the actual TYPE loan is installed"
+    );
+    assert_eq!(extended.artifacts().selected_native_groups(), groups);
+    let after = extended.artifacts().capture_graph_selection();
+    assert_eq!(native_roots(&after), native_roots(&before));
+    assert_eq!(after.native_groups, before.native_groups);
+    assert_eq!(
+        native_edges(&extended),
+        edges,
+        "adding TYPE evidence preserves every exact executable group/carrier/dependency edge"
+    );
+    assert_eq!(extended.selected[owner].interface().0, canonical.0);
+    assert!(Arc::ptr_eq(
+        &extended.selected[owner].interface().1,
+        &canonical.1
+    ));
+    assert_eq!(
+        extended.selected[added_owner].interface().0,
+        expected_addition.0
+    );
+    assert!(Arc::ptr_eq(
+        &extended.selected[added_owner].interface().1,
+        &expected_addition.1
+    ));
+    assert_eq!(extended.recorded_rows()[owner], recorded);
+    assert!(matches!(
+        extended.compiler_roles().native_decision(owner),
+        InputNativeDecision::UnissuedPolicy
+    ));
+    assert!(extended
+        .compiler_roles()
+        .original_acquisition(owner)
+        .is_none());
+    let retained = extended
+        .artifacts()
+        .lease
+        .payloads
+        .get(&acquired_original.descriptor.id)
+        .unwrap();
+    assert!(retained.same_issuing_authority(&acquired_original),
+        "the executable graph retains the actual original transport despite TYPE-only compiler policy");
 }
