@@ -4662,9 +4662,8 @@ impl NativeInputSelection {
             }
         }
         let role_originals = roles
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
+            .iter()
+            .filter_map(|(_, role)| role.original())
             .collect::<BTreeSet<_>>();
         let availability = availability
             .into_iter()
@@ -18692,7 +18691,11 @@ mod tests {
         [RecoveryArtifactRef; 2],
         Vec<ArtifactView>,
     ) {
-        let raw = support_product_in_unit("main", "Tidepool.Session.Lib.G11");
+        let raw = support_draft_with_interface(
+            "main",
+            "Tidepool.Session.Lib.G11",
+            b"Tidepool.Session.Lib.G11 interface".to_vec(),
+        );
         let products = [
             crate::certified_products::fixture_finalized_product(raw.clone(), [2; 32]),
             crate::certified_products::fixture_native_declaration_product(raw, [2; 32], 11),
@@ -19900,6 +19903,14 @@ mod tests {
         support_product_in_unit("fixture", module)
     }
 
+    fn support_draft(module: &str) -> crate::recovery_artifacts::OriginalDraft {
+        support_draft_with_interface(
+            "fixture",
+            module,
+            format!("{module} interface").into_bytes(),
+        )
+    }
+
     fn support_product_in_unit(unit: &str, module: &str) -> CertifiedRecoveryProduct {
         support_product_with_interface(unit, module, format!("{module} interface").into_bytes())
     }
@@ -20087,7 +20098,7 @@ mod tests {
             .clone()
             .extend_issued_compiler_support(&match support_offer(&[
                 crate::certified_products::fixture_finalized_product(
-                    support_product("Later"),
+                    support_draft("Later"),
                     context.owner.facts.producer,
                 ),
             ]) {
@@ -20109,7 +20120,7 @@ mod tests {
     fn support_view(products: &[CertifiedRecoveryProduct]) -> ArtifactView {
         let producer = products
             .first()
-            .and_then(|product| product.module_interface())
+            .map(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
         certified_product_artifact_view(producer, products, &[], None).unwrap()
     }
@@ -20166,7 +20177,7 @@ mod tests {
     fn support_offer(products: &[CertifiedRecoveryProduct]) -> CompilerSupportFixture {
         let producer = products
             .first()
-            .and_then(|product| product.module_interface())
+            .map(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
         let output = (|| -> Result<CapturedCompilerStage, CompileError> {
             let mut validation = PackageInterfaceValidation::default();
@@ -20225,7 +20236,7 @@ mod tests {
     ) -> CompilerSupportFixture {
         let producer = products
             .first()
-            .and_then(|product| product.module_interface())
+            .map(|product| product.module_interface())
             .map_or([2; 32], |interface| interface.producer_sha256());
         let entries = products
             .iter()
@@ -20439,20 +20450,23 @@ mod tests {
             .for_program_continuation(&support, std::slice::from_ref(&admission), source_text)
             .unwrap();
         assert!(continued
-            .artifacts
+            .issued_artifacts()
             .entries()
             .iter()
             .all(|entry| entry.descriptor.owner != admission.generated_source_owner()));
         assert_eq!(
-            continued.artifacts.capture_graph_selection().roots,
+            continued.issued_artifacts().capture_graph_selection().roots,
             support.capture_graph_selection().roots
         );
         assert_eq!(
-            continued.artifacts.capture_graph_selection().namespace,
+            continued
+                .issued_artifacts()
+                .capture_graph_selection()
+                .namespace,
             support.capture_graph_selection().namespace
         );
         assert_eq!(
-            continued.projection.roles(),
+            continued.role_projection().roles(),
             support_offer(std::slice::from_ref(&hidden))
                 .projection()
                 .roles()
@@ -20531,7 +20545,7 @@ mod tests {
                 source_text,
             )
             .unwrap();
-        assert_eq!(preserved.projection.roles().len(), 2);
+        assert_eq!(preserved.role_projection().roles().len(), 2);
         assert!(
             issued
                 .artifacts()
@@ -20736,7 +20750,7 @@ mod tests {
             ArtifactEntry::original(
                 producer_sha256,
                 crate::certified_products::fixture_finalized_product(
-                    support_product("Alpha"),
+                    support_draft("Alpha"),
                     producer_sha256,
                 ),
             )
@@ -20744,7 +20758,7 @@ mod tests {
             ArtifactEntry::original(
                 producer_sha256,
                 crate::certified_products::fixture_finalized_product(
-                    support_product("Beta"),
+                    support_draft("Beta"),
                     producer_sha256,
                 ),
             )
@@ -22020,7 +22034,11 @@ mod tests {
         let target = identity("main", "Tidepool.Session.Lib.G11");
         let mut histories = 0;
         for native_authored in [false, true] {
-            let product = support_product_in_unit(&target.unit, &target.module);
+            let product = support_draft_with_interface(
+                &target.unit,
+                &target.module,
+                format!("{} interface", target.module).into_bytes(),
+            );
             let product = if native_authored {
                 crate::certified_products::fixture_native_declaration_product(
                     product,
@@ -26602,7 +26620,7 @@ mod tests {
         let (ancestor, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
         let gamma = crate::certified_products::fixture_finalized_product(
-            support_product("Gamma"),
+            support_draft("Gamma"),
             ancestor.owner.facts.producer,
         );
         let descendant = Arc::new(
@@ -26670,7 +26688,7 @@ mod tests {
             .interface
             .clone();
         let epsilon = crate::certified_products::fixture_finalized_product(
-            support_product("Epsilon"),
+            support_draft("Epsilon"),
             descendant.owner.facts.producer,
         );
         let next = Arc::new(
@@ -26824,7 +26842,7 @@ mod tests {
         let (ancestor, producer) = metadata_fixture();
         let scratch = tempfile::tempdir().unwrap();
         let gamma = crate::certified_products::fixture_finalized_product(
-            support_product("Gamma"),
+            support_draft("Gamma"),
             ancestor.owner.facts.producer,
         );
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -26867,7 +26885,7 @@ mod tests {
             .prepare_compilation(&scratch.path().join("late-ancestor"), &producer)
             .unwrap();
         let delta = crate::certified_products::fixture_finalized_product(
-            support_product("Delta"),
+            support_draft("Delta"),
             descendant.owner.facts.producer,
         );
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -26935,7 +26953,7 @@ mod tests {
             .map(|(id, row)| (id, Arc::downgrade(&row._directory)))
             .collect::<BTreeMap<_, _>>();
         let gamma = crate::certified_products::fixture_finalized_product(
-            support_product("Gamma"),
+            support_draft("Gamma"),
             a.owner.facts.producer,
         );
         let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -27543,7 +27561,7 @@ mod tests {
         let (initial, _) = metadata_fixture();
         let epoch = |version: u8| {
             let finalized = crate::certified_products::fixture_finalized_product(
-                support_product_with_interface("fixture", "Epoch", vec![version; 16]),
+                support_draft_with_interface("fixture", "Epoch", vec![version; 16]),
                 initial.owner.facts.producer,
             );
             let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -28152,7 +28170,7 @@ mod tests {
             let mut inherited_rows = 0;
             for index in 0..descendants {
                 let product = crate::certified_products::fixture_finalized_product(
-                    support_product(&format!("Growing{index}")),
+                    support_draft(&format!("Growing{index}")),
                     context.owner.facts.producer,
                 );
                 let recovered = crate::certified_products::tests::recovered_witness_fixtures(
@@ -28313,7 +28331,7 @@ mod tests {
             .clone()
             .extend_issued_compiler_support(&match support_offer(&[
                 crate::certified_products::fixture_finalized_product(
-                    support_product("Later"),
+                    support_draft("Later"),
                     context.owner.facts.producer,
                 ),
             ]) {
@@ -29207,35 +29225,43 @@ mod tests {
         PathBuf,
     ) {
         let inventory = ArtifactInventory::default();
-        let products =
-            ["A", "B"].map(|module| {
-                let source = format!("module {module} where\nvalue = 1\n");
-                std::fs::write(root.join(format!("{module}.hs")), &source).unwrap();
-                let imports = if dependency && module == "A" {
-                    vec![crate::certified_products::CanonicalSourceImport {
-                        qualifier: crate::cache::ImportQualifier::Unqualified,
-                        module: "B".into(),
-                        boot: false,
-                        home_unit: Some("main".into()),
-                    }]
-                } else {
-                    vec![]
-                };
-                crate::certified_products::fixture_source_finalized_product_with_source(
+        let products = ["A", "B"].map(|module| {
+            let source = format!("module {module} where\nvalue = 1\n");
+            std::fs::write(root.join(format!("{module}.hs")), &source).unwrap();
+            let imports = if dependency && module == "A" {
+                vec![crate::certified_products::CanonicalSourceImport {
+                    qualifier: crate::cache::ImportQualifier::Unqualified,
+                    module: "B".into(),
+                    boot: false,
+                    home_unit: Some("main".into()),
+                }]
+            } else {
+                vec![]
+            };
+            crate::certified_products::fixture_source_finalized_product_with_source(
                 if sparse {
                     crate::certified_products::tests::original_groups_fixture_in_unit_with_sites(
-                        "main", module, vec![(7, vec![]), (11, vec![])], 91,
-                        &BTreeMap::new(), format!("{module} sparse interface").into_bytes(),
-                        &BTreeMap::new(), &[],
+                        "main",
+                        module,
+                        vec![(7, vec![]), (11, vec![])],
+                        91,
+                        &BTreeMap::new(),
+                        format!("{module} sparse interface").into_bytes(),
+                        &BTreeMap::new(),
+                        &[],
                     )
                 } else {
-                    support_draft_with_interface("main", module, format!("{module} interface").into_bytes())
+                    support_draft_with_interface(
+                        "main",
+                        module,
+                        format!("{module} interface").into_bytes(),
+                    )
                 },
                 [7; 32],
                 imports,
                 Sha256::digest(source.as_bytes()).into(),
             )
-            });
+        });
         // Current-source replay and native availability are separate proofs.
         // These zero-group originals have genuine production recovery witnesses.
         let products = crate::certified_products::tests::recovered_witness_fixtures(&products)
@@ -31155,7 +31181,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let hidden = support_product("Hidden");
         let relay = crate::certified_products::fixture_finalized_product_with_requirements(
-            support_product("InstanceRelay"),
+            support_draft("InstanceRelay"),
             [2; 32],
             Some(BTreeMap::from([(
                 ("fixture".into(), "Hidden".into()),
@@ -31982,9 +32008,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .extend_issued_compiler_support(
                     &recover_fixture_compiler_support(
                         CompilerInputProjection::from_issued_entries(&[Arc::new(
-                            ArtifactEntry::canonical(
-                                unchanged[0].module_interface().clone(),
-                            ),
+                            ArtifactEntry::canonical(unchanged[0].module_interface().clone()),
                         )])
                         .unwrap(),
                         canonical,
@@ -32564,7 +32588,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                 .sha256();
         let product = crate::certified_products::fixture_finalized_product(
-            support_product("PhysicalInput"),
+            support_draft("PhysicalInput"),
             producer_sha256,
         );
         let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
@@ -32989,25 +33013,22 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                 .sha256();
         let product = crate::certified_products::fixture_finalized_product(
-            support_product("Support"),
+            support_draft("Support"),
             producer_sha256,
         );
         let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
             .remove(0)
             .product;
         let unchanged = crate::certified_products::fixture_finalized_product(
-            support_product("Unchanged"),
+            support_draft("Unchanged"),
             producer_sha256,
         );
         let unchanged = crate::certified_products::tests::recovered_witness_fixtures(&[unchanged])
             .remove(0)
             .product;
         let inventory = ArtifactInventory::default();
-        let entries = [
-            product.module_interface(),
-            unchanged.module_interface(),
-        ]
-        .map(|interface| Arc::new(ArtifactEntry::canonical(interface.clone())));
+        let entries = [product.module_interface(), unchanged.module_interface()]
+            .map(|interface| Arc::new(ArtifactEntry::canonical(interface.clone())));
         let interfaces = inventory
             .admit(
                 &inventory.empty_view(),
@@ -33140,11 +33161,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         )
         .with_module_interface(product.module_interface().clone())
         .unwrap();
-        assert!(crate::certified_products::certify_original_draft_with_validation(
-            changed,
-            &mut PackageInterfaceValidation::default(),
-        )
-        .is_err());
+        assert!(
+            crate::certified_products::certify_original_draft_with_validation(
+                changed,
+                &mut PackageInterfaceValidation::default(),
+            )
+            .is_err()
+        );
         assert!(ArtifactEntry::original([99; 32], product).is_err());
     }
 
@@ -35666,7 +35689,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let source_path = source_root.join("A.hs");
         std::fs::write(&target_path, &generated).unwrap();
         std::fs::write(&source_path, authored).unwrap();
-        let product = support_product("A");
+        let product = support_draft("A");
         let owner = product.owner().clone();
         let producer = b"execution manifest producer";
         let producer_sha256 = Sha256::digest(producer).into();
