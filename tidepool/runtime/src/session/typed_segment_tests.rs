@@ -2540,10 +2540,10 @@ fn strict_let_group_forces_before_retaining_its_closure_capture() {
 
 // The finite parser/worker contract has its own artifact-layout and stderr
 // controls. These tests do not establish ordinary World-path acceptance.
-mod finite_component_controls {
+mod world_component_controls {
     use super::*;
 
-    struct FiniteControlSession {
+    struct WorldControlSession {
         resident: ProbeSession,
         public: ScopeId,
         _public_source: Arc<crate::session::RuntimeLexicalScopeLease>,
@@ -2553,7 +2553,7 @@ mod finite_component_controls {
         _root: tempfile::TempDir,
     }
 
-    impl FiniteControlSession {
+    impl WorldControlSession {
         fn with_raw_result(raw_result: Option<Arc<CaptureMutex<Vec<String>>>>) -> Self {
             tidepool_testing::eval_harness::require_extract();
             let root = tempfile::tempdir().unwrap();
@@ -2635,10 +2635,10 @@ mod finite_component_controls {
     }
 
     #[test]
-    fn finite_receipts_refuse_cross_item_mutations_before_effects() {
-        let mut session = FiniteControlSession::with_raw_result(None);
+    fn world_checked_items_refuse_cross_item_mutations_before_effects() {
+        let mut session = WorldControlSession::with_raw_result(None);
         session.execute(
-            "finite_receipt_baseline",
+            "world_receipt_baseline",
             "baselinePlannedValue <- pure (2 :: Int)",
             CellDeclarationExpectation::Total(0),
             AuthorityChecks::Configured,
@@ -2652,7 +2652,7 @@ mod finite_component_controls {
             .unwrap()
             + 1;
         session.execute(
-            "finite_receipt_mutations",
+            "world_receipt_mutations",
             source,
             CellDeclarationExpectation::CapturedAt {
                 name: "boundaryCapture",
@@ -2660,7 +2660,7 @@ mod finite_component_controls {
             },
             AuthorityChecks::TypedEntryRefusalBranches(concat!(
                 module_path!(),
-                "::finite_receipts_refuse_cross_item_mutations_before_effects"
+                "::world_checked_items_refuse_cross_item_mutations_before_effects"
             )),
             &SourceImports::new(),
             |_| {},
@@ -2669,14 +2669,14 @@ mod finite_component_controls {
     }
 
     #[test]
-    fn finite_inference_ledgers_record_single_pass_segments() {
+    fn world_inference_ledgers_record_single_pass_segments() {
         use super::super::super::tests::TestEnvGuard;
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _timing = TestEnvGuard::set("TIDEPOOL_TIMING", "1");
         for count in [1, 4, 8] {
             let cache = tempfile::tempdir().unwrap();
             let _cache = TestEnvGuard::set("TIDEPOOL_COMPILE_CACHE_DIR", cache.path());
-            let mut session = FiniteControlSession::with_raw_result(None);
+            let mut session = WorldControlSession::with_raw_result(None);
             let source = (1..=count)
                 .map(|ordinal| {
                     let value = if ordinal == 1 {
@@ -2689,7 +2689,7 @@ mod finite_component_controls {
                 .collect::<Vec<_>>()
                 .join("\n");
             session.execute(
-                "finite_inference_ledger",
+                "world_inference_ledger",
                 &source,
                 CellDeclarationExpectation::Total(0),
                 AuthorityChecks::SegmentWorkCounts(super::super::SegmentWorkShape::CaptureChain(
@@ -2704,7 +2704,7 @@ mod finite_component_controls {
             );
         }
         let results = Arc::new(CaptureMutex::new(Vec::new()));
-        let mut session = FiniteControlSession::with_raw_result(Some(results.clone()));
+        let mut session = WorldControlSession::with_raw_result(Some(results.clone()));
         let definitions = include_str!("fixtures/typed-segment-template-helpers.hs")
             .replace("__EFFECT_ROW__", session.effects.row());
         let preamble = crate::session::insert_preamble_imports(
@@ -2720,7 +2720,7 @@ mod finite_component_controls {
             &session.effects,
             &session.images,
             (0, 0),
-            "finite_signed_template_ledger",
+            "world_signed_template_ledger",
             include_str!("fixtures/typed-segment-template-helper-use.hs"),
             CellDeclarationExpectation::Total(0),
             &ScalePublication::Ephemeral,
@@ -2737,12 +2737,12 @@ mod finite_component_controls {
     }
 
     #[test]
-    fn finite_warm_emission_excludes_previously_issued_owners() {
-        let mut session = FiniteControlSession::with_raw_result(None);
+    fn world_warm_emission_excludes_previously_issued_owners() {
+        let mut session = WorldControlSession::with_raw_result(None);
         let imports = SourceImports::from_specs(["qualified SegmentProbeSupport as Carrier"]);
         let mut old_owners = std::collections::BTreeSet::new();
         session.execute(
-            "finite_emission_baseline",
+            "world_emission_baseline",
             "baselinePlannedValue <- pure (Carrier.carrierBaseline 2)",
             CellDeclarationExpectation::Total(0),
             AuthorityChecks::Configured,
@@ -2767,7 +2767,7 @@ mod finite_component_controls {
         );
         assert!(!old_owners.is_empty());
         session.execute(
-            "finite_warm_emission",
+            "world_warm_emission",
             include_str!("fixtures/typed-segment-warm-carrier.hs"),
             CellDeclarationExpectation::Total(0),
             AuthorityChecks::NativeEmissionOwnersAbsent(&old_owners),
