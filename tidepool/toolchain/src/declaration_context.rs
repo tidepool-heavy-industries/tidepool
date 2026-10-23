@@ -11187,7 +11187,7 @@ impl ProductInputFacts<'_> {
             selected.contains(&(unit, module))
                 || (world
                     && context
-                        .source_lexical_node(&identity(unit, module))
+                        .selected_import_node(&identity(unit, module))
                         .is_some())
         };
         let claimed_owners = claims
@@ -11300,7 +11300,7 @@ impl ProductInputFacts<'_> {
                         .map(|(unit, module)| identity(unit, module))
                         .or_else(|| {
                             world
-                                .then(|| context.source_lexical_node(&identity(unit, name)))
+                                .then(|| context.selected_import_node(&identity(unit, name)))
                                 .flatten()
                                 .map(|node| node.owner.clone())
                         });
@@ -11420,7 +11420,7 @@ impl ProductInputFacts<'_> {
                     entries
                         .iter()
                         .map(|entry| &entry.descriptor.owner)
-                        .filter(|owner| context.source_lexical_node(owner).is_some())
+                        .filter(|owner| context.selected_import_node(owner).is_some())
                         .cloned(),
                 );
             }
@@ -14771,6 +14771,23 @@ impl ExactDeclarationContext {
 
     fn source_lexical_node(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
         self.source_scope().snapshot.get(owner)
+    }
+
+    /// Compiler imports may name an issued facade without making that facade
+    /// fresh SOURCE. Its exact selected interface and retained adjacency must
+    /// both survive; TYPE-only availability and byte custody are insufficient.
+    fn selected_import_node(&self, owner: &ExactModuleIdentity) -> Option<&ExactLexicalNode> {
+        self.source_lexical_node(owner).or_else(|| {
+            let selected = self
+                .compiler_source_support()
+                .world_primary_type_row(owner)?;
+            match &selected.entry.payload {
+                ArtifactPayload::Interface(_, JoinedInterfaceRole::LexicalJoin) => {
+                    self.owner.facts.lexical.get(owner)
+                }
+                _ => None,
+            }
+        })
     }
 
     pub fn lexical_graph(&self) -> &[ExactLexicalNode] {
@@ -33097,6 +33114,37 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()),
             before,
             "keyed observations must not rebuild compiler metadata",
+        );
+    }
+
+    #[test]
+    fn selected_facade_import_requires_its_binding_and_adjacency_without_source_authority() {
+        let (context, _) = metadata_fixture();
+        let before = COMPILER_METADATA_SNAPSHOTS.with(|count| count.get());
+        let joined = identity("fixture", "Joined");
+        assert_eq!(context.selected_import_node(&joined).unwrap().owner, joined);
+        assert!(!context.source_scope().admits(&joined));
+        for module in ["Alpha", "Beta", "Value", "Absent"] {
+            assert!(context
+                .selected_import_node(&identity("fixture", module))
+                .is_none());
+        }
+        let without_adjacency = context.as_ref().clone().rebuild(|facts| {
+            facts.lexical = crate::exact_context::ExactLexicalSnapshot::default();
+        });
+        assert!(without_adjacency.selected_import_node(&joined).is_none());
+
+        let custody_only = crate::artifact_inventory::CompilerSourceSupport::empty()
+            .retain_custody(context.artifact_view())
+            .unwrap();
+        let without_selection = context.as_ref().clone().rebuild(|facts| {
+            facts.compiler_support = custody_only;
+        });
+        assert!(without_selection.selected_import_node(&joined).is_none());
+        assert_eq!(
+            COMPILER_METADATA_SNAPSHOTS.with(|count| count.get()),
+            before,
+            "keyed import membership must not rebuild compiler metadata",
         );
     }
 
