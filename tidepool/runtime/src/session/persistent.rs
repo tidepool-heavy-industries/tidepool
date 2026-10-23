@@ -1749,7 +1749,7 @@ impl PersistentSession {
             );
         }
         let bindings =
-            tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
+            tidepool_toolchain::compiler_world::VisibleWorldBindings::from_published_bindings(
                 scope.0, bindings,
             )?;
         let lexical = self.capture_compiler_world_lexical_in(scope)?;
@@ -9840,7 +9840,7 @@ impl PersistentSession {
                 observation: None,
                 inputs: super::inspection::InspectionWorldInputs::Cold {
                     primary: Some(source.context.exact().clone()),
-                    bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings::from_published_bindings(
+                    bindings: tidepool_toolchain::compiler_world::VisibleWorldBindings::from_published_bindings(
                         prepared.scope.0,
                         Vec::new(),
                     )?,
