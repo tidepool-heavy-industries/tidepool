@@ -1490,3 +1490,69 @@ fn nested_publication_digest_cannot_change_recovered_source_or_native_selection(
         "corrupt historical digest cannot become a usable source context"
     );
 }
+
+
+impl ExactDeclarationContext {
+    /// Continue an actual completed compilation with its selected acquisition
+    /// crossed against equal-fact transport custody. This helper asserts the
+    /// production transitions; it issues no stand-alone test authority.
+    pub(crate) fn assert_selected_acquisition_publication_history(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        incoming: &crate::artifact_inventory::CompilerSourceSupport,
+        owner: &ExactModuleIdentity,
+        expected: &Arc<ArtifactEntry>,
+        input_identity: &str,
+        selection: &crate::certified_products::CertifiedSourceSelection,
+    ) {
+        let assert_acquisition = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+            assert!(Arc::ptr_eq(
+                support.compiler_roles().original_acquisition(owner).unwrap(),
+                expected,
+            ), "an equal-fact custody acquisition replaced the selected compiler owner");
+        };
+        let context = self
+            .published_context_for_root(owner, expected.descriptor.id)
+            .unwrap()
+            .rebuild(|facts| facts.compiler_support = support.clone())
+            .finish()
+            .unwrap();
+        assert_acquisition(context.compiler_source_support());
+        let endorsement = context
+            .endorse_published_original(owner, "crossed-acquisition-history", input_identity)
+            .unwrap();
+        let published = support.publish_original(&endorsement).unwrap();
+        assert_acquisition(&published);
+        assert_acquisition(&published.publication_birth_support(owner).unwrap());
+
+        // An empty source delta still traverses the real source continuation
+        // owner with a genuine completed source selection. It must retain the
+        // receiving published row and its immutable pre-endorsement birth.
+        let extended = published
+            .extend_program_source(
+                selection,
+                incoming.artifacts(),
+                incoming.projection(),
+                &CompilerDependencies::merge(std::iter::empty()).unwrap(),
+            )
+            .unwrap();
+        assert_acquisition(&extended);
+        assert_acquisition(&extended.publication_birth_support(owner).unwrap());
+        let context = Arc::new(context
+            .rebuild(|facts| facts.compiler_support = extended)
+            .finish()
+            .unwrap());
+
+        // Exercise the same retained input owner used by compiler World
+        // continuations, including its actual native-selection consumer.
+        let world = context
+            .capture_world_primary_inputs(context.toolchain_identity_sha256())
+            .unwrap();
+        assert_acquisition(world.inputs().compiler_source_support());
+        let continued = world.advance_program_support(&context, incoming).unwrap();
+        assert_acquisition(continued.primary.context().compiler_source_support());
+        assert_acquisition(continued.primary.inputs().compiler_source_support());
+        assert_acquisition(&continued.primary.context().compiler_source_support()
+            .publication_birth_support(owner).unwrap());
+    }
+}

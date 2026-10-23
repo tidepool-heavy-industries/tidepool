@@ -133,6 +133,25 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
                 Arc::ptr_eq(&observation(selected), &observations[offered]),
                 "an equal payload in broad availability cannot replace the issuing observation"
             );
+            let products = if offered == 0 {
+                fixture.entry.products()
+            } else {
+                second_entry.products()
+            };
+            contexts[offered].assert_selected_acquisition_publication_history(
+                &promoted,
+                supports[retained],
+                owner,
+                offers[offered].original_acquisition(),
+                products
+                    .original_compile_input
+                    .as_ref()
+                    .unwrap()
+                    .original_input_identity(),
+                products.source_selection(),
+            );
+            assert_narrowing_keeps_selected_acquisition(&promoted, owner, selected);
+            assert_whole_row_precedence(&promoted, supports[retained], owner);
             let repeated = source
                 .retain_offers([offers[offered].clone(), offers[offered].clone()])
                 .unwrap()
@@ -167,5 +186,72 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
                 assert_eq!(ambiguous.artifacts().capture_graph_selection(), before);
             }
         }
+    }
+}
+
+// The oracle is the pre-transform acquired entry, not a reconstruction of the
+// narrowed role from its retained artifact inventory.
+fn assert_narrowing_keeps_selected_acquisition(
+    source: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+    expected: &Arc<ArtifactEntry>,
+) {
+    let original = source
+        .for_source_owners(&BTreeSet::from([owner.clone()]))
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        original.compiler_roles().original_acquisition(owner).unwrap(),
+        expected,
+    ));
+    assert_same_native_decision(source, &original, owner);
+    let types = source.for_source_owners(&BTreeSet::new()).unwrap();
+    assert!(types.compiler_roles().original_acquisition(owner).is_none());
+    assert!(matches!(
+        types.compiler_roles().native_decision(owner),
+        InputNativeDecision::UnissuedPolicy,
+    ));
+}
+
+fn assert_same_native_decision(
+    expected: &CompilerSourceSupport,
+    actual: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+) {
+    match (
+        expected.compiler_roles().native_decision(owner),
+        actual.compiler_roles().native_decision(owner),
+    ) {
+        (InputNativeDecision::UnissuedPolicy, InputNativeDecision::UnissuedPolicy) => {}
+        (InputNativeDecision::IssuedChoices(expected), InputNativeDecision::IssuedChoices(actual)) => {
+            assert_eq!(actual, expected);
+        }
+        _ => panic!("a whole-row operation changed whether a native choice was issued"),
+    }
+}
+
+fn assert_whole_row_precedence(
+    first: &CompilerSourceSupport,
+    second: &CompilerSourceSupport,
+    owner: &ExactModuleIdentity,
+) {
+    for (receiving, incoming) in [(first, second), (second, first)] {
+        // Equal Original policy chooses Receiving, including when the other
+        // completed acquisition was retained first as transport custody.
+        let receiving = receiving.retain_custody(incoming.artifacts()).unwrap();
+        let expected = receiving.compiler_roles().original_acquisition(owner).unwrap();
+        let appended = receiving.append_program_fragment(incoming).unwrap().support;
+        assert!(Arc::ptr_eq(
+            appended.compiler_roles().original_acquisition(owner).unwrap(),
+            expected,
+        ));
+        assert_same_native_decision(&receiving, &appended, owner);
+        // A TYPE receiver chooses the complete Incoming Original row.
+        let types = receiving.for_source_owners(&BTreeSet::new()).unwrap();
+        let appended = types.append_program_fragment(incoming).unwrap().support;
+        assert!(Arc::ptr_eq(
+            appended.compiler_roles().original_acquisition(owner).unwrap(),
+            incoming.compiler_roles().original_acquisition(owner).unwrap(),
+        ));
+        assert_same_native_decision(incoming, &appended, owner);
     }
 }
