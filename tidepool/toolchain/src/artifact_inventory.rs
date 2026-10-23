@@ -7602,6 +7602,29 @@ impl ArtifactView {
         )
     }
 
+    /// Resolve immutable group metadata for one exact acquired Original carrier.
+    /// This observes custody without selecting roots or issuing native permission.
+    pub(crate) fn acquired_original_group_for_carrier(
+        &self,
+        carrier: ArtifactBinding,
+        ordinal: u32,
+        operation: &tidepool_repr::execution_schema::InventoryOperation,
+    ) -> Result<NativeGroupBinding, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        if !owned.contains(&InventoryNodeKey::Artifact(carrier)) {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: carrier.artifact,
+                },
+            ));
+        }
+        operation
+            .charge(owned.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        resolve_group_binding(&state, owned, carrier, ordinal)
+    }
+
     /// Validate a recorded completion's exact rows against acquired custody.
     /// This does not select executable roots or qualify another Original.
     pub(crate) fn validate_acquired_original_group_bindings(

@@ -35,6 +35,8 @@ pub use execution_evidence::{
 };
 mod published_source;
 mod source_admission;
+mod source_dependency;
+pub(crate) use source_dependency::SourceDependencyBasis;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;

@@ -1,0 +1,326 @@
+//! Read-only SOURCE metadata from an admitted primary and its exact acquired graph.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use tidepool_repr::execution_schema::{InventoryOperation, SymbolIdentity};
+
+use crate::artifact_inventory::{ArtifactBinding, ArtifactPayload, NativeGroupBinding};
+use crate::certified_products::{
+    original_native_group_definitions, original_native_group_imports,
+    AuthenticatedOriginalBindings, CertificationError, ReceiptImportOwner,
+};
+use crate::declaration_join::ExactModuleIdentity;
+use crate::CompileError;
+
+use super::{NativeRetainedOccurrence, WorldPrimaryInputs};
+
+/// An observation keeps the same admitted SOURCE context, exact input selection
+/// and accounting owner alive. It cannot authorize native acquisition or values.
+pub(crate) struct SourceDependencyBasis {
+    _primary: WorldPrimaryInputs,
+    _membership: Arc<AuthenticatedOriginalBindings>,
+    rows: Vec<SourceDependencyRow>,
+}
+
+pub(crate) struct SourceDependencyRow {
+    reference: ReceiptImportOwner,
+    retained: Vec<OwnedRetainedOccurrence>,
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+struct OwnedRetainedOccurrence {
+    demander: NativeGroupBinding,
+    global_index: u32,
+    binding: ArtifactBinding,
+    identity: SymbolIdentity,
+    generation: u64,
+}
+
+fn refuse(detail: &'static str) -> CompileError {
+    CompileError::CompilerEvidence(Box::new(CertificationError::Mismatch(detail)))
+}
+
+impl SourceDependencyBasis {
+    pub(crate) fn observe(
+        primary: &WorldPrimaryInputs,
+        references: Vec<ReceiptImportOwner>,
+        operation: &Arc<InventoryOperation>,
+    ) -> Result<Self, CompileError> {
+        for reference in &references {
+            crate::host_work::checkpoint()?;
+            let ReceiptImportOwner::OriginalBinding { unit, module, .. } = reference else {
+                return Err(refuse(
+                    "SOURCE dependency query requires exact Original uses",
+                ));
+            };
+            operation
+                .charge(unit.len().saturating_add(module.len()))
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let owner = ExactModuleIdentity {
+                unit: unit.clone(),
+                module: module.clone(),
+            };
+            if !primary.context().source_scope().admits(&owner) {
+                return Err(refuse(
+                    "SOURCE dependency owner is outside admitted source scope",
+                ));
+            }
+        }
+        let membership = AuthenticatedOriginalBindings::issue(
+            primary.inputs().shared_compiler_source_support(),
+            Arc::clone(operation),
+            references.iter(),
+        )
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
+        operation
+            .reserve::<SourceDependencyRow>(references.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        let view = membership.acquisition().artifacts();
+        let mut rows = Vec::with_capacity(references.len());
+        for reference in references {
+            crate::host_work::checkpoint()?;
+            let ReceiptImportOwner::OriginalBinding { original, .. } = &reference else {
+                return Err(refuse(
+                    "authenticated SOURCE dependency reference changed kind",
+                ));
+            };
+            let (_, ordinal) = membership
+                .get(&reference)
+                .ok_or_else(|| refuse("SOURCE dependency lacks authenticated pair membership"))?;
+            let root = view.acquired_original_group_for_carrier(*original, *ordinal, operation)?;
+            operation
+                .reserve::<NativeGroupBinding>(1)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let mut visited = BTreeSet::new();
+            let mut pending = vec![root];
+            let mut retained = Vec::new();
+            while let Some(demander) = pending.pop() {
+                crate::host_work::checkpoint()?;
+                if visited.contains(&demander) {
+                    continue;
+                }
+                operation
+                    .reserve::<(NativeGroupBinding, [usize; 4])>(1)
+                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                visited.insert(demander);
+                view.validate_acquired_original_group_bindings(
+                    &BTreeSet::from([demander]),
+                    operation,
+                )?;
+                let entry = view
+                    .observed_payload(&demander.binding.artifact())
+                    .ok_or_else(|| refuse("SOURCE dependency group lacks its acquired payload"))?;
+                let ArtifactPayload::Original(product) = &entry.payload else {
+                    return Err(refuse("SOURCE dependency group payload is not an Original"));
+                };
+                let imports = original_native_group_imports(product, demander.original_ordinal)
+                    .ok_or_else(|| {
+                        refuse("SOURCE dependency lacks its certified global imports")
+                    })?;
+                let definitions =
+                    original_native_group_definitions(product, demander.original_ordinal)
+                        .ok_or_else(|| {
+                            refuse("SOURCE dependency lacks its certified group definitions")
+                        })?;
+                if definitions.globals().len() != imports.len() {
+                    return Err(refuse(
+                        "SOURCE dependency global slots differ from certified imports",
+                    ));
+                }
+                for (index, import) in imports.iter().enumerate() {
+                    crate::host_work::checkpoint()?;
+                    operation
+                        .charge(1)
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                    let ReceiptImportOwner::Retained {
+                        identity,
+                        generation,
+                    } = import
+                    else {
+                        continue;
+                    };
+                    let global_index = u32::try_from(index).map_err(|_| {
+                        refuse("SOURCE dependency global slot exceeds its wire index")
+                    })?;
+                    operation
+                        .reserve::<OwnedRetainedOccurrence>(1)
+                        .and_then(|_| {
+                            operation.charge(
+                                identity
+                                    .unit
+                                    .len()
+                                    .saturating_add(identity.module.len())
+                                    .saturating_add(identity.namespace.len())
+                                    .saturating_add(identity.occurrence.len())
+                                    .saturating_add(
+                                        identity.record_parent.as_ref().map_or(0, String::len),
+                                    ),
+                            )
+                        })
+                        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+                    let binding = view.acquired_original_group_retained_binding(
+                        demander,
+                        identity,
+                        *generation,
+                        operation,
+                    )?;
+                    retained.push(OwnedRetainedOccurrence {
+                        demander,
+                        global_index,
+                        binding,
+                        identity: identity.clone(),
+                        generation: *generation,
+                    });
+                }
+                let children = view.acquired_original_group_children(demander, operation)?;
+                // The stack visits children in their issued edge order.
+                pending.extend(children.into_iter().rev());
+            }
+            retained.sort();
+            rows.push(SourceDependencyRow {
+                reference,
+                retained,
+            });
+        }
+        Ok(Self {
+            _primary: primary.clone(),
+            _membership: membership,
+            rows,
+        })
+    }
+
+    pub(crate) fn rows(&self) -> &[SourceDependencyRow] {
+        &self.rows
+    }
+}
+
+impl SourceDependencyRow {
+    pub(crate) fn reference(&self) -> &ReceiptImportOwner {
+        &self.reference
+    }
+
+    pub(crate) fn retained_occurrences(
+        &self,
+    ) -> impl ExactSizeIterator<Item = NativeRetainedOccurrence<'_>> {
+        self.retained
+            .iter()
+            .map(|occurrence| NativeRetainedOccurrence {
+                demander: occurrence.demander,
+                global_index: occurrence.global_index,
+                binding: &occurrence.binding,
+                identity: &occurrence.identity,
+                generation: occurrence.generation,
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact_inventory::CompilerInputRole;
+
+    #[test]
+    #[ignore = "requires the declared rooted compiler service"]
+    fn source_dependency_observer_checks_actual_scope_without_native_acquisition() {
+        let fixture =
+            crate::artifacts::test_support::prepare_source_publication_entry_fixture().unwrap();
+        let context = fixture
+            .entry
+            .products()
+            .original_execution_evidence()
+            .unwrap()
+            .context()
+            .clone();
+        let primary = context
+            .capture_world_primary_inputs(context.toolchain_identity_sha256())
+            .unwrap();
+        let owner = &fixture.root.descriptor.owner;
+        let selected = context
+            .compiler_source_support()
+            .compiler_primary_input(owner)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            context.compiler_input_projection().snapshot_roles()[owner],
+            CompilerInputRole::ReusableOriginal { .. }
+        ));
+        let ArtifactPayload::Original(product) = &fixture.root.payload else {
+            unreachable!()
+        };
+        let binder = original_native_group_definitions(product, fixture.root_ordinals[1])
+            .unwrap()
+            .export_contracts()
+            .map(Result::unwrap)
+            .find(|contract| contract.identity.occurrence == "second")
+            .unwrap()
+            .identity
+            .clone();
+        let reference = ReceiptImportOwner::OriginalBinding {
+            unit: owner.unit.clone(),
+            module: owner.module.clone(),
+            interface: selected.interface(),
+            original: selected.original().unwrap(),
+            binder,
+        };
+        let operation = Arc::new(InventoryOperation::new(Default::default()));
+        let before = context.snapshot();
+        let before_graph = context.artifact_view().capture_graph_selection();
+        let observed = SourceDependencyBasis::observe(
+            &primary,
+            vec![reference.clone(), reference.clone()],
+            &operation,
+        )
+        .unwrap();
+        assert_eq!(
+            observed.rows().len(),
+            2,
+            "ordered duplicate uses remain distinct reply rows"
+        );
+        assert!(observed
+            .rows()
+            .iter()
+            .all(|row| row.reference() == &reference));
+        assert_eq!(
+            context.artifact_view().capture_graph_selection(),
+            before_graph,
+            "metadata observation does not change selected native roots"
+        );
+
+        let without_source = context
+            .as_ref()
+            .clone()
+            .rebuild(|facts| {
+                facts.source_scope = Default::default();
+                facts.lexical = Default::default();
+            })
+            .finish()
+            .unwrap();
+        let without_source = without_source
+            .capture_world_primary_inputs(context.toolchain_identity_sha256())
+            .unwrap();
+        let member = AuthenticatedOriginalBindings::issue(
+            without_source.inputs().shared_compiler_source_support(),
+            operation.clone(),
+            [&reference],
+        )
+        .unwrap();
+        assert!(
+            member.get(&reference).is_some(),
+            "exact pair membership alone is not SOURCE admission"
+        );
+        let error = SourceDependencyBasis::observe(&without_source, vec![reference], &operation)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, CompileError::CompilerEvidence(error) if matches!(error.as_ref(), CertificationError::Mismatch("SOURCE dependency owner is outside admitted source scope")))
+        );
+        let after = context.snapshot();
+        assert_eq!(after.native_availability, before.native_availability);
+        assert_eq!(after.input_decisions, before.input_decisions);
+        assert_eq!(
+            context.artifact_view().capture_graph_selection(),
+            before_graph
+        );
+    }
+}
