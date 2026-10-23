@@ -88,16 +88,21 @@ lost across a tool restart; the retained native test report establishes executio
 
 WorldPrimaryInputs and the narrow TYPE owner are integrated at `04fb19a11e`.
 Independent source review found and repaired moved-field accesses and verified
-the restricted producers and consumers. Joined compilation at `04fb19a11e` and
-`5a699c3e66` exposed remaining cfg(test) callers; those executions ran no tests.
-The new World/TYPE boundary therefore remains unqualified pending joined checks.
+the restricted producers and consumers. At `a7371ee34e`, production and cfg(test)
+compilation passed for toolchain, runtime, actor and host consumers. Two new
+regressions passed: explicit overlapping custody seeds survive live merging,
+and equal TYPE payloads with different issued bindings remain distinct through
+warm and cold selection. These are component results; G2 remains unqualified.
 
 At predecessor `b5c8008343`, the three output API control/refusal pairs passed;
 the four focused executions passed three and failed one. Output cohorts
 16/7/2/6 executed 31 cases with 16 passing and 15 failing. Failures distinguish
 stale custody-versus-demand premises, wrong fixture home units, exact-key versus
 transitive dependency observation, and real cold-reimport identity drift.
-Reviewed repairs are integrated through `0d99014c42`; they require execution.
+Reviewed repairs are integrated through `0422550b91`; the broader histories
+require execution. The final test-only change makes the retained-template
+consumer explicitly TYPE-only while retaining Full/Partial/Empty permission
+and strict recovery controls.
 Exact commands, source hashes and reports are retained in
 `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/b5c8-checkpoint.json`.
 
