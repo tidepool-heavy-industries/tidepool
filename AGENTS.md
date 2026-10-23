@@ -275,8 +275,13 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   while verifying ownership, inspect bypass APIs, redundant copying, and whether
   tests enter through production consumers. The primary goal defines completion;
   secondary findings need concrete evidence and bounded follow-ups, not silent
-  scope expansion. After merging a tranche, independently inspect its joined
-  consumers for incomplete migrations and surviving alternate routes.
+  scope expansion. A refactoring tranche is not complete until an independent
+  adversarial audit of the consolidated revision tries to falsify its claimed
+  invariants. Trace joined production consumers, incomplete migrations, surviving
+  bypasses and obsolete paths; challenge whether tests exercise the promised
+  behavior and detect its failure. Resolve findings, verify repairs in the joined
+  tree, and record untested boundaries before declaring completion. Compilation,
+  component passes and the implementer's own review do not replace this audit.
 - The coordinator owns technical and editorial judgment throughout delivery.
   Read critical diffs and production consumers directly; challenge proposed
   boundaries, unnecessary mechanisms, and tests that do not exercise the claimed
