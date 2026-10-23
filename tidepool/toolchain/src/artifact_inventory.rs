@@ -15658,6 +15658,12 @@ mod tests {
             .artifact_view()
             .merge_fixture_selections(original.artifact_view())
             .unwrap();
+        let roles = published.compiler_input_projection().snapshot_roles();
+        let CompilerInputRole::PublishedSourceOriginal { selection, .. } =
+            &roles[&fixture.root.descriptor.owner]
+        else {
+            panic!("the actual publication owns its exact selection");
+        };
         let recovered_inventory = ArtifactInventory::default();
         let recovered = recovered_inventory
             .recover_selection(
@@ -15671,7 +15677,7 @@ mod tests {
             let inventory = view.inventory();
             let mut retained = view.clone();
             for _ in 0..2 {
-                retained = inventory
+                let interfaces = inventory
                     .admit_projected_with_native_requirements(
                         &retained,
                         vec![fixture.root.clone()],
@@ -15679,8 +15685,14 @@ mod tests {
                         &[],
                     )
                     .unwrap();
-                let selected = retained
+                assert!(matches!(interfaces
                     .select_admission_roots(vec![fixture.root.descriptor.id])
+                    , Err(CompileError::ExtractFailed(detail))
+                    if detail == "artifact inventory: admitted original lacks its issued group census"));
+                // Reopening consumes the publication's issued graph, not a
+                // fresh interface admission's intentionally empty native demand.
+                let selected = retained
+                    .select_issued(vec![fixture.root.descriptor.id], selection)
                     .unwrap();
                 assert_eq!(
                     selected.capture_graph_selection().native_groups,
@@ -15689,6 +15701,7 @@ mod tests {
                 for edge in &expected_edges {
                     assert!(selected.binding_dependencies().contains(edge));
                 }
+                retained = selected;
             }
         }
 

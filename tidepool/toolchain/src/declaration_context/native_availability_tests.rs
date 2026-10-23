@@ -7206,14 +7206,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
         assert!(partial.source_scope().rows().is_empty());
         assert!(partial.lexical_graph().is_empty());
         assert!(partial.owner.facts.template_imports.is_none());
-        assert_eq!(
-            partial
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .selected_native_groups(),
-            selected
+        assert!(
+            partial.artifact_view().selected_native_groups().is_empty(),
+            "extending retained support transfers permission without executable demand"
         );
         let expected_ordinals = selected
             .iter()
