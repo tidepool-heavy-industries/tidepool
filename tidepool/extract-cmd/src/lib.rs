@@ -43,12 +43,13 @@ mod process;
 mod request;
 mod resources;
 pub use endpoint::{
-    compiler_host_checkpoint, reject_compiler_response, retain_compiler_input_directory,
-    retain_compiler_input_file, settle_compiler_transaction_cancellable,
-    settle_compiler_transaction_cancellable_for_workload, with_compiler_transaction,
-    with_compiler_transaction_cancellable, with_compiler_transaction_cancellable_for_workload,
-    with_compiler_transaction_for_workload, CompilerEndpoint, CompilerFrontendCloseReport,
-    CompilerIdentity, CompilerIoCause, CompilerPackageSourceAssociation, CompilerResponseRejection,
+    compiler_host_checkpoint, reject_compiler_response, reject_compiler_response_with_cause,
+    retain_compiler_input_directory, retain_compiler_input_file,
+    settle_compiler_transaction_cancellable, settle_compiler_transaction_cancellable_for_workload,
+    with_compiler_transaction, with_compiler_transaction_cancellable,
+    with_compiler_transaction_cancellable_for_workload, with_compiler_transaction_for_workload,
+    CompilerEndpoint, CompilerFrontendCloseReport, CompilerIdentity, CompilerIoCause,
+    CompilerPackageSourceAssociation, CompilerResponseFailure, CompilerResponseRejection,
     CompilerScratchFailure, CompilerScratchRetirement, CompilerTermination, CompilerTransaction,
     CompilerTransactionCancellation, CompilerTransactionClose, CompilerTransactionCloseEvidence,
     CompilerTransactionCloseFailure, CompilerTransactionClosePhase, CompilerTransactionCloseReason,
