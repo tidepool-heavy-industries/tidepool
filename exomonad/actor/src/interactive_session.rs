@@ -10,8 +10,8 @@ use tidepool_runtime::session::{
     OutputSink, ResidentHole, ResidentSession, RuntimeActivationInput,
 };
 
-use crate::ResponseExpectation;
 use crate::typed_request::decode_typed_request_site;
+use crate::ResponseExpectation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivationId {

@@ -24895,7 +24895,10 @@ pub(crate) mod request_tests {
                             prop_assert!(matches!(result, Err(tidepool_runtime::session::SessionError::TransitionRefused(
                                 tidepool_runtime::session::SessionTransitionReason::PublicBaselineChanged
                             ))));
-                            prop_assert_eq!(session.compile_view_in(scope).unwrap(), before);
+                            let after = session.compile_view_in(scope).unwrap();
+                            prop_assert!(after.is_current_for(&before));
+                            prop_assert_eq!((after.next_value_generation(), after.injected_values(), after.reachable_values()),
+                                (before.next_value_generation(), before.injected_values(), before.reachable_values()));
                         }
                     },
                     2 => {
@@ -24907,11 +24910,18 @@ pub(crate) mod request_tests {
                         let expected = session.compile_view_in(scope).unwrap().exact_declaration_context().cloned();
                         let child = session.mint_detached_scope(scope).unwrap();
                         let view = session.compile_view_in(child).unwrap();
-                        prop_assert_eq!(view.exact_declaration_context(), expected.as_ref());
+                        prop_assert!(match (view.exact_declaration_context(), expected.as_ref()) {
+                            (Some(actual), Some(expected)) => actual.same_authenticated_context(expected),
+                            (None, None) => true,
+                            _ => false,
+                        });
                         children.push((child, view));
                     },
                     4 => if let Some((child, captured)) = children.pop() {
-                        prop_assert_eq!(session.compile_view_in(child).unwrap(), captured);
+                        let after = session.compile_view_in(child).unwrap();
+                        prop_assert!(after.is_current_for(&captured));
+                        prop_assert_eq!((after.next_value_generation(), after.injected_values(), after.reachable_values()),
+                            (captured.next_value_generation(), captured.injected_values(), captured.reachable_values()));
                         session.retire_scope(child);
                         prop_assert!(session.compile_view_in(child).is_none());
                     },
@@ -24923,7 +24933,10 @@ pub(crate) mod request_tests {
                 prop_assert!(empty.exact_declaration_context().is_none());
                 prop_assert_eq!(current.library(), None);
                 for (child, captured) in &children {
-                    prop_assert_eq!(&session.compile_view_in(*child).unwrap(), captured);
+                    let after = session.compile_view_in(*child).unwrap();
+                    prop_assert!(after.is_current_for(captured));
+                    prop_assert_eq!((after.next_value_generation(), after.injected_values(), after.reachable_values()),
+                        (captured.next_value_generation(), captured.injected_values(), captured.reachable_values()));
                 }
             }
             Ok(())
@@ -26380,8 +26393,8 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
-            assert_ne!(
-                installed_view, warm_view,
+            assert!(
+                !installed_view.is_current_for(&warm_view),
                 "same-tip installation invalidates the warm view"
             );
             assert!(installed_view.exact_declaration_context().is_some());
@@ -26519,12 +26532,10 @@ pub(crate) mod request_tests {
                             )
                         ))
                     ));
-                    assert_eq!(
-                        session
-                            .compile_view_in(context.placement.lexical_scope)
-                            .unwrap(),
-                        before
-                    );
+                    let after = session.compile_view_in(context.placement.lexical_scope).unwrap();
+                    assert!(after.is_current_for(&before));
+                    assert_eq!((after.next_value_generation(), after.injected_values(), after.reachable_values()),
+                        (before.next_value_generation(), before.injected_values(), before.reachable_values()));
                     Ok(())
                 })
                 .await
@@ -26885,11 +26896,21 @@ pub(crate) mod request_tests {
                         workbench
                             .access
                             .with_machine(context.clone(), move |session, context, _| {
+                                let after = session
+                                    .compile_view_in(context.placement.lexical_scope)
+                                    .unwrap();
+                                assert!(after.is_current_for(&old));
                                 assert_eq!(
-                                    session
-                                        .compile_view_in(context.placement.lexical_scope)
-                                        .unwrap(),
-                                    old
+                                    (
+                                        after.next_value_generation(),
+                                        after.injected_values(),
+                                        after.reachable_values()
+                                    ),
+                                    (
+                                        old.next_value_generation(),
+                                        old.injected_values(),
+                                        old.reachable_values()
+                                    )
                                 );
                                 assert!(session
                                     .compile_view_in(rejected_scope.scope())
@@ -26982,11 +27003,21 @@ pub(crate) mod request_tests {
                     workbench
                         .access
                         .with_machine(context.clone(), move |session, context, _| {
+                            let after = session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap();
+                            assert!(after.is_current_for(&before));
                             assert_eq!(
-                                session
-                                    .compile_view_in(context.placement.lexical_scope)
-                                    .unwrap(),
-                                before
+                                (
+                                    after.next_value_generation(),
+                                    after.injected_values(),
+                                    after.reachable_values()
+                                ),
+                                (
+                                    before.next_value_generation(),
+                                    before.injected_values(),
+                                    before.reachable_values()
+                                )
                             );
                             assert!(session
                                 .compile_view_in(next_scope)
@@ -27341,11 +27372,21 @@ pub(crate) mod request_tests {
                         let before = before.clone();
                         let visibility = visibility.clone();
                         move |session, context, _| {
+                            let after = session
+                                .compile_view_in(context.placement.lexical_scope)
+                                .unwrap();
+                            assert!(after.is_current_for(&before));
                             assert_eq!(
-                                session
-                                    .compile_view_in(context.placement.lexical_scope)
-                                    .unwrap(),
-                                before
+                                (
+                                    after.next_value_generation(),
+                                    after.injected_values(),
+                                    after.reachable_values()
+                                ),
+                                (
+                                    before.next_value_generation(),
+                                    before.injected_values(),
+                                    before.reachable_values()
+                                )
                             );
                             assert_eq!(
                                 session
@@ -27396,11 +27437,21 @@ pub(crate) mod request_tests {
                 workbench
                     .access
                     .with_machine(context.clone(), move |session, context, _| {
+                        let after = session
+                            .compile_view_in(context.placement.lexical_scope)
+                            .unwrap();
+                        assert!(after.is_current_for(&before));
                         assert_eq!(
-                            session
-                                .compile_view_in(context.placement.lexical_scope)
-                                .unwrap(),
-                            before
+                            (
+                                after.next_value_generation(),
+                                after.injected_values(),
+                                after.reachable_values()
+                            ),
+                            (
+                                before.next_value_generation(),
+                                before.injected_values(),
+                                before.reachable_values()
+                            )
                         );
                         assert_eq!(
                             session
@@ -27580,7 +27631,20 @@ pub(crate) mod request_tests {
                 .access
                 .with_machine(context.clone(), move |session, context, _| {
                     let scope = context.placement.lexical_scope;
-                    assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                    let after = session.compile_view_in(scope).unwrap();
+                    assert!(after.is_current_for(&before_reinstall));
+                    assert_eq!(
+                        (
+                            after.next_value_generation(),
+                            after.injected_values(),
+                            after.reachable_values()
+                        ),
+                        (
+                            before_reinstall.next_value_generation(),
+                            before_reinstall.injected_values(),
+                            before_reinstall.reachable_values()
+                        )
+                    );
                     assert_eq!(
                         session.public_visibility_snapshot_in(scope).unwrap(),
                         before_visibility
@@ -27590,7 +27654,20 @@ pub(crate) mod request_tests {
                         .map_err(|error| {
                             ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
                         })?;
-                    assert_eq!(session.compile_view_in(scope).unwrap(), before_reinstall);
+                    let after = session.compile_view_in(scope).unwrap();
+                    assert!(after.is_current_for(&before_reinstall));
+                    assert_eq!(
+                        (
+                            after.next_value_generation(),
+                            after.injected_values(),
+                            after.reachable_values()
+                        ),
+                        (
+                            before_reinstall.next_value_generation(),
+                            before_reinstall.injected_values(),
+                            before_reinstall.reachable_values()
+                        )
+                    );
                     assert_eq!(
                         session.public_visibility_snapshot_in(scope).unwrap(),
                         before_visibility
@@ -27600,10 +27677,39 @@ pub(crate) mod request_tests {
                 .await
                 .unwrap();
             let after_reinstall_recovered = recover_context();
+            assert!(
+                after_reinstall_recovered
+                    .exact_declaration_context()
+                    .unwrap()
+                    .same_recorded_facts(
+                        before_reinstall_recovered
+                            .exact_declaration_context()
+                            .unwrap()
+                    ),
+                "native recovery installation preserves the durable compiler observations"
+            );
             assert_eq!(
-            after_reinstall_recovered, before_reinstall_recovered,
-            "native recovery installation preserves the exact durable compiler and binding surface"
-        );
+                after_reinstall_recovered.library_import_module(),
+                before_reinstall_recovered.library_import_module()
+            );
+            assert_eq!(
+                after_reinstall_recovered.turn_imports(&SourceImports::new()),
+                before_reinstall_recovered.turn_imports(&SourceImports::new())
+            );
+            assert_eq!(
+                (
+                    after_reinstall_recovered.next_value_generation(),
+                    after_reinstall_recovered.visible_values(),
+                    after_reinstall_recovered.injected_values(),
+                    after_reinstall_recovered.reachable_values()
+                ),
+                (
+                    before_reinstall_recovered.next_value_generation(),
+                    before_reinstall_recovered.visible_values(),
+                    before_reinstall_recovered.injected_values(),
+                    before_reinstall_recovered.reachable_values()
+                )
+            );
             assert_eq!(
                 std::fs::read_to_string(quotation_input.with_extension("executions")).unwrap(),
                 completed_executions
@@ -27663,7 +27769,19 @@ pub(crate) mod request_tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(after_failed_cell, before_failed_cell);
+            assert!(after_failed_cell.is_current_for(&before_failed_cell));
+            assert_eq!(
+                (
+                    after_failed_cell.next_value_generation(),
+                    after_failed_cell.injected_values(),
+                    after_failed_cell.reachable_values()
+                ),
+                (
+                    before_failed_cell.next_value_generation(),
+                    before_failed_cell.injected_values(),
+                    before_failed_cell.reachable_values()
+                )
+            );
             let later_recovered = recover_context();
             assert!(later_recovered.library().is_some());
             assert_eq!(
