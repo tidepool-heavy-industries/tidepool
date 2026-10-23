@@ -21,6 +21,7 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import GHC hiding (Target)
+import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Builtin.Types (intTy, intDataCon)
 import GHC.Builtin.Names (genClassKey)
 import GHC.Core.Class (className)
@@ -89,6 +90,8 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
+import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
+import Tidepool.CheckedCell (nativeParsedModule, unannotatedModule)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
@@ -633,12 +636,13 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
       target = root </> "ProgramOriginalConsumer.hs"
   createDirectoryIfMissing True originalDirectory
   writeFile first "module Tidepool.Session.Lib.G1 (a,T(..)) where\ndata T = Old\na :: Int\na = 1\n__result = (0 :: Int)\n"
-  writeFile second "module Tidepool.Session.Lib.G2 (b) where\nb :: Int\nb = 2\n__result = (0 :: Int)\n"
+  writeFile second "module Tidepool.Session.Lib.G2 (b,c) where\nb :: Int\nb = 2\nc :: Int\nc = 3\n__result = (0 :: Int)\n"
   writeFile shadow "module Tidepool.Session.Lib.G3 (a,T(..)) where\ndata T = New\na :: Bool\na = True\n__result = (0 :: Int)\n"
   let source body = unlines
         [ "module ProgramOriginalConsumer where"
         , "import Tidepool.Session.Lib.G1"
         , "import Tidepool.Session.Lib.G2"
+        , "import Tidepool.Session.Lib.G2 as Restricted (b)"
         , "import Tidepool.Session.Lib.G3"
         , "__result :: (Bool,Int)"
         , "__result = " ++ body
@@ -653,7 +657,7 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         hydratePlannedDeclarationInventory ("main",owner)
           (show (mi_iface_hash (mi_final_exts (hm_iface original)))) environment >>= either fail pure)
         ["Tidepool.Session.Lib.G1","Tidepool.Session.Lib.G2","Tidepool.Session.Lib.G3"]
-      writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b)")
+      writeFile target (source "(a,Tidepool.Session.Lib.G1.a + b + c + Restricted.b)")
       libdir <- getLibdir
       transformed <- runGhc (Just libdir) $ do
         setSession environment
@@ -662,12 +666,53 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
         _ <- depanal [] False
         summary <- getModSummary (mkModuleName "ProgramOriginalConsumer")
         parsed <- parseModule summary
-        liftIO (transformProgramDeclarationImports inventories Nothing environment parsed)
-      let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr (pm_parsed_source transformed))
+        -- The inventory comes from the actual installed interfaces above;
+        -- matching syntax DATA does not manufacture a declaration inventory.
+        captured <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+        driver <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
+        liftIO (transformProgramDeclarationImports inventories Nothing environment
+          (unannotatedModule (beginImportRefinement driver)))
+      let transformedSource = pm_parsed_source (nativeParsedModule transformed)
+          imports = map unLoc (hsmodImports (unLoc transformedSource))
+          originalOwner = mkModuleName "Tidepool.Session.Lib.G2"
+          restricted = [declaration | declaration <- imports
+            , unLoc (ideclName declaration) == originalOwner
+            , (unLoc <$> ideclAs declaration) == Just (mkModuleName "Restricted")]
+          direct = [declaration | declaration <- imports
+            , unLoc (ideclName declaration) == originalOwner
+            , ideclAs declaration == Nothing, ideclQualified declaration == NotQualified]
+          selectedValues :: ImportDecl GhcPs -> Maybe [String]
+          selectedValues declaration = case ideclImportList declaration of
+            Just (Exactly,entries) -> mapM (\entry -> case unLoc entry of
+              IEVar _ wrapped _ -> case unLoc wrapped of
+                IEName _ name -> Just (occNameString (rdrNameOcc (unLoc name)))
+                _ -> Nothing
+              _ -> Nothing) (unLoc entries)
+            _ -> Nothing
+      unless ([selectedValues declaration | declaration <- restricted
+            , ideclQualified declaration == NotQualified] == [Just []]
+          && [selectedValues declaration | declaration <- restricted
+            , ideclQualified declaration == QualifiedPre] == [Just ["b"]]
+          && case direct of
+            [declaration] -> fmap sort (selectedValues declaration) == Just ["b","c"]
+            _ -> False)
+        (fail "program winner pass widened a restricted alias or lost the direct winner selection")
+      let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr transformedSource)
       _ <- evaluate (length rendered)
       pure rendered
     writeFile target (rendered ++ "\n__legacy = Tidepool.Session.Lib.G1.Old\n")
     runRequest (pure ()) $ \compiler -> void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+    writeFile target (rendered ++ "\n__aliasLeak = Restricted.c\n")
+    aliasRefusal <- try (runRequest (pure ()) $ \compiler ->
+        void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing))
+      :: IO (Either SourceError ())
+    case aliasRefusal of
+      Left failure -> unless (any (\diagnostic ->
+          "Restricted.c" `isInfixOf` dMessage diagnostic
+            && any (`isInfixOf` dMessage diagnostic) ["not in scope","Not in scope","does not export"])
+          (diagsFromSourceError failure))
+        (fail "restricted alias refusal lost the actual missing-export diagnostic")
+      Right _ -> fail "restricted original alias acquired another source winner"
     writeFile target (rendered ++ "\n__legacy = Old\n")
     rejected <- try (runRequest (pure ()) $ \compiler -> void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing))
       :: IO (Either SomeException ())
