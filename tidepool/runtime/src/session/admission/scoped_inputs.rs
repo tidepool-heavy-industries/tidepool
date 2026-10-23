@@ -319,8 +319,22 @@ impl ScopedResolvedInputs {
                         return Err(PreparedRuntimeError::CertifiedTargetOwners);
                     }
                 }
-                if !matched && !value.is_produced() {
-                    return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                if !matched {
+                    if !value.is_produced()
+                        || !owner
+                            .matches_retained_checked_value(
+                                *global_index,
+                                *binding,
+                                value.checked_row().map_err(|error| {
+                                    PreparedRuntimeError::CheckedInputs(Box::new(error))
+                                })?,
+                            )
+                            .map_err(|error| {
+                                PreparedRuntimeError::NativeSourceEvidence(Box::new(error))
+                            })?
+                    {
+                        return Err(PreparedRuntimeError::CertifiedTargetOwners);
+                    }
                 }
             }
         }

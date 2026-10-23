@@ -11411,6 +11411,118 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn produced_native_capture_requires_its_actual_acquired_slot_and_row() {
+        use super::super::turn::{consume_cell_program_item, TurnResult};
+        use tidepool_toolchain::linked_native::AcquiredNativeImport;
+        let CheckedCaptureFixture {
+            root: _root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture_from(
+            SessionId(1013),
+            include_str!("fixtures/checked-produced-native-capture.hs"),
+        );
+        let source_module = SessionModule::val(reservation.generation());
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                reservation.generation(),
+                report,
+            )
+        })
+        .unwrap();
+        let produced = resident
+            .state
+            .retained_checked_value_artifact(source_module)
+            .unwrap()
+            .clone();
+        let declaration = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), checked.checked_item(1).unwrap())
+        })
+        .unwrap();
+        source_action(&mut resident, &original, |resident, _| {
+            resident.adopt_checked_declaration(declaration)
+        })
+        .unwrap();
+        let next = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), checked.checked_item(2).unwrap())
+        })
+        .unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = consume_cell_program_item(next.clone()).unwrap()
+        else {
+            panic!("the native capture consumer must be a checked binding");
+        };
+        let target = compiled
+            .certification
+            .as_ref()
+            .unwrap()
+            .linked_target
+            .as_ref()
+            .unwrap();
+        let retained = target
+            .acquired()
+            .find_map(|owner| {
+                owner
+                    .imports()
+                    .enumerate()
+                    .find_map(|(index, import)| match import {
+                        AcquiredNativeImport::Retained {
+                            requirement,
+                            binding,
+                        } if requirement.identity().occurrence == "capturedForNative" => {
+                            Some((owner.clone(), u32::try_from(index).unwrap(), binding))
+                        }
+                        _ => None,
+                    })
+            })
+            .expect("NOINLINE must retain a real acquired native import of the produced value");
+        assert!(retained
+            .0
+            .matches_retained_checked_value(retained.1, retained.2, &produced)
+            .unwrap());
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(u32::MAX, retained.2, &produced)
+            .unwrap());
+        let mut foreign_binding = retained.2;
+        foreign_binding.selection.0[0] ^= 0x80;
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(retained.1, foreign_binding, &produced)
+            .unwrap());
+        source_action(&mut resident, &original, |resident, report| {
+            resident.run_bind_with_sites(
+                &bound[0].name,
+                compiled.code(),
+                &bound[0],
+                next.generation(),
+                report,
+            )
+        })
+        .unwrap();
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 3);
+        let unrelated = resident
+            .state
+            .retained_checked_value_artifact(SessionModule::val(next.generation()))
+            .unwrap();
+        assert!(!retained
+            .0
+            .matches_retained_checked_value(retained.1, retained.2, unrelated)
+            .unwrap());
+        resident.freeze_private_execution(&execution).unwrap();
+    }
+
+    #[test]
     fn checked_snapshot_retains_expired_observation_until_its_last_owner_drops() {
         use super::super::turn::{consume_cell_program_item, TurnResult};
         let CheckedCaptureFixture {
