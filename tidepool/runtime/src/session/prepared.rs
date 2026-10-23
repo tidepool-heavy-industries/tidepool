@@ -6598,10 +6598,11 @@ pub(super) mod tests {
                         .then(|| expected.clone())
                 })
                 .unwrap();
-            assert_ne!(expected, NativeSourceCustody::default());
-            assert_eq!(
-                engine.installed_program_sources(wrapper),
-                &expected,
+            assert!(!expected.same_selected_acquisitions(&NativeSourceCustody::default()));
+            assert!(
+                engine
+                    .installed_program_sources(wrapper)
+                    .same_selected_acquisitions(&expected),
                 "site-free wrapper retains the actual producer's Unknown contribution"
             );
         }
@@ -6619,9 +6620,8 @@ pub(super) mod tests {
                     .unwrap();
                 let engine = state.prepared_mut().unwrap();
                 let expected = engine.installed_program_sources(producer).clone();
-                assert_ne!(
-                    expected,
-                    NativeSourceCustody::default(),
+                assert!(
+                    !expected.same_selected_acquisitions(&NativeSourceCustody::default()),
                     "actual producer contributes an unknown site"
                 );
                 let handle = engine.machine.retain_top(producer, ValueId(0)).unwrap();
@@ -8518,7 +8518,7 @@ pub(super) mod tests {
             .unwrap();
         let original_request = engine.request_site_type_evidence(101).unwrap();
         let new_request = engine.request_site_type_evidence(102).unwrap();
-        assert_ne!(original_request, new_request);
+        assert!(!original_request.types.evidence_eq(&new_request.types));
         let observation = tidepool_toolchain::timing::HostWorkObservation::new();
         let original_commitment = observation.scope(|| original_request.commitment());
         observation.scope(|| {
@@ -8673,7 +8673,7 @@ pub(super) mod tests {
             // descriptor addresses enter the expected equality relation.
             for left in 0..revisions.len() { for right in 0..revisions.len() {
                 let same_revision = revisions[left] == revisions[right];
-                proptest::prop_assert_eq!(evidence[left] == evidence[right],same_revision);
+                proptest::prop_assert_eq!(evidence[left].types.evidence_eq(&evidence[right].types),same_revision);
                 proptest::prop_assert_eq!(evidence[left].commitment() == evidence[right].commitment(),same_revision);
                 let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
                 proptest::prop_assert_eq!(evidence[left].types.rooted_compatible(TypeNodeId(1),&evidence[right].types,TypeNodeId(1),&mut budget).unwrap(),same_revision);
@@ -8787,7 +8787,7 @@ pub(super) mod tests {
             )
             .expect("renamed graph preserves structural evidence"),
         );
-        assert_eq!(evidence, renamed);
+        assert!(evidence.types.evidence_eq(&renamed.types));
         assert_ne!(
             evidence.types, renamed.types,
             "artifact content retains diagnostic bytes"
@@ -8796,7 +8796,12 @@ pub(super) mod tests {
         let mut relocated = evidence.clone();
         relocated.commitment.take();
         Arc::make_mut(&mut relocated.constructors)[0].1 = DataConId(999);
-        assert_eq!(evidence, relocated);
+        assert!(evidence
+            .constructors
+            .iter()
+            .map(|(identity, _)| identity)
+            .eq(relocated.constructors.iter().map(|(identity, _)| identity)));
+        assert_ne!(evidence.constructors[0].1, relocated.constructors[0].1);
         assert_eq!(commitment, relocated.commitment());
 
         let mut changed_template = evidence.clone();
@@ -8821,7 +8826,7 @@ pub(super) mod tests {
             )
             .expect("changed finite field template"),
         );
-        assert_ne!(evidence, changed_template);
+        assert!(!evidence.types.evidence_eq(&changed_template.types));
         assert_ne!(commitment, changed_template.commitment());
         let mut changed_family = evidence.clone();
         changed_family.commitment.take();
@@ -8849,7 +8854,8 @@ pub(super) mod tests {
             .expect("changed nominal family"),
         );
         Arc::make_mut(&mut changed_family.constructors)[0].0 = renamed_constructor.identity;
-        assert_ne!(evidence, changed_family);
+        assert!(!evidence.types.evidence_eq(&changed_family.types));
+        assert_ne!(evidence.constructors[0].0, changed_family.constructors[0].0);
         assert_ne!(commitment, changed_family.commitment());
 
         let mut changed_endpoint = evidence.clone();

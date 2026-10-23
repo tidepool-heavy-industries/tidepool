@@ -226,7 +226,7 @@ pub(crate) struct NativeSourceCustody {
 }
 
 impl NativeSourceCustody {
-    fn same_selected_acquisitions(&self, other: &Self) -> bool {
+    pub(super) fn same_selected_acquisitions(&self, other: &Self) -> bool {
         self.sites.len() == other.sites.len()
             && self.sites.iter().all(|(site, source)| {
                 other

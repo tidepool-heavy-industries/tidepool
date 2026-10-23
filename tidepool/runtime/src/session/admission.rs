@@ -1696,8 +1696,6 @@ pub(super) struct RuntimeHostPrototypeReceipt {
 impl RuntimeCellPurpose {
     fn frame_authorization(&self, frame: &mut impl FnMut(&[u8])) {
         match self {
-            #[cfg(test)]
-            Self::Observation => {}
             Self::PrivateExecution(_) => frame(b"TidepoolPrivateExecutionAdmission1"),
             Self::HostCarrier {
                 binding,
