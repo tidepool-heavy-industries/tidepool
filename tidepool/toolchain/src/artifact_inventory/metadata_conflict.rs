@@ -2,6 +2,33 @@
 //! participate in equality, selection or permission decisions.
 use super::*;
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ArtifactMetadataInvariant {
+    PayloadFactOwner,
+    CanonicalRequirements,
+    OriginalPayloadKind,
+    OriginalDurableFacts,
+}
+
+pub(super) fn invariant(
+    entry: &Arc<ArtifactEntry>,
+    invariant: ArtifactMetadataInvariant,
+) -> CompileError {
+    ArtifactInventoryError {
+        failure: ArtifactInventoryFailure::MetadataConflict {
+            artifact: entry.descriptor.id,
+        },
+        diagnostic_artifacts: None,
+        native_refusal: None,
+        owner_conflict: Some(ArtifactOwnerConflictEvidence::MetadataInvariant {
+            entry: Arc::clone(entry),
+            invariant,
+        }),
+    }
+    .into()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ArtifactMetadataField {

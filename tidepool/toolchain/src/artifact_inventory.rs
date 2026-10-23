@@ -34,7 +34,7 @@ mod scope_proof;
 pub use scope_proof::ScopeProofV3;
 mod cold_validation;
 mod metadata_conflict;
-pub(crate) use metadata_conflict::ArtifactMetadataField;
+pub(crate) use metadata_conflict::{ArtifactMetadataField, ArtifactMetadataInvariant};
 
 /// Exact artifacts persist SHA-256 of the compiler's stable producer bytes.
 /// Endpoint identities and their raw producer bytes are not this identity.
@@ -1751,6 +1751,15 @@ pub struct ArtifactInventoryError {
 }
 
 pub(crate) enum ArtifactOwnerConflictEvidence {
+    MetadataInvariant {
+        entry: Arc<ArtifactEntry>,
+        invariant: ArtifactMetadataInvariant,
+    },
+    ScopedEdges {
+        node: ArtifactBindingNode,
+        existing: BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
+        incoming: BTreeSet<(ArtifactBindingNode, ArtifactDependency)>,
+    },
     Metadata {
         existing: Arc<ArtifactEntry>,
         incoming: Arc<ArtifactEntry>,
@@ -1793,6 +1802,13 @@ impl ArtifactOwnerConflictEvidence {
             summary
         }
         match self {
+            Self::MetadataInvariant { entry, invariant } => format!(
+                "metadata_invariant artifact={} invariant={invariant:?}", artifact(entry)
+            ),
+            Self::ScopedEdges { node, existing, incoming } => format!(
+                "scoped_edges node={node:?} existing={} incoming={} first_removed={:?} first_added={:?}",
+                existing.len(), incoming.len(), existing.difference(incoming).next(), incoming.difference(existing).next()
+            ),
             Self::Metadata {
                 existing,
                 incoming,
@@ -1855,6 +1871,16 @@ impl ArtifactOwnerConflictEvidence {
             }
         }
         match self {
+            Self::MetadataInvariant { entry, invariant } => serde_json::json!({
+                "boundary": "metadata_invariant", "entry": entry.descriptor, "invariant": invariant,
+            }),
+            Self::ScopedEdges {
+                node,
+                existing,
+                incoming,
+            } => serde_json::json!({
+                "boundary": "scoped_edges", "node": node, "existing": existing, "incoming": incoming,
+            }),
             Self::Metadata {
                 existing,
                 incoming,
@@ -1898,6 +1924,7 @@ impl ArtifactOwnerConflictEvidence {
 
     fn entries(&self) -> Option<(&Arc<ArtifactEntry>, &Arc<ArtifactEntry>)> {
         match self {
+            Self::MetadataInvariant { .. } | Self::ScopedEdges { .. } => None,
             Self::Metadata {
                 existing, incoming, ..
             } => Some((existing, incoming)),
@@ -2946,10 +2973,9 @@ impl InventoryState {
             _ => false,
         };
         if !consistent {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: entry.descriptor.id,
-                },
+            return Err(metadata_conflict::invariant(
+                &entry,
+                ArtifactMetadataInvariant::PayloadFactOwner,
             ));
         }
         if self
@@ -3512,10 +3538,9 @@ impl SelectedOwners {
             if entry.interface_seals != sealed
                 || entry.requirements.iter().collect::<BTreeSet<_>>() != sealed.keys().collect()
             {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::MetadataConflict {
-                        artifact: entry.descriptor.id,
-                    },
+                return Err(metadata_conflict::invariant(
+                    &Arc::new(entry.clone()),
+                    ArtifactMetadataInvariant::CanonicalRequirements,
                 ));
             }
         }
@@ -3608,11 +3633,19 @@ fn validate_existing_rows(
                 .map(|(target, label)| (target, label.clone()))
                 .collect::<BTreeSet<_>>();
             if &actual != edges {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::MetadataConflict {
+                return Err(ArtifactInventoryError {
+                    failure: ArtifactInventoryFailure::MetadataConflict {
                         artifact: key.artifact(),
                     },
-                ));
+                    diagnostic_artifacts: None,
+                    native_refusal: None,
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence::ScopedEdges {
+                        node: *key,
+                        existing: actual,
+                        incoming: edges.clone(),
+                    }),
+                }
+                .into());
             }
         }
         for (target, _) in edges {
@@ -4158,15 +4191,10 @@ impl ArtifactInventory {
                     "value extension requires a certified value interface",
                 ));
             }
-            if incoming
-                .insert(entry.descriptor.id, Arc::clone(entry))
-                .is_some_and(|previous| previous != *entry)
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::MetadataConflict {
-                        artifact: entry.descriptor.id,
-                    },
-                ));
+            if let Some(previous) = incoming.insert(entry.descriptor.id, Arc::clone(entry)) {
+                if previous != *entry {
+                    return Err(metadata_conflict::refusal(&previous, entry));
+                }
             }
         }
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
@@ -4615,13 +4643,10 @@ impl ArtifactInventory {
             } else {
                 // An unrelated global vertex supplies semantic bytes, never
                 // another admission's source proof or physical custody.
-                if state
-                    .interned(&id)
-                    .is_some_and(|existing| existing != entry)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::MetadataConflict { artifact: id },
-                    ));
+                if let Some(existing) = state.interned(&id) {
+                    if existing != entry {
+                        return Err(metadata_conflict::refusal(&existing, &entry));
+                    }
                 }
                 entry
             };
@@ -9730,17 +9755,15 @@ impl ArtifactView {
             return Ok(None);
         };
         let ArtifactPayload::Original(previous) = &existing.payload else {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: descriptor.id,
-                },
+            return Err(metadata_conflict::invariant(
+                &existing,
+                ArtifactMetadataInvariant::OriginalPayloadKind,
             ));
         };
         if existing.descriptor != descriptor || !previous.same_durable_artifact(product) {
-            return Err(admission_failure(
-                ArtifactInventoryFailure::MetadataConflict {
-                    artifact: descriptor.id,
-                },
+            return Err(metadata_conflict::invariant(
+                &existing,
+                ArtifactMetadataInvariant::OriginalDurableFacts,
             ));
         }
         // Inventory equality deliberately excludes the fresh source witness.
