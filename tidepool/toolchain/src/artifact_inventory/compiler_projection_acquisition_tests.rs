@@ -78,6 +78,12 @@ fn authored_promotion_preserves_actual_offered_acquisition() {
             &observations[index]
         ));
     }
+    assert_completed_output_keeps_actual_producer_with_private_equal_offer(
+        &fixture,
+        supports[0],
+        offers[0],
+        owner,
+    );
     let owners = BTreeSet::from([owner.clone()]);
     let checked_inputs = acquisitions.map(|entry| {
         [
@@ -469,4 +475,121 @@ fn assert_fresh_dependency_permission_boundary(
         expected_group,
         false,
     );
+}
+
+fn assert_completed_output_keeps_actual_producer_with_private_equal_offer(
+    fixture: &crate::artifacts::test_support::SourcePublicationEntryFixture,
+    prior: &CompilerSourceSupport,
+    prior_offer: &IssuedNativeOffer,
+    owner: &ExactModuleIdentity,
+) {
+    let types = prior
+        .selected_interfaces()
+        .unwrap()
+        .type_interfaces_for_owners(vec![owner.clone()])
+        .unwrap()
+        .retain_custody(prior.artifacts())
+        .unwrap()
+        .retain_normalized_availability(prior.native_availability())
+        .unwrap()
+        .retain_offers([prior_offer.clone()])
+        .unwrap();
+    assert!(types.compiler_roles().original_acquisition(owner).is_none());
+    assert!(types
+        .native_offers()
+        .iter()
+        .any(|offer| offer.same_issuance(prior_offer)));
+    let context = crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![])
+        .unwrap()
+        .extend_issued_compiler_support(&types)
+        .unwrap();
+    assert!(
+        context.lexical_graph().is_empty(),
+        "private A grants no authored source reuse"
+    );
+    let source = std::fs::read_to_string(fixture.includes[0].join("PublicationTarget.hs")).unwrap();
+    let compiled = crate::artifacts::test_support::compile_invocation_in_context(
+        &crate::artifacts::CompileInvocation {
+            source: &source,
+            targets: &["__prepared"],
+            include: &fixture.includes,
+            fallback_module_name: "PublicationTarget",
+        },
+        Arc::new(context),
+        |_, _, _| {},
+    )
+    .expect("actual completed B is unambiguous beside equal-fact private A availability");
+    let actual_product = compiled
+        .recovery_products
+        .iter()
+        .find(|product| {
+            product.owner().unit == owner.unit && product.owner().module == owner.module
+        })
+        .expect("TYPE input forces the actual compiler to produce B from source");
+    let ArtifactPayload::Original(prior_product) = &prior_offer.original_acquisition().payload
+    else {
+        unreachable!()
+    };
+    assert!(actual_product.source_admission().is_some());
+    assert!(
+        !Arc::ptr_eq(
+            actual_product.source_admission().unwrap(),
+            prior_product.source_admission().unwrap()
+        ),
+        "the control must issue an independent actual completed source observation B"
+    );
+    assert_eq!(
+        actual_product, prior_product,
+        "B and private A have equal immutable facts"
+    );
+    let output = compiled
+        .issued_output
+        .as_ref()
+        .expect("the actual compiler owns its completed output");
+    assert!(output.source_selection().issued_native_availability()
+        .flat_map(|row| row.offers()).any(|offer| offer.same_issuance(prior_offer)),
+        "the completed selection must still retain actual A private availability as the crossed control");
+    let own_offer = output
+        .source_selection()
+        .completed_compiler_output_offer(owner)
+        .unwrap()
+        .expect("the completed B receipt retains its own native offer");
+    assert!(!own_offer.same_issuance(prior_offer));
+    let support = CompilerSourceSupport::close_complete_output(output.compiler_inputs()).unwrap();
+    let selected = support
+        .compiler_roles()
+        .original_acquisition(owner)
+        .unwrap();
+    let ArtifactPayload::Original(selected_product) = &selected.payload else {
+        unreachable!()
+    };
+    assert!(
+        selected_product.same_admission_and_transport(actual_product),
+        "fresh row construction carries completed B's actual admission and transport"
+    );
+    assert!(
+        Arc::ptr_eq(selected, own_offer.original_acquisition()),
+        "fresh row construction carries B's exact own-offer acquisition"
+    );
+    if let InputNativeDecision::IssuedChoices(groups) =
+        support.compiler_roles().native_decision(owner)
+    {
+        for group in groups.values() {
+            let selected = support
+                .compiler_roles()
+                .selected_native_support(owner, *group)
+                .unwrap();
+            assert!(selected
+                .acquisitions()
+                .iter()
+                .any(|offer| offer.same_issuance(own_offer)));
+            assert!(
+                !selected
+                    .acquisitions()
+                    .iter()
+                    .any(|offer| offer.same_issuance(prior_offer)),
+                "private equal-fact A cannot contribute to B's selected native decision"
+            );
+        }
+    }
 }
