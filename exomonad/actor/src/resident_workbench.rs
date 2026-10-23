@@ -24910,11 +24910,12 @@ pub(crate) mod request_tests {
                         let expected = session.compile_view_in(scope).unwrap().exact_declaration_context().cloned();
                         let child = session.mint_detached_scope(scope).unwrap();
                         let view = session.compile_view_in(child).unwrap();
-                        prop_assert!(match (view.exact_declaration_context(), expected.as_ref()) {
+                        let same_context = match (view.exact_declaration_context(), expected.as_ref()) {
                             (Some(actual), Some(expected)) => actual.same_authenticated_context(expected),
                             (None, None) => true,
                             _ => false,
-                        });
+                        };
+                        prop_assert!(same_context, "detached scope preserves its selected context");
                         children.push((child, view));
                     },
                     4 => if let Some((child, captured)) = children.pop() {

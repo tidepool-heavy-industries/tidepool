@@ -7291,14 +7291,12 @@ mod tests {
             alternate
                 .admission
                 .world_reservation()
-                .unwrap()
                 .plan()
                 .recipe()
                 .source,
             legitimate
                 .admission
                 .world_reservation()
-                .unwrap()
                 .plan()
                 .recipe()
                 .source,
@@ -7321,18 +7319,8 @@ mod tests {
         let mut fixture = CheckedHomeFixture::new();
         let legitimate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
         let alternate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
-        let alternate_recipe = alternate
-            .admission
-            .world_reservation()
-            .unwrap()
-            .plan()
-            .recipe();
-        let legitimate_recipe = legitimate
-            .admission
-            .world_reservation()
-            .unwrap()
-            .plan()
-            .recipe();
+        let alternate_recipe = alternate.admission.world_reservation().plan().recipe();
+        let legitimate_recipe = legitimate.admission.world_reservation().plan().recipe();
         assert_eq!(alternate_recipe.source, legitimate_recipe.source);
         assert_eq!(alternate_recipe.template, legitimate_recipe.template);
         assert_eq!(
@@ -7952,6 +7940,7 @@ mod tests {
         let projected = execution
             .view()
             .unwrap()
+            .clone()
             .with_compile_inputs(&source_inputs)
             .unwrap();
         assert!(projected
