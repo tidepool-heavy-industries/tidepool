@@ -9,6 +9,7 @@ module Tidepool.DependencyPlan
   , CompilerDependencyBasis, FrozenDependencyBasis
   , newCompilerDependencyBasis, captureSourceDependencies, freezeDependencyBasis
   , dependencyGenerations, frozenDependencyGenerations, selectDependencyTerminals
+  , requireUnambiguousDependencySymbols
   , nativeDependencyTerminals, encodeDependencyTerminal, encodeDependencyUses, readDependencyReply
   , NativePreparationFailure(..)
   ) where
@@ -100,8 +101,16 @@ terminalGenerations terminals = do
   where
     add known (DependencyTerminal _ _ (RetainedOccurrence _ _ binding identity generation)) = do
       forM_ (Map.lookup identity known) $ \old -> unless (old == (binding,generation))
-        (throwIO (NativeReplyCorrupt "ambiguous historical dependency terminal"))
+        (throwIO (DependencyTerminalConflict identity))
       pure (Map.insert identity (binding,generation) known)
+
+-- A generation projection cannot turn a known conflict into absent evidence.
+-- Both recovery front doors call this with their actual reached references.
+requireUnambiguousDependencySymbols :: FrozenDependencyBasis -> Set.Set SymbolIdentity -> IO ()
+requireUnambiguousDependencySymbols (FrozenDependencyBasis terminals) reached = do
+  _ <- terminalGenerations [terminal | terminal <- terminals
+    , fst (terminalBinding terminal) `Set.member` reached]
+  pure ()
 
 selectDependencyTerminals :: Set.Set (SymbolIdentity,Word64) -> FrozenDependencyBasis -> IO [DependencyTerminal]
 selectDependencyTerminals needed (FrozenDependencyBasis terminals) = do
@@ -133,6 +142,7 @@ data NativePreparationFailure
   = NativeDemandRejected NativeDemandRefusalReason T.Text
   | NativeReplyCorrupt String
   | NativePackageSealConflict SymbolIdentity
+  | DependencyTerminalConflict SymbolIdentity
   deriving (Show)
 instance Exception NativePreparationFailure
 

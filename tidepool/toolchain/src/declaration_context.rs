@@ -3511,6 +3511,22 @@ impl DemandCertifiedGroups {
         Ok(occurrences)
     }
 
+    pub(crate) fn matches_retained_checked_value(
+        &self,
+        reference: &crate::certified_products::ReceiptImportOwner,
+        occurrence: NativeRetainedOccurrence<'_>,
+        row: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<bool, CompileError> {
+        if !self.retained_occurrences_for_use(reference)?.contains(&occurrence) {
+            return Ok(false);
+        }
+        let selected = self.basis.source_support.artifacts()
+            .observed_payload(&occurrence.binding.artifact)
+            .ok_or_else(|| failure("selected native retained occurrence lost its immutable value payload"))?;
+        let (actual, _) = row.world_type_parts()?;
+        Ok(selected.as_ref() == actual.as_ref())
+    }
+
     /// Follow roots recorded by the original choice issuer and their exact
     /// dependency links. The projection never resolves a symbol or permission.
     fn restrict_uses(

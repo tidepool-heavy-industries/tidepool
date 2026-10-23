@@ -790,7 +790,9 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
             when (preparedRootIdentity identifier /= identity) $
               ioError (userError "package recovery root differs from canonical original global")
             pure identifier
-    recover <- newPreparedRecoveryWithDemandAndReuse (Just (pprReuseContext prepared)) (Just executor) demandPackages
+    let checkDependency identity = forM_ (preparedCompilationWorldInputs completion >>= worldCellDependencyBasis) $ \basis ->
+          requireUnambiguousDependencySymbols basis (Set.singleton identity)
+    recover <- newPreparedRecoveryWithDemandAndReuse checkDependency (Just (pprReuseContext prepared)) (Just executor) demandPackages
       hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
       (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
     artifacts <- forM targets $ \target -> do

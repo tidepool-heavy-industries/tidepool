@@ -100,6 +100,49 @@ impl CheckedWorldStageNativeInputs {
         })
     }
 
+    pub(crate) fn matches_dependency_terminal_checked_value(
+        &self,
+        reference: &DependencyTerminalReference,
+        row: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<bool, CompileError> {
+        let occurrence = crate::declaration_context::NativeRetainedOccurrence {
+            demander: reference.demander,
+            global_index: reference.global_index,
+            binding: &reference.binding,
+            identity: &reference.identity,
+            generation: reference.generation,
+        };
+        match reference.origin {
+            DependencyTerminalOrigin::SourceDefinition => {
+                for basis in self
+                    .request
+                    .source_dependencies
+                    .get(&self.offset)
+                    .into_iter()
+                    .flatten()
+                {
+                    if basis.rows().iter().any(|issued| {
+                        issued.reference() == &reference.original_use
+                            && issued
+                                .retained_occurrences()
+                                .any(|actual| actual == occurrence)
+                    }) {
+                        return basis.matches_checked_value(occurrence, row);
+                    }
+                }
+                Ok(false)
+            }
+            DependencyTerminalOrigin::NativeOriginal => match self.selection() {
+                Some(stage) => stage.selected_groups.matches_retained_checked_value(
+                    &reference.original_use,
+                    occurrence,
+                    row,
+                ),
+                None => Ok(false),
+            },
+        }
+    }
+
     pub(crate) fn selection(&self) -> Option<&WorldNativeDemandStage> {
         // Absence is known empty only because checked_stage proved that this
         // exact stage was emitted by the same completed request.

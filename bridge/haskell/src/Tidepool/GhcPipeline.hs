@@ -158,7 +158,7 @@ import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable
   ( renderWithContext, defaultSDocContext, ppr, SDocContext(..), Outputable, showSDocUnsafe
   , mkUserStyle, NamePprCtx(..), QualifyName(..), Depth(..), PromotionTickContext(..) )
-import GHC.Types.Id (idName, setIdExported)
+import GHC.Types.Id (idName, setIdExported, isDataConId_maybe)
 import GHC.Types.Avail (availNames)
 import GHC.Core.Type
   ( mkInvisForAllTys
@@ -5733,7 +5733,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     worldHasSelectedSource facts (unitString (moduleUnit owner),moduleNameString (moduleName owner))
                   _ -> False
             uses <- fmap catMaybes $ forM identifiers $ \identifier ->
-              if isSource (idName identifier) then do
+              if isSource (idName identifier) && isNothing (isDataConId_maybe identifier) then do
                 reference <- referenceForName (idName identifier)
                 pure ((\selected -> (preparedRootIdentity identifier,selected)) <$> reference)
               else pure Nothing
