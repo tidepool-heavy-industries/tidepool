@@ -1,5 +1,5 @@
 //! A canonical/Core-only consumer gains native groups after original source removal.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -88,38 +88,16 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let original_producer = execution.toolchain_identity_sha256();
     assert_ne!(original_producer, [0; 32]);
 
-    // Retain the original consumed home-import graph. A lexical selection is
-    // separate from native demand, and its complete interface closure is
-    // admitted by the production inventory owner.
-    let mut pending = vec![owner.clone()];
-    let mut lexical = BTreeMap::new();
-    while let Some(selected) = pending.pop() {
-        if lexical.contains_key(&selected) {
-            continue;
-        }
-        let node = execution
-            .lexical_graph()
-            .iter()
-            .find(|node| node.owner == selected)
-            .expect("selected source owner has its original compiler import graph");
-        pending.extend(node.imports.iter().cloned());
-        lexical.insert(selected, node.clone());
-    }
-    assert!(lexical[&owner].imports.contains(&support));
+    assert!(execution
+        .lexical_graph()
+        .iter()
+        .find(|node| node.owner == owner)
+        .expect("source owner retains its actual compiler import graph")
+        .imports
+        .contains(&support));
     // Restore the exact output selection. Its unrelated entry target may retain
     // native custody; the requested homes were only imported for their types.
     let durable = tempfile::tempdir().unwrap();
-    let canonical_interfaces = execution
-        .materialize_module_interfaces(durable.path())
-        .unwrap()
-        .into_iter()
-        .filter(|reference| {
-            lexical.contains_key(&ExactModuleIdentity {
-                unit: reference.interface.unit.clone(),
-                module: reference.interface.module.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
     let snapshot = execution.snapshot();
     let blocks = MemoryBlockstore::new();
     let mut writer = Materializer::new(&blocks);
@@ -139,6 +117,13 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     let payloads = execution
         .materialize_recovery_artifacts(durable.path(), &ids)
         .unwrap();
+    let canonical_interfaces = payloads
+        .iter()
+        .filter_map(|reference| match reference {
+            RecoveryPayloadReference::Canonical(reference) => Some(reference),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let descriptors = payloads
         .iter()
         .map(|reference| match reference {

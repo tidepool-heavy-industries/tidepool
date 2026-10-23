@@ -256,13 +256,22 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             "this fixture must exercise canonical dependencies without native products"
         );
         let selection = original_context.snapshot().graph_selection().unwrap();
+        use tidepool_toolchain::declaration_join::RecoveryPayloadReference;
+        let incomplete_payloads = references
+            .iter()
+            .cloned()
+            .map(RecoveryPayloadReference::Original)
+            .chain(
+                companions
+                    .iter()
+                    .cloned()
+                    .map(RecoveryPayloadReference::Canonical),
+            )
+            .collect::<Vec<_>>();
         let incomplete =
             tidepool_toolchain::declaration_join::RecoveredArtifactAcquisition::new(durable.path())
-                .capture_bound(
-                    &references,
-                    &companions,
-                    &[],
-                    &[],
+                .capture_payloads_bound(
+                    &incomplete_payloads,
                     &original_context.artifact_view().descriptors(),
                     &selection.bindings,
                     &original_context.artifact_view().binding_dependencies(),
