@@ -54,13 +54,9 @@ impl<'a> NativeDependencyCatalog<'a> {
     }
 
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
-        let projection = match &self.0 {
-            DependencyGrantSource::Source(source) => source.projection(),
-            DependencyGrantSource::Request(inputs) => inputs.projection(),
-        };
-        match projection.snapshot_roles().get(owner) {
-            Some(role) => self.input_decisions().for_role(owner, role),
-            None => InputNativeDecision::UnissuedPolicy,
+        match &self.0 {
+            DependencyGrantSource::Source(source) => source.compiler_roles().native_decision(owner),
+            DependencyGrantSource::Request(inputs) => inputs.native_decision(owner),
         }
     }
 
@@ -68,7 +64,7 @@ impl<'a> NativeDependencyCatalog<'a> {
     /// permit every exact binding. A retained Full offer alone grants nothing.
     pub(crate) fn qualified_availability(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
         advertised: &BTreeSet<NativeGroupKey>,
         new_products: &[IssuedNativeOffer],
@@ -79,8 +75,7 @@ impl<'a> NativeDependencyCatalog<'a> {
         let mut qualifications = Vec::new();
         for row in inputs.availability_rows() {
             for offer in row.offers() {
-                let Some(qualification) =
-                    offer.qualified_private_availability(projection, namespace)
+                let Some(qualification) = offer.qualified_private_availability(roles, namespace)
                 else {
                     continue;
                 };
@@ -799,11 +794,7 @@ pub(super) fn verified_root_choice(
     let ArtifactPayload::Original(product) = &entry.payload else {
         return Err(failure("native root demand lacks original payload"));
     };
-    let canonical = ArtifactEntry::canonical_artifact_id(
-        product
-            .module_interface()
-            .ok_or_else(|| failure("native canonical carrier missing"))?,
-    );
+    let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
     let choices = match support
         .checked_native_input_decision(key.artifact, canonical, native_owner)
         .map_err(|reason| match root_evidence_refusal(&identity, reason) {
@@ -1256,11 +1247,7 @@ impl<'a> NativeSupportRef<'a> {
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(failure("native support is not Original"));
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native support lacks canonical interface"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let (carrier, canonical) = self.carrier_pair(group, canonical)?;
         Ok(IssuedNativeBinding {
             binding: group,
@@ -1505,11 +1492,7 @@ pub(super) fn bind_certified_input_demand(
                 (chosen, support, RootIssuer::Current)
             }
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native canonical carrier missing"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let support = NativeSupportRef::checked(state, parent, chosen, support)?;
         let mut issued = support.describe(chosen)?;
         if let RootIssuer::Historical(selected) = &issuer {
@@ -1686,10 +1669,10 @@ pub(crate) fn validate_consumed_native_namespace(
     };
     let canonical = match &selected.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Original(product) => product.module_interface(),
+        ArtifactPayload::Original(product) => Some(product.module_interface()),
         ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
     };
-    if canonical != product.module_interface()
+    if canonical != Some(product.module_interface())
         || (matches!(selected.payload, ArtifactPayload::Original(_))
             && selected.descriptor.id != dependency.descriptor.id)
     {
@@ -1699,7 +1682,7 @@ pub(crate) fn validate_consumed_native_namespace(
             dependency = ?dependency.descriptor.id,
             selected = ?selected.descriptor.id,
             selected_kind = ?selected.descriptor.kind,
-            interfaces_match = canonical == product.module_interface(),
+            interfaces_match = canonical == Some(product.module_interface()),
             caller = %std::panic::Location::caller(),
             "issued native dependency conflicts with request interface"
         );
@@ -2386,7 +2369,6 @@ impl CheckedNativeAvailability {
                         .map_err(|error| evidence(error.into()))?;
                     product
                         .original_native()
-                        .ok_or_else(|| failure("cohort native proof lacks authenticated witness"))?
                         .validate_package_interfaces(validation)
                         .map_err(evidence)?;
                     available.insert(*id, product);
@@ -2451,14 +2433,14 @@ impl CheckedNativeAvailability {
         self,
         baseline_groups: &BTreeSet<NativeGroupKey>,
         catalog: &NativeDependencyCatalog<'_>,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let advertised = self.advertised_groups(baseline_groups)?;
         let preferred =
-            catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
-        self.validate_advertised(advertised, &preferred, projection, validation)
+            catalog.qualified_availability(roles, namespace, &advertised, &self.offers)?;
+        self.validate_advertised(advertised, &preferred, roles, validation)
     }
 
     fn advertised_groups(
@@ -2490,7 +2472,7 @@ impl CheckedNativeAvailability {
         self,
         advertised: BTreeSet<NativeGroupKey>,
         preferred: &[QualifiedNativeAvailability],
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
         let mut qualifications = BTreeMap::new();
@@ -2525,7 +2507,7 @@ impl CheckedNativeAvailability {
         // competing members of this request's original namespace.
         let mut required_originals = self.roots.clone();
         required_originals.extend(advertised.iter().map(|key| key.artifact));
-        required_originals.extend(projection.roles().iter().filter_map(|role| role.original()));
+        required_originals.extend(roles.iter().filter_map(|(_, role)| role.original()));
         for qualification in qualifications.values() {
             required_originals.insert(qualification.original());
             required_originals.extend(
@@ -2666,11 +2648,7 @@ impl IssuedNativeOffer {
                     ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
                 ));
             };
-            let interface = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("complete availability lacks canonical interface"))?,
-            );
+            let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let carrier = outcome.binding;
             let mut canonical = state
                 .outgoing(ArtifactBindingNode::Artifact(carrier))
@@ -2852,19 +2830,19 @@ impl IssuedNativeOffer {
     /// own roles and graph before merging any private input. Protected roles
     /// whose carrier is not present here wait for their exact private offer.
     pub(crate) fn issue_context_offers(
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         source: &ArtifactView,
         preferred: &[NativeOriginalRequirement],
     ) -> Result<Vec<Self>, CompileError> {
         let mut offers = Vec::new();
-        for role in projection.roles() {
+        for (owner, role) in roles.iter() {
             let Some(original) = role.original() else {
                 continue;
             };
             if !source.lease.payloads.contains_key(&original) {
                 continue;
             }
-            let mut proofs = match NativeOriginalRequirement::from_role(role.clone()) {
+            let mut proofs = match NativeOriginalRequirement::from_publication(roles, owner) {
                 Some(proof) => vec![proof],
                 None => preferred
                     .iter()
@@ -2922,11 +2900,7 @@ impl IssuedNativeOffer {
                 ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
             ));
         };
-        let interface = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native offer lacks its canonical interface"))?,
-        );
+        let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let (body, custody) = match proof {
             None => {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
@@ -3137,11 +3111,7 @@ impl IssuedNativeOffer {
                 },
             ));
         };
-        let interface = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("recovered native offer lacks its canonical interface"))?,
-        );
+        let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
         if interface != facts.interface || entry.descriptor.owner != facts.owner {
             return Err(failure(
                 "recovered native offer differs from its original interface or owner",
@@ -3349,13 +3319,13 @@ impl IssuedNativeOffer {
     /// Body availability does not select an original or executable roots.
     pub(crate) fn qualified_private_availability(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
     ) -> Option<&QualifiedNativeAvailability> {
         let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
             return None;
         };
-        let role = projection.snapshot_roles().get(&self.0.owner)?;
+        let role = roles.get(&self.0.owner)?;
         (role.interface() == self.0.interface
             && role
                 .original()
@@ -3481,8 +3451,8 @@ impl IssuedNativeOffer {
         }
         let lease = &self.0.custody.lease;
         if !matches!(&lease.payloads[&self.original()].payload, ArtifactPayload::Original(product)
-            if product.module_interface().is_some_and(|interface| matches!(interface.origin(),
-                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+            if matches!(product.module_interface().origin(),
+                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }))
         {
             return Ok(Vec::new());
         }
@@ -3610,19 +3580,17 @@ impl IssuedNativeOffer {
     /// offers related to its canonical roles or exact native dependencies.
     pub(crate) fn is_relevant_to_support(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
     ) -> Result<bool, CompileError> {
-        if projection
-            .snapshot_roles()
+        if roles
             .get(&self.0.owner)
             .is_some_and(|role| role.interface() == self.0.interface)
         {
             return Ok(true);
         }
-        let originals = projection
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
+        let originals = roles
+            .iter()
+            .filter_map(|(_, role)| role.original())
             .collect::<BTreeSet<_>>();
         Ok(self
             .0
@@ -3637,11 +3605,11 @@ impl IssuedNativeOffer {
     #[track_caller]
     pub(crate) fn within_projection(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
         if self
-            .qualified_private_availability(projection, namespace)
+            .qualified_private_availability(roles, namespace)
             .is_some()
         {
             return Ok(Some(self.clone()));
@@ -3649,10 +3617,9 @@ impl IssuedNativeOffer {
         // Matching roles propagate the existing opaque issuance directly.
         // Only a different or absent role needs dependency relevance.
         let contributes = || -> Result<bool, CompileError> {
-            let originals = projection
-                .roles()
-                .into_iter()
-                .filter_map(|role| role.original())
+            let originals = roles
+                .iter()
+                .filter_map(|(_, role)| role.original())
                 .collect::<BTreeSet<_>>();
             Ok(self
                 .0
@@ -3661,8 +3628,8 @@ impl IssuedNativeOffer {
                 .iter()
                 .any(|original| originals.contains(original)))
         };
-        let role = projection.snapshot_roles().get(&self.0.owner);
-        let Some(original) = role.and_then(CompilerInputRole::original) else {
+        let role = roles.get(&self.0.owner);
+        let Some(original) = role.and_then(CompilerRoleFacts::original) else {
             return Ok(contributes()?.then(|| self.clone()));
         };
         let role = role.expect("native role");
@@ -4079,7 +4046,7 @@ mod normalized_dependency_tests {
             ),
             producer.sha256(),
         );
-        let sibling = ArtifactEntry::canonical(sibling.module_interface().unwrap().clone());
+        let sibling = ArtifactEntry::canonical(sibling.module_interface().clone());
         let sibling_id = sibling.descriptor.id;
         let custody = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
         let issuer = custody
@@ -4249,12 +4216,11 @@ mod normalized_dependency_tests {
             .support_for_owners(vec![root_owner.clone()])
             .unwrap();
         let retained = types.retain_template_availability(&complete).unwrap();
-        assert_eq!(retained.projection().snapshot_roles().len(), 1);
+        assert_eq!(retained.compiler_roles().len(), 1);
         assert!(retained
-            .projection()
-            .roles()
+            .compiler_roles()
             .iter()
-            .all(|role| role.original().is_none()));
+            .all(|(_, role)| role.original().is_none()));
         let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
             .unwrap()
             .descriptor
@@ -4272,14 +4238,14 @@ mod normalized_dependency_tests {
             .cloned()
             .collect::<Vec<_>>();
         let repeated = crate::declaration_context::RequestNativeAvailability::issue_checked(
-            complete.projection(),
+            complete.compiler_roles(),
             complete.artifacts(),
             &repeated_offers,
         )
         .unwrap();
         let repeated = complete.retain_normalized_availability(&repeated).unwrap();
         let empty = crate::declaration_context::RequestNativeAvailability::issue_checked(
-            complete.projection(),
+            complete.compiler_roles(),
             complete.artifacts(),
             &[],
         )
@@ -4477,11 +4443,8 @@ mod normalized_dependency_tests {
             .unwrap()
             .source_support(&BTreeSet::from([root_owner.clone()]))
             .unwrap();
-        assert_eq!(root_source.projection().snapshot_roles().len(), 1);
-        assert!(root_source
-            .projection()
-            .snapshot_roles()
-            .contains_key(&root_owner));
+        assert_eq!(root_source.compiler_roles().len(), 1);
+        assert!(root_source.compiler_roles().get(&root_owner).is_some());
         let root_context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&root_source)
@@ -4502,7 +4465,7 @@ mod normalized_dependency_tests {
         )
         .unwrap();
         let canonical = Arc::new(ArtifactEntry::canonical(
-            products[0].module_interface().unwrap().clone(),
+            products[0].module_interface().clone(),
         ));
         let canonical_id = canonical.descriptor.id;
         let receiving = inventory
@@ -4848,9 +4811,7 @@ mod normalized_dependency_tests {
             .admit_role(
                 entry.descriptor.owner.clone(),
                 CompilerInputRole::PublishedSourceOriginal {
-                    interface: ArtifactEntry::canonical_artifact_id(
-                        original.module_interface().unwrap(),
-                    ),
+                    interface: ArtifactEntry::canonical_artifact_id(original.module_interface()),
                     original: entry.descriptor.id,
                     source_revision: "pending fixture revision".into(),
                     original_input_identity: "pending fixture input".into(),
@@ -4970,9 +4931,8 @@ mod normalized_dependency_tests {
             ),
             producer.sha256(),
         );
-        let hidden_interface = Arc::new(ArtifactEntry::canonical(
-            hidden.module_interface().unwrap().clone(),
-        ));
+        let hidden_interface =
+            Arc::new(ArtifactEntry::canonical(hidden.module_interface().clone()));
         let root_entry = Arc::new(ArtifactEntry::original(producer.sha256(), root).unwrap());
         let inventory = ArtifactInventory::default();
         let inherited = inventory
