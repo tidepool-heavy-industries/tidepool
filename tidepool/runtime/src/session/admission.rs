@@ -213,6 +213,30 @@ enum PrivateAuthoredProgram {
     Failed,
 }
 
+/// A freeze borrows its exact completed private owner. Compiler evidence alone
+/// cannot construct this runtime frontier or substitute a different admission.
+pub(super) struct CompletedPrivateFrontier<'a> {
+    admission: &'a PrivateExecutionAdmission,
+    frontier: Arc<PrivateSettledFrontier>,
+    scope_lease: Arc<RuntimeLexicalScopeLease>,
+}
+
+impl<'a> CompletedPrivateFrontier<'a> {
+    pub(super) fn admission(&self) -> &'a PrivateExecutionAdmission {
+        self.admission
+    }
+
+    pub(super) fn publication(&self) -> PrivateCompilerProgress {
+        self.frontier.publication()
+    }
+
+    pub(super) fn scope_lease(&self) -> &Arc<RuntimeLexicalScopeLease> {
+        &self.scope_lease
+    }
+}
+
+static_assertions::assert_not_impl_any!(CompletedPrivateFrontier<'static>: Clone, Copy);
+
 impl std::fmt::Debug for PrivateAuthoredProgram {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1385,17 +1409,28 @@ impl PrivateExecutionAdmission {
         }
     }
 
-    pub(super) fn publication_progress(
+    pub(super) fn completed_frontier(
         &self,
         world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-    ) -> Result<PrivateCompilerProgress, SessionError> {
+    ) -> Result<CompletedPrivateFrontier<'_>, SessionError> {
         let state = self.state.lock();
+        if !matches!(
+            state.phase,
+            PrivateExecutionPhase::Freezing | PrivateExecutionPhase::Frozen
+        ) {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
         match &state.authored {
             PrivateAuthoredProgram::Ready(frontier)
                 if frontier.matches_world(world)
-                    && state.accepted_visible_revision == state.applied_visible_revision =>
+                    && state.accepted_visible_revision == state.applied_visible_revision
+                    && state.pending_hosts.is_empty() =>
             {
-                Ok(frontier.publication())
+                Ok(CompletedPrivateFrontier {
+                    admission: self,
+                    frontier: Arc::clone(frontier),
+                    scope_lease: Arc::clone(&self.scope_lease),
+                })
             }
             _ => Err(SessionError::WorldCellPublicationIncomplete),
         }
