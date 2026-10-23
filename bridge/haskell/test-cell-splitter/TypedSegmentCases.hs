@@ -61,7 +61,8 @@ import Tidepool.SessionArtifacts
 import qualified Tidepool.Session as Session
 import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.CheckedPrefixImports (hydrateCompletedValueAliases, transformCompletedValueAliases)
-import Tidepool.CheckedCell (typecheckNativeModule)
+import Tidepool.CheckedCell (typecheckNativeModule, unannotatedModule)
+import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), depanalSourceModules)
 import Tidepool.Identity (nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -122,7 +123,10 @@ typedValueAliasControl libdir root prepared = do
       _ -> liftIO (fail "typed alias control lost its actual source summary")
     parsed <- parseModule summary
     current <- getSession
-    native <- liftIO (transformCompletedValueAliases aliases current parsed)
+    syntax <- either (liftIO . fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+    driver <- either (liftIO . fail . show) pure (matchDriverImports syntax parsed)
+    native <- liftIO (transformCompletedValueAliases aliases current
+      (unannotatedModule (beginImportRefinement driver)))
     checked <- typecheckNativeModule native
     let (checkedEnvironment,_) = tm_internals_ checked
         actual = typeEnvIds (tcg_type_env checkedEnvironment)
@@ -669,7 +673,7 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
       summary <- getModSummary (mkModuleName ordinary)
       parsed <- parseModule summary
       transformed <- liftIO (rewriteParsedSegmentRoot (preparedTypedSegmentOperations prepared)
-        (preparedTypedSegmentPlan prepared) parsed)
+        (preparedTypedSegmentPlan prepared) (ms_hspp_opts summary) (pm_parsed_source parsed))
       -- Preserve the actual source pragmas: ParsedModule's printed AST does
       -- not include the header's LANGUAGE directives. Only the module owner
       -- changes so both programs can be loaded in the same interpreter.
@@ -677,7 +681,7 @@ typedSegmentRewriteSemantics = bracket temporary removeDirectoryRecursive $ \roo
             (lines (preparedTypedSegmentSource prepared)))
           rendered = unlines [if ("module " ++ ordinary ++ " ") `isPrefixOf` line
             then "module " ++ rewritten ++ " where" else line
-            | line <- lines (showSDocUnsafe (ppr (pm_parsed_source transformed)))]
+            | line <- lines (showSDocUnsafe (ppr transformed))]
           path = root </> rewritten ++ ".hs"
       liftIO (writeFile path (pragmas ++ rendered))
       pure path
