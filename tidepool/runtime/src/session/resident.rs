@@ -21,7 +21,7 @@ use tidepool_repr::execution_schema::{
     ImportOwner, JsonLayout, PreparedProgram, RuntimeRep, SymbolIdentity, TypeIdentity,
 };
 
-use super::admission::CheckedTurnCompletion;
+use super::admission::{CheckedCaptureTicket, CheckedTurnCompletion};
 use super::prepared::{ParkPolicy, PreparedRuntimeError, PreparedSettlement, HOME_UNIT};
 use super::turn::{TurnCode, TurnPurpose};
 use tidepool_codegen::suspension::{ContinuationId, RealmId, ValueHandle};
@@ -3056,6 +3056,151 @@ enum PreparedTurnMode<'a> {
 struct PreparedCheckedTurn {
     prefix: Arc<super::RuntimeCheckedPrefix>,
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+
+/// Successful installation of the exact result set named by one running item.
+/// The affine ticket is retained until its installed values settle the prefix.
+pub(crate) struct CapturedCheckedValues {
+    ticket: CheckedCaptureTicket,
+    values: CapturedCheckedValueSet,
+}
+
+static_assertions::assert_not_impl_any!(CapturedCheckedValues: Clone, Copy);
+
+impl CapturedCheckedValues {
+    pub(crate) fn into_parts(self) -> (CheckedCaptureTicket, CapturedCheckedValueSet) {
+        (self.ticket, self.values)
+    }
+}
+
+/// Only the resident result consumer constructs this installed evidence.
+pub(crate) struct CapturedCheckedValueSet {
+    payload: CapturedCheckedValuePayload,
+    provenance: Arc<ProgramProvenance>,
+}
+
+/// Checked capture staging follows the item's sealed empty/value distinction.
+/// A receiving binding owner cannot substitute an absent row for a value set.
+pub(super) struct CheckedCaptureStage {
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    payload: CheckedCaptureStagePayload,
+}
+
+enum CheckedCaptureStagePayload {
+    Empty,
+    Values {
+        row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+        staged: super::persistent::StagedCheckedValueInterface,
+    },
+}
+
+impl CheckedCaptureStage {
+    fn prepare(
+        session: &PersistentSession,
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<Self, SessionError> {
+        let execution = Arc::clone(ticket.execution());
+        let payload = if execution.bound_binder_identities().next().is_none() {
+            CheckedCaptureStagePayload::Empty
+        } else {
+            let row = execution
+                .value_interface_certificate()
+                .filter(|row| row.owner() == SessionModule::val(Generation(execution.generation())))
+                .ok_or(SessionError::StaleStagedDeclaration)?;
+            let staged = session.stage_checked_value_interface(Arc::clone(&row))?;
+            CheckedCaptureStagePayload::Values { row, staged }
+        };
+        let stage = Self { execution, payload };
+        stage.validate(session, ticket)?;
+        Ok(stage)
+    }
+
+    fn row(&self) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        match &self.payload {
+            CheckedCaptureStagePayload::Empty => None,
+            CheckedCaptureStagePayload::Values { row, .. } => Some(row),
+        }
+    }
+
+    pub(super) fn validate(
+        &self,
+        session: &PersistentSession,
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<(), SessionError> {
+        if !Arc::ptr_eq(&self.execution, ticket.execution()) {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        if let CheckedCaptureStagePayload::Values { staged, .. } = &self.payload {
+            session.validate_staged_value_interface(staged)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn commit(self, session: &mut PersistentSession) {
+        if let CheckedCaptureStagePayload::Values { staged, .. } = self.payload {
+            session.commit_staged_value_interface(staged);
+        }
+    }
+}
+
+enum CapturedCheckedValuePayload {
+    Empty,
+    Values {
+        row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+        values: Vec<CapturedCheckedValue>,
+    },
+}
+
+impl CapturedCheckedValueSet {
+    pub(crate) fn provenance(&self) -> &Arc<ProgramProvenance> {
+        &self.provenance
+    }
+
+    pub(crate) fn row(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
+        match &self.payload {
+            CapturedCheckedValuePayload::Empty => None,
+            CapturedCheckedValuePayload::Values { row, .. } => Some(row),
+        }
+    }
+
+    pub(crate) fn values(&self) -> &[CapturedCheckedValue] {
+        match &self.payload {
+            CapturedCheckedValuePayload::Empty => &[],
+            CapturedCheckedValuePayload::Values { values, .. } => values,
+        }
+    }
+}
+
+pub(crate) struct CapturedCheckedValue {
+    name: String,
+    id: SessionVarId,
+    identity: SymbolIdentity,
+    generation: Generation,
+    handle: PreparedHandle,
+}
+
+impl CapturedCheckedValue {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn id(&self) -> SessionVarId {
+        self.id
+    }
+
+    pub(crate) fn identity(&self) -> &SymbolIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    pub(crate) fn handle(&self) -> PreparedHandle {
+        self.handle
+    }
 }
 
 enum PreparedExecutionPurpose<'a> {
@@ -7536,10 +7681,9 @@ where
                 Some(install) => PreparedBindingInstall::Host(install),
                 None => PreparedBindingInstall::Turn(None),
             },
+            &Arc::new(ProgramProvenance::default()),
             settlement,
         )?;
-        self.binding_provenance
-            .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
         Ok(())
     }
 
@@ -7580,9 +7724,9 @@ where
                 interface: staged_interface,
                 private_input,
             }),
+            &provenance,
             settlement,
         )?;
-        self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
     }
 
@@ -8893,28 +9037,45 @@ where
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole_seed_of(&mode, lexical_scope, checked.clone());
+        let mut captured = None;
         let outcome = match run {
             PreparedRun::Done { handle, value } => {
                 let engine = self.state.require_prepared()?;
                 match mode {
                     PreparedTurnMode::Value(_) => {
                         engine.release(handle);
+                        if let Some(checked) = &checked {
+                            let ticket = checked.capture_ticket()?;
+                            ticket
+                                .execution()
+                                .validate_bound_binders(&[])
+                                .map_err(SessionError::from)?;
+                            if ticket.scope() != lexical_scope {
+                                return Err(SessionError::StaleStagedDeclaration.into());
+                            }
+                            captured = Some(CapturedCheckedValues {
+                                ticket,
+                                values: CapturedCheckedValueSet {
+                                    payload: CapturedCheckedValuePayload::Empty,
+                                    provenance: Arc::clone(&provenance),
+                                },
+                            });
+                        }
                     }
                     PreparedTurnMode::Binding {
                         binder,
                         generation,
                         observation,
                     } => {
-                        self.bind_prepared(
+                        captured = self.bind_prepared(
                             program,
                             lexical_scope,
                             generation,
                             &[(binder, handle)],
                             PreparedBindingInstall::Turn(checked.as_deref()),
+                            &provenance,
                             settlement,
                         )?;
-                        self.binding_provenance
-                            .insert(binder.var_id, Arc::clone(&provenance));
                         if let Some(dependencies) = observation {
                             self.finish_observation(binder, &dependencies);
                         }
@@ -8924,6 +9085,9 @@ where
                         // (`SettlePlan::Project`); a whole value here is a
                         // settlement mismatch.
                         engine.release(handle);
+                        if let Some(checked) = &checked {
+                            checked.fail();
+                        }
                         return Err(PreparedRuntimeError::UnsettledEntry {
                             program,
                             detail: "a whole-value settlement for a pattern turn",
@@ -8942,31 +9106,48 @@ where
                     if let Some(engine) = self.state.prepared_mut() {
                         engine.release_all(fields);
                     }
+                    if let Some(checked) = &checked {
+                        checked.fail();
+                    }
                     return Err(PreparedRuntimeError::UnsettledEntry {
                         program,
                         detail: "a projected settlement for a non-pattern turn",
                     }
                     .into());
                 };
+                if fields.len() != binders.len() {
+                    let fields_len = fields.len();
+                    if let Some(engine) = self.state.prepared_mut() {
+                        engine.release_all(fields);
+                    }
+                    if let Some(checked) = &checked {
+                        checked.fail();
+                    }
+                    return Err(PreparedRuntimeError::ProjectionShape {
+                        binders: binders.len(),
+                        fields: fields_len,
+                    }
+                    .into());
+                }
                 let bound: Vec<(&BoundBinder, PreparedHandle)> =
                     binders.iter().zip(fields).collect();
-                self.bind_prepared(
+                captured = self.bind_prepared(
                     program,
                     lexical_scope,
                     generation,
                     &bound,
                     PreparedBindingInstall::Turn(checked.as_deref()),
+                    &provenance,
                     settlement,
                 )?;
-                for binder in binders {
-                    self.binding_provenance
-                        .insert(binder.var_id, Arc::clone(&provenance));
-                }
                 self.classify_parked(ParkedRun::CompletedProject, resumed, seed, provenance)
             }
             PreparedRun::Suspended { id, request } => {
                 // The frame is parked in the machine's ledger; the hole
                 // carries the turn's completion obligation forward.
+                if let Some(checked) = &checked {
+                    checked.park(lexical_scope)?;
+                }
                 self.classify_parked(
                     ParkedRun::Suspended { id, request },
                     resumed,
@@ -8974,12 +9155,17 @@ where
                     provenance,
                 )
             }
-            PreparedRun::Deferred { id, request, work } => self.classify_parked(
-                ParkedRun::Deferred { id, request, work },
-                resumed,
-                seed,
-                provenance,
-            ),
+            PreparedRun::Deferred { id, request, work } => {
+                if let Some(checked) = &checked {
+                    checked.park(lexical_scope)?;
+                }
+                self.classify_parked(
+                    ParkedRun::Deferred { id, request, work },
+                    resumed,
+                    seed,
+                    provenance,
+                )
+            }
         };
         // The between-turn quiescent point: a fresh or resumed turn that
         // settled or parked just released whatever it retired-in-place, so
@@ -9002,8 +9188,9 @@ where
             &outcome,
             ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. }
         ) {
-            if let Some(checked) = checked {
-                checked.settle(&mut self.state)?;
+            if let Some(captured) = captured {
+                let (ticket, values) = captured.into_parts();
+                ticket.settle(&mut self.state, values)?;
             }
         }
         Ok(outcome)
@@ -9023,8 +9210,9 @@ where
         generation: Generation,
         bound: &[(&BoundBinder, PreparedHandle)],
         install: PreparedBindingInstall<'_>,
+        provenance: &Arc<ProgramProvenance>,
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-    ) -> Result<(), ResidentError> {
+    ) -> Result<Option<CapturedCheckedValues>, ResidentError> {
         if let PreparedBindingInstall::Host(host) = &install {
             let valid = bound.len() == 1 && host.reservation.matches(scope, generation, bound[0].0);
             let fresh = if valid {
@@ -9073,12 +9261,45 @@ where
         let private_overlay = match overlay_validation {
             Ok(completion) => completion,
             Err(error) => {
+                if let PreparedBindingInstall::Turn(Some(completion)) = &install {
+                    completion.fail();
+                }
                 if let Some(engine) = self.state.prepared_mut() {
                     engine.release_all(bound.iter().map(|(_, handle)| *handle));
                 }
                 return Err(error.into());
             }
         };
+        let capture_preflight = (|| -> Result<_, SessionError> {
+            let PreparedBindingInstall::Turn(Some(completion)) = &install else {
+                return Ok(None);
+            };
+            let ticket = completion.capture_ticket()?;
+            if ticket.scope() != scope || ticket.execution().generation() != generation.0 {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            ticket.execution().validate_bound_binders(
+                &binders
+                    .iter()
+                    .map(|binder| super::turn::encode_bound_binder_authority(binder))
+                    .collect::<Vec<_>>(),
+            )?;
+            let stage = CheckedCaptureStage::prepare(&self.state, &ticket)?;
+            Ok(Some((ticket, stage)))
+        })();
+        let (ticket, mut checked_stage) = match capture_preflight {
+            Ok(Some((ticket, stage))) => (Some(ticket), Some(stage)),
+            Ok(None) => (None, None),
+            Err(error) => {
+                if let Some(engine) = self.state.prepared_mut() {
+                    engine.release_all(bound.iter().map(|(_, handle)| *handle));
+                }
+                return Err(error.into());
+            }
+        };
+        let row = checked_stage
+            .as_ref()
+            .and_then(|stage| stage.row().cloned());
         let scope_is_live = self.state.scope_tree().is_live(scope);
         let engine = self.state.require_prepared()?;
         if !scope_is_live {
@@ -9124,6 +9345,18 @@ where
             };
             entries.push(entry);
         }
+        let captured_values = ticket.as_ref().map(|_| {
+            entries
+                .iter()
+                .map(|entry| CapturedCheckedValue {
+                    name: entry.name.0.clone(),
+                    id: entry.id,
+                    identity: entry.value.identity.clone(),
+                    generation: entry.module.gen,
+                    handle: entry.value.handle,
+                })
+                .collect::<Vec<_>>()
+        });
         if let PreparedBindingInstall::Host(HostBindingInstall {
             private_input: Some(private_input),
             reservation,
@@ -9161,8 +9394,18 @@ where
                     .insert(id, HiddenHostBinding::PrivateInput);
             }
         } else if let Some(completion) = private_overlay {
-            self.state
-                .bind_checked_private_values_in(completion, scope, entries, &binders)?;
+            self.state.bind_checked_private_values_in(
+                completion,
+                ticket
+                    .as_ref()
+                    .expect("checked overlay owns its capture ticket"),
+                scope,
+                entries,
+                &binders,
+                checked_stage
+                    .take()
+                    .expect("checked overlay owns its capture stage"),
+            )?;
         } else if matches!(&install, PreparedBindingInstall::Host(_)) {
             let entry = entries.pop().expect("one reserved host binding");
             let handle = entry.value.handle;
@@ -9176,16 +9419,33 @@ where
             self.state
                 .bind_replacing_decls_in(scope, entries, settlement)?;
         }
-        // A checked native mount commits its sealed artifact with the binding;
-        // every other install retains no in-memory value interface.
+        if let Some(stage) = checked_stage {
+            stage.commit(&mut self.state);
+        }
+        // Checked row publication and provenance accompany the actual binding
+        // mutation under this same exclusive resident checkout.
         if let PreparedBindingInstall::Host(host) = install {
             self.state.commit_staged_value_interface(host.interface);
         }
-        for _ in bound {
+        for (binder, _) in bound {
+            self.binding_provenance
+                .insert(binder.var_id, Arc::clone(provenance));
             self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
-        Ok(())
+        Ok(ticket.map(|ticket| CapturedCheckedValues {
+            ticket,
+            values: CapturedCheckedValueSet {
+                payload: match row {
+                    Some(row) => CapturedCheckedValuePayload::Values {
+                        row,
+                        values: captured_values.expect("checked capture carries its result set"),
+                    },
+                    None => CapturedCheckedValuePayload::Empty,
+                },
+                provenance: Arc::clone(provenance),
+            },
+        }))
     }
 
     fn run_transient_with_sites(
@@ -10372,6 +10632,74 @@ mod custody_release_tests {
     type TestSession = ResidentSession<frunk::HNil, EmptyOutput>;
 
     #[test]
+    fn projected_capture_refuses_missing_and_extra_fields_before_binding() {
+        for fields_count in [0, 2] {
+            let mut resident = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+            let entries = (0..fields_count.max(1))
+                .map(|index| {
+                    crate::session::prepared::tests::evaluated_publication_fixture(
+                        &mut resident.state,
+                        "projected",
+                        801 + index as u64,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let binder = BoundBinder {
+                name: entries[0].name.0.clone(),
+                var_id: entries[0].id.raw(),
+                module: entries[0].module.module_name(),
+                tier: ValueTier::ForceData,
+                type_display: "Int".into(),
+                root_head: None,
+                host_authority: None,
+            };
+            let handles = entries
+                .iter()
+                .map(|entry| entry.value.handle)
+                .collect::<Vec<_>>();
+            let engine = resident.state.prepared_mut().unwrap();
+            let program = engine.hosting_program(handles[0]).unwrap();
+            if fields_count == 0 {
+                engine.release(handles[0]);
+            }
+            let outcome = tidepool_testing::with_settlement(|settlement| {
+                resident.complete_prepared(
+                    PreparedRun::Projected {
+                        fields: handles.iter().copied().take(fields_count).collect(),
+                    },
+                    PreparedTurnMode::Projected {
+                        binders: std::slice::from_ref(&binder),
+                        generation: Generation(801),
+                    },
+                    program,
+                    ScopeId::ROOT,
+                    Arc::default(),
+                    None,
+                    None,
+                    settlement,
+                )
+            });
+            assert!(matches!(
+                outcome,
+                Err(ResidentError::Prepared(PreparedRuntimeError::ProjectionShape {
+                    binders: 1,
+                    fields,
+                })) if fields == fields_count
+            ));
+            assert!(resident.state.bindings().get(entries[0].id).is_none());
+            assert!(!resident.binding_provenance.contains_key(&binder.var_id));
+            for handle in handles {
+                assert!(resident
+                    .state
+                    .prepared()
+                    .unwrap()
+                    .prepared_handle_of(handle.raw())
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
     fn final_external_lease_is_released_before_its_cleanup_notification() {
         for mode in 0..4 {
             let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
@@ -10824,87 +11152,241 @@ mod authored_publication_tests {
         checked_interface_publication_failure(true);
     }
 
-    fn checked_interface_publication_failure(write_failure: bool) {
-        use crate::session::turn::{compile_cell_program_admitted, consume_cell_program_item};
-        use crate::session::{
-            resident_cell_check_template, resident_workbench_templates, SourceImports, TurnResult,
+    #[test]
+    fn checked_capture_refuses_missing_binder_at_binding_receiver() {
+        checked_capture_receiver_refusal(CaptureRefusal::MissingBinder);
+    }
+
+    #[test]
+    fn checked_capture_refuses_extra_binder_at_binding_receiver() {
+        checked_capture_receiver_refusal(CaptureRefusal::ExtraBinder);
+    }
+
+    #[test]
+    fn checked_capture_refuses_foreign_checked_row_at_binding_receiver() {
+        checked_capture_receiver_refusal(CaptureRefusal::ForeignStage);
+    }
+
+    #[derive(Clone, Copy)]
+    enum CaptureRefusal {
+        MissingBinder,
+        ExtraBinder,
+        ForeignStage,
+    }
+
+    struct CheckedCaptureFixture {
+        root: tempfile::TempDir,
+        original: Arc<super::super::RuntimeLexicalScopeLease>,
+        resident: TestSession,
+        execution: Arc<super::super::PrivateExecutionAdmission>,
+        checked: super::super::turn::CellCheck,
+        prefix: Arc<super::super::RuntimeCheckedPrefix>,
+        reservation: Arc<super::super::RuntimeCheckedItemAdmission>,
+        bound: Vec<BoundBinder>,
+        compiled: super::super::turn::CompiledTurn,
+    }
+
+    impl CheckedCaptureFixture {
+        fn capture(
+            &mut self,
+        ) -> (
+            Arc<CheckedTurnCompletion>,
+            CheckedCaptureTicket,
+            CheckedCaptureStage,
+        ) {
+            let native = self
+                .compiled
+                .certification
+                .as_ref()
+                .unwrap()
+                .checked_execution()
+                .unwrap()
+                .clone();
+            let completion = source_action(&mut self.resident, &self.original, |resident, _| {
+                self.prefix
+                    .start(&resident.state, self.execution.private_scope(), native)
+            })
+            .unwrap();
+            let ticket = completion.capture_ticket().unwrap();
+            let stage = CheckedCaptureStage::prepare(&self.resident.state, &ticket).unwrap();
+            (completion, ticket, stage)
+        }
+    }
+
+    fn checked_capture_receiver_refusal(refusal: CaptureRefusal) {
+        let mut fixture = checked_capture_fixture(SessionId(1001));
+        let mut foreign = matches!(refusal, CaptureRefusal::ForeignStage)
+            .then(|| checked_capture_fixture(SessionId(1002)));
+        let (completion, ticket, own_stage) = fixture.capture();
+        let (stage, _foreign_completion, _foreign_ticket) = match foreign.as_mut() {
+            Some(foreign) => {
+                let (completion, ticket, stage) = foreign.capture();
+                drop(own_stage);
+                (stage, Some(completion), Some(ticket))
+            }
+            None => (own_stage, None, None),
         };
-        use std::os::unix::fs::PermissionsExt;
+        let binder = &fixture.bound[0];
+        let scope = fixture.execution.private_scope();
+        let mut entry = crate::session::prepared::tests::evaluated_publication_fixture(
+            &mut fixture.resident.state,
+            &binder.name,
+            fixture.reservation.generation().0,
+        );
+        entry.id = SessionVarId::from_extract(binder.var_id);
+        entry.scope = scope;
+        entry.value.identity = SymbolIdentity {
+            unit: "main".into(),
+            module: binder.module.clone(),
+            namespace: "value".into(),
+            occurrence: binder.name.clone(),
+            record_parent: None,
+        };
+        let id = entry.id;
+        let handle = entry.value.handle;
+        let mut binders = fixture.bound.clone();
+        match refusal {
+            CaptureRefusal::MissingBinder => binders.clear(),
+            CaptureRefusal::ExtraBinder => binders.push(binders[0].clone()),
+            CaptureRefusal::ForeignStage => {}
+        }
+        let binders = binders.iter().collect::<Vec<_>>();
+        let before = fixture.prefix.snapshot();
+        let result = source_action(&mut fixture.resident, &fixture.original, |resident, _| {
+            resident.state.bind_checked_private_values_in(
+                &completion,
+                &ticket,
+                scope,
+                vec![entry],
+                &binders,
+                stage,
+            )
+        });
+        match refusal {
+            CaptureRefusal::MissingBinder | CaptureRefusal::ExtraBinder => {
+                assert!(matches!(result, Err(SessionError::Compile(_))));
+            }
+            CaptureRefusal::ForeignStage => {
+                assert!(matches!(result, Err(SessionError::StaleStagedDeclaration)));
+            }
+        }
+        assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
+        assert!(fixture.resident.state.bindings().get(id).is_none());
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(SessionModule::val(fixture.reservation.generation()))
+            .is_none());
+        assert!(!fixture.resident.binding_provenance.contains_key(&id.raw()));
+        assert!(fixture
+            .resident
+            .state
+            .prepared()
+            .unwrap()
+            .prepared_handle_of(handle.raw())
+            .is_none());
+        assert!(fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .is_err());
+    }
+
+    fn checked_capture_fixture(session: SessionId) -> CheckedCaptureFixture {
+        use super::world_cell_test_support::{
+            bootstrap_world_for, plan_fixture_cell_for, InputRecipe,
+        };
+        use crate::session::turn::{
+            consume_cell_program_item, finish_cell_program_admitted, prepare_cell_program_admitted,
+        };
+        use crate::session::TurnResult;
         use tidepool_testing::effect_surface::TestEffectSurface;
-        use tidepool_toolchain::checked_cell::CellRecipe;
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let library =
-            SessionLib::open(SessionId(999), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(effects.include_paths().to_vec());
-        let mut state = PersistentSession::new(Some(library), 1024 * 1024);
-        let public = state.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = state.compile_view_for_execution(&execution).unwrap();
-        let imports = view.turn_imports(&SourceImports::from_specs(["qualified Prelude as P"]));
-        let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
-        let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
+        let recipe = InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
+            .unwrap()
+            .with_validation_include(recipe.include.clone());
+        let mut resident =
+            TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(library));
+        let original = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let public = original.scope();
+        resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: public,
+                ..Default::default()
+            })
+            .unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &original);
+        let execution = Arc::new(
+            source_action(&mut resident, &original, |resident, _| {
+                resident.begin_private_execution(public)
+            })
+            .unwrap(),
+        );
         let source = include_str!("fixtures/checked-interface-publication.hs");
-        let specification = CellRecipe::new(
-            source.to_string(),
-            template.clone(),
-            templates
-                .iter()
-                .map(|template| {
-                    let kind = match template.kind {
-                        crate::session::TemplateSelector::Decl => "decl",
-                        crate::session::TemplateSelector::Bind => "bind",
-                        crate::session::TemplateSelector::BindDiscard => "binddiscard",
-                        crate::session::TemplateSelector::Expr => "expr",
-                    };
-                    (kind.to_owned(), template.source.clone())
-                })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap();
-        let admission = state
-            .admit_planned_cell_for_execution(
-                execution.clone(),
-                tidepool_testing::with_settlement(|settlement| {
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(view.include_paths(effects.include_paths())),
-                        settlement,
-                    )
-                })
-                .unwrap(),
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                view.include_paths(effects.include_paths()),
+        let admission =
+            plan_fixture_cell_for(&mut resident, &original, &recipe, source, execution.clone())
+                .unwrap();
+        let prepared = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
                 None,
+                |_| {},
+                |owner, settlement| prepare_cell_program_admitted(owner, admission, settlement),
             )
             .unwrap();
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap();
+        let (checked, program) = finish_cell_program_admitted(prepared).unwrap();
         let first = checked.checked_item(0).unwrap();
-        let prefix = state.begin_cell_program(program).unwrap().unwrap();
-        let mut resident = TestSession::from_persistent_for_test(frunk::HNil, EmptyOutput, state);
+        let prefix = resident.begin_cell_program(program).unwrap().unwrap();
         resident
             .set_run_context(SessionRunContext {
                 lexical_scope: execution.private_scope(),
                 ..Default::default()
             })
             .unwrap();
-        let reservation = resident
-            .admit_checked_item(prefix.clone(), first.clone())
-            .unwrap();
+        let reservation = source_action(&mut resident, &original, |resident, _| {
+            resident.admit_checked_item(prefix.clone(), first.clone())
+        })
+        .unwrap();
         let TurnResult::Bind {
             bound, compiled, ..
         } = consume_cell_program_item(reservation.clone()).unwrap()
         else {
             panic!("expected checked binding");
         };
+        CheckedCaptureFixture {
+            root,
+            original,
+            resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        }
+    }
+
+    fn checked_interface_publication_failure(write_failure: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let CheckedCaptureFixture {
+            root,
+            original,
+            mut resident,
+            execution,
+            checked,
+            prefix,
+            reservation,
+            bound,
+            compiled,
+        } = checked_capture_fixture(SessionId(999));
+        let public = original.scope();
         let module = tidepool_repr::SessionModule::val(reservation.generation());
         let path = root.path().join(module.relative_hi_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -10928,7 +11410,7 @@ mod authored_publication_tests {
         };
         let before = prefix.snapshot();
         let public_bindings = resident.workbench_bindings_in(public);
-        let outcome = tidepool_testing::with_settlement(|settlement| {
+        let outcome = source_action(&mut resident, &original, |resident, settlement| {
             resident.run_bind_with_sites(
                 "checkedPublication",
                 compiled.code(),
@@ -10963,13 +11445,13 @@ mod authored_publication_tests {
         }
         let id = SessionVarId::from_extract(bound[0].var_id);
         assert!(
-            resident.state.bindings().get(id).is_some(),
-            "failed publication still has private native custody"
+            resident.state.bindings().get(id).is_none(),
+            "row refusal must precede private binding installation"
         );
+        assert!(!resident.binding_provenance.contains_key(&id.raw()));
         drop(before);
         drop(compiled);
         drop(checked);
-        drop(first);
         drop(reservation);
         drop(prefix);
         drop(execution);
