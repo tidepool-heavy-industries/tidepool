@@ -1556,9 +1556,15 @@ impl ExactDeclarationContext {
         assert_unissued(&published);
         assert_unissued(&published.publication_birth_support(owner).unwrap());
 
-        // An empty source delta still traverses the real source continuation
-        // owner with a genuine completed source selection. It must retain the
-        // receiving published row and its immutable pre-endorsement birth.
+        // Both continuation paths start from the published helper. Source
+        // extension adds the incoming TYPE rows even without SOURCE demand;
+        // feeding that result into the World test would pre-install its delta.
+        let published_context = Arc::new(
+            context
+                .rebuild(|facts| facts.compiler_support = published.clone())
+                .finish()
+                .unwrap(),
+        );
         let extended = published
             .extend_program_source(
                 selection,
@@ -1569,15 +1575,17 @@ impl ExactDeclarationContext {
             .unwrap();
         assert_unissued(&extended);
         assert_unissued(&extended.publication_birth_support(owner).unwrap());
-        let context = Arc::new(
-            context
-                .rebuild(|facts| facts.compiler_support = extended)
-                .finish()
-                .unwrap(),
-        );
+        let extended_context = published_context
+            .as_ref()
+            .clone()
+            .rebuild(|facts| facts.compiler_support = extended)
+            .finish()
+            .unwrap();
+        assert_unissued(extended_context.compiler_source_support());
 
         // Exercise the same retained input owner used by compiler World
         // continuations, including its actual native-selection consumer.
+        let context = published_context;
         let world = context
             .capture_world_primary_inputs(context.toolchain_identity_sha256())
             .unwrap();
