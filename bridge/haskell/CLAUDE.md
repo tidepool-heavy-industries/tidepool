@@ -157,9 +157,13 @@ retain generated import intent when parsed into a later stage; imports submitted
 in the current cell retain authored source intent. The request-local World import
 basis hydrates only reached selected TYPE rows before downsweep and rename.
 Canonical source-import adjacency authorizes its virtual lexical graph;
-implementation TYPE requirements do not become lexical edges. Any captured
-source-less HOME import retains its exact owner in the completion's import
-receipt and is excluded from ordinary package/source lookup evidence. Classify
+implementation TYPE requirements do not become lexical edges. Canonical SOURCE
+imports retain their exact owners even when their captured interfaces have no
+current source node. Checked-value imports use their separate verified authority;
+they do not become canonical SOURCE adjacency merely because GHC resolves them
+to HOME modules. Partition actual selected imports using their issuing owners,
+then require complete SOURCE-edge coverage. Do not drop unexplained HOME imports
+or infer their role from the absence of a source file. Classify
 actual lexical edges using the same admitted input basis, rather than the
 subset of owners with current source files. Any captured
 current source is qualified before hydration or exclusion can hide a conflict.
@@ -420,8 +424,9 @@ This is an internal matched worker/frontend migration: previous workers reject
 
 ## Current source selection of retained originals
 
-`TPEXACTCOMPILE` version 3 retains the fresh source receipt fields and a
-separate current source-selection section. Each selected row names the exact
+`TPEXACTCOMPILE` version 4 retains the fresh source receipt fields, a
+separate current source-selection section, and the root's SOURCE import roles.
+Each selected row names the exact
 unit/module, canonical certificate SHA, interface SHA and source SHA. Current
 source evidence records bytes, authored import adjacency and resolution
 witnesses. This proof needs no native product or execution-source graph and
