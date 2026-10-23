@@ -200,6 +200,10 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
         .seal(&admission)
         .expect("independent produced-value prefix reaches actual compiler END");
     assert_eq!(program.items().len(), 2);
+    let foreign_inventory = program.items()[0]
+        .compiler_context()
+        .artifact_view()
+        .inventory();
 
     let (prepared, admission) = settle(|| {
         let (endpoint, world, source) = open_empty_world()?;
@@ -215,7 +219,7 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
                 (53, "dependentSelection"),
             ],
         )?;
-        assert_private_future_dependency(&checked)?;
+        assert_private_future_dependency(&checked, foreign_inventory)?;
         prepare_world_cell_program(checked)
     });
     let program = prepared
@@ -226,6 +230,7 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
 
 fn assert_private_future_dependency(
     checked: &Arc<CheckedWorldCellProgram>,
+    foreign_inventory: &crate::artifact_inventory::ArtifactInventory,
 ) -> Result<(), CompileError> {
     use crate::artifact_inventory::{
         ArtifactBindingNode, ArtifactDependency, NativeRequirementRoot,
@@ -362,11 +367,12 @@ fn assert_private_future_dependency(
             .collect::<Vec<_>>();
         let catalog = segment_package_availability(&segment.originals, &packages);
         let before_target = inventory.metrics().issued_scope_nodes;
+        let target_cursor = native_cursor.clone();
         let target = inventory.select_native_target(
             certified.physical_cohort(),
             package_selection.authenticated_imports().clone(),
-            Some(entry),
-            Some(&native_cursor),
+            Some(entry.clone()),
+            Some(&target_cursor),
             &values,
             &catalog,
             &mut validation,
@@ -375,6 +381,31 @@ fn assert_private_future_dependency(
         native_cursor = target.artifacts().clone();
         assert!(native_cursor.selected_native_groups().contains(&entry_key));
         if index == 0 {
+            let before_foreign = foreign_inventory.metrics().issued_scope_nodes;
+            let before_original = inventory.metrics().issued_scope_nodes;
+            let cursor_before_foreign = target_cursor.capture_graph_selection();
+            let foreign = foreign_inventory.select_native_target(
+                certified.physical_cohort(),
+                package_selection.authenticated_imports().clone(),
+                Some(entry),
+                Some(&target_cursor),
+                &values,
+                &catalog,
+                &mut validation,
+            );
+            assert!(
+                matches!(foreign, Err(CompileError::ExtractFailed(ref detail))
+                if detail == "artifact inventory: target belongs to another inventory")
+            );
+            assert_eq!(inventory.metrics().issued_scope_nodes, before_original);
+            assert_eq!(
+                foreign_inventory.metrics().issued_scope_nodes,
+                before_foreign
+            );
+            assert_eq!(
+                target_cursor.capture_graph_selection(),
+                cursor_before_foreign
+            );
             assert!(native_cursor.artifact_ids().contains(&later));
             assert!(!native_cursor.contains_namespace_artifact(later));
             let roots = native_cursor
