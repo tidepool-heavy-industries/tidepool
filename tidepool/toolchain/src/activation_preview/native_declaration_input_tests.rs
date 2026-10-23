@@ -6,7 +6,7 @@ use crate::artifact_inventory::{
 use crate::certified_products::{
     fixture_finalized_product, fixture_module_interface, fixture_native_declaration_product,
 };
-use crate::declaration_context::ExactCompileContext;
+use crate::declaration_context::{ExactCompileContext, OriginalCompilerInputs};
 use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use std::collections::{BTreeMap, BTreeSet};
@@ -178,7 +178,7 @@ fn original_context_with_fixtures(
             NativeArtifactDemand::ScopeInterfaces,
         )
         .unwrap();
-    let context = ExactDeclarationContext::from_authenticated_execution(
+    let context = ExactDeclarationContext::retained_execution_fixture(
         producer,
         &view,
         CompilerInputProjection::restore(&view, &roles).unwrap(),
@@ -201,7 +201,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
     let lexical = context.lexical_graph().to_vec();
     let roles = context.compiler_input_roles();
     let groups = context.artifact_view().selected_native_groups();
-    let private = original_native_declaration_inputs(context, PRODUCER).unwrap();
+    let private = OriginalCompilerInputs::reuse_selected_authored(context).unwrap();
     let request = ExactCompileContext::new(context.clone())
         .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, private)
         .unwrap();
@@ -312,8 +312,8 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
 pub(crate) fn display_prototype(
     context: &Arc<ExactDeclarationContext>,
 ) -> Arc<ExactHostBindingPrototype> {
-    // Component codec fixture. Context authority comes from the original
-    // issuer above, rather than from these nominal signature bytes.
+    // Canonical type codec fixture over retained input data. Neither these
+    // nominal bytes nor this context issue output-completion evidence.
     let mut structure = Vec::new();
     ciborium::into_writer(
         &array([text("literal"), text("nat"), text("1")]),
@@ -401,17 +401,7 @@ pub(crate) fn with_irrelevant_values_named(
         .clone()
         .extend_with_value_interfaces(&values)
         .unwrap();
-    Arc::new(
-        ExactDeclarationContext::from_authenticated_execution(
-            producer,
-            expanded.artifact_view(),
-            expanded.compiler_input_projection().clone(),
-            lexical,
-            context.original_instance_target().unwrap().clone(),
-            &[],
-        )
-        .unwrap(),
-    )
+    Arc::new(expanded.extend(&[], &[], lexical).unwrap())
 }
 
 pub(crate) fn admit_irrelevant_value_root(
@@ -471,99 +461,78 @@ pub(crate) fn admit_irrelevant_value_root(
     Arc::new(expanded)
 }
 
-fn display_property_config() -> proptest::test_runner::Config {
+fn retained_history_property_config() -> proptest::test_runner::Config {
     let mut config = property_config();
     config.cases = 64;
     config
 }
 
 proptest::proptest! {
-    #![proptest_config(display_property_config())]
+    #![proptest_config(retained_history_property_config())]
     #[test]
-    fn display_projection_ignores_only_unreachable_value_histories(versions in proptest::collection::vec(1u8..255, 1..12)) {
+    fn retained_native_inputs_ignore_unselected_value_histories(versions in proptest::collection::vec(1u8..255, 1..12)) {
         let original = original_context_with_roles(&[(true, true, true)], true);
-        let prototype = display_prototype(&original);
-        let expected = OriginalDisplayContext::issue(&prototype, &original).unwrap().unwrap();
+        let expected = offered_native_owners(&original);
         let mut previous = original.semantic_sha256();
         for count in 1..=versions.len() {
             let expanded = with_irrelevant_values(&original, &versions[..count], false);
             proptest::prop_assert_ne!(expanded.semantic_sha256(), previous);
             previous = expanded.semantic_sha256();
-            let prototype = display_prototype(&expanded);
-            let projected = OriginalDisplayContext::issue(&prototype, &expanded).unwrap().unwrap();
-            proptest::prop_assert_eq!(&projected, &expected);
-            proptest::prop_assert_eq!(projected.identity(), expected.identity());
-            proptest::prop_assert!(projected.declarations().value_interfaces().is_empty());
-            proptest::prop_assert_eq!(offered_native_owners(projected.declarations()), vec!["Tidepool.Session.Lib.G1".to_owned()]);
-            let reopened = OriginalDisplayContext::issue(&prototype, projected.declarations()).unwrap().unwrap();
-            proptest::prop_assert_eq!(reopened, projected);
+            proptest::prop_assert_eq!(expanded.value_interfaces().len(), count);
+            proptest::prop_assert_eq!(expanded.lexical_graph(), original.lexical_graph());
+            proptest::prop_assert_eq!(offered_native_owners(&expanded), expected.clone());
+            proptest::prop_assert!(expanded.artifact_view().selected_native_groups().is_empty());
         }
         let visible = with_irrelevant_values(&original, &versions[..1], true);
-        let projected = OriginalDisplayContext::issue(&prototype, &visible).unwrap().unwrap();
-        proptest::prop_assert_ne!(&projected, &expected);
-        proptest::prop_assert_eq!(projected.declarations().value_interfaces().len(), 1);
+        proptest::prop_assert_ne!(visible.lexical_graph(), original.lexical_graph());
+        proptest::prop_assert_eq!(offered_native_owners(&visible), expected);
+        proptest::prop_assert!(visible.source_scope().rows().is_empty());
     }
 }
 
 #[test]
-fn display_projection_preserves_native_availability_and_refuses_missing_instance_evidence() {
+fn retained_native_inputs_require_exact_selected_custody() {
     let without_native = original_context_with_roles(&[(true, false, true)], true);
     let with_native = original_context_with_roles(&[(true, true, true)], true);
-    let prototype = display_prototype(&with_native);
-    let absent = OriginalDisplayContext::issue(&prototype, &without_native)
-        .unwrap()
-        .unwrap();
-    let available = OriginalDisplayContext::issue(&prototype, &with_native)
-        .unwrap()
-        .unwrap();
-    assert_ne!(
-        absent, available,
-        "canonical type equality cannot erase original native custody"
-    );
-    assert!(offered_native_owners(absent.declarations()).is_empty());
+    assert!(offered_native_owners(&without_native).is_empty());
     assert_eq!(
-        offered_native_owners(available.declarations()),
+        offered_native_owners(&with_native),
         ["Tidepool.Session.Lib.G1"]
     );
-    let unknown = ExactDeclarationContext::from_authenticated_interfaces(
-        prototype.producer(),
+    let type_only = ExactDeclarationContext::from_authenticated_interfaces(
+        with_native.toolchain_identity_sha256(),
         with_native.artifact_view(),
         with_native.compiler_input_projection().clone(),
     )
     .unwrap();
-    assert!(OriginalDisplayContext::issue(&prototype, &unknown)
+    assert!(OriginalCompilerInputs::reuse_selected_authored(&type_only)
         .unwrap()
         .is_none());
+    assert!(type_only.source_scope().rows().is_empty());
 }
 
 #[test]
-fn display_projection_keeps_native_custody_without_promoting_group_demand() {
+fn retained_native_inputs_do_not_promote_group_demand() {
     let original = original_context_with_roles(&[(true, true, true)], true);
-    let prototype = display_prototype(&original);
     let expanded = with_irrelevant_values(&original, &[1], false);
     let before_groups = expanded.artifact_view().selected_native_groups();
     assert!(before_groups.is_empty());
     assert_eq!(expanded.value_interfaces().len(), 1);
-
-    let projected = OriginalDisplayContext::issue(&prototype, &expanded)
-        .unwrap()
-        .unwrap();
-    let declarations = projected.declarations();
-    assert!(declarations.value_interfaces().is_empty());
     assert_eq!(
-        declarations.artifact_view().selected_native_groups(),
-        before_groups,
-        "display visibility must not promote retained native custody into executable demand"
+        offered_native_owners(&expanded),
+        ["Tidepool.Session.Lib.G1"]
     );
     assert_eq!(
-        offered_native_owners(declarations),
-        ["Tidepool.Session.Lib.G1"],
-        "the retained original native body remains available"
+        expanded.artifact_view().selected_native_groups(),
+        before_groups
     );
+    assert_eq!(expanded.value_interfaces().len(), 1);
+    assert_eq!(expanded.lexical_graph(), original.lexical_graph());
+    assert!(expanded.source_scope().rows().is_empty());
 }
 
 #[test]
-fn display_projection_preserves_exact_canonical_implementation_dependencies() {
+fn retained_inputs_preserve_exact_canonical_implementation_dependencies() {
     use crate::certified_products::fixture_module_core;
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
     let child = fixture_module_interface(producer, "main", "CapturedDependency", BTreeMap::new());
@@ -602,7 +571,7 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
             module: "CapturedDependency".into(),
         };
         Arc::new(
-            ExactDeclarationContext::from_authenticated_execution(
+            ExactDeclarationContext::retained_execution_fixture(
                 producer,
                 &view,
                 roles,
@@ -622,23 +591,30 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
             .unwrap(),
         )
     });
-    assert_eq!(
-        contexts[0].original_preview_interface_graph().unwrap(),
-        contexts[1].original_preview_interface_graph().unwrap(),
-        "the full original interface graph is unchanged"
-    );
-    let displays = contexts.map(|context| {
-        OriginalDisplayContext::issue(&display_prototype(&context), &context)
+    let selected_types = |context: &ExactDeclarationContext| {
+        context
+            .compiler_metadata_snapshot()
             .unwrap()
-            .unwrap()
-    });
+            .entries
+            .iter()
+            .map(|(owner, entry)| match &entry.payload {
+                crate::artifact_inventory::ArtifactPayload::Canonical(interface) => {
+                    (owner.clone(), interface.interface_sha256())
+                }
+                _ => panic!("canonical interface fixture"),
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(selected_types(&contexts[0]), selected_types(&contexts[1]));
+    assert_eq!(contexts[0].lexical_graph(), contexts[1].lexical_graph());
     assert_ne!(
-        displays[0], displays[1],
-        "equal type and instance interfaces cannot erase their exact implementation dependency"
+        contexts[0].semantic_sha256(),
+        contexts[1].semantic_sha256(),
+        "equal type and lexical interfaces retain distinct implementation dependencies"
     );
-    for display in displays {
+    for context in contexts {
         let scratch = tempfile::tempdir().unwrap();
-        ExactCompileContext::new(display.declarations().clone())
+        ExactCompileContext::new(context)
             .prepare_compilation(scratch.path(), PRODUCER)
             .unwrap()
             .validate_artifacts()
@@ -658,7 +634,7 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
         "a later declaration cannot enter an earlier capture"
     );
     let scratch = tempfile::tempdir().unwrap();
-    let private = original_native_declaration_inputs(&later, PRODUCER).unwrap();
+    let private = OriginalCompilerInputs::reuse_selected_authored(&later).unwrap();
     let request = ExactCompileContext::new(later.clone())
         .prepare_compilation_with_private_input(scratch.path(), PRODUCER, None, private)
         .unwrap();
@@ -692,7 +668,7 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
     let canonical_only =
         original_context_with_products(&[(true, false, true)], vec![declaration(1, true)]);
     assert!(
-        original_native_declaration_inputs(&canonical_only, PRODUCER)
+        OriginalCompilerInputs::reuse_selected_authored(&canonical_only)
             .unwrap()
             .is_none(),
         "finalized canonical custody cannot issue a native availability census"
@@ -832,7 +808,15 @@ fn original_role_preview_keeps_exact_native_identity_and_refuses_substitution() 
         projection.native_declaration_availability(&types).is_err(),
         "a selected original role cannot silently lose native custody"
     );
-    assert!(original_native_declaration_inputs(&original, b"wrong preview issuer").is_err());
+    let wrong_producer = tempfile::tempdir().unwrap();
+    assert!(ExactCompileContext::new(original.clone())
+        .prepare_compilation_with_private_input(
+            wrong_producer.path(),
+            b"wrong preview issuer",
+            None,
+            OriginalCompilerInputs::reuse_selected_authored(&original).unwrap(),
+        )
+        .is_err());
 }
 
 proptest::proptest! {
@@ -909,7 +893,7 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     .unwrap();
     let target = fixture.original.descriptor.owner.clone();
     let context = Arc::new(
-        ExactDeclarationContext::from_authenticated_execution_support(
+        ExactDeclarationContext::retained_execution_support_fixture(
             producer,
             crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                 candidate.compiler_inputs(),
@@ -926,7 +910,7 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
     );
     assert!(context.source_scope().rows().is_empty());
     let before = context.as_ref().clone();
-    let private = original_native_declaration_inputs(&context, PRODUCER)
+    let private = OriginalCompilerInputs::reuse_selected_authored(&context)
         .unwrap()
         .expect("selected Original role retains its issued private availability proof");
     let scratch = tempfile::tempdir().unwrap();
