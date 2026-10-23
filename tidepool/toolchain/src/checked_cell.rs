@@ -9,7 +9,6 @@ use std::sync::Arc;
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
-use crate::declaration_context::ExactSourceAdmission;
 use crate::CompileError;
 
 /// Caller-authored, immutable whole-cell recipe. It names the exact source,
