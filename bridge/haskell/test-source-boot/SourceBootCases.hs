@@ -233,7 +233,7 @@ import Tidepool.DeclarationJoin (HostBindingInterfaceInput(..), BindingInterface
   , DeclarationOperation(..), JoinRejection(..), encodeHostBindingInterface, readDeclarationOperation)
 import Tidepool.FamilyConsistency (FamilyConsistencyRejection(..))
 import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), SessionModuleKind(..))
-import Tidepool.ImportAdmission (ExactCompilation(..), writeCheckedExactCompilation)
+import Tidepool.ImportAdmission (ExactCompilation, compilationScope, compilationSourceSelection, compilationSourceImports, writeCheckedExactCompilation)
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeRecipeOriginals, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes

@@ -83,7 +83,7 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), sameExactInterfaceIdentity, originalInterfaceBytes, originalRetainedInterfaceCaptures, newOriginalInterfaceArtifactsWithReader, newOriginalInterfaceArtifactsWithLookup, exactInterfaceSummary )
 import Tidepool.ImportAdmission
-  ( ExactCompilation(..), compilationSource, captureFinalizedSourceOriginals
+  ( ExactCompilation, compilationScope, compilationSourceSelection, compilationExactImports, compilationSource, captureFinalizedSourceOriginals
   , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication )
 import Tidepool.ExactScope

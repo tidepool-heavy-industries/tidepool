@@ -7,7 +7,8 @@ module Tidepool.ImportAdmission
   ( CheckedItemImportRendering, checkedItemImportRendering
   , checkedItemOriginalRendering, checkedItemValueRendering, checkedItemImportNamespaces
   , appendCompletedProgramImports
-  , ExactCompilation(..), compilationSource
+  , ExactCompilation, compilationScope, compilationTransaction, compilationSourceImports
+  , compilationExactImports, compilationSourceSelection, compilationSource
   , captureFinalizedSourceOriginals, compilationOriginalSourceImports
   , ExactCompilationPublication(..)
   , writeExactCompilation, writeCheckedExactCompilation
@@ -50,6 +51,7 @@ import Tidepool.LocalNativeDeclaration (localNativeOwner, localNativeProof)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.Binders (CellSourcePlan(..), SourcePrologue(..))
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
+import Tidepool.ImportAdmission.Internal (ExactCompilation(..))
 import Tidepool.ImportSyntax.Internal
   ( CellSourceSpan(..), LocatedImport(..), ImportIntent(..)
   , ProtectedImports(..), protectedImportsRendering )
@@ -121,14 +123,21 @@ appendCompletedProgramImports scope values originals plan = do
   pure plan {cellPlanPrologue = prologue {prologueImports = prologueImports prologue ++ imports}}
 
 
-data ExactCompilation = ExactCompilation
-  { compilationScope :: ExactScope
-  , compilationTransaction :: Word64
-  , compilationSourceImports :: IssuedSourceImports
-  -- | Direct imports to retained exact owners, excluded from fresh source lookup.
-  , compilationExactImports :: [((String, String, Bool), [(DependencyQualifier, String, Bool, String)])]
-  , compilationSourceSelection :: Maybe SourceSelectedOriginals
-  } deriving (Eq, Show)
+compilationScope :: ExactCompilation -> ExactScope
+compilationScope (ExactCompilation scope _ _ _ _) = scope
+
+compilationTransaction :: ExactCompilation -> Word64
+compilationTransaction (ExactCompilation _ transaction _ _ _) = transaction
+
+compilationSourceImports :: ExactCompilation -> IssuedSourceImports
+compilationSourceImports (ExactCompilation _ _ imports _ _) = imports
+
+compilationExactImports :: ExactCompilation
+  -> [((String,String,Bool),[(DependencyQualifier,String,Bool,String)])]
+compilationExactImports (ExactCompilation _ _ _ imports _) = imports
+
+compilationSourceSelection :: ExactCompilation -> Maybe SourceSelectedOriginals
+compilationSourceSelection (ExactCompilation _ _ _ _ selected) = selected
 
 compilationSource :: ExactCompilation -> FilePath
 compilationSource = fst . sourceImportsSnapshot . compilationSourceImports

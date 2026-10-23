@@ -152,6 +152,7 @@ library tidepool-extract-internal
     Tidepool.ImportAdmission
   other-modules:   Tidepool.FinalizedModule.Internal
                    Tidepool.ImportSyntax.Internal
+                   Tidepool.ImportAdmission.Internal
                    Tidepool.CheckedCell.Internal
                    Tidepool.LocalNativeDeclaration
                    Tidepool.ResumePackage
