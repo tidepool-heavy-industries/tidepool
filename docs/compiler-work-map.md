@@ -1,6 +1,6 @@
 # Compiler work and authority map
 
-This map was checked against joined source `4912601c7f` (2026-10-22).
+This map was checked against joined source `0197741519` (2026-10-22).
 The linked-code, physical-stage, acquired-prefix, source-scope and Context9
 consumer tranche is joined in source; G2 remains unqualified. Source inspection
 establishes ownership and callers; it does not establish executed acceptance,
@@ -152,7 +152,10 @@ of reconstructing them from module names, generation labels or retained catalogs
   source fingerprint and effective language/extensions/safety/import-path policy;
   an hs-boot summary remains a separate parse. After `cpBeforeModule` installs
   precisely demanded source-less interfaces, `prepareImportAdmission` resolves
-  selected Modules and invokes the closed refiner on its owned driver. Narrowed
+  selected Modules and carries the existing `CheckedValueImportAuthority` into
+  `PreparedImportAdmission`. A selected checked import must have that full Module
+  installed in the HPT and cannot select a boot interface. The closed refiner
+  consumes the same owned driver. Narrowed
   and qualified descendants must preserve their parent's selected owner and
   import restriction. Frontend summary rebinding preserves the parsed body and
   occurrence lineage; callers cannot pair a replacement AST with that proof.
@@ -163,9 +166,14 @@ of reconstructing them from module names, generation labels or retained catalogs
   structurally owns finite completion, while World inputs retain their correlated
   World completion. Terminal projections retain compact consumed decisions and
   perform no Finder resolution; the successful parsed owner is released from the
-  attempt reference. The detached import-intent parser/selection route is removed.
-  This boundary is source-reviewed at this checkpoint; actual-driver, cold finite,
-  ordinary CPP and carried-World histories remain execution obligations. Relevant
+  attempt reference. Completion keeps checked imports outside canonical SOURCE
+  roles, refuses any checked/consumed-SOURCE overlap and requires exact equality
+  between selected nonchecked HOME imports and the consumed SOURCE census. SOURCE
+  wire evidence and `exactImports` are unchanged; checked TYPE custody retains its
+  independent issuer. The detached import-intent parser/selection route is removed.
+  This boundary is source-reviewed and its checked-value control executes at this
+  checkpoint; broader actual-driver, ordinary CPP and carried-World histories
+  remain execution obligations. Relevant
   controls include `moduleHeaderCompilation`, `generatedScaffoldImports`,
   `checkedCommandValue` and `worldCarriedImportTypes`; migrated callers and linked
   test executables alone do not establish their passing behavior.
@@ -248,8 +256,8 @@ ordinary journey, snapshot recovery or frozen bundle.
 
 | Boundary | Remaining acceptance |
 |---|---|
-| Compiler boundary qualification | Historical target/TYPE/prefix/package/support passes belong to the ledger's predecessor sources. At `a33e076132`, toolchain/runtime production and cfg compilation pass. The actual prior-World history still refuses a checked-value role in a transitive TYPE closure; the joined checked-value partition repair is source-reviewed, with execution pending. The finite owner/restore missing-interface control also needs its repaired exact refusal oracle executed. Neither is a passing current owner history. |
-| Runtime selection/publication | Pure graph/encoder/export/codegen focus passes retain their own exact-source scope. At `a33e076132`, the staged runtime history clears the missing-payload panic but fails with the original-target instance-environment error. The `66214423ee` checkpoint does not supply a passing staged history. The joined target-proof repair removes capture's complete-instance gate while preserving display/publication checks; it requires the actual staged rerun. Acquired-owner/Context9 restoration, Text/Display, acknowledgement and ordinary publication remain unqualified. V's warm lane owns exact source pins and terminal reports. |
+| Compiler boundary qualification | At `0197741519`, affected production/cfg compilation passes. The [checked-value type-closure leaf](/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/linked-0197-checked-value-one.log) executes 1/1 and reaches all four explicit/inferred and normal/delayed branches, complete TYPE closure, owner refusals and the SOURCE/TYPE distinction. Nested actual-candidate 1/1 and codec 4/4 passes retain their separate scope. The [Context9 control](/srv/swarm/evidence/inanna/g2-sol-tranche-20261022/validation/linked-1d5c-context-nine-one.log) passes 1/1 at `1d5c7d86f8`, covering omitted fields, missing roots, restore and unchanged reuse. Broader snapshot histories remain unqualified; earlier target/TYPE/prefix/package/support results belong to their recorded predecessor sources. |
+| Runtime selection/publication | Current runtime production compilation is not an executed runtime history. Staged World, runtime recovery from acquired-owner/Context9 snapshots, Text/Display, acknowledgement and ordinary publication remain unqualified. The native target-proof and checked-import completion boundaries are source-reviewed; their component results do not qualify the ordinary journey. V's warm lane owns exact source pins and terminal reports. |
 | World expression reservation | The held World issues collision-free expression and `_unit` names from its actual lexical scope. Rust validates ordered expression coverage and reserves captures from that witness; the actor uses the ordinary World observation path. Missing witnesses still refuse. Joined bare/effectful expression execution and publication remain to qualify through semantic histories. |
 | Native build and custody qualification | Native actions require `bind_owned` and declared compiler-service resources; portable actions remain direct. Qualify actual catalog production and the exact frozen bundle through [package qualification](../build/package/qualification.py). Retain exact-source limits on custody/recovery passes. |
 | Joined ordinary workflow | Execute finite source → installer → public World → repeated package-using cells, A retirement and new B execution with genuine captured-A refusal. Qualify discovery, private inputs, reload and caller loss before selected Persona startup and real DeepSeek smoke on one bundle. |
