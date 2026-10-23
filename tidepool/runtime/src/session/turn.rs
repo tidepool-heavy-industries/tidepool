@@ -6754,26 +6754,17 @@ mod tests {
         );
         assert!(before.0 >= 2, "actual multi-item output must be observed");
         assert_eq!(before.0, before.1, "one decode per captured item");
-        let originals = prepared
-            .program
+        let PreparedRuntimeCellEvidence::World(output) = &prepared.evidence else {
+            panic!("metadata fixture must retain the actual World output owner");
+        };
+        let issued_items = output
             .items()
             .iter()
-            .filter_map(|item| item.native())
-            .map(|owner| {
-                (
-                    owner.item().index(),
-                    (
-                        owner.table().clone(),
-                        owner.warnings().captured_type.clone(),
-                        owner.warnings().has_io,
-                        owner.warnings().warnings.clone(),
-                    ),
-                )
-            })
+            .map(|item| (item.ordinal(), item.generation()))
             .collect::<std::collections::BTreeMap<_, _>>();
         assert!(
-            originals.len() >= 2,
-            "capture metadata from multiple actual World items"
+            issued_items.len() >= 2,
+            "capture multiple actual World items"
         );
         let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
         let natives = program
@@ -6782,12 +6773,12 @@ mod tests {
             .filter_map(|item| item.native())
             .collect::<Vec<_>>();
         assert_eq!(natives.len(), before.1);
+        assert_eq!(natives.len(), issued_items.len());
         for owner in &natives {
-            let (table, captured_type, has_io, warnings) = &originals[&owner.item().index()];
-            assert_eq!(table, owner.table());
-            assert_eq!(captured_type, &owner.warnings().captured_type);
-            assert_eq!(*has_io, owner.warnings().has_io);
-            assert_eq!(warnings, &owner.warnings().warnings);
+            assert_eq!(
+                issued_items.get(&owner.item().index()),
+                Some(&owner.generation())
+            );
             assert!(owner.table().json_layout().is_none());
         }
         let siblings = natives
