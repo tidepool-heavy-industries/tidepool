@@ -110,11 +110,11 @@ import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, r
   , preparedCompilationWorldInputs, prepareCompilationOriginals)
 import Tidepool.WorkerDiagnostics (sourceFailureDiagnostics)
 import Tidepool.ExtractRequest
-  ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
+  ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest, ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), WorldResidency(..), WorldNonRetentionReason(..), WorldAcquisitionMiss(..)
   , WorldCellRecipe(..), WorldCellPlanRequest(..), WorldCellPrepareRequest(..), PlannedCellSlot(..)
   , WorldQueryRequest(..), WorldQueryQuestion(..), WorldPublicQuestion(..), WorldObservationQuery(..)
   , StructuredInspection(..), StructuredNameScope(..), StructuredNameNamespace(..), InspectionProvenance(..)
-  , RequestField(..), WorkerRequest, workerArgv, workerRequestFromArgv )
+  , RequestField(..), workerArgv, workerRequestFromArgv )
 import Tidepool.TypedSegment (typedSegmentPlanItems, TypedItemPlan(..), TypedItemBody(..))
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
@@ -1851,7 +1851,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
                   (WorldScopedQuery (WorldObservationExpression (InspectionProvenance 1 "carried-import") expression))
                   (rootB </> "query.bin")
             args <- decodeWorldArgs [WorldQuery query]
-            answer <- (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldQuery
+            answer <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldQuery
             case deserialiseFromBytes decodeTerm (BL.fromStrict (BS.drop 12 answer)) of
               Right (remaining,TList [_,_,_,_,TList [TString "answer",TBytes payload]])
                 | BL.null remaining,"Int" `BS.isInfixOf` payload -> pure ()
@@ -1910,7 +1910,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
           recipe = WorldCellRecipe source template []
       createDirectory directory
       planArgs <- decodeWorldArgs [WorldCellPlan (WorldCellPlanRequest (worldInputsIdentity facts) reference recipe Nothing (directory </> "plan.cbor"))]
-      plan <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) runBoundWorldCellPlan
+      plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
       slots <- scopedRunGhc compiler $ do
         environment <- getSession
         parsed <- liftIO (analyzeOrderedCellWithFlags (hsc_dflags environment) template source)
@@ -1924,7 +1924,7 @@ worldCarriedImportTypes = withTiming $ withScratch $ \work ->
       let question = WorldCellPrepareRequest (worldInputsIdentity facts) reference recipe Nothing plan
             (BS.replicate 32 23) generation slots directory (directory </> "prepared.cbor")
       args <- decodeWorldArgs [WorldCellPrepare question]
-      (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $ \request -> do
+      (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
         admitted <- boundWorldCellPreparation request >>= either throwIO pure
         _ <- scopedPrepareWorldCellStage compiler admitted >>= maybe (fail "carried-import declaration omitted its stage") pure
         scopedCompileWorldCell compiler admitted (PreparedProducts Nothing) Set.empty
@@ -1985,7 +1985,7 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
               question = WorldQueryRequest identity reference
                 (WorldPublicModuleQuery (WorldPublicType inspection)) (rootB </> "type-answer.bin")
           args <- decodeWorldArgs [WorldQuery question]
-          answer <- (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldQuery
+          answer <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldQuery
           unless (BS.take 8 answer == "TPWQ0002") (fail "World type query lost its response framing")
           case deserialiseFromBytes decodeTerm (BL.fromStrict (BS.drop 12 answer)) of
             Right (remaining,TList [_,TBytes actual,TInt 1,TString "CanonicalPartialConsumer",_
@@ -2095,12 +2095,12 @@ worldCanonicalOriginalReuse = withTiming $ withScratch $ \work ->
           planRequest = WorldCellPlanRequest identity reference recipe Nothing (directory </> "plan.cbor")
       createDirectory directory
       planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
-      plan <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) runBoundWorldCellPlan
+      plan <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) runBoundWorldCellPlan
       let slots = [(0,PlannedPrologue generation),(1,PlannedDeclaration (generation+1)),(2,PlannedBind (generation+2))]
           question = WorldCellPrepareRequest identity reference recipe Nothing plan (BS.replicate 32 29)
             generation slots directory (directory </> "prepared.cbor")
       args <- decodeWorldArgs [WorldCellPrepare question]
-      (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $ \request -> do
+      (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
         completions <- prepareWorldCell request
         case completions of
           Left refusal -> pure (Left refusal)
@@ -2148,7 +2148,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                 planOut = work </> "cell-plan.cbor"
                 planRequest = WorldCellPlanRequest identity reference recipe Nothing planOut
             planArgs <- decodeWorldArgs [WorldCellPlan planRequest]
-            planBytes <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \request ->
+            planBytes <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) $ \request ->
               runBoundWorldCellPlan request
             -- These names are persisted observations, so UNUSED imported
             -- exports and every current binder/companion belong to freshness.
@@ -2158,7 +2158,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                 namesQuestion = planRequest {worldCellPlanRecipe=nameRecipe}
                 issueNames = do
                   args <- decodeWorldArgs [WorldCellPlan namesQuestion]
-                  (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
+                  (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldCellPlan
             namesBytes <- issueNames
             repeatedNames <- issueNames
             unless (namesBytes == repeatedNames) (fail "same held expression plan changed its issued names")
@@ -2209,7 +2209,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   ,worldCellSource="(1 :: Int)\n(2 :: Int)"}
                 renderedQuestion = planRequest {worldCellPlanRecipe=renderedRecipe}
             renderedArgs <- decodeWorldArgs [WorldCellPlan renderedQuestion]
-            renderedBytes <- (withBoundCompilerRequest (const (pure ())) compiler renderedArgs >=> finishCompletion)
+            renderedBytes <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest renderedArgs) >=> finishCompletion)
               runBoundWorldCellPlan
             renderedNames <- case deserialiseFromBytes decodeTerm (BL.fromStrict renderedBytes) of
               Right (remaining,TList fields) | BL.null remaining -> case last fields of
@@ -2225,7 +2225,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   [(fromIntegral ordinal,PlannedExpression (101+fromIntegral ordinal) name) | (ordinal,name) <- renderedNames]
                   (work </> "rendered-expression-names") (work </> "rendered-expression-names.cbor")
             renderedPrepareArgs <- decodeWorldArgs [WorldCellPrepare renderedPrepare]
-            (withBoundCompilerRequest (const (pure ())) compiler renderedPrepareArgs >=> finishCompletion) $ \request -> do
+            (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest renderedPrepareArgs) >=> finishCompletion) $ \request -> do
               admitted <- boundWorldCellPreparation request >>= either (fail . show) pure
               stage <- scopedPrepareWorldCellStage compiler admitted >>= maybe
                 (fail "expression admission lost its real rendered stage") pure
@@ -2260,7 +2260,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   (BS.replicate 32 7) 17 slots directory (directory </> "prepared.cbor")
             createDirectoryIfMissing True directory
             prepareArgs <- decodeWorldArgs [WorldCellPrepare prepareRequest]
-            validated <- (withBoundCompilerRequest (const (pure ())) compiler prepareArgs >=> finishCompletion) $ \request -> do
+            validated <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest prepareArgs) >=> finishCompletion) $ \request -> do
               validation <- boundWorldCellPreparation request
               forM_ validation $ \admitted -> do
                 unissued <- try (void (scopedCompileWorldCell compiler admitted CheckedEnvironment Set.empty))
@@ -2350,7 +2350,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                         _ -> fail "real world item omitted an exact file seal"
                       _ -> fail "real world item omitted its captured files"
                   _ -> fail "real world preparation omitted its actual item proof"
-                crossedCommit <- (withBoundCompilerRequest (const (pure ())) compiler planArgs >=> finishCompletion) $ \other ->
+                crossedCommit <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest planArgs) >=> finishCompletion) $ \other ->
                   try (commitPreparedWorldDependencies other completion) :: IO (Either InputRejection ())
                 unless (either (\failure -> case failure of CheckedPurposeMismatch -> True; _ -> False)
                     (const False) crossedCommit)
@@ -2438,12 +2438,12 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                             ,worldCellPlanOutput=ownDirectory </> "plan.cbor"}
                       createDirectoryIfMissing True ownDirectory
                       ownPlanArgs <- decodeWorldArgs [WorldCellPlan ownPlan]
-                      ownPlanBytes <- (withBoundCompilerRequest (const (pure ())) compiler ownPlanArgs >=> finishCompletion)
+                      ownPlanBytes <- (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest ownPlanArgs) >=> finishCompletion)
                         runBoundWorldCellPlan
                       let ownPrepare = WorldCellPrepareRequest identity reference ownRecipe Nothing ownPlanBytes
                             (BS.replicate 32 9) 17 caseSlots ownDirectory (ownDirectory </> "prepared.cbor")
                       ownArgs <- decodeWorldArgs [WorldCellPrepare ownPrepare]
-                      (withBoundCompilerRequest (const (pure ())) compiler ownArgs >=> finishCompletion) $ \request -> do
+                      (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest ownArgs) >=> finishCompletion) $ \request -> do
                         completions <- prepareWorldCell request >>= either
                           (fail . (("ordered World " ++ label ++ " refused: ") ++) . show) pure
                         unless (length completions == length kinds)
@@ -2625,7 +2625,7 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                   _ -> fail "expression cancellation control lost its exact held realization"
               issueCancellation compiler = do
                 args <- decodeWorldArgs [WorldCellPlan cancellationQuestion]
-                (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) runBoundWorldCellPlan
+                (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) runBoundWorldCellPlan
           fired <- newIORef False
           ((interrupted,poisoned),cancelledLog) <- captureDiagnostics $ runScope (pure ()) $ \compiler -> do
             acquire compiler
@@ -3857,3 +3857,7 @@ freshOutputSealSetLaws = withScratch $ \work -> do
   requireConflict (relocated {exactModule="ForeignType"},body)
   fresh <- either fail pure (retainTypeInterfaceCaptures Map.empty (additions (artifact,body)))
   unless (fresh == previous) (fail "fresh TYPE custody lost its actual issued capture")
+
+-- Fixture requests pass the production pure admission before compiler binding.
+admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
+admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)

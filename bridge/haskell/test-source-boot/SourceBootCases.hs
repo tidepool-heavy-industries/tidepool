@@ -5,7 +5,7 @@ import Tidepool.CompilerRequest
   ( BoundCompilerRequest, withBoundCompilerRequest, boundRequestExactScope, withBoundExactInterfaceTransaction
   , compilePreparedRequest, preparedCompilationResult, prepareArtifactsWithIntent
   , PreparedArtifactOutput(..), paProgram )
-import Tidepool.ExtractRequest (RequestField(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest,RequestField(..), workerArgv, workerRequestFromArgv)
 
 import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256, artifactBytes)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
@@ -3728,7 +3728,7 @@ originalProjectionProducts = withScratch $ \work ->
           [Input (work </> "ProjectionConsumer.hs"),Include work,Target "usesGood",OutputDir work]) of
         Right (Just request) -> pure request
         other -> fail ("invalid original product projection request: " ++ show other)
-      (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $
+      (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $
         originalProjectionProductsWithRequest work
 
 originalProjectionProductsWithRequest :: FilePath -> BoundCompilerRequest -> IO ()
@@ -4926,7 +4926,7 @@ originalThinInterfaceTest inputFixture = withTiming $ withScratch $ \work -> do
           Right (Just args) -> pure args
           other -> fail ("invalid bound host interface fixture request: " ++ show other)
         withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \compiler ->
-          (withBoundCompilerRequest (const (pure ())) compiler args >=> finishCompletion) $ \bound -> do
+          (withBoundCompilerRequest (const (pure ())) compiler (admitFixtureRequest args) >=> finishCompletion) $ \bound -> do
             admitted <- maybe (fail "thin fixture has no bound exact scope") pure
               (boundRequestExactScope bound)
             afterAdmission admitted
@@ -7855,3 +7855,7 @@ lazyHomePackageInstances = withScratch $ \work -> do
     (external {eps_PIT = extendModuleEnv (eps_PIT external) owner (hm_iface home)})
   requireModeFailure ExactContextContainsHomePackageInterface $
     forkExactContextWithPackageFacts packages (selected {hsc_unit_env = units {ue_eps = faultyEPS}})
+
+-- Fixture requests pass the production pure admission before compiler binding.
+admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
+admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)

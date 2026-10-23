@@ -9,9 +9,9 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (hClose, openTempFile)
 import System.IO.Error (isDoesNotExistError, isUserError, ioeGetErrorString, ioeGetFileName)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), DependencyLoadFailure(..))
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), InspectionRequest(..), AdmittedRequestOperation(..), admittedRequestOperation, admitWorkerRequest, workerArgv, workerRequestFromArgv)
 import Tidepool.GhcPipeline (CompilePurpose(..))
-import Tidepool.InspectionRunner (runInspectionRequests)
+import qualified Tidepool.InspectionRunner as Production
 import Tidepool.Introspection (InspectionResult(..))
 
 newtype TestCancellation = TestCancellation String deriving Show
@@ -114,14 +114,14 @@ inspectionRunnerChecks = do
     reset
     invalid <- try (runInspectionRequests (mixed {requestInspectTypeBatch = Just batch}) record inspect) :: IO (Either SomeException [InspectionResult])
     assert "mixed batches report the batch admission error"
-      (isUserFailure "inspection type batch requires at least two type queries and no other query kinds" invalid)
+      (isUserFailure "InvalidInspectionShape" invalid)
     invalidCalls <- readIORef calls
     assert "invalid batch has no compiler calls" (null invalidCalls)
   let mismatched = mixed { requestFiles = [] }
   writeIORef calls []
   mismatch <- try (runInspectionRequests mismatched record inspect) :: IO (Either SomeException [InspectionResult])
   assert "source/query count mismatch reports the shape admission error"
-    (isUserFailure "inspection request must carry exactly one source per query" mismatch)
+    (isUserFailure "InvalidInspectionShape" mismatch)
   mismatchCalls <- readIORef calls
   assert "count mismatch has no compiler calls" (null mismatchCalls)
   where
@@ -137,7 +137,7 @@ inspectionRunnerChecks = do
     isDependencySource _ = False
 
 request :: [RequestField] -> [RequestField] -> WorkerRequest
-request sources queries = case workerRequestFromArgv (workerArgv (sources ++ queries)) of
+request sources queries = case workerRequestFromArgv (workerArgv (sources ++ queries ++ [InspectOut "unused"])) of
   Right (Just value) -> value
   other -> error ("inspection fixture request: " ++ show other)
 
@@ -146,3 +146,11 @@ withBatch action = do
   directory <- getTemporaryDirectory
   bracket (do (path, handle) <- openTempFile directory "inspection-runner-batch"; hClose handle; pure path)
     removeFile action
+
+runInspectionRequests :: WorkerRequest -> (CompilePurpose -> FilePath -> IO environment)
+  -> (environment -> [InspectionRequest] -> IO [InspectionResult]) -> IO [InspectionResult]
+runInspectionRequests raw compile inspect = case admitWorkerRequest raw of
+  Left failure -> ioError (userError (show failure))
+  Right admitted -> case admittedRequestOperation admitted of
+    AdmittedInspection payload -> Production.runInspectionRequests payload compile inspect
+    _ -> fail "inspection fixture admitted a different operation"

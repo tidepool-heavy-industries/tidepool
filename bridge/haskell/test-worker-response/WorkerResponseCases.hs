@@ -23,7 +23,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, compileBoundRequest)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..))
 import Tidepool.ExtractRequest
-  ( workerRequestFromArgv, workerArgv, RequestField(..)
+  ( AdmittedWorkerRequest, admitWorkerRequest, WorkerRequest, workerRequestFromArgv, workerArgv, RequestField(..)
   , EnsureExactInputsOutcome(..), ExactInputsRejection(..), WorldResidency(..)
   , WorldAcquisitionMiss(..), encodeEnsureExactInputsOutcomeWithin )
 import Tidepool.GhcPipeline
@@ -438,7 +438,7 @@ compilerClusterChild scratch = do
           Right (Just value) -> pure value
           _ -> fail "invalid real compiler control request"
         completed <- flattenCompletion <$> captureCompletion
-          (withBoundCompilerRequest sink scope request $ \bound -> do
+          (withBoundCompilerRequest sink scope (admitFixtureRequest request) $ \bound -> do
             body <- captureCompletion $ do
               _ <- compileBoundRequest bound CheckedEnvironment mempty GeneralCompile Nothing source
               if mode == "cancel" then throwIO ThreadKilled
@@ -558,3 +558,7 @@ assertReport expected bytes = do
     ["-c", "import json,sys; r=json.loads(bytes(json.loads(sys.stdin.read())).decode('utf-8')); assert r['version']==2; assert r['outcome']==sys.argv[1]; assert isinstance(r['diagnostics'],list)", expected]
     (show (BS.unpack bytes))
   unless (status == ExitSuccess) (fail ("terminal report is not one complete document: " ++ diagnostic))
+
+-- Fixture requests pass the production pure admission before compiler binding.
+admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
+admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)

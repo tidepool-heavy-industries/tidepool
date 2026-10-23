@@ -123,7 +123,7 @@ worldRequestBoundaries = do
       outcome <- scopedEnsureWorld scope request
       unless (outcome == ExactInputsRejected UnsupportedOperation)
         (fail "observation boot acquired a world or read complete inputs")
-    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+    (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
       actual <- runBoundWorldQuery request
       unless (actual == expected) (fail "missing scope hold lost its typed unavailable response")
       generic <- try (runBoundGhc request (pure ())) :: IO (Either SomeException ())
@@ -144,12 +144,12 @@ worldRequestBoundaries = do
   planArgs <- decode [WorldCellPlan cellPlan]
   prepareArgs <- decode [WorldCellPrepare cellPrepare]
   (latePlan,latePrepare) <- withResidentCompilerScopes [] $ \runScope -> runScope (pure ()) $ \scope -> do
-    latePlan <- (withBoundCompilerRequest (const (pure ())) scope planArgs >=> finishCompletion) $ \request -> do
+    latePlan <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest planArgs) >=> finishCompletion) $ \request -> do
       absent <- try (runBoundWorldCellPlan request) :: IO (Either WorldCellRefusal BS.ByteString)
       unless (either (== WorldCellUnavailable) (const False) absent)
         (fail "unheld plan parsed source or obtained a compiler world")
       pure (void (runBoundWorldCellPlan request))
-    latePrepare <- (withBoundCompilerRequest (const (pure ())) scope prepareArgs >=> finishCompletion) $ \request -> do
+    latePrepare <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest prepareArgs) >=> finishCompletion) $ \request -> do
       absent <- boundWorldCellPreparation request
       unless (either (== WorldCellUnavailable) (const False) absent)
         (fail "unheld prepare parsed source or allocated compiler generation state")
@@ -513,7 +513,7 @@ withRequestFixture action = withScratch $ \work -> do
   args <- requestFor work
   withRootedCompilerEnvironment work $ withQuietStdout $
     withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
-      (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> action scope request work
+      (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> action scope request work
 
 compileA :: BoundCompilerRequest -> FilePath -> IO PreparedCompilation
 compileA request work = compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
@@ -597,7 +597,7 @@ completedRequestRelease = withScratch $ \work -> do
   copyFile "test-source-boot/fixtures/BoundPreparedA.hs" (work </> "BoundPreparedA.hs")
   args <- requestFor work
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
-    completed <- (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+    completed <- (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
       first <- compileA request work
       projectA "__result" first
       originals <- newPreparedOriginalInterfaceArtifacts (preparedCompilationResult first) work
@@ -610,7 +610,7 @@ completedRequestRelease = withScratch $ \work -> do
     requireCancellation refused
     -- A later live allowance on this same GHC scope cannot substitute for the
     -- completed result's closed issuing allowance, even before pending lookup.
-    (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \later -> do
+    (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \later -> do
       stolen <- try (commitPreparedWorldDependencies later first) :: IO (Either SomeException ())
       requireCancellation stolen
 
@@ -639,13 +639,13 @@ nativeOutputProvenanceChecks = withScratch $ \work -> do
     Right (Just request) -> pure request
     other -> fail ("invalid explicit portable fixture: " ++ show other)
   withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope -> do
-    refused <- try ((withBoundCompilerRequest (const (pure ())) scope native >=> finishCompletion) $ \request ->
+    refused <- try ((withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest native) >=> finishCompletion) $ \request ->
       compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing (work </> "missing.hs"))
       :: IO (Either NativeProductConfigurationUnavailable PreparedCompilation)
     case refused of
       Left NativeProductConfigurationUnavailable -> pure ()
       Right _ -> fail "observation configuration issued a native compilation"
-    (withBoundCompilerRequest (const (pure ())) scope portable >=> finishCompletion) $ \request -> do
+    (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest portable) >=> finishCompletion) $ \request -> do
       completion <- compilePreparedRequest request PreparedStg Set.empty GeneralCompile Nothing
         (work </> "BoundPreparedA.hs")
       let prepared = preparedCompilationResult completion
@@ -669,7 +669,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
     other -> fail ("invalid native package fixture: " ++ show other)
   withRootedCompilerEnvironment work $ withQuietStdout $
     withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \scope ->
-      (withBoundCompilerRequest (const (pure ())) scope args >=> finishCompletion) $ \request -> do
+      (withBoundCompilerRequest (const (pure ())) scope (admitFixtureRequest args) >=> finishCompletion) $ \request -> do
         completion <- compilePreparedRequest request (PreparedProducts Nothing) Set.empty GeneralCompile Nothing source
         let prepared = preparedCompilationResult completion
         interfaces <- newPreparedOriginalInterfaceArtifacts prepared work
@@ -814,3 +814,7 @@ nativePackageOutputChecks = forM_ cases $ \(name,sourceLines,names,wantsCode) ->
         ["{-# LANGUAGE NoImplicitPrelude #-}", "module NativeTypeSupport where"
         ,"data Token = First | Second", "first = First", "second = Second"],
         ["first","second"],False)]
+
+-- Fixture requests pass the production pure admission before compiler binding.
+admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
+admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)
