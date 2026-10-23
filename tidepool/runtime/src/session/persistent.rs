@@ -342,6 +342,7 @@ fn stage_interface_file(
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
+    pub(super) custody_cleanup: Arc<super::resident::CustodyCleanup>,
     pub(super) source_transaction:
         Option<Arc<super::source_admission::RuntimeSourceCompilerTransaction>>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
@@ -620,6 +621,7 @@ impl PersistentSession {
             super::admission::RuntimeUnconfirmedSourceCustody::default(),
         ));
         PersistentSession {
+            custody_cleanup: Arc::default(),
             source_transaction: None,
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new(
                 &uncertain_source_scopes,

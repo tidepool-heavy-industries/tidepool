@@ -2540,6 +2540,20 @@ impl Drop for BindingLease {
     }
 }
 
+impl PersistentSession {
+    /// Retain exact values, including reserved IDs that will materialize at
+    /// capture commit. Drop uses the resident owner's existing cleanup queue.
+    pub(super) fn lease_binding_ids(
+        &mut self,
+        ids: impl IntoIterator<Item = SessionVarId>,
+    ) -> BindingLease {
+        BindingLease {
+            retained: self.acquire_binding_leases(ids).into_iter().collect(),
+            cleanup: CustodyLease::new(Arc::clone(&self.custody_cleanup)),
+        }
+    }
+}
+
 /// Counts external ownership independently of temporary Arc references. Drop
 /// implementations enqueue their cleanup first; this field then releases the
 /// count before waking the owner, including committed transfers.
@@ -2575,7 +2589,7 @@ impl Drop for CustodyLease {
 }
 
 #[derive(Default)]
-struct CustodyCleanup {
+pub(super) struct CustodyCleanup {
     abandoned: Mutex<Vec<ValueHandle>>,
     binding_leases: Mutex<Vec<Vec<SessionVarId>>>,
     notify: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -3176,12 +3190,16 @@ impl CapturedCheckedValueSet {
 
 pub(crate) struct CapturedCheckedValue {
     entry: BindingEntry,
+    binding_lease: Arc<BindingLease>,
     custody: RootCustody,
 }
 
 impl CapturedCheckedValue {
     pub(crate) fn defining_scope(&self) -> ScopeId {
         self.entry.scope
+    }
+    pub(crate) fn binding_lease(&self) -> &Arc<BindingLease> {
+        &self.binding_lease
     }
     pub(crate) fn name(&self) -> &str {
         &self.entry.name.0
@@ -4319,6 +4337,7 @@ where
     }
 
     fn with_state(handlers: H, captured: O, state: PersistentSession) -> Self {
+        let custody_cleanup = Arc::clone(&state.custody_cleanup);
         ResidentSession {
             state,
             handlers,
@@ -4331,7 +4350,7 @@ where
             hidden_host_bindings: HashMap::new(),
             host_binding_prototypes: Vec::new(),
             run_context: SessionRunContext::ROOT,
-            custody_cleanup: Arc::new(CustodyCleanup::default()),
+            custody_cleanup,
             display_owners: Arc::default(),
         }
     }
@@ -5190,15 +5209,8 @@ where
     /// Reserved future bindings can be leased before they materialize.
     pub fn lease_bindings(&mut self, referenced: &[tidepool_repr::VarId]) -> BindingLease {
         self.settle_dropped_custody();
-        let retained = self
-            .state
-            .acquire_binding_leases(referenced.iter().copied().map(SessionVarId::from_var))
-            .into_iter()
-            .collect();
-        BindingLease {
-            retained,
-            cleanup: CustodyLease::new(Arc::clone(&self.custody_cleanup)),
-        }
+        self.state
+            .lease_binding_ids(referenced.iter().copied().map(SessionVarId::from_var))
     }
 
     pub fn retain_lexical_scope(
@@ -7635,6 +7647,7 @@ where
                 None => PreparedBindingInstall::Turn(None),
             },
             &Arc::new(ProgramProvenance::default()),
+            &[],
             settlement,
         )?;
         Ok(())
@@ -7678,6 +7691,7 @@ where
                 private_input,
             }),
             &provenance,
+            &[],
             settlement,
         )?;
         Ok(())
@@ -9026,6 +9040,7 @@ where
                             &[(binder, handle)],
                             PreparedBindingInstall::Turn(checked.as_deref()),
                             &provenance,
+                            observation.as_deref().unwrap_or(&[]),
                             settlement,
                         )?;
                         if let Some(dependencies) = observation {
@@ -9095,6 +9110,7 @@ where
                     &bound,
                     PreparedBindingInstall::Turn(checked.as_deref()),
                     &provenance,
+                    &[],
                     settlement,
                 )?;
                 self.classify_parked(ParkedRun::CompletedProject, resumed, seed, provenance)
@@ -9168,6 +9184,7 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
         install: PreparedBindingInstall<'_>,
         provenance: &Arc<ProgramProvenance>,
+        observation_dependencies: &[tidepool_repr::VarId],
         settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<CapturedCheckedValues>, ResidentError> {
         if let PreparedBindingInstall::Host(host) = &install {
@@ -9310,6 +9327,16 @@ where
             let values = entries
                 .into_iter()
                 .map(|entry| CapturedCheckedValue {
+                    binding_lease: Arc::new(
+                        self.state.lease_binding_ids(
+                            std::iter::once(entry.id).chain(
+                                observation_dependencies
+                                    .iter()
+                                    .copied()
+                                    .map(SessionVarId::from_var),
+                            ),
+                        ),
+                    ),
                     custody: RootCustody::new(
                         entry.value.handle.raw(),
                         self.custody_cleanup.clone(),
