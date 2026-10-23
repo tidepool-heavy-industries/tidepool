@@ -57,7 +57,7 @@ import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactByte
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, foldM)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVarMasked)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
 import Control.Monad.IO.Class (liftIO)
@@ -151,7 +151,8 @@ import System.IO (fixIO)
 import Tidepool.TurnSource (preambleImportMarker, ImportOrigin(..), ImportRendering, importRenderingSource, importRenderingOrigins)
 import Tidepool.ImportSyntax
   ( ImportDescriptor, describeImport, CapturedImportSyntax, captureImportSyntax
-  , ImportOccurrence, capturedImportOccurrences )
+  , ImportOccurrence, capturedImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
+  , DriverImportSyntax, driverParsedModule, driverImportOccurrences )
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -759,13 +760,22 @@ permitsGeneratedScaffoldImport (GeneratedScaffoldImportAuthority scaffold _ _ _)
       && requested == (case owner of
           NativeScaffoldOwner native -> (executionUnit native,executionModule native)
           TemplateInterfaceOwner -> (exactUnit artifact,exactModule artifact))
-      && getLoc imported == span') scaffold
+      && sameImportOccurrenceSpan (getLoc imported) span') scaffold
+
+sameImportOccurrenceSpan :: SrcSpan -> SrcSpan -> Bool
+sameImportOccurrenceSpan left right = left == right && case (getBufSpan left,getBufSpan right) of
+  (Strict.Just before,Strict.Just after) -> before == after
+  _ -> False
 
 readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
-  -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe -> ParsedModule -> ModuleGraph -> HscEnv
+  -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe
+  -> CapturedGeneratedImports -> DriverImportSyntax -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
 readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
-    recipe@(GeneratedScaffoldRecipe path target expected line templateInterfaces templateGraph instanceScope purpose _) parsed sourceGraph env = do
+    recipe@(GeneratedScaffoldRecipe path target expected _ templateInterfaces templateGraph instanceScope purpose census)
+    (CapturedGeneratedImports (CapturedGeneratedScaffoldSource capturedPath capturedBytes capturedCensus) _ syntax classified)
+    driver sourceGraph env = do
+  let parsed = driverParsedModule driver
   checked <- captureGeneratedScaffoldTarget recipe path
   (source,fingerprint) <- sourceEvidenceWithFingerprint path
   targetPaths <- forM [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
@@ -776,8 +786,36 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
     else fmap Just <$> resolveResumeInterface env
   pure $ do
     _ <- checked
+    unless (capturedPath == path && capturedBytes == expected && capturedCensus == census)
+      (Left "generated scaffold imports belong to another captured source")
     unless (dependencySourceSha256 source == hexBytes (SHA256.hash expected))
       (Left "generated scaffold source changed during admission")
+    -- This is DATA consistency, not request/attempt identity. The private
+    -- pipeline transition supplies the driver matched to this whole capture.
+    let signature occurrence = (importOccurrenceId occurrence,importOccurrenceDescriptor occurrence)
+        occurrences = driverImportOccurrences driver
+        capturedOccurrences = capturedImportOccurrences syntax
+        identities = map importOccurrenceId capturedOccurrences
+        origins = Map.fromList [(importOccurrenceId occurrence,origin)
+          | CapturedGeneratedImportOccurrence occurrence origin <- classified]
+        declarations = hsmodImports (unLoc (pm_parsed_source parsed))
+    unless (map signature occurrences == map signature capturedOccurrences
+        && map (\(CapturedGeneratedImportOccurrence occurrence _) -> signature occurrence) classified
+          == map signature capturedOccurrences
+        && length identities == Set.size (Set.fromList identities)
+        && length declarations == length occurrences)
+      (Left "generated scaffold driver lost its captured import occurrences")
+    let protected = [(occurrence,unLoc located) | (occurrence,located) <- zip occurrences declarations
+          , Map.lookup (importOccurrenceId occurrence) origins == Just ProtectedCompiler]
+        -- The span is borrowed from this occurrence's actual driver AST. It
+        -- never chooses a role or links raw and preprocessed source buffers.
+        consumed summary predicate declaration = case
+            [name | (qualifier,name) <- ms_textual_imps summary
+              , predicate qualifier
+              , unLoc name == unLoc (ideclName declaration)
+              , sameImportOccurrenceSpan (getLoc name) (getLocA (ideclName declaration))] of
+          [name] -> Right name
+          _ -> Left "generated scaffold import lacks its exact consumed occurrence"
     summary <- case [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph
         , moduleNameString (moduleName (ms_mod summary)) == target] of
       [summary] | ms_hs_hash summary == fingerprint && targetPaths == [Just path]
@@ -801,29 +839,24 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           && occNameString (nameOccName name) == occurrence) exports) (if isTypedSegmentPurpose purpose
           then ["segmentPure", "segmentBind", "segmentFail", "settle", "resumeLifted"] else ["settle","resumeLifted"]))
         (Left "generated scaffold support has another export owner")
-      imported <- case [name | (OtherPkg package,name) <- ms_textual_imps summary
-          , RealUnit (Definite package) == moduleUnit owner, unLoc name == moduleName owner
-          , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == line; _ -> False] of
-        [name] -> Right name
-        _ -> Left "generated scaffold package import occurrence differs from its protected recipe"
-      declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
-          , getLocA (ideclName (unLoc located)) == getLoc imported] of
+      declaration <- case [declaration | (_,declaration) <- protected
+          , unLoc (ideclName declaration) == moduleName owner
+          , ideclQualified declaration == QualifiedPre
+          , fmap unLoc (ideclAs declaration) == Just (generatedScaffoldQualifier purpose)
+          , ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+          , case ideclPkgQual declaration of RawPkgQual package -> sl_fs package == fsLit "tidepool-resume"; _ -> False] of
         [declaration] -> Right declaration
-        _ -> Left "generated scaffold parsed import differs from its captured occurrence"
-      unless (ideclQualified declaration == QualifiedPre
-          && fmap unLoc (ideclAs declaration) == Just (generatedScaffoldQualifier purpose)
-          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
-          && case ideclPkgQual declaration of RawPkgQual package -> sl_fs package == fsLit "tidepool-resume"; _ -> False)
-        (Left "generated scaffold parsed import differs from its protected shape")
+        _ -> Left "generated scaffold package import lacks its protected occurrence"
+      _ <- consumed summary (\qualifier -> case qualifier of
+        OtherPkg package -> RealUnit (Definite package) == moduleUnit owner
+        _ -> False) declaration
+      pure ()
       -- This remains an ordinary external import. Package witnesses and the
       -- defining fat interface own its type and executable body evidence.
     originals <- case planned of
       Nothing -> Right noGeneratedScaffoldImports
       Just (owner,expectedFingerprint) -> do
         let original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
-            importLine = "import " ++ snd owner
-            occurrences = [number | (number,textLine) <- zip [1..] (lines (Text.unpack (TextEncoding.decodeUtf8 expected)))
-              , textLine == importLine]
         unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env))
           (Left "checked recipe original belongs to another home unit")
         unless (not (any (\case ModuleNode _ loaded -> ms_mod loaded == original; _ -> False)
@@ -839,22 +872,14 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
             && executionIfaceSha256 candidate == exactSha256 artifact] of
           [candidate] -> Right candidate
           _ -> Left "checked recipe lacks its paired original native owner"
-        originalLine <- case occurrences of
-          [number] -> Right number
-          _ -> Left "checked recipe original import is missing or duplicated"
-        imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
-            , unLoc name == moduleName original
-            , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == originalLine; _ -> False] of
-          [name] -> Right name
-          _ -> Left "checked recipe original import occurrence differs"
-        declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
-            , getLocA (ideclName (unLoc located)) == getLoc imported] of
+        declaration <- case [declaration | (_,declaration) <- protected
+            , unLoc (ideclName declaration) == moduleName original
+            , ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
+            , ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
+            , case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False] of
           [declaration] -> Right declaration
-          _ -> Left "checked recipe original parsed import differs"
-        unless (ideclQualified declaration == NotQualified && isNothing (ideclAs declaration)
-          && ideclSource declaration == NotBoot && ideclImportList declaration == Nothing
-          && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
-          (Left "checked recipe original import has another shape")
+          _ -> Left "checked recipe original lacks its protected import occurrence"
+        imported <- consumed summary (== NoPkgQual) declaration
         -- Original instances and families belong to this sealed declaration;
         -- only the protected recipe edge receives visibility.
         pure (GeneratedScaffoldImportAuthority [(ms_mod summary,fingerprint,NativeScaffoldOwner native,getLoc imported,artifact)] [(artifact,[])] [] [])
@@ -864,7 +889,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
       unless (exactSha256 artifact == templateInterfaceSha256 selected)
         (Left "checked template graph interface seal changed")
       pure (artifact,templateInterfaceImports selected)
-    templateEdges <- forM templateInterfaces $ \(selected,importLine,expectedShape) -> do
+    (reversedTemplateEdges,_) <- foldM (\(edges,remaining) (selected,_,expectedShape) -> do
       let owner = (templateInterfaceUnit selected,templateInterfaceModule selected)
           original = mkModule (stringToUnit (fst owner)) (mkModuleName (snd owner))
       unless (moduleUnit original == homeUnitAsUnit (hsc_home_unit env)
@@ -875,20 +900,18 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
         (Map.lookup owner captured)
       unless (exactSha256 artifact == templateInterfaceSha256 selected && mi_module iface == original)
         (Left "checked template interface seal changed")
-      imported <- case [name | (NoPkgQual,name) <- ms_textual_imps summary
-          , unLoc name == moduleName original
-          , case getLoc name of RealSrcSpan span' _ -> srcSpanStartLine span' == importLine; _ -> False] of
-        [name] -> Right name
-        _ -> Left "checked template interface import occurrence differs"
-      declaration <- case [unLoc located | located <- hsmodImports (unLoc (pm_parsed_source parsed))
-          , getLocA (ideclName (unLoc located)) == getLoc imported] of
-        [declaration] -> Right declaration
-        _ -> Left "checked template parsed import differs"
-      actualShape <- either (Left . show) (Right . TemplateImportShape) (describeImport declaration)
-      unless (actualShape == expectedShape && ideclSource declaration == NotBoot
-          && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
-        (Left "checked template interface import has another shape")
-      pure (ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact)
+      let matches (occurrence,declaration) =
+            unLoc (ideclName declaration) == moduleName original
+              && TemplateImportShape (importOccurrenceDescriptor occurrence) == expectedShape
+              && ideclSource declaration == NotBoot
+              && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False
+      (declaration,unclaimed) <- case break matches remaining of
+        (before,(_,declaration):after) -> Right (declaration,before ++ after)
+        _ -> Left "checked template interface lacks its protected structural occurrence"
+      imported <- consumed summary (== NoPkgQual) declaration
+      pure ((ms_mod summary,fingerprint,TemplateInterfaceOwner,getLoc imported,artifact):edges,unclaimed))
+      ([],protected) templateInterfaces
+    let templateEdges = reverse reversedTemplateEdges
     orphanScopes <- case instanceScope of
       ImportedTemplateInstances -> pure []
       OriginalPreviewInstances originalTarget -> do
