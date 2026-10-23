@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::artifact_inventory::{
-    admission_failure, ArtifactBinding, ArtifactBindingNode, ArtifactDependency, ArtifactEntry,
-    ArtifactGraphSelection, ArtifactId, ArtifactInventory, ArtifactInventoryFailure,
-    ArtifactPayload, ArtifactView, CanonicalProducerIdentity, CompilerArtifactMetadata,
-    CompilerInputProjection, CompilerInputRole, JoinedInterfaceRole, NativeGroupKey,
+    admission_failure, AdmittedCompilerRoles, ArtifactBinding, ArtifactBindingNode,
+    ArtifactDependency, ArtifactEntry, ArtifactGraphSelection, ArtifactId, ArtifactInventory,
+    ArtifactInventoryFailure, ArtifactPayload, ArtifactView, CanonicalProducerIdentity,
+    CompilerArtifactMetadata, CompilerInputProjection, CompilerInputRole, JoinedInterfaceRole,
+    NativeGroupKey,
 };
 use crate::certified_products::{IssuedSelectedNativeGroup, PendingCertifiedGroup};
 use crate::declaration_join::{
@@ -2502,13 +2503,9 @@ impl RequestNativeAvailability {
 
     pub(crate) fn validate_role_coverage(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
     ) -> Result<(), CompileError> {
-        for original in projection
-            .snapshot_roles()
-            .values()
-            .filter_map(|role| role.original())
-        {
+        for original in roles.iter().filter_map(|(_, role)| role.original()) {
             if !self.0.contains_key(&original) {
                 return Err(failure(
                     "selected original lacks its normalized native permission row",
@@ -2666,7 +2663,7 @@ impl RequestNativeAvailability {
     #[track_caller]
     pub(crate) fn for_compiler_roles(
         &self,
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         artifacts: &ArtifactView,
     ) -> Result<Self, CompileError> {
         if self.0.is_empty() {
@@ -2676,7 +2673,7 @@ impl RequestNativeAvailability {
             .0
             .iter()
             .filter_map(|(id, row)| {
-                let role = roles.snapshot_roles().get(&row.original.descriptor.owner)?;
+                let role = roles.get(&row.original.descriptor.owner)?;
                 (role.interface() == row.canonical
                     && role.original().is_none_or(|selected| selected == *id))
                 .then_some(*id)
@@ -2694,7 +2691,7 @@ impl RequestNativeAvailability {
     #[track_caller]
     fn for_compiler_roots(
         &self,
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         artifacts: &ArtifactView,
         direct: &BTreeSet<ArtifactId>,
         budget: NativeDemandBudget<'_>,
@@ -2827,7 +2824,6 @@ impl RequestNativeAvailability {
                 selected.contributions = contributions.into();
             }
             selected.classification = if roles
-                .snapshot_roles()
                 .get(&row.original.descriptor.owner)
                 .is_some_and(|role| role.original() == Some(id))
             {
@@ -2961,10 +2957,11 @@ impl RequestNativeAvailability {
 
     /// Transfer one checked physical cohort without qualifying its immutable
     /// dependency graphs against a later namespace or widening its own subset.
+    /// Assembly facts classify rows; the validated cohort owns their permission.
     fn from_current_cohort(
         physical: &ArtifactView,
         validated: crate::artifact_inventory::ValidatedFreshNativeAvailability,
-        roles: &CompilerInputProjection,
+        roles: crate::artifact_inventory::AssemblyRoleView<'_>,
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<CompletedRequestNativeAvailability, CompileError> {
         let artifacts = physical.retain_issued_offer_custody(validated.offers().iter().cloned())?;
@@ -3025,9 +3022,8 @@ impl RequestNativeAvailability {
             return Err(failure("current cohort omitted an own availability offer"));
         }
         let role_originals = roles
-            .roles()
             .iter()
-            .filter_map(|role| role.original())
+            .filter_map(|(_, role)| role.original())
             .collect::<BTreeSet<_>>();
         let mut rows = imbl::OrdMap::new();
         for (id, contributions) in availability {
@@ -3084,12 +3080,12 @@ impl RequestNativeAvailability {
     }
 
     pub(crate) fn issue_checked(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
+        metadata: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
     ) -> Result<Self, CompileError> {
-        let metadata = roles.project_metadata(artifacts.metadata_snapshot())?;
-        Ok(NativeInputSelection::issue_checked(roles, &metadata, artifacts, offers)?.availability)
+        Ok(NativeInputSelection::issue_checked(roles, metadata, artifacts, offers)?.availability)
     }
 
     pub(crate) fn issued(&self) -> impl Iterator<Item = &Arc<NativeTransportAvailability>> {
@@ -4510,8 +4506,7 @@ impl NativeInputSelection {
         let mut changed = BTreeSet::new();
         for owner in changed_owners {
             let role = support
-                .projection()
-                .snapshot_roles()
+                .compiler_roles()
                 .get(owner)
                 .ok_or_else(|| failure("type candidate refresh lost its compiler role"))?;
             if role.original().is_some() {
@@ -4525,7 +4520,7 @@ impl NativeInputSelection {
             .any(|row| changed.contains(&row.original.descriptor.owner))
         {
             Self::from_normalized_rows(
-                support.projection(),
+                support.compiler_roles(),
                 metadata,
                 support.artifacts(),
                 support.native_availability().clone(),
@@ -4537,7 +4532,7 @@ impl NativeInputSelection {
     }
 
     fn receive(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: &RequestNativeAvailability,
@@ -4549,7 +4544,7 @@ impl NativeInputSelection {
     }
 
     fn from_normalized_rows(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: RequestNativeAvailability,
@@ -4576,7 +4571,7 @@ impl NativeInputSelection {
                 &projection.entries,
             )?;
             let owner = &row.original.descriptor.owner;
-            let Some(role) = roles.snapshot_roles().get(owner) else {
+            let Some(role) = roles.get(owner) else {
                 continue;
             };
             let direct = match role.original() {
@@ -4660,7 +4655,7 @@ impl NativeInputSelection {
     }
 
     fn issue_checked(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
@@ -4706,7 +4701,7 @@ impl NativeInputSelection {
     }
 
     fn normalize_issued_contributions(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         offers: &[crate::artifact_inventory::IssuedNativeOffer],
@@ -4718,7 +4713,6 @@ impl NativeInputSelection {
             Vec<Arc<crate::artifact_inventory::NativeOfferContribution>>,
         >::new();
         let namespace_originals = roles
-            .snapshot_roles()
             .iter()
             .filter_map(|(owner, role)| {
                 let id = role.original()?;
@@ -25098,7 +25092,7 @@ mod tests {
 
     // Frozen pre-split constructor, independent of the new semantic/physical split.
     fn reference_native_transport(
-        roles: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         projection: &CompilerArtifactMetadata,
         artifacts: &ArtifactView,
         normalized: RequestNativeAvailability,
@@ -25129,7 +25123,7 @@ mod tests {
                 &projection.entries,
             )?;
             let owner = &row.original.descriptor.owner;
-            let Some(role) = roles.snapshot_roles().get(owner) else {
+            let Some(role) = roles.get(owner) else {
                 continue;
             };
             let direct = match role.original() {
@@ -25188,7 +25182,7 @@ mod tests {
         normalized: &RequestNativeAvailability,
     ) -> Option<ReferenceNativeCompilerTransport> {
         let support = inputs.compiler_source_support();
-        let roles = inputs.projection();
+        let roles = support.compiler_roles();
         let artifacts = inputs.artifacts();
         let expected = normalized
             .for_compiler_roles(roles, artifacts)
@@ -25289,10 +25283,10 @@ mod tests {
             )
             .expect("genuinely issued common inputs");
             if inputs
-                .projection()
-                .roles()
+                .compiler_source_support()
+                .compiler_roles()
                 .iter()
-                .any(|role| role.original().is_some())
+                .any(|(_, role)| role.original().is_some())
             {
                 assert!(check_native_selection_reference(
                     &inputs,
@@ -25341,7 +25335,7 @@ mod tests {
             let source = physical.inputs.compiler_source_support();
             let before = NATIVE_TRANSPORT_LOWERINGS.with(std::cell::Cell::get);
             let issued = NativeInputSelection::issue_checked(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 source.native_offers(),
@@ -25362,7 +25356,7 @@ mod tests {
             row.contributions = Arc::from([]);
             let invalid = RequestNativeAvailability::from_rows(Arc::new(invalid)).unwrap();
             let expected = reference_native_transport(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 invalid.clone(),
@@ -25371,7 +25365,7 @@ mod tests {
             .err()
             .expect("complete proof is mandatory");
             let actual = NativeInputSelection::from_normalized_rows(
-                source.projection(),
+                source.compiler_roles(),
                 &physical.inputs.metadata,
                 source.artifacts(),
                 invalid,

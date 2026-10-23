@@ -4237,8 +4237,15 @@ mod normalized_dependency_tests {
             .chain(complete.native_offers())
             .cloned()
             .collect::<Vec<_>>();
+        let metadata = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&complete)
+            .unwrap()
+            .compiler_metadata_snapshot()
+            .unwrap();
         let repeated = crate::declaration_context::RequestNativeAvailability::issue_checked(
             complete.compiler_roles(),
+            &metadata,
             complete.artifacts(),
             &repeated_offers,
         )
@@ -4246,6 +4253,7 @@ mod normalized_dependency_tests {
         let repeated = complete.retain_normalized_availability(&repeated).unwrap();
         let empty = crate::declaration_context::RequestNativeAvailability::issue_checked(
             complete.compiler_roles(),
+            &metadata,
             complete.artifacts(),
             &[],
         )
