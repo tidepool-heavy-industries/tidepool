@@ -1625,6 +1625,36 @@ impl ExactDeclarationContext {
             .original_acquisition(&helper.descriptor.owner)
             .unwrap();
         assert!(Arc::ptr_eq(selected_helper, helper));
+        let ArtifactPayload::Original(product) = &selected_helper.payload else {
+            unreachable!()
+        };
+        let dependency = self
+            .compiler_source_support()
+            .native_availability()
+            .dependency_support(
+                crate::artifact_inventory::NativeGroupKey {
+                    artifact: helper.descriptor.id,
+                    original_ordinal: expected_ordinal,
+                },
+                product.owner(),
+            )
+            .expect("the actual publication holds the exact dependency contribution");
+        let groups = dependency.groups().collect::<BTreeSet<_>>();
+        assert_eq!(groups.len(), 1);
+        let expected_group = *groups.first().unwrap();
+        let expected_offer = dependency.offer_for_group(expected_group).unwrap();
+        assert!(Arc::ptr_eq(
+            expected_offer.original_acquisition(),
+            selected_helper,
+        ));
+        if let crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices) = self
+            .compiler_roles()
+            .native_decision(&helper.descriptor.owner)
+        {
+            if let Some(chosen) = choices.get(&expected_ordinal) {
+                assert_eq!(*chosen, expected_group);
+            }
+        }
         let directory = crate::artifacts::test_support::compiler_input_directory().unwrap();
         let module = tidepool_repr::SessionModule::lib(tidepool_repr::Generation(47));
         let path = directory.path().join(module.relative_hs_path());
@@ -1667,9 +1697,7 @@ impl ExactDeclarationContext {
         assert!(issued.artifacts().binding_dependencies().iter().any(|(from, to, edge)|
             matches!(from, crate::artifact_inventory::ArtifactBindingNode::Group(group)
                 if group.binding.artifact() == parent.descriptor.id)
-            && matches!(to, crate::artifact_inventory::ArtifactBindingNode::Group(group)
-                if group.binding.artifact() == helper.descriptor.id
-                    && group.original_ordinal == expected_ordinal)
+            && *to == crate::artifact_inventory::ArtifactBindingNode::Group(expected_group)
             && matches!(edge, crate::artifact_inventory::ArtifactDependency::NativeGroup {
                 required_ordinal, ..
             } if *required_ordinal == expected_ordinal)),
