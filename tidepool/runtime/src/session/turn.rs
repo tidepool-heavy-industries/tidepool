@@ -3232,13 +3232,7 @@ pub fn prepare_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
-    prepare_cell_program_admitted_inner(
-        source,
-        admission,
-        #[cfg(test)]
-        CellProgramAudit::None,
-        settlement,
-    )
+    prepare_cell_program_admitted_inner(source, admission, settlement)
 }
 
 /// Consume prepared outputs after the affine compiler owner has settled END.
@@ -3360,13 +3354,9 @@ fn compile_cell_program_admitted_inner(
         None,
         |close| settlement.borrow_mut()(close),
         |owner, _| {
-            prepare_cell_program_admitted_inner(
-                owner,
-                admission,
-                #[cfg(test)]
-                audit,
-                &mut |close| settlement.borrow_mut()(close),
-            )
+            prepare_cell_program_admitted_inner(owner, admission, &mut |close| {
+                settlement.borrow_mut()(close)
+            })
         },
     )?;
     #[cfg(test)]
@@ -3407,7 +3397,6 @@ fn compile_cell_program_admitted_inner(
 fn prepare_cell_program_admitted_inner(
     source: &super::RuntimeSourceCompilerTransaction,
     admission: Arc<super::RuntimeCellAdmission>,
-    #[cfg(test)] audit: CellProgramAudit<'_>,
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<PreparedRuntimeCell, CellCheckFailure> {
     admission.admit_compiler_preparation(source)?;
