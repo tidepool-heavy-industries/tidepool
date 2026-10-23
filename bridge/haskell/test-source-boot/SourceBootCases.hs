@@ -4210,6 +4210,7 @@ nativeCheckedSignaturesTest = withScratch $ \work -> do
         unless (eqType expected resolved) (fail ("native signature changed exact type: " ++ key))
       let damaged = [signature {signatureNames=[]} | (_,signature) <- signatures
             , not (null (signatureNames signature))]
+      liftIO $ when (null damaged) (fail "native signature fixture lacks a Name-inventory refusal control")
       liftIO $ forM_ damaged $ \signature -> do
         refused <- try (void (resolveCheckedSignature (crHscEnv checked) signature))
           :: IO (Either SomeException ())

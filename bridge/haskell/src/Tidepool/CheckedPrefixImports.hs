@@ -170,8 +170,7 @@ mapPrefixImports transform (NativeParsedModule parsed uses) = do
   pure (NativeParsedModule next uses)
 
 -- Planned declaration certification supplies the full authored-only original
--- export inventory. Keep its direct wildcard import contract distinct from the
--- completed value owner's exact selected import while sharing one AST policy.
+-- export inventory. Its selected owner retains a direct wildcard import.
 refineOriginalDeclarationImports
   :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 refineOriginalDeclarationImports owner fingerprint names env = mapPrefixImports $ \parsed -> do
@@ -179,8 +178,8 @@ refineOriginalDeclarationImports owner fingerprint names env = mapPrefixImports 
   refineImports [original] env parsed
 
 -- Select the source-ordered declaration winners while keeping every original
--- owner available through its qualified import. Completed Val selections have
--- already been pruned by declaration shadowing before they enter this pass.
+-- owner available through its qualified import. World value aliases are applied
+-- separately after this declaration refinement.
 refineProgramDeclarationImports
   :: [(Module,Fingerprint,[[ExportIdentity]])] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 refineProgramDeclarationImports originals env = mapPrefixImports $ \parsed -> do
@@ -208,8 +207,7 @@ refineProgramDeclarationImports originals env = mapPrefixImports $ \parsed -> do
                 , Map.lookup (key (exportIdentity name)) winners == Just (refinementOwner owner)]
           pure (NarrowUnqualified (map importName retained))
         _ -> fail "program declaration owner is duplicated"
-  selected <- mapRefinedImportsM select verified
-  pure selected
+  mapRefinedImportsM select verified
 
 originalRefinement
   :: HscEnv -> Module -> Fingerprint -> [ExportIdentity] -> IO RefinementOwner
