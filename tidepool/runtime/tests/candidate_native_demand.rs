@@ -70,7 +70,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     let _daemon = OwnedEnvironment::set("TIDEPOOL_EXTRACT_DAEMON_SOCKET", None);
     let cache = tempfile::tempdir().unwrap();
     let _cache = OwnedEnvironment::set("TIDEPOOL_COMPILE_CACHE_DIR", Some(cache.path()));
-    let work = tempfile::tempdir().unwrap();
+    let work = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     for (name, source) in [
         (
             "CandidateDemandClass",
@@ -232,7 +232,7 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
         module: "CandidateDemandInstance".into(),
     };
     let lexical = selected_lexical_closure(original.artifacts(), vec![instance]);
-    let recovery = tempfile::tempdir().unwrap();
+    let recovery = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let source = work.path().join("CandidateDemandWarmer.hs");
     std::fs::write(&source, WARMER).unwrap();
     let frozen =

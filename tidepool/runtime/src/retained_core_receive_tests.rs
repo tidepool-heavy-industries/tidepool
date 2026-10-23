@@ -23,7 +23,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         tidepool_mcp::actor_local_decl(),
     ])
     .expect("typed receive effect surface");
-    let work = tempfile::tempdir().unwrap();
+    let work = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let owner_source = work.path().join("RetainedReceiveOwner.hs");
     let support_source = work.path().join("RetainedReceiveSupport.hs");
     std::fs::write(
@@ -61,7 +61,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     )
     .unwrap();
     let frozen = FrozenEntrySources::capture(&include, &probe_source).unwrap();
-    let retained = tempfile::tempdir().unwrap();
+    let retained = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let original = tidepool_testing::with_settlement(|settlement| {
         prepare_frozen_production_entry(
             &frozen,
@@ -97,7 +97,7 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .contains(&support));
     // Restore the exact output selection. Its unrelated entry target may retain
     // native custody; the requested homes were only imported for their types.
-    let durable = tempfile::tempdir().unwrap();
+    let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
     let snapshot = execution.snapshot();
     let blocks = MemoryBlockstore::new();
     let mut writer = Materializer::new(&blocks);
@@ -227,6 +227,18 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         .collect::<Vec<_>>();
     let (incomplete_payloads, incomplete_descriptors): (Vec<_>, Vec<_>) =
         incomplete.into_iter().unzip();
+    let omitted = descriptors
+        .iter()
+        .filter(|descriptor| descriptor.owner == owner)
+        .collect::<Vec<_>>();
+    assert_eq!(omitted.len(), 1);
+    assert!(selection
+        .bindings
+        .iter()
+        .any(|binding| binding.artifact == omitted[0].id));
+    assert!(incomplete_descriptors
+        .iter()
+        .all(|descriptor| descriptor.id != omitted[0].id));
     let Err(refusal) = RecoveredArtifactAcquisition::new(durable.path()).capture_payloads_bound(
         &incomplete_payloads,
         &incomplete_descriptors,
@@ -235,10 +247,9 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     ) else {
         panic!("missing canonical owner must refuse exact acquisition");
     };
-    assert!(matches!(
-        refusal,
-        RecoveryInventoryError::Certification(CompileError::ExtractFailed(_))
-            | RecoveryInventoryError::Certification(CompileError::ArtifactInventory(_))
+    assert!(matches!(refusal,
+        RecoveryInventoryError::Certification(CompileError::ExtractFailed(detail))
+        if detail == "exact declaration context: bound recovery has duplicate or missing exact endpoints"
     ));
 
     drop(original);
