@@ -519,6 +519,31 @@ impl AcquiredNativeCode {
             },
         })
     }
+    /// Compare immutable value facts selected by this exact acquired import.
+    /// Runtime scope, produced-value receipt and lease checks remain separate.
+    pub fn matches_retained_checked_value(
+        &self,
+        global_index: u32,
+        binding: ArtifactBinding,
+        row: &crate::checked_cell::CheckedValueArtifact,
+    ) -> Result<bool, CompileError> {
+        let index = usize::try_from(global_index)
+            .map_err(|_| refusal("retained import index is out of range"))?;
+        match self.node().slots().get(index) {
+            Some(CheckedNativeSlot::Retained {
+                binding: selected, ..
+            }) if *selected == binding => {}
+            _ => return Ok(false),
+        }
+        let selected = self
+            .owner
+            .artifacts
+            .observed_payload(&binding.artifact)
+            .ok_or_else(|| refusal("acquired retained import lost its immutable payload"))?;
+        let (actual, _) = row.world_type_parts()?;
+        Ok(selected.as_ref() == actual.as_ref())
+    }
+
     pub(crate) fn reborrow(&self, sources: &Arc<NativeTargetSources>) -> Self {
         Self {
             owner: Arc::clone(&self.owner),
