@@ -3084,7 +3084,7 @@ impl RuntimeCheckedPrefix {
         session: &PersistentSession,
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+    ) -> Result<RunningCheckedTicket, SessionError> {
         if let Some(private) = self.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -3210,8 +3210,7 @@ impl RuntimeCheckedPrefix {
         drop(state);
         let ticket = RunningCheckedTicket::new(Arc::clone(&completion));
         super::complete_native_transition(admission)?;
-        ticket.handoff();
-        Ok(completion)
+        Ok(ticket)
     }
 }
 

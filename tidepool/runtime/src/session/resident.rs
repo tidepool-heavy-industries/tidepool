@@ -3380,9 +3380,7 @@ impl PreparedCheckedTurn {
         session: &PersistentSession,
         scope: ScopeId,
     ) -> Result<RunningCheckedTicket, SessionError> {
-        self.prefix
-            .start(session, scope, self.execution)
-            .map(RunningCheckedTicket::new)
+        self.prefix.start(session, scope, self.execution)
     }
 }
 
@@ -4922,16 +4920,6 @@ where
         }
         self.settle_dropped_custody();
         self.state.adopt_checked_declaration(admission)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_checked_item_for_test(
-        &self,
-        prefix: &Arc<super::RuntimeCheckedPrefix>,
-        scope: ScopeId,
-        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<super::admission::CheckedTurnCompletion>, SessionError> {
-        prefix.start(&self.state, scope, execution)
     }
 
     /// Finalize the current writes selected by this resident owner. Private
