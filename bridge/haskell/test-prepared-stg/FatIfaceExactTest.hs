@@ -31,7 +31,7 @@ import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Unit.Module.ModIface (mi_extra_decls)
 import System.Directory
-  ( copyFile, createDirectoryIfMissing
+  ( createDirectoryIfMissing
   , getTemporaryDirectory
   , removeFile
   , removePathForcibly
