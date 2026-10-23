@@ -108,7 +108,7 @@ fn type_context(products: &[CertifiedRecoveryProduct]) -> Arc<ExactDeclarationCo
         .iter()
         .map(|product| {
             Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             ))
         })
         .collect::<Vec<_>>();
@@ -220,11 +220,11 @@ fn partial_context(
         Arc::clone(&required_entry)
     } else {
         Arc::new(ArtifactEntry::canonical(
-            required.module_interface().unwrap().clone(),
+            required.module_interface().clone(),
         ))
     };
     let unused_role = Arc::new(ArtifactEntry::canonical(
-        unused.module_interface().unwrap().clone(),
+        unused.module_interface().clone(),
     ));
     let projection = CompilerInputProjection::from_issued_entries(&[
         Arc::clone(&baseline_entry),
@@ -887,7 +887,6 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
             (dependency.unit.clone(), dependency.module.clone()),
             baseline_product
                 .module_interface()
-                .unwrap()
                 .interface_sha256(),
         )])),
     );
@@ -896,7 +895,7 @@ fn selected_output_carries_baseline_type_dependency_without_granting_body() {
         let output =
             Arc::new(ArtifactEntry::original(producer.sha256(), consumer.clone()).unwrap());
         let dependency = Arc::new(ArtifactEntry::canonical(
-            baseline_product.module_interface().unwrap().clone(),
+            baseline_product.module_interface().clone(),
         ));
         let artifacts = baseline
             .artifact_view()
@@ -1056,7 +1055,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
         .product;
     let native_entry =
         Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
-    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone());
+    let canonical = ArtifactEntry::canonical(native.module_interface().clone());
     let inventory = ArtifactInventory::default();
     let base = inventory
         .admit_shared_with_demand(
@@ -1079,7 +1078,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             .admit_recovery_selection(
                 &base,
                 vec![Arc::new(ArtifactEntry::canonical(
-                    marker.module_interface().unwrap().clone(),
+                    marker.module_interface().clone(),
                 ))],
                 selected,
             )
@@ -1227,7 +1226,7 @@ fn private_complete_product_prefers_carried_dependency_proof_over_selected_fallb
             vec![
                 native_entry.clone(),
                 Arc::new(ArtifactEntry::canonical(
-                    marker.module_interface().unwrap().clone(),
+                    marker.module_interface().clone(),
                 )),
             ],
             NativeArtifactDemand::ScopeInterfaces,
@@ -1438,7 +1437,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
     )));
     let complete = |index: usize| {
         let canonical =
-            ArtifactEntry::canonical(recovered[index].product.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(recovered[index].product.module_interface().clone())
                 .descriptor
                 .id;
         let proof = NativeOriginalRequirement::from_issued_group_custody(
@@ -1687,7 +1686,7 @@ fn original_receipt_retains_transitive_support_without_unrelated_offer() {
         let catalog =
             crate::artifact_inventory::NativeDependencyCatalog::from_request(&continuation);
         let a_interface = Arc::new(ArtifactEntry::canonical(
-            recovered[0].product.module_interface().unwrap().clone(),
+            recovered[0].product.module_interface().clone(),
         ));
         let receiver = full
             .select_roots(vec![a_interface.descriptor.id, b_id])
@@ -2015,7 +2014,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("OptionalCensus", 102);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
-    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone())
+    let canonical = ArtifactEntry::canonical(native.module_interface().clone())
         .descriptor
         .id;
     let inventory = ArtifactInventory::default();
@@ -2033,7 +2032,7 @@ fn optional_baseline_census_preserves_competing_exact_private_issuances() {
                 &base,
                 vec![
                     Arc::new(ArtifactEntry::canonical(
-                        marker.module_interface().unwrap().clone(),
+                        marker.module_interface().clone(),
                     )),
                     entry.clone(),
                 ],
@@ -2261,7 +2260,7 @@ fn retained_dependency_support_refuses_a_selected_conflicting_backedge() {
     let a_id = entries[0].descriptor.id;
     let b_id = entries[1].descriptor.id;
     let canonical =
-        ArtifactEntry::canonical(recovered[0].product.module_interface().unwrap().clone())
+        ArtifactEntry::canonical(recovered[0].product.module_interface().clone())
             .descriptor
             .id;
     let proof = NativeOriginalRequirement::from_issued_group_custody(a_id, canonical, &full)
@@ -2419,7 +2418,7 @@ fn dependency_support_keeps_consumed_historical_group_instead_of_parent_root() {
         .unwrap();
     let marker = |module, version| {
         Arc::new(ArtifactEntry::canonical(
-            product(module, version).module_interface().unwrap().clone(),
+            product(module, version).module_interface().clone(),
         ))
     };
     let historical = inventory
@@ -3125,7 +3124,7 @@ fn interface_only_full_availability_requires_explicit_original_acquisition() {
         .into_iter()
         .map(|binding| (binding.artifact, binding))
         .collect::<BTreeMap<_, _>>();
-    let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
+    let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface());
     let pair = |binding: &crate::artifact_inventory::ArtifactBinding| {
         Value::Array(vec![
             Value::Bytes(binding.artifact.0.to_vec()),
@@ -3285,7 +3284,7 @@ fn private_native_scope_artifacts_keep_their_product_anchor() {
     let native_entry =
         Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
     let plain_entry = Arc::new(ArtifactEntry::canonical(
-        plain_product.module_interface().unwrap().clone(),
+        plain_product.module_interface().clone(),
     ));
     let inventory = ArtifactInventory::default();
     let full = inventory
@@ -3554,7 +3553,7 @@ fn direct_native_advertisement_follows_canonical_binding_and_keeps_historical_pe
         );
         let canonical_only = ArtifactInventory::default();
         let canonical_entry = Arc::new(ArtifactEntry::canonical(
-            products[0].module_interface().unwrap().clone(),
+            products[0].module_interface().clone(),
         ));
         let unrelated = canonical_only
             .admit_shared(&canonical_only.empty_view(), vec![canonical_entry])
@@ -3856,7 +3855,7 @@ fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
     // An equal canonical payload in a different namespace binding withdraws
     // Full qualification. This existing owner operation changes only one row.
     let canonical = Arc::new(ArtifactEntry::canonical(
-        native.module_interface().unwrap().clone(),
+        native.module_interface().clone(),
     ));
     let projection = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
     let inventory = ArtifactInventory::default();
@@ -3905,7 +3904,7 @@ fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
         .unwrap()
         .into_rows();
     let canonical = Arc::new(ArtifactEntry::canonical(
-        native.module_interface().unwrap().clone(),
+        native.module_interface().clone(),
     ));
     let mixed_roles = CompilerInputProjection::from_issued_entries(&[canonical.clone()])
         .unwrap()
@@ -4056,7 +4055,7 @@ fn unchanged_native_availability_merge_keeps_qualified_rows() {
     assert_eq!(requalified.native_availability(), rows);
 
     let canonical = Arc::new(ArtifactEntry::canonical(
-        native.module_interface().unwrap().clone(),
+        native.module_interface().clone(),
     ));
     let canonical_id = canonical.descriptor.id;
     let projection = CompilerInputProjection::from_issued_entries(&[canonical.clone()]).unwrap();
@@ -4267,7 +4266,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
     assert_ne!(entries[0].descriptor.id, entries[1].descriptor.id);
     let inventory = ArtifactInventory::default();
     let canonical = Arc::new(ArtifactEntry::canonical(match &entries[0].payload {
-        ArtifactPayload::Original(native) => native.module_interface().unwrap().clone(),
+        ArtifactPayload::Original(native) => native.module_interface().clone(),
         _ => unreachable!(),
     }));
     let base = inventory
@@ -4509,7 +4508,7 @@ fn private_full_candidates_survive_receive_and_refuse_ambiguous_selection() {
     }
     let wrong = Arc::new(ArtifactEntry::canonical(fixture_module_core(
         match &entries[0].payload {
-            ArtifactPayload::Original(native) => native.module_interface().unwrap(),
+            ArtifactPayload::Original(native) => native.module_interface(),
             _ => unreachable!(),
         },
         b"different canonical Core".to_vec(),
@@ -4538,7 +4537,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
     let native = product("OfferOnlyCandidate", 206);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
     let canonical = Arc::new(ArtifactEntry::canonical(
-        native.module_interface().unwrap().clone(),
+        native.module_interface().clone(),
     ));
     let inventory = ArtifactInventory::default();
     let views = ["OfferOnlyLeft", "OfferOnlyRight"].map(|marker| {
@@ -4548,7 +4547,7 @@ fn program_offer_only_append_refreshes_empty_native_candidates() {
                 vec![
                     entry.clone(),
                     Arc::new(ArtifactEntry::canonical(
-                        product(marker, 207).module_interface().unwrap().clone(),
+                        product(marker, 207).module_interface().clone(),
                     )),
                 ],
                 NativeArtifactDemand::ScopeInterfaces,
@@ -4711,7 +4710,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
     let native = product("EqualPrivateFull", 125);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
     let canonical = Arc::new(ArtifactEntry::canonical(
-        native.module_interface().unwrap().clone(),
+        native.module_interface().clone(),
     ));
     for shared_carrier in [false, true] {
         let inventory = ArtifactInventory::default();
@@ -4733,7 +4732,7 @@ fn equal_payload_full_offers_preserve_distinct_carrier_and_group_issuance() {
                     vec![
                         entry.clone(),
                         Arc::new(ArtifactEntry::canonical(
-                            product(marker, version).module_interface().unwrap().clone(),
+                            product(marker, version).module_interface().clone(),
                         )),
                     ],
                     &BTreeSet::from([7, 9001].map(|original_ordinal| NativeGroupKey {
@@ -4908,7 +4907,7 @@ fn private_transport_full_offer_cannot_borrow_another_offers_root() {
     let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER);
     let native = product("FullOfferRoot", 85);
     let entry = Arc::new(ArtifactEntry::original(producer.sha256(), native.clone()).unwrap());
-    let canonical = ArtifactEntry::canonical(native.module_interface().unwrap().clone());
+    let canonical = ArtifactEntry::canonical(native.module_interface().clone());
     let inventory = ArtifactInventory::default();
     let base = inventory
         .admit_shared_with_demand(
@@ -5022,7 +5021,7 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
         };
         if !dependency_in_roles {
             let dependency_interface =
-                ArtifactEntry::canonical(products[0].module_interface().unwrap().clone())
+                ArtifactEntry::canonical(products[0].module_interface().clone())
                     .descriptor
                     .id;
             assert!(
@@ -5265,7 +5264,7 @@ fn private_transport_refuses_selected_dependency_product_and_interface_conflicts
         let issued = inventory
             .admit_shared(&inventory.empty_view(), entries[..2].to_vec())
             .unwrap();
-        let canonical = ArtifactEntry::canonical(consumer.module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(consumer.module_interface().clone());
         let proof =
             crate::artifact_inventory::NativeOriginalRequirement::from_issued_group_custody(
                 entries[1].descriptor.id,
@@ -5524,7 +5523,6 @@ fn selected_authored_private_offer_carries_issued_type_only_dependency_groups() 
             .unwrap()
             .product
             .module_interface()
-            .unwrap()
             .clone(),
     )
     .descriptor
@@ -6068,7 +6066,7 @@ fn native_availability_preserves_ambiguity_and_explicit_selection_refuses_confli
     let context = type_context(std::slice::from_ref(&first));
     let mut changed = context.as_ref().clone();
     let interface =
-        fixture_module_core(first.module_interface().unwrap(), b"changed-Core".to_vec());
+        fixture_module_core(first.module_interface(), b"changed-Core".to_vec());
     let entry = Arc::new(ArtifactEntry::canonical(interface));
     let view = changed
         .artifact_view()
@@ -6826,7 +6824,7 @@ fn selected_authored_availability_preserves_exact_native_winner_histories() {
             assert!(matches!(
                 &metadata.artifacts[&selected_role.interface()].payload,
                 ArtifactPayload::Canonical(interface)
-                    if interface == current.module_interface().unwrap()
+                    if interface == current.module_interface()
             ));
             assert_eq!(direct.artifacts.selected_native_groups(), before);
             assert!(direct.issued_input_decisions().is_some());
@@ -6964,10 +6962,9 @@ fn availability_refuses_wrong_external_group_before_advertising_binders() {
             )
             .unwrap(),
             certification_bytes: wrong.certification_bytes().to_vec(),
-            module_interface: wrong.module_interface().unwrap().clone(),
+            module_interface: wrong.module_interface().clone(),
             package_interfaces: wrong
                 .original_native()
-                .unwrap()
                 .package_interfaces()
                 .clone(),
             execution_source: None,
@@ -7964,7 +7961,7 @@ fn recovered_native_offer_preserves_full_partial_and_empty_issuance_modes() {
     assert!(proof.qualify_availability(&artifacts).unwrap().is_some());
     let empty = IssuedNativeOffer::issue(entry.descriptor.id, &artifacts, None).unwrap();
     let canonical = ArtifactEntry::canonical(match &entry.payload {
-        ArtifactPayload::Original(product) => product.module_interface().unwrap().clone(),
+        ArtifactPayload::Original(product) => product.module_interface().clone(),
         _ => unreachable!(),
     })
     .descriptor
@@ -8240,7 +8237,7 @@ fn empty_offer_snapshot_retains_exact_carrier_beside_competing_namespace() {
                 vec![
                     entry.clone(),
                     Arc::new(ArtifactEntry::canonical(
-                        product(marker, version).module_interface().unwrap().clone(),
+                        product(marker, version).module_interface().clone(),
                     )),
                 ],
                 NativeArtifactDemand::ScopeInterfaces,
@@ -9113,7 +9110,7 @@ fn historical_canonical_offer_histories_preserve_selected_request_and_recovery()
                         let projection = selected_support.projection().clone();
                         let canonical_id = ArtifactEntry::canonical(match &entries[0].payload {
                             ArtifactPayload::Original(product) => {
-                                product.module_interface().unwrap().clone()
+                                product.module_interface().clone()
                             }
                             _ => unreachable!(),
                         })
@@ -10224,7 +10221,7 @@ fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
             NativeTransportMode::Full,
             "input choice and Full native availability are independent"
         );
-        let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface().unwrap());
+        let canonical = ArtifactEntry::canonical_artifact_id(native.module_interface());
         assert!(matches!(
             support.checked_native_input_decision(entry.descriptor.id, canonical, native.owner()).unwrap(),
             crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
@@ -10473,7 +10470,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         unreachable!()
     };
     assert!(matches!(
-        current.module_interface().unwrap().origin(),
+        current.module_interface().origin(),
         crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
     ));
     assert_eq!(old.descriptor.owner, entry.descriptor.owner);
@@ -10507,7 +10504,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
         )
         .unwrap();
     let historical_canonical =
-        ArtifactEntry::canonical_artifact_id(historical.module_interface().unwrap());
+        ArtifactEntry::canonical_artifact_id(historical.module_interface());
     assert!(matches!(
         historical_request
             .compiler_inputs()
@@ -10538,7 +10535,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
     );
     let fallback = recovered_witness_fixtures(&[fallback]).remove(0).product;
     let target = Arc::new(ArtifactEntry::canonical(
-        fallback.module_interface().unwrap().clone(),
+        fallback.module_interface().clone(),
     ));
     let inventory = ArtifactInventory::default();
     let interfaces = inventory
@@ -10638,7 +10635,7 @@ fn authored_fallback_does_not_requalify_unrelated_selected_published_owner() {
             .unwrap();
         let support = request.compiler_inputs().compiler_source_support();
         let current_canonical =
-            ArtifactEntry::canonical_artifact_id(current.module_interface().unwrap());
+            ArtifactEntry::canonical_artifact_id(current.module_interface());
         assert!(matches!(
             support
                 .checked_native_input_decision(
@@ -11095,7 +11092,6 @@ fn candidate_custody_preserves_issued_availability_without_selecting_execution()
                 Arc::new(ArtifactEntry::canonical(
                     product("HistoricalDependencyMarker", 163)
                         .module_interface()
-                        .unwrap()
                         .clone(),
                 )),
             ],
