@@ -35,41 +35,56 @@ validated. Its post-change performance and correctness evidence is pending.
 | Parcels | State and remaining boundary | Owner |
 |---|---|---|
 | P1 complete products | Draft/certifier and actual Fresh token source complete; integrated in facts group; joined compilation pending | publication_history_repair |
-| P2–P4 facts/selection/custody | Actual whole selected rows and separate assembly/admitted views implemented; native callers and OriginalCompilerInputs owner cutover still in progress | astra_context_owner_impl; publication_history_repair |
-| P5 Context10 | Recorded codec source ready; authentication/writer integration with actual selected owners in progress; no live Deserialize or equality-as-authority | facts lead / publication_selection_repair |
+| P2–P4 facts/selection/custody | Facts group `e4057b073a` joined, with owner-issued offers and migrated callers. Final single acquired-row map and removal of live equality remain unfinished, pending first joined cfg feedback | astra_context_owner_impl |
+| P5 Context10 | Recorded codec, recursive selected-owner authentication and maintained writer index joined. Nested historical-digest discriminator `f16a0f4c7c` joined; execution pending | facts lead / astra_joined_test_review |
 | P6 native occurrences | Closed HOME/package occurrence and real acquisition source ready in facts group; qualification pending | candidate_guard_resume |
 | P7 typed requests | Joined: admission before effects, mandatory SOURCE targets, native/SOURCE exchange separation; actual entrypoint controls awaiting execution | worker_request_shapes |
-| P8 interface backing | Captured/Hydrated/Installed owner cutover in progress; actual HMI/NameCache ownership under independent review | interface_backing_impl |
+| P8 interface backing | Compiler group `471f1f5f9d` joined with actual Captured/Hydrated/Installed owners and independent GHC controls. Review repair `c470cf4d4b` checks package sidecars and nominal requirements before issuer reuse. Joined compilation pending | interface_backing_impl / astra_compiler_cutover_review |
 | P9 compiler universe | Joined fixed boot state and common finite/resident kernel; completed-stage ordering source joined; lazy SOURCE backedge control source ready | compiler_backing_lifetime |
 | P10 World binding/reservation | Joined paired item reservations and prior-input linking before stage admission; typed decoder repairs joined | world_owner_resume |
-| P11 dependency sealing | Joined actual request identity and immutable indexed handles; duplicate stage seal now refused by same ledger transition | astra_dependency_plan_impl |
+| P11 dependency sealing | Joined actual request identity and immutable indexed handles; both focused seal/completion controls passed at `b2ef`; new joined checkpoint still needs validation | astra_dependency_plan_impl |
 | P12 ordered program cursor | Joined consuming stage/cursor and exact output issuer; actual controls need execution | compiler_stage_cursor |
-| P13 runtime inputs | Existing resolver being folded into one scoped acquired-input owner; exact retained occurrence before image sharing under review | type_consumer_resume |
-| P14 execution/capture | Joined actual parked completion owner, closed phases and affine capture ticket; tests and joined compilation pending | type_consumer_resume |
+| P13 runtime inputs | Single scoped acquired-input owner source checkpoint `7b6fccfd75` awaits matched P14/finite-route join. Exact binding lifetime versus lexical-scope lifetime is under review; do not substitute a scope lease for value custody | type_consumer_resume / astra_runtime_ownership_review |
+| P14 execution/capture | Atomic prepared binding/provenance/row/World commit through `1732faefbf`, plus witness-exhaustion preflight `bcdff60584`, joined. Actual issuer, malformed binder, resumed fence and observation controls require execution | astra_runtime_ownership_review |
 | P15 publication | Joined completed-frontier freeze, mandatory World/lease, exact final selection; completed-only progress and concurrent fence followup source ready | runtime_publication_owner |
 | P16 failures | Joined typed decoder/IO/phase causes; exact error assessment repairs included | transition_failure_owner |
 | P17 tests | Actual World publication ports integrated incrementally; further recovery, semantic-history and complete-product fixture migrations in flight | validation_resume; fixture workers |
 
-`b9fdda8a8f` joined compilation found incomplete Rust caller migrations, not
-executed-test failures: iterator lifetime/indexing, temporary slot borrowing,
-new exhaustive failure classification and stale completion test API. The next
-source checkpoint repairs these, removes two reconstructed slot/binder fixture
-lists, and includes the P14 capture/phase owners. Validation pin `2d23dfdc8b`
-compiles toolchain/runtime/extract-cmd first, then the declared source-boot
-Haskell test binary only if Rust compilation succeeds. Inspect its retained
-report for the terminal outcome; no source-only parcel is a passing test.
+## Latest executed checkpoints
+
+- `7204`: toolchain/runtime/extract-cmd production and cfg consumers compiled.
+- `b2ef`: two dependency seal/completion controls and the actual parked-resume
+  owner/revocation control passed.
+- `4136078ecac0`: the native source-boot target compiled; four selected tests
+  executed and passed (admission ordering, recipe parsing, boot lifetime after
+  END, and lazy SOURCE backedge reuse). The final control measures actual
+  unchanged and changed warm reuse against independent cold compilation.
+  Runtime was 12.58 seconds; total command time including rebuild was 108.4
+  seconds. This is the pre-P8 compiler checkpoint, not the newly joined tree.
+  Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/4136-native-source-boot-focused-four-checkpoint.json`.
+
+The source join now contains facts `e4057b073a`, P14 `1732faefbf`/`bcdff60584`,
+and compiler `471f1f5f9d`/`c470cf4d4b`. Conflicts preserve the previously tested
+consuming dependency seal, ordinary-source selection, actual loaded HMI reuse,
+and package-interface reader fixes. The next warm checkpoint must compile
+`tidepool-toolchain`, `tidepool-runtime`, `tidepool-extract-cmd`, and
+`tidepool-codegen`, including cfg consumers. No source-only parcel is a test pass.
 
 ## Required next sequence
 
 1. Repair joined compile errors with owning workers; compile tests as well as
    production consumers. Execute the small typed refusal/phase controls early.
-2. Fold facts P1–P6 as one owner-consistent slice, including Context10 codec and
-   OriginalCompilerInputs; compile before adding more migration layers.
-3. Join P8 after independent HMI/NameCache and SOURCE closure review. Validate
+2. Validate the joined facts P1–P6/Context10 slice before final removal of its
+   duplicated live storage and equality surfaces.
+3. Validate joined P8 after independent HMI/NameCache and SOURCE closure review:
    cold/warm/backedge behavior and actual per-binder historical SOURCE carry.
 4. Finish P13 single owner, rejecting mismatched runtime imports before physical
    code sharing. No parallel tuple map or identity-based reconstruction.
 5. Finish actual World test ports and delete their finite/test-only backdoors.
+   Production deletion `68f69d6f19` and external ports `0370c8a542`/`cfe7cb3d93`
+   remain source-only, not joined here. Preserve the inherited facade execution
+   test: its selected ActorSourceImports must reach the production World owner;
+   changing it into a metadata-only assertion would discard the contract.
    Unsupported direct retractions stay explicit refusals, not fabricated
    completed executions. Freeze/retry must not repeat already completed effects.
 6. Run the exact joined owner, publication, recovery, historical dependency and
