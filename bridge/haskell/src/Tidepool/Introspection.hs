@@ -416,16 +416,12 @@ signatureAvailability context signature = do
 -- variable. GHC then kind-checks and quantifies those variables normally.
 -- Rewriting the parsed tree preserves qualification and repeated named
 -- variables; rendered source never drives this transformation.
-normalizeInspectionWildcards :: ParsedModule -> ParsedModule
-normalizeInspectionWildcards parsed =
-  let source = pm_parsed_source parsed
-      occupied =
+normalizeInspectionWildcards :: ParsedSource -> ParsedSource
+normalizeInspectionWildcards source =
+  let occupied =
         Set.fromList $
           everything (++) (mkQ [] (\name -> [occNameString (rdrNameOcc name)])) source
-   in parsed
-        { pm_parsed_source =
-            evalState (everywhereM (mkM replaceWildcard) source) (0, occupied)
-        }
+   in evalState (everywhereM (mkM replaceWildcard) source) (0, occupied)
   where
     replaceWildcard ::
       HsType GhcPs ->

@@ -40,9 +40,11 @@ import Tidepool.CheckedPrefixImports
   , refineOriginalDeclarationImportsWithCompleted, refineProgramDeclarationImports )
 import Tidepool.Binders
   ( CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..), CellSourceSpan(..)
-  , StmtBinders(..), TurnKind(..), ExportItem(..), LocatedImport(..), ImportIntent(..)
+  , StmtBinders(..), TurnKind(..), ExportItem(..)
   , SourcePrologue(..), DeclarationSource(..), renderDeclarationForTemplateWithImports )
 import Tidepool.TurnSource (ImportRendering, importRenderingSource)
+import Tidepool.ImportSyntax.Internal (LocatedImport(..), ImportIntent(..))
+import Tidepool.CheckedCell (NativeParsedModule)
 import Tidepool.DeclarationJoin
   ( DeclarationExport(..), DeclarationKind(..), ExportNamespace(..), ExportIdentity(..), exportIdentity
   , InstanceInventory(..), ClassInstanceEvidence(..), JoinDecision(..)
@@ -302,20 +304,20 @@ readPlannedDeclarationInventory env original = do
 -- The checked recipe gives the certified original authored names lexical
 -- precedence while preserving each historical qualified import selection.
 transformPlannedDeclarationImports
-  :: PlannedDeclarationInventory -> HscEnv -> ParsedModule -> IO ParsedModule
+  :: PlannedDeclarationInventory -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 transformPlannedDeclarationImports inventory = refineOriginalDeclarationImports
   (inventoryOwner inventory) (inventoryInterface inventory)
   (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
 
 transformPlannedDeclarationImportsWithCompleted
-  :: PlannedDeclarationInventory -> CompletedValueImports -> HscEnv -> ParsedModule -> IO ParsedModule
+  :: PlannedDeclarationInventory -> CompletedValueImports -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 transformPlannedDeclarationImportsWithCompleted inventory = refineOriginalDeclarationImportsWithCompleted
   (inventoryOwner inventory) (inventoryInterface inventory)
   (concatMap (\item -> exportHead item : exportChildren item) (plannedExports inventory))
 
 transformProgramDeclarationImports
   :: [PlannedDeclarationInventory] -> Maybe CompletedValueImports
-  -> HscEnv -> ParsedModule -> IO ParsedModule
+  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 transformProgramDeclarationImports inventories = refineProgramDeclarationImports
   [(inventoryOwner inventory,inventoryInterface inventory,
       map (\item -> exportHead item : exportChildren item) (plannedExports inventory))

@@ -40,14 +40,17 @@ import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
+import Tidepool.ImportAdmission
+  ( checkedItemImportRendering, checkedItemOriginalRendering, checkedItemValueRendering
+  , checkedItemImportNamespaces, appendCompletedProgramImports )
 import Tidepool.Binders
   ( extractBindersNamedGhc
   , classifyWithFlags, exportItemName, templateParserFlags
   , analyzeCellWithFlags, analyzeOrderedCellWithFlags, cellInferenceSegments
-  , renderCellCheckSource, renderCellCheckSourceWithImports, locatedImportsRendering, CellSourceSpan(..)
+  , renderCellCheckSource, renderCellCheckSourceWithImports, locatedImportsRendering, locatedImportNamespaces
   , PreparedTypedSegmentSource(..), prepareTypedSegmentSource
   , CellSourcePlan(..), CellAnalysisItem(..), CellBindingForm(..), CellExpressionPlan(..), BoundBinder(..),
-    SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(InheritedLexicalImport, ProtectedCompilerImport), ExpressionLiftPlan(..)
+    SourcePrologue(..), LocatedPragma(..), ExpressionLiftPlan(..)
   , declarationSourceWithTemplateFlags, renderDeclarationForTemplate
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
@@ -159,10 +162,10 @@ import Tidepool.SessionArtifacts
 import Tidepool.CborEncode (encodeTurnOut, encodeCellOut, encodeBoundBinder, encodeTypedSegmentPlan)
 import Tidepool.Timing (readTimingEnabled, timePhase, emitCount)
 import Tidepool.TurnSource
-  ( extractModuleName, spliceTemplate, renderImportBinder
+  ( extractModuleName, spliceTemplate
   , generatedScaffoldModuleName, renameScaffoldModuleHeader
   , captureCompilerDefaultRecipe, preambleImportMarker
-  , ImportOrigin(..), ImportRendering, literalImportRendering, locatedImportRendering
+  , ImportRendering, literalImportRendering
   , appendImportRendering, replaceImportRendering, importRenderingSource
   , qualifyCompilerDefaultRendering, spliceImportRendering )
 import Tidepool.DependencyEvidence
@@ -546,6 +549,10 @@ runTurnMode bound path = do
   lastAttempt <- newIORef Nothing
   res <- timePhase timing "total" $ trySynchronous $ do
     turnSrc   <- readFile path
+    checkedImports <- case (admitted, exact) of
+      (Nothing, _) -> pure Nothing
+      (Just item, Just scope) -> Just <$> either fail pure (checkedItemImportRendering scope item)
+      (Just _, Nothing) -> fail "checked item imports lack their exact scope"
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
     -- The parse emits no phases of its own. This mode times it as the single
@@ -627,7 +634,7 @@ compileClassifiedTurn
   -> Maybe ExactScope
   -> IO TurnOut
 compileClassifiedTurn flags bound timing outDir turnSrc sb bindersStr admitted lastAttempt exact =
-  compiledTurn <$> compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt [] (StandaloneTurnParse flags) exact
+  compiledTurn <$> compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt (StandaloneTurnParse flags) exact
 
 data CompiledTurnOutput = CompiledTurnOutput
   { compiledTurn :: TurnOut
@@ -643,8 +650,8 @@ data TurnParseContext
 compileClassifiedTurnKeeping
   :: BoundCompilerRequest -> Bool -> FilePath
   -> String -> StmtBinders -> String -> Maybe CheckedItemAdmission
-  -> IORef (Maybe (FilePath, String)) -> [String] -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
-compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt programImports parseContext exact = do
+  -> IORef (Maybe (FilePath, String)) -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
+compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt parseContext exact = do
     let args = boundWorkerRequest bound
     let (parserFlags, prologue) = case parseContext of
           StandaloneTurnParse flags -> (flags, Nothing)
@@ -686,21 +693,13 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
                     either fail pure (replaceImportRendering preambleImportMarker
                       (appendImportRendering (locatedImportsRendering (prologueImports authored))
                         (literalImportRendering preambleImportMarker)) (literalImportRendering template))
-                withOriginal <- case original of
+                withOriginal <- case checkedImports >>= checkedItemOriginalRendering of
                   Nothing -> pure tmplSrc
-                  Just ((_, owner), _) -> either fail pure (replaceImportRendering preambleImportMarker
-                    (appendImportRendering (locatedImportRendering ProtectedCompiler ("import " ++ owner ++ "\n"))
-                      (literalImportRendering preambleImportMarker)) tmplSrc)
-                withProgram <- if null programImports then pure withOriginal else
-                  either fail pure (replaceImportRendering preambleImportMarker
-                    (foldl appendImportRendering (literalImportRendering "")
-                      (map (\owner -> locatedImportRendering InheritedLexical ("import " ++ owner ++ "\n")) programImports
-                        ++ [literalImportRendering preambleImportMarker])) withOriginal)
-                pure (appendImportRendering (literalImportRendering pragmaPrefix) withProgram, length (filter (== '\n') pragmaPrefix))
+                  Just imports -> either fail pure (replaceImportRendering preambleImportMarker
+                    (appendImportRendering imports (literalImportRendering preambleImportMarker)) tmplSrc)
+                pure (appendImportRendering (literalImportRendering pragmaPrefix) withOriginal, length (filter (== '\n') pragmaPrefix))
               namespaces = maybe [] (concatMap locatedImportNamespaces . prologueImports) prologue
-                ++ map mkModuleName programImports
-                ++ maybe [] (\((_,owner),_) -> [mkModuleName owner]) original
-                ++ maybe [] (map (mkModuleName . fst) . itemValueImports) admitted
+                ++ maybe [] checkedItemImportNamespaces checkedImports
               renderRecipe (withProgram, protectedLinePrefix) = do
                 case admitted of
                   Nothing -> do
@@ -709,12 +708,10 @@ compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted 
                     rendered <- either fail pure (spliceImportRendering prepared turnSrc bindersStr)
                     pure (rendered, protectedLinePrefix + qualifiedLinePrefix)
                   Just admission -> do
-                    withPrefix <- if null (itemValueImports admission) then pure withProgram else
-                      either fail pure (replaceImportRendering preambleImportMarker
-                        (foldl appendImportRendering (literalImportRendering "")
-                          (map (\(moduleName',names) -> locatedImportRendering ProtectedCompiler
-                            ("import " ++ moduleName' ++ " (" ++ intercalate ", " (map renderImportBinder names) ++ ")\n"))
-                              (itemValueImports admission) ++ [literalImportRendering preambleImportMarker])) withProgram)
+                    withPrefix <- case checkedImports >>= checkedItemValueRendering of
+                      Nothing -> pure withProgram
+                      Just imports -> either fail pure (replaceImportRendering preambleImportMarker
+                        (appendImportRendering imports (literalImportRendering preambleImportMarker)) withProgram)
                     (source, qualifiedLinePrefix) <- checkedRecipeSourceWithImports
                       defaults namespaces admission withPrefix turnSrc
                     pure (source, protectedLinePrefix + qualifiedLinePrefix)
@@ -1062,11 +1059,12 @@ runCellProgramMode bound cellPath exact planned = do
     compileSegment parserFlags timing admission template outDir batches state (segmentIndex, segment) = do
       let offset = programItemOffset state
           prefix = selectedProgramValues (programValues state)
-          withPrefix = installProgramImports prefix (programOriginals state) segment
           scope = programInput state
           segmentRequest = cellSegmentRequest bound state
           localArgs = boundWorkerRequest segmentRequest
           directory = outDir </> "segment-" ++ show segmentIndex
+      withPrefix <- either fail pure (appendCompletedProgramImports scope prefix
+        (programOriginals state) segment)
       createDirectoryIfMissing True directory
       case cellPlanItems segment of
         [item] | sbKind (cellAnalysisVerdict item) == KDecl -> do
@@ -1268,16 +1266,6 @@ writeTypedItemReceipt root scope admission source plan original entry ordinal = 
 
 programValueImport :: CompletedValueImport -> (String,[String])
 programValueImport value = (completedValueModule value,map fst (completedValueBinders value))
-
-installProgramImports :: [CompletedValueImport] -> [((String,String),String)] -> CellSourcePlan -> CellSourcePlan
-installProgramImports values original plan = plan { cellPlanPrologue = prologue
-  { prologueImports = prologueImports prologue ++ imports } }
-  where
-    prologue = cellPlanPrologue plan
-    imports = [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ owner) InheritedLexicalImport [mkModuleName owner]
-      | ((_,owner),_) <- original]
-      ++ [LocatedImport (CellSourceSpan 1 1 1 1) ("import " ++ completedValueModule value
-        ++ " (" ++ intercalate ", " (map (renderImportBinder . fst) (completedValueBinders value)) ++ ")") ProtectedCompilerImport [mkModuleName (completedValueModule value)] | value <- values]
 
 addProgramValue :: FilePath -> Word64 -> [BoundBinder] -> ProgramCellState ExactScope -> IO (ProgramCellState ExactScope)
 addProgramValue _ _ [] state = pure state

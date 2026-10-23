@@ -223,9 +223,9 @@ import Data.Foldable (toList)
 import Data.Unique qualified as RequestUnique
 import Data.Word (Word64)
 import Tidepool.CborEncode (encodeCellOut)
-import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport(..), ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
+import Tidepool.Binders (analyzeOrderedCellWithFlags, sourceModuleFlags, renderCellSplitError, CellAnalysisItem(..), CellBindingForm(..), TurnKind(..), StmtBinders(..), cellInferenceSegments, CellSourceSpan(..), PreparedTypedSegmentSource(..), prepareTypedSegmentSourceAvoiding, renderCellCheckSource, renderCellCheckSourceWithImports, CheckedBinderPin(..), CellSourcePlan(..), SourcePrologue(..), LocatedPragma(..), LocatedImport, locatedImportIntent, locatedImportNamespaces, ImportIntent(..), CellGenericDeclaration(..), CellStructuralDisplayTarget(..), CellExpressionPlan(..), ExpressionLiftPlan(..), omitCellGenericDeclarations, omitCellStructuralDisplayDeclarations)
 import Tidepool.CheckedCell (CheckedSignature, captureCheckedSignature, rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
-  , NativeParsedModule, unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModuleWithDiagnostics
+  , NativeParsedModule, unannotatedModule, nativeParsedModule, mapNativeModule, typecheckNativeModuleWithDiagnostics
   , resolveNativeAnnotations, annotateNativeModule)
 import Tidepool.FinalizedModule (FinalizedModule, newFinalizedModule, finalizedHomeModInfo, finalizedTidyGuts, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModuleArtifacts
@@ -321,6 +321,8 @@ import Tidepool.ExactHydration
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.TurnSource (importRenderingSource)
 import Tidepool.ImportAdmission (ExactCompilation(..), writeCheckedExactCompilation, compilationOriginalSourceImports)
+import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
+import Tidepool.ImportSyntax.Internal (LocatedImport(..))
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), SourceSelectedOriginals(..), revalidateSourceSelectedOriginals, extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, scopeValueInterfaces
   , scopeAvailableOriginalProducts
@@ -1363,7 +1365,7 @@ data PipelineVariant = PipelineVariant
     -- ^ @pvPlan compilerViewDirectory timingEnabled targetName downsweepGraph selectedExactScope@.
   , pvGeneratedInstanceCheck :: Maybe GeneratedInstanceRecipe
   , pvSourceImportIntents :: [ImportIntent]
-  , pvTransformParsed :: ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
+  , pvTransformParsed :: ModuleName -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
   }
 
 -- Operation-local source admission reuses the actual held facts. Only its
@@ -2706,7 +2708,7 @@ worldCellInheritedImports flags facts recipe = do
         Just facade -> [LocatedImport (CellSourceSpan 1 1 1 1)
           ("import " ++ exactModule (worldDeclarationInterface facade))
           InheritedLexicalImport [mkModuleName (exactModule (worldDeclarationInterface facade))]]
-  pure (map (\imported -> imported {locatedImportIntent=InheritedLexicalImport})
+  pure (map (\(LocatedImport span source _ namespaces) -> LocatedImport span source InheritedLexicalImport namespaces)
     (prologueImports (cellPlanPrologue lexical)) ++ declaration)
 
 prepareWorldCellNameStage :: HscEnv -> HeldCompilerWorld -> WorldCellRecipe -> CellSourcePlan
@@ -3061,17 +3063,17 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             annotated <- if ms_mod_name summary /= target
               then pvTransformParsed variant target environment summary parsed
               else do
-                let sourceOnlyImports = case operation of
-                      WorldCellNameSource {} -> parsed {pm_parsed_source = case pm_parsed_source parsed of
-                        L location syntax -> L location syntax {hsmodDecls=[]}}
-                      _ -> parsed
+                sourceOnlyImports <- case operation of
+                  WorldCellNameSource {} -> mapNativeModule (\(L location syntax) ->
+                    pure (L location syntax {hsmodDecls=[]})) parsed
+                  _ -> pure parsed
                 transformed <- pvTransformParsed variant target environment summary sourceOnlyImports
                 annotations <- requireNative
-                thenNativeModule transformed (annotateNativeModule annotations)
+                annotateNativeModule annotations transformed
             if ms_mod_name summary /= target then pure annotated else do
               resolved <- requireResolved
-              baseDeclared <- mapNativeModule (\parsed -> case verifiedDeclaration of
-                Nothing -> pure parsed
+              baseDeclared <- case verifiedDeclaration of
+                Nothing -> pure annotated
                 Just declaration -> do
                   let artifact = verifiedWorldDeclarationInterface declaration
                       entries = [entry | entry <- verifiedWorldDeclarationTypeInputs declaration
@@ -3081,9 +3083,9 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
                   iface <- case entries of
                     [entry] -> pure (worldTypeEntryInterface entry)
                     _ -> throwIO WorldCellCorrupt
-                  refineOriginalDeclarationImports (mi_module iface) (mi_iface_hash (mi_final_exts iface)) exports environment parsed) annotated
-              declared <- mapNativeModule (transformProgramDeclarationImports inventories Nothing environment) baseDeclared
-              thenNativeModule declared (transformCompletedValueAliases (worldResolvedAliases resolved) environment)
+                  refineOriginalDeclarationImports (mi_module iface) (mi_iface_hash (mi_final_exts iface)) exports environment annotated
+              declared <- transformProgramDeclarationImports inventories Nothing environment baseDeclared
+              transformCompletedValueAliases (worldResolvedAliases resolved) environment declared
         , pvPlan = \directory enabled target graph exact -> do
             environment <- getSession
             prefixEnvironment <- case operation of
@@ -3925,17 +3927,23 @@ typedPurposePlan (GeneratedScaffoldCompile _ inner) = typedPurposePlan inner
 typedPurposePlan (ExactScopeCompile inner _) = typedPurposePlan inner
 typedPurposePlan _ = Nothing
 
-transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
-transformFor GeneralCompile _ _ _ = pure . unannotatedModule
+nativeParsedModuleFor :: ParsedModule -> IO NativeParsedModule
+nativeParsedModuleFor parsed = do
+  syntax <- either (fail . show) pure (captureImportSyntax (pm_parsed_source parsed))
+  driver <- either (fail . show) pure (matchDriverImports syntax parsed)
+  pure (unannotatedModule (beginImportRefinement driver))
+
+transformFor :: CompilePurpose -> ModuleName -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
+transformFor GeneralCompile _ _ _ = pure
 transformFor (WorldPlannedDeclarationCompile _) target env summary = transformFor OriginalDeclarationCompile target env summary
 transformFor OriginalDeclarationCompile target env summary
-  | ms_mod_name summary == target = fmap unannotatedModule . refineParsedDeclarationImports env
-  | otherwise = pure . unannotatedModule
-transformFor CertifyHomeProductsCompile _ _ _ = pure . unannotatedModule
+  | ms_mod_name summary == target = refineParsedDeclarationImports env
+  | otherwise = pure
+transformFor CertifyHomeProductsCompile _ _ _ = pure
 transformFor WorldObservationCompile target env summary = transformFor InspectionTypeCompile target env summary
 transformFor InspectionTypeCompile target _ summary
-  | ms_mod_name summary == target = pure . unannotatedModule . normalizeInspectionWildcards
-  | otherwise = pure . unannotatedModule
+  | ms_mod_name summary == target = mapNativeModule (pure . normalizeInspectionWildcards)
+  | otherwise = pure
 transformFor (CheckedItemCompile annotations original _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
@@ -3943,24 +3951,24 @@ transformFor (CheckedItemCompile annotations original _) target env summary
         Nothing -> pure annotated
         Just (owner, fingerprint) -> do
           inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-          mapNativeModule (transformPlannedDeclarationImports inventory env) annotated
-  | otherwise = pure . unannotatedModule
+          transformPlannedDeclarationImports inventory env annotated
+  | otherwise = pure
 transformFor (HostActivationPreviewCompile signature) target env summary
   | ms_mod_name summary == target = rewriteHostInputType env 1 signature
-  | otherwise = pure . unannotatedModule
+  | otherwise = pure
 transformFor (ProgramItemCompile original annotations originals _) target env summary
   | ms_mod_name summary == target = \parsed -> do
       annotated <- rewriteCheckedAnnotations env annotations parsed
       inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-      selected <- mapNativeModule (transformProgramDeclarationImports inventories Nothing env) annotated
-      if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
-  | otherwise = pure . unannotatedModule
+      selected <- transformProgramDeclarationImports inventories Nothing env annotated
+      if original then refineParsedDeclarationImports env selected else pure selected
+  | otherwise = pure
 transformFor (PlannedDeclarationCheck inventory _) target env summary
-  | ms_mod_name summary == target = fmap unannotatedModule . transformPlannedDeclarationImports inventory env
-  | otherwise = pure . unannotatedModule
+  | ms_mod_name summary == target = transformPlannedDeclarationImports inventory env
+  | otherwise = pure
 transformFor (TypedSegmentCompile plan operations inner) target env summary
   | ms_mod_name summary == target = \parsed ->
-      transformFor inner target env summary parsed >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
+      transformFor inner target env summary parsed >>= mapNativeModule (rewriteParsedSegmentRoot operations plan (ms_hspp_opts summary))
   | otherwise = transformFor inner target env summary
 transformFor (ExactScopeCompile purpose _) target env summary = transformFor purpose target env summary
 transformFor (GeneratedScaffoldCompile _ purpose) target env summary = transformFor purpose target env summary
@@ -3969,12 +3977,12 @@ transformFor (ParsedImportSelection _ purpose) target env summary = transformFor
 transformFor (CompletedProgramImports _ purpose) target env summary = transformFor purpose target env summary
 
 transformWithCompletedValues :: Maybe CompletedValueImports -> CompilePurpose -> ModuleName
-  -> HscEnv -> ModSummary -> ParsedModule -> IO NativeParsedModule
+  -> HscEnv -> ModSummary -> NativeParsedModule -> IO NativeParsedModule
 transformWithCompletedValues captured purpose target env summary = case purpose of
   TypedSegmentCompile plan operations inner
     | ms_mod_name summary == target -> \parsed ->
         transformWithCompletedValues captured inner target env summary parsed
-          >>= mapNativeModule (rewriteParsedSegmentRoot operations plan)
+          >>= mapNativeModule (rewriteParsedSegmentRoot operations plan (ms_hspp_opts summary))
     | otherwise -> transformWithCompletedValues captured inner target env summary
   ParsedImportSelection _ inner -> transformWithCompletedValues captured inner target env summary
   CompletedProgramImports _ inner -> transformWithCompletedValues captured inner target env summary
@@ -3986,18 +3994,18 @@ transformWithCompletedValues captured purpose target env summary = case purpose 
         values <- maybe (fail "completed value interfaces were not installed in this request") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         case original of
-          Nothing -> mapNativeModule (transformCompletedValueImports values env) annotated
+          Nothing -> transformCompletedValueImports values env annotated
           Just (owner, fingerprint) -> do
             inventory <- hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure
-            mapNativeModule (transformPlannedDeclarationImportsWithCompleted inventory values env) annotated
+            transformPlannedDeclarationImportsWithCompleted inventory values env annotated
   ProgramItemCompile original annotations originals requested
     | ms_mod_name summary == target -> \parsed -> do
         values <- if null requested then pure Nothing else
           Just <$> maybe (fail "program completed interfaces were not installed") pure captured
         annotated <- rewriteCheckedAnnotations env annotations parsed
         inventories <- mapM (\(owner,fingerprint) -> hydratePlannedDeclarationInventory owner fingerprint env >>= either fail pure) originals
-        selected <- mapNativeModule (transformProgramDeclarationImports inventories values env) annotated
-        if original then mapNativeModule (refineParsedDeclarationImports env) selected else pure selected
+        selected <- transformProgramDeclarationImports inventories values env annotated
+        if original then refineParsedDeclarationImports env selected else pure selected
   _ -> transformFor purpose target env summary
 
 withNativeTypecheckRecovery :: PipelineVariant -> ModuleName -> HscEnv -> ModSummary -> ParsedModule -> IO a -> IO a
@@ -5943,7 +5951,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 current <- getSession
                 parsed <- parseModule summaryC
                 let quotes = classifyQuasiQuoteUse parsed
-                transformed <- liftIO (pvTransformParsed variant targetName current summaryC parsed)
+                transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summaryC)
                 ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summaryC parsed
                   (typecheckNativeModuleWithDiagnostics current transformed)
                 liftIO (validateCompilationFamilies current tcg)
@@ -6254,7 +6262,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                   timeDetailPhase timing "typecheck" (moduleNameString (ms_mod_name modSum)) $ do
                     parsed <- parseModule modSum
                     let quotes = classifyQuasiQuoteUse parsed
-                    transformed <- liftIO (pvTransformParsed variant targetName typecheckEnv modSum parsed)
+                    transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName typecheckEnv modSum)
                     ((tcg, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName typecheckEnv modSum parsed
                       (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
                     let flags = ms_hspp_opts modSum
@@ -6995,7 +7003,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     (moduleNameString (ms_mod_name summary)) $ do
                       parsed <- parseModule summary
                       let quotes = classifyQuasiQuoteUse parsed
-                      transformed <- liftIO (pvTransformParsed variant targetName current summary parsed)
+                      transformed <- liftIO (nativeParsedModuleFor parsed >>= pvTransformParsed variant targetName current summary)
                       ((checkedEnvironment, _), warnings) <- liftIO $ withNativeTypecheckRecovery variant targetName current summary parsed
                         (typecheckNativeModuleWithDiagnostics current transformed)
                       let flags = ms_hspp_opts summary
@@ -9979,7 +9987,7 @@ sessionVariant purpose scope = do
        transformed <- transformWithCompletedValues captured purpose targetModName' env summary parsed
        case scopeRequestTypes =<< exact of
          Just (recipe, signatures) | ms_mod_name summary == targetModName' ->
-           thenNativeModule transformed (rewriteRequestTypes env recipe signatures)
+           rewriteRequestTypes env recipe signatures transformed
          _ -> pure transformed
    , pvPlan = \compilerViewDirectory timing targetModName' modGraphRaw selectedExact -> do
       current <- getSession

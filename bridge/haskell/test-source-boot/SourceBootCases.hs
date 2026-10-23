@@ -191,7 +191,7 @@ import Tidepool.ExactHydration
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
   , captureProtectedTemplateImports, renderProtectedTemplateImports
   , generatedScaffoldRecipeWithProtectedImports
-  , generatedScaffoldRecipeWithImportRendering, sourceImportsHomeRoles
+  , generatedScaffoldRecipeWithImportRendering, sourceImportsSnapshot, sourceImportsHomeRoles
   , generatedActivationPreviewRecipe, generatedCheckingTemplateRecipe )
 import Tidepool.TypedSegment.Source
   ( prepareModuleDemand, annotateModuleDemand, moduleInputOccurrences, newSegmentDemandScope )

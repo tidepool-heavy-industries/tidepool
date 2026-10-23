@@ -884,7 +884,7 @@ readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) native
           , getLocA (ideclName (unLoc located)) == getLoc imported] of
         [declaration] -> Right declaration
         _ -> Left "checked template parsed import differs"
-      let actualShape = TemplateImportShape (showSDocOneLine defaultSDocContext (ppr declaration))
+      actualShape <- either (Left . show) (Right . TemplateImportShape) (describeImport declaration)
       unless (actualShape == expectedShape && ideclSource declaration == NotBoot
           && case ideclPkgQual declaration of NoRawPkgQual -> True; _ -> False)
         (Left "checked template interface import has another shape")
