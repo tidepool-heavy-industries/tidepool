@@ -1016,6 +1016,7 @@ fn assert_physical_selection(
             checked
                 .primary_inputs()
                 .inputs()
+                .compiler_source_support()
                 .compiler_roles()
                 .get(owner)
                 .is_none(),
