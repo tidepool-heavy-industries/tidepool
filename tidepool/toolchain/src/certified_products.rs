@@ -16100,171 +16100,186 @@ pub(crate) mod tests {
 
     #[test]
     fn compile_input_proof_rejects_substituted_dependency_bundle() {
-        use crate::artifact_inventory::{
-            ArtifactEntry, CompilerInputProjection, CompilerInputRole,
-        };
+        use crate::artifacts::{FrozenEntrySources, YieldSite};
 
-        let source = "module Driver where";
-        let target = Arc::new(testing::prepare(testing::wire_program()).unwrap());
-        let packages = BTreeMap::new();
-        let interfaces = certify_target_package_interfaces(&target, &packages).unwrap();
-        let owner = inherited_owner("Driver");
-        let import = PendingImportOwner::Source {
-            owner: owner.clone(),
-            original_ordinal: 1,
-            binder: testing::identity("Driver", "entry"),
-        };
-        let groups: Arc<[_]> = vec![inherited_group(&owner, import.clone())].into();
-        let table = tidepool_repr::DataConTable::default();
-        let producer = crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-            b"admitted-producer",
-        )
-        .sha256();
-        let interface = fixture_source_module_interface(
-            producer,
-            &owner.unit,
-            &owner.module,
-            sha(source.as_bytes()),
-            BTreeMap::new(),
-            None,
-        );
-        let entry = Arc::new(ArtifactEntry::canonical(interface.clone()));
-        let projection = CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap();
-        assert_eq!(
-            projection.roles(),
-            vec![CompilerInputRole::InterfaceOnly {
-                interface: entry.descriptor.id,
-            }],
-        );
-        let artifacts = crate::declaration_context::certified_product_artifact_view(
-            producer,
-            &[],
-            &[interface],
-            None,
+        let root = crate::artifacts::test_support::compiler_input_directory().unwrap();
+        let authored = root.path().join("sources");
+        std::fs::create_dir(&authored).unwrap();
+        std::fs::write(
+            authored.join("ResponseDependency.hs"),
+            include_str!("../tests/fixtures/completed-response/ResponseDependency.hs"),
         )
         .unwrap();
-        let mut validation = PackageInterfaceValidation::default();
-        let mut selection = CertifiedSourceSelection::from_compiler_projection(
-            &projection,
-            &artifacts.metadata_snapshot(),
-            &validation.inventory,
-        )
-        .unwrap();
-        let stage = crate::declaration_context::CapturedCompilerStage::issue(
-            &mut selection,
-            &artifacts.inventory().empty_view(),
-            vec![entry],
-            &mut validation,
-        )
-        .unwrap();
-        let source_directory = tempfile::tempdir().unwrap();
-        let source_path = source_directory.path().join("Driver.hs");
+        let source = include_str!("../tests/fixtures/completed-source/PreparedOriginal.hs")
+            .replace("QuotedOriginal", "ResponseDependency");
+        let source_path = authored.join("PreparedOriginal.hs");
         std::fs::write(&source_path, source).unwrap();
-        let mut source_evidence = evidence(source);
-        source_evidence.modules[0].unit = owner.unit.clone();
-        source_evidence.modules[0].module = owner.module.clone();
-        let source_evidence_bytes = serde_json::to_vec(&source_evidence).unwrap();
-        let source_admission = crate::artifacts::admit_compiler_source(
-            &validation.inventory,
-            &source_evidence_bytes,
-            &source_path,
-            source,
+        let sources = FrozenEntrySources::capture(&[authored], &source_path).unwrap();
+        let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            root.path(),
+            &root.path().join("entry"),
         )
-        .unwrap();
-        let proof = crate::compile_input::seal(
-            b"admitted-producer",
-            &[],
-            &source_admission,
-            &crate::compile_input::ValidatedInputPackages::fixture(packages.clone()),
-            source,
-            "root",
-            &target,
-            &groups,
-            &[import.clone()],
-            &interfaces,
-            table.clone(),
-            vec![],
-            stage.output(),
-            Default::default(),
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            proof
-                .issued_original_execution()
-                .compiler_input_projection(),
-            &projection,
-        );
-        let admitted_context = proof.issued_original_execution();
-        let source_owner = crate::declaration_join::ExactModuleIdentity {
-            unit: owner.unit.clone(),
-            module: owner.module.clone(),
-        };
-        assert!(admitted_context.source_scope().admits(&source_owner));
-        let dependency_context = crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
-            producer,
-            admitted_context.compiler_source_support().clone(),
-            admitted_context.lexical_graph().to_vec(),
-            source_owner.clone(),
-            &[],
-        ).unwrap();
-        assert_eq!(
-            dependency_context.lexical_graph(),
-            admitted_context.lexical_graph()
-        );
-        assert_eq!(
-            dependency_context.compiler_input_roles(),
-            admitted_context.compiler_input_roles()
-        );
-        assert!(!dependency_context.source_scope().admits(&source_owner));
-        assert_ne!(
-            dependency_context.semantic_sha256(),
-            admitted_context.semantic_sha256()
-        );
-        assert!(!dependency_context
-            .extend_interface_context(&admitted_context)
-            .unwrap()
-            .source_scope()
-            .admits(&source_owner));
+        .expect("the real compiler must issue the sealed native dependency bundle");
+        let target = entry.target_owned();
+        let products = entry.products();
+        let proof = products
+            .original_compile_input
+            .as_ref()
+            .expect("the actual entry retains its original compile-input issuer");
+        let groups = &products.certified_groups;
+        let imports = products.pending_imports();
+        let group_index = groups
+            .iter()
+            .position(|group| group.owner().module == "ResponseDependency")
+            .expect("the real compiled dependency supplies a native group");
+        let import_index = imports
+            .iter()
+            .position(|import| {
+                matches!(import, PendingImportOwner::Source { owner, .. }
+                    if owner.module == "ResponseDependency")
+            })
+            .expect("the actual target demands its declared HOME dependency");
+        assert!(entry.yield_sites().is_empty());
         assert!(proof.matches_bundle(
             &target,
-            &groups,
-            &[import.clone()],
-            &interfaces,
-            &table,
-            &[]
+            groups,
+            imports,
+            &products.package_interfaces,
+            entry.table(),
+            entry.yield_sites(),
         ));
-        let mut changed_owner = owner.clone();
-        changed_owner.module_version = ModuleVersion([99; 32]);
-        let changed_groups = vec![inherited_group(&changed_owner, import.clone())];
+        proof
+            .validated_original_source(
+                &target,
+                groups,
+                imports,
+                &products.package_interfaces,
+                entry.table(),
+                entry.yield_sites(),
+            )
+            .expect("the actual completed bundle lends its validated original source");
+
+        let mut changed_groups = groups.to_vec();
+        changed_groups[group_index].owner.module_version.0[0] ^= 1;
         assert!(!proof.matches_bundle(
             &target,
             &changed_groups,
-            &[import.clone()],
-            &interfaces,
-            &table,
-            &[]
+            imports,
+            &products.package_interfaces,
+            entry.table(),
+            entry.yield_sites(),
         ));
-        let changed_import = PendingImportOwner::Source {
-            owner: owner.clone(),
-            original_ordinal: 2,
-            binder: testing::identity("Driver", "entry"),
+        let mut changed_imports = imports.to_vec();
+        let PendingImportOwner::Source {
+            original_ordinal, ..
+        } = &mut changed_imports[import_index]
+        else {
+            unreachable!("the selected real dependency is a HOME import")
         };
+        *original_ordinal = original_ordinal.checked_add(1).unwrap();
         assert!(!proof.matches_bundle(
             &target,
-            &groups,
-            &[changed_import],
-            &interfaces,
-            &table,
-            &[]
+            groups,
+            &changed_imports,
+            &products.package_interfaces,
+            entry.table(),
+            entry.yield_sites(),
         ));
+        let mut changed_packages = products.package_interfaces.clone();
+        match changed_packages.interfaces.values_mut().next() {
+            Some(digest) => digest[0] ^= 1,
+            None => {
+                changed_packages.interfaces.insert(
+                    ("unselected-package".into(), "UnselectedInterface".into()),
+                    [99; 32],
+                );
+            }
+        }
+        assert!(changed_packages.matches_target(&target));
         assert!(!proof.matches_bundle(
             &target,
-            &groups,
-            &[import],
-            &CertifiedTargetPackageInterfaces::default(),
-            &table,
-            &[]
+            groups,
+            imports,
+            &changed_packages,
+            entry.table(),
+            entry.yield_sites(),
+        ));
+
+        let assert_refused = |result: Result<
+            crate::declaration_context::ValidatedOriginalSource<'_>,
+            CompileError,
+        >| {
+            match result {
+                Err(CompileError::ExtractFailed(detail)) => assert_eq!(
+                    detail,
+                    "original source belongs to another compiler output bundle"
+                ),
+                Err(error) => panic!("unexpected output-bundle refusal: {error:?}"),
+                Ok(_) => panic!("an altered output cannot borrow the original source issuer"),
+            }
+        };
+        let unrelated_target = testing::prepare(testing::wire_program()).unwrap();
+        assert_ne!(target.as_ref(), &unrelated_target);
+        assert_refused(proof.validated_original_source(
+            &unrelated_target,
+            groups,
+            imports,
+            &products.package_interfaces,
+            entry.table(),
+            entry.yield_sites(),
+        ));
+        let mut edited_table = entry.table().clone();
+        let next_id = edited_table
+            .iter()
+            .map(|row| row.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .unwrap();
+        let mut symbol = testing::identity("Fixture", "Edited");
+        symbol.namespace = "constructor".into();
+        let mut family = symbol.clone();
+        family.namespace = "type".into();
+        edited_table
+            .insert_checked(tidepool_repr::DataCon {
+                identity: testing::constructor_identity(symbol, family),
+                id: tidepool_repr::DataConId(next_id),
+                name: "Edited".into(),
+                tag: 1,
+                rep_arity: 0,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: "Edited".into(),
+            })
+            .unwrap();
+        assert_refused(proof.validated_original_source(
+            &target,
+            groups,
+            imports,
+            &products.package_interfaces,
+            &edited_table,
+            entry.yield_sites(),
+        ));
+        let edited_sites = vec![YieldSite {
+            site: 1,
+            origin: "PreparedOriginal".into(),
+            ordinal: 0,
+            ty: "Int".into(),
+            modules: vec![],
+            heads: vec![],
+            inputs: vec![],
+            input_type_witnesses: vec![],
+            reply_declaration: None,
+            request_type_signatures: None,
+        }];
+        assert_refused(proof.validated_original_source(
+            &target,
+            groups,
+            imports,
+            &products.package_interfaces,
+            entry.table(),
+            &edited_sites,
         ));
     }
 
