@@ -525,9 +525,7 @@ pub(crate) fn certify_world_stage_planned_declaration(
                 && product.owner().module == authored.owner.module
         })
         .ok_or_else(|| contract("authored World item has no issued Original"))?;
-    let interface = selected
-        .module_interface()
-        .ok_or_else(|| contract("authored World Original lacks canonical interface"))?;
+    let interface = selected.module_interface();
     if proof.owner() != &authored.owner
         || interface.interface_sha256() != *proof.iface_sha256()
         || selected.interface_bytes() != interface.interface_bytes()
@@ -651,14 +649,10 @@ fn certify_admitted_planned_declaration(
             "planned original sealed product has a different source digest",
         ));
     }
-    if selected
-        .module_interface()
-        .map(|interface| interface.origin())
-        != Some(
-            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
-                generation: module.gen.0,
-            },
-        )
+    if selected.module_interface().origin()
+        != (crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+            generation: module.gen.0,
+        })
     {
         return Err(contract(
             "planned original sealed product has a different declaration origin",
@@ -1078,29 +1072,29 @@ mod tests {
             fixture_finalized_product, fixture_finalized_product_with_requirements,
             tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
         };
+        let draft = |name: &str, version| {
+            original_groups_fixture_with_interface(
+                name,
+                vec![(7, vec![]), (11, vec![])],
+                version,
+                &BTreeMap::new(),
+                name.as_bytes().to_vec(),
+            )
+        };
         let product = |name: &str, version| {
-            let legacy = fixture_finalized_product(
-                original_groups_fixture_with_interface(
-                    name,
-                    vec![(7, vec![]), (11, vec![])],
-                    version,
-                    &BTreeMap::new(),
-                    name.as_bytes().to_vec(),
-                ),
-                [1; 32],
-            );
-            recovered_witness_fixtures(&[legacy]).remove(0).product
+            let complete = fixture_finalized_product(draft(name, version), [1; 32]);
+            recovered_witness_fixtures(&[complete]).remove(0).product
         };
         let private_type = product("PrivateType", 1);
         let authored = fixture_finalized_product_with_requirements(
-            product("Authored", 1),
+            draft("Authored", 1),
             [1; 32],
             Some(BTreeMap::from([(
                 (
                     private_type.owner().unit.clone(),
                     private_type.owner().module.clone(),
                 ),
-                private_type.module_interface().unwrap().interface_sha256(),
+                private_type.module_interface().interface_sha256(),
             )])),
         );
         let authored = recovered_witness_fixtures(&[authored]).remove(0).product;
@@ -1896,7 +1890,6 @@ mod tests {
         let originals = issued_originals(&products[..1]).unwrap();
         let captured = originals.products()[0]
             .original_native()
-            .unwrap()
             .package_interfaces()
             .get(&(external_unit.into(), "External".into()))
             .unwrap()

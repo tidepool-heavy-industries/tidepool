@@ -206,7 +206,7 @@ impl InputArtifactDiagnostics {
                 "interface": self.bytes("hi", product.interface_bytes())?,
                 "packages": self.bytes("packages", product.package_imports_bytes())?,
                 "certificate": self.bytes("certificate", product.certification_bytes())?,
-                "canonical": product.module_interface().map(|interface| self.canonical(interface)).transpose()?,
+                "canonical": self.canonical(product.module_interface())?,
             })),
             ArtifactPayload::Interface(interface, _) => Ok(serde_json::json!({
                 "interface": self.bytes("hi", interface.interface_bytes())?,

@@ -966,7 +966,7 @@ fn read_catalog_view_interface(
         .unwrap();
     let interface = match &entry.payload {
         ArtifactPayload::Canonical(interface) => interface,
-        ArtifactPayload::Original(product) => product.module_interface().unwrap(),
+        ArtifactPayload::Original(product) => product.module_interface(),
         ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
             panic!("catalog original or canonical owner required")
         }
@@ -1524,7 +1524,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let checked_previous = admit_borrowed_catalog(&fixture, &selected)
             .unwrap()
             .recovery_products
-            .remove(0);
+            .first()
+            .expect("the actual fixture compiler returned its Original")
+            .clone();
         assert!(acquired.records[0]
             .certified_original()
             .unwrap()
@@ -1549,7 +1551,9 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let checked_incoming = admit_borrowed_catalog(&fixture, &incoming_selected)
             .unwrap()
             .recovery_products
-            .remove(0);
+            .first()
+            .expect("the actual fixture compiler returned its Original")
+            .clone();
         assert!(incoming_package.records[0]
             .certified_original()
             .unwrap()
@@ -1823,18 +1827,18 @@ fn cached_catalog_admission_reuses_issued_facts_after_source_observation_and_rec
         let issued = admit_borrowed_catalog(&fixture, &ordinary).unwrap();
         assert_eq!(accepted, &issued.recovery_products[0]);
         assert!(!Arc::ptr_eq(
-            accepted.facts().unwrap(),
-            issued.recovery_products[0].facts().unwrap()
+            accepted.facts(),
+            issued.recovery_products[0].facts()
         ));
         // Keep semantic comparison before the reuse assertion so a no-reuse
         // sensitivity mutant distinguishes lost sharing from changed output.
         assert!(
-            Arc::ptr_eq(original.facts().unwrap(), accepted.facts().unwrap()),
+            Arc::ptr_eq(original.facts(), accepted.facts()),
             "exact catalog admission must retain its issued facts"
         );
 
         let durable = tempfile::tempdir().unwrap();
-        let producer = accepted.module_interface().unwrap().producer_sha256();
+        let producer = accepted.module_interface().producer_sha256();
         let references = crate::recovery_artifacts::materialize_certified_products(
             durable.path(),
             producer,
@@ -1883,10 +1887,7 @@ fn cached_catalog_admission_reissues_a_changed_recipe_and_refuses_stale_source()
     let admitted = admit_borrowed_catalog(&fixture, &selected).unwrap();
     let rebound = &admitted.recovery_products[0];
     assert!(rebound.execution_source().is_none());
-    assert!(!Arc::ptr_eq(
-        original.facts().unwrap(),
-        rebound.facts().unwrap()
-    ));
+    assert!(!Arc::ptr_eq(original.facts(), rebound.facts()));
     assert_eq!(original.product_bytes(), rebound.product_bytes());
     assert_eq!(original.module_interface(), rebound.module_interface());
     let mut ordinary = borrow_catalog(&package).unwrap();
@@ -2077,8 +2078,8 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
         if unit == "external" && module == "External")
     );
     assert!(Arc::ptr_eq(
-        original.facts().unwrap(),
-        admitted.recovery_products[0].facts().unwrap()
+        original.facts(),
+        admitted.recovery_products[0].facts()
     ));
     let mut ordinary = borrow_catalog(&package).unwrap();
     let bundle = ordinary
@@ -2089,8 +2090,8 @@ fn cached_catalog_package_binding_reuses_exact_facts_and_refuses_current_drift()
     let issued = admit_borrowed_catalog_receipt(&fixture, &ordinary, &packages, |_| {}).unwrap();
     assert_eq!(admitted.recovery_products, issued.recovery_products);
     assert!(!Arc::ptr_eq(
-        original.facts().unwrap(),
-        issued.recovery_products[0].facts().unwrap()
+        original.facts(),
+        issued.recovery_products[0].facts()
     ));
     fs::write(path, b"changed-external-package-interface").unwrap();
     for candidates in [&selected, &ordinary] {
@@ -2168,8 +2169,8 @@ fn cached_catalog_metadata_uses_captured_owner_and_owned_physical_files() {
     let relocated = admit_borrowed_catalog(&fixture, &selected).unwrap();
     assert_eq!(first.recovery_products, relocated.recovery_products);
     assert!(Arc::ptr_eq(
-        first.recovery_products[0].facts().unwrap(),
-        relocated.recovery_products[0].facts().unwrap()
+        first.recovery_products[0].facts(),
+        relocated.recovery_products[0].facts()
     ));
 
     let mut ordinary = borrow_catalog(&package).unwrap();

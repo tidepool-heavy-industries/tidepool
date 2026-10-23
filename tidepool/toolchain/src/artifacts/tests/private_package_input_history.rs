@@ -482,7 +482,7 @@ fn private_original_package_witness_survives_sparse_literal_target() {
         .compiler_source_support()
         .checked_native_input_decision(
             original_id,
-            ArtifactEntry::canonical_artifact_id(original.module_interface().unwrap()),
+            ArtifactEntry::canonical_artifact_id(original.module_interface()),
             original.owner(),
         )
         .unwrap();

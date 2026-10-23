@@ -1611,8 +1611,8 @@ mod tests {
                     .find(|product| product.owner().module == module)
                     .unwrap()
                     .clone();
-                let canonical = product.module_interface().unwrap();
-                let native = product.original_native().unwrap();
+                let canonical = product.module_interface();
+                let native = product.original_native();
                 native_counts.push(native.package_interfaces().iter().count());
                 if package_code {
                     assert!(
@@ -1650,15 +1650,9 @@ mod tests {
                 directories[0], directories[1],
                 "actual compiler outputs must have independent storage"
             );
-            for (owner, token) in originals[0]
-                .module_interface()
-                .unwrap()
-                .package_interfaces()
-                .iter()
-            {
+            for (owner, token) in originals[0].module_interface().package_interfaces().iter() {
                 let other = originals[1]
                     .module_interface()
-                    .unwrap()
                     .package_interfaces()
                     .get(owner)
                     .unwrap();
@@ -1677,7 +1671,7 @@ mod tests {
             let mut references = Vec::new();
             let mut producers = Vec::new();
             for (index, (product, store)) in originals.iter().zip(&storage).enumerate() {
-                let producer = product.module_interface().unwrap().producer_sha256();
+                let producer = product.module_interface().producer_sha256();
                 let before = crate::recovery_artifacts::package_interface_io();
                 let reference = crate::recovery_artifacts::materialize_certified_products(
                     store.path(),
@@ -1777,7 +1771,7 @@ mod tests {
             .recovery_products
             .iter()
             .find(|product| product.owner().module == "NativePackageTargets")
-            .and_then(|product| product.module_interface())
+            .map(|product| product.module_interface())
             .expect("actual canonical interface paired to its Original")
             .clone();
         assert!(

@@ -2056,9 +2056,7 @@ impl ExactCandidateContext {
         match self.originals.iter().find(|original| {
             original.owner().unit == owner.unit && original.owner().module == owner.module
         }) {
-            Some(original) => {
-                original.owner() == owner && original.module_interface() == Some(canonical)
-            }
+            Some(original) => original.owner() == owner && original.module_interface() == canonical,
             None => !self.ambiguous_native_owners.contains(&key),
         }
     }

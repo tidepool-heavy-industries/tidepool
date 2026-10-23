@@ -679,10 +679,8 @@ impl CertifiedAuthoredDeclaration {
             module: self.product.owner().module.clone(),
         };
         if !matches!(
-            self.product
-                .module_interface()
-                .map(|interface| interface.origin()),
-            Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })
+            self.product.module_interface().origin(),
+            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
         ) {
             return Err(contract(
                 "authored publication lacks its certified source origin",
@@ -990,14 +988,10 @@ fn certify_authored_declaration_inner(
     if selected.source_sha256() != Some(source_sha256) {
         return Err(contract("certified authored source digest differs"));
     }
-    if selected
-        .module_interface()
-        .map(|interface| interface.origin())
-        != Some(
-            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
-                generation: module.gen.0,
-            },
-        )
+    if selected.module_interface().origin()
+        != (crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration {
+            generation: module.gen.0,
+        })
     {
         return Err(contract("certified authored declaration origin differs"));
     }
@@ -2729,7 +2723,7 @@ mod authored_tests {
         assert_eq!(result.product.owner().module, module.module_name());
         assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
         assert_eq!(
-            result.product.module_interface().unwrap().origin(),
+            result.product.module_interface().origin(),
             crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
         );
         assert!(result.lexical_exports().is_empty());
@@ -2798,7 +2792,7 @@ mod authored_tests {
                     product.owner().unit == support.unit && product.owner().module == support.module
                 })
                 .all(|product| matches!(
-                    product.module_interface().unwrap().origin(),
+                    product.module_interface().origin(),
                     crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
                 )));
         }
@@ -3016,7 +3010,7 @@ mod authored_tests {
         assert_eq!(result.product.owner().module, module.module_name());
         assert_eq!(result.product.source_sha256(), Some(result.source_sha256));
         assert_eq!(
-            result.product.module_interface().unwrap().origin(),
+            result.product.module_interface().origin(),
             crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: 2 }
         );
         assert_eq!(
@@ -3050,7 +3044,7 @@ mod authored_tests {
             "later cumulative SOURCE roots cannot rewrite an earlier authored owner's issued adjacency");
         let result_owner = result.product().owner().clone();
         let result_interface = crate::artifact_inventory::ArtifactEntry::canonical(
-            result.product().module_interface().unwrap().clone(),
+            result.product().module_interface().clone(),
         )
         .descriptor
         .id;
@@ -3294,7 +3288,7 @@ mod authored_tests {
             assert_eq!(
                 selected[&owner].interface(),
                 crate::artifact_inventory::ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone()
+                    product.module_interface().clone()
                 )
                 .descriptor
                 .id

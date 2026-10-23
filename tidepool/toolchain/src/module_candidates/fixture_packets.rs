@@ -308,9 +308,7 @@ fn admit_fixture_scope(
             "native scope owners require genuine original products"
         );
         for product in &native {
-            let canonical = product
-                .module_interface()
-                .expect("native product must retain its paired finalized module");
+            let canonical = product.module_interface();
             assert!(
                 canonical.core_bytes().is_some(),
                 "native scope requires its captured canonical interface and Core"

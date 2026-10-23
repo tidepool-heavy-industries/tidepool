@@ -26,9 +26,7 @@ struct DeclarationFixture {
 impl DeclarationFixture {
     fn new(product: CertifiedRecoveryProduct) -> Self {
         Self {
-            canonical: Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
-            )),
+            canonical: Arc::new(ArtifactEntry::canonical(product.module_interface().clone())),
             original: Arc::new(
                 ArtifactEntry::original(
                     CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256(),
@@ -229,7 +227,7 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
                 .find(|product| product.owner().module == module)
                 .unwrap();
             if !matches!(
-                original.module_interface().unwrap().origin(),
+                original.module_interface().origin(),
                 crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
             ) {
                 assert_eq!(

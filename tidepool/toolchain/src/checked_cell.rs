@@ -7729,7 +7729,7 @@ mod tests {
             .iter()
             .find(|row| row.product.owner().module == "LifetimeHelper")
             .map(|row| Arc::new(ArtifactEntry::original(producer, row.product.clone()).unwrap()));
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone())
             .descriptor
             .id;
         let authored = Arc::new(ArtifactEntry::original(producer, product).unwrap());
@@ -7773,7 +7773,7 @@ mod tests {
         let authored_role =
             CompilerInputProjection::from_issued_entries(&[authored.clone()]).unwrap();
         let partial_offer = full_offer
-            .within_projection(&authored_role, context.artifact_view())
+            .within_assembly(authored_role.role_view(), context.artifact_view())
             .unwrap()
             .expect("the same original role preserves its issued offer");
         assert!(!partial_offer.is_full());
@@ -8153,7 +8153,7 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             let canonical = match &native.payload {
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                    ArtifactEntry::canonical(product.module_interface().clone())
                         .descriptor
                         .id
                 }

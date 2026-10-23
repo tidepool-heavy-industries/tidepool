@@ -1503,7 +1503,7 @@ fn immutable_candidates_in_context_with_catalog(
             let canonical = match &entry.payload {
                 crate::artifact_inventory::ArtifactPayload::Canonical(interface) => interface,
                 crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    product.module_interface()?
+                    product.module_interface()
                 }
                 crate::artifact_inventory::ArtifactPayload::Interface(_, _)
                 | crate::artifact_inventory::ArtifactPayload::PackageCode(_) => return None,
@@ -3241,7 +3241,7 @@ impl SelectedModuleCandidateOffer {
         let [original] = products.as_slice() else {
             return Err(fail());
         };
-        let interface = original.module_interface().ok_or_else(fail)?;
+        let interface = original.module_interface();
         let iface = interface.interface_bytes();
         let digest = crate::checked_cell::hash(iface);
         if string(&fields[5])? != digest || original.interface_bytes() != iface {
@@ -9095,7 +9095,7 @@ mod module_product_tests {
             else {
                 unreachable!()
             };
-            let native = product.original_native().unwrap();
+            let native = product.original_native();
             let ordinal_for = |name: &str| {
                 native
                     .inventory_facts()
@@ -9531,10 +9531,7 @@ mod module_product_tests {
                     certificate.product().owner().module,
                     "Tidepool.Session.Lib.G21"
                 );
-                let native = certificate
-                    .product()
-                    .original_native()
-                    .expect("authentic Original native witness");
+                let native = certificate.product().original_native();
                 assert!(!native.inventory_facts().native_group_ordinals.is_empty());
                 assert!(certificate
                     .lexical_exports()
@@ -9554,7 +9551,7 @@ mod module_product_tests {
                     certificate.product().owner().module,
                     "Tidepool.Session.Lib.G32"
                 );
-                let native = certificate.product().original_native().unwrap();
+                let native = certificate.product().original_native();
                 let references = native
                     .inventory_facts()
                     .native_group_ordinals
@@ -10078,7 +10075,8 @@ mod module_product_tests {
         let token = compiled.recovery_products.iter().find_map(|product| {
             product
                 .original_native()
-                .and_then(|native| native.package_interfaces().get(owner))
+                .package_interfaces()
+                .get(owner)
                 .filter(|token| token.sha256() == &selected.sha256)
                 .cloned()
         });
@@ -10422,7 +10420,7 @@ mod module_product_tests {
                 .find(|product| product.owner().module == module)
                 .expect("fresh source has a certified Original");
             let original_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
-                original.module_interface().unwrap().producer_sha256(),
+                original.module_interface().producer_sha256(),
                 original,
             );
             assert!(
@@ -10483,10 +10481,7 @@ mod module_product_tests {
             .find(|product| product.owner().module == "Tidepool.FilePath")
             .unwrap();
         let native_id = crate::artifact_inventory::ArtifactEntry::original_artifact_id(
-            native_original
-                .module_interface()
-                .unwrap()
-                .producer_sha256(),
+            native_original.module_interface().producer_sha256(),
             native_original,
         );
         assert_eq!(
