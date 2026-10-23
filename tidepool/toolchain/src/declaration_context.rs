@@ -2597,8 +2597,8 @@ impl RequestNativeAvailability {
         rows.insert(
             id,
             Arc::new(NativeTransportAvailability {
-                original: Arc::clone(&row.original),
-                canonical: row.canonical,
+                original: Arc::clone(&previous.original),
+                canonical: previous.canonical,
                 mode: if previous.mode == NativeTransportMode::Full
                     || row.mode == NativeTransportMode::Full
                 {
