@@ -18482,7 +18482,7 @@ pub(crate) mod tests {
                 }]),
             )
             .unwrap();
-        let context = ExactDeclarationContext::from_authenticated_execution(
+        let context = ExactDeclarationContext::retained_execution_fixture(
             producer,
             &partial,
             CompilerInputProjection::from_issued_entries(&[entry.clone()]).unwrap(),
@@ -19731,7 +19731,7 @@ pub(crate) mod tests {
             let mut continuation = stage.compiler_inputs().as_ref().clone();
             let owner = native.descriptor.owner.clone();
             let context = Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_execution_support(
+                crate::declaration_context::ExactDeclarationContext::retained_execution_support_fixture(
                     producer.sha256(),
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(stage.compiler_inputs()).unwrap(),
                     vec![crate::declaration_join::ExactLexicalNode {
@@ -20012,7 +20012,7 @@ pub(crate) mod tests {
                     .admit_recovery_selection(&inventory.empty_view(), entries.clone(), &selected)
                     .unwrap();
                 let owner = input.descriptor.owner.clone();
-                let mut context = ExactDeclarationContext::from_authenticated_execution(
+                let mut context = ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &view,
                     projection,
@@ -22164,7 +22164,7 @@ pub(crate) mod tests {
                 .admit_recovery_selection(&inventory.empty_view(), vec![input.clone()], &selected)
                 .unwrap();
             let baseline = Arc::new(
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &view,
                     CompilerInputProjection::from_issued_entries(&[input.clone()]).unwrap(),
@@ -24127,7 +24127,7 @@ pub(crate) mod tests {
                 imports: vec![],
             }];
             let context = if let Some(output) = &full_output {
-                let context = ExactDeclarationContext::from_authenticated_execution_support(
+                let context = ExactDeclarationContext::retained_execution_support_fixture(
                     producer.sha256(),
                     crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
                         output.compiler_inputs(),
@@ -24146,7 +24146,7 @@ pub(crate) mod tests {
                 assert!(context.artifact_view().selected_native_groups().is_empty());
                 context
             } else {
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &view,
                     projection,
@@ -24377,7 +24377,7 @@ pub(crate) mod tests {
                         ),
                     )
                     .unwrap();
-                let no_offer_context = ExactDeclarationContext::from_authenticated_execution(
+                let no_offer_context = ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &no_offer_view,
                     projection.clone(),
@@ -24466,7 +24466,7 @@ pub(crate) mod tests {
                     .extend_issued_compiler_support(&support)
                     .unwrap()
             } else {
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &view,
                     projection,
@@ -26373,7 +26373,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
             let context = Arc::new(
-                ExactDeclarationContext::from_authenticated_execution(
+                ExactDeclarationContext::retained_execution_fixture(
                     producer.sha256(),
                     &view,
                     projection,
