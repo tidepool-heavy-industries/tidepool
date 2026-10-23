@@ -1909,7 +1909,7 @@ tidepool_buildscript_run(
             env, resources, worker = compiler_service_test_inputs(package_name, unit_target["name"], mixed=True)
         unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-toolchain":
-            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident", "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes": "owned-resident", "declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand": "owned-resident", "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner": "owned-resident"},'
+            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident", "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes": "owned-resident", "declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand": "owned-resident", "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner": "owned-resident"},'
         if package_name == "tidepool":
             unit_extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         if package_name == "exomonad-host":
@@ -2317,7 +2317,7 @@ tidepool_buildscript_run(
             source_proof_cases = [
                 "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof",
                 "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes",
-                "declaration_context::native_availability_tests::candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand",
+                "declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand",
                 "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner",
             ]
             rules.append("\n".join([

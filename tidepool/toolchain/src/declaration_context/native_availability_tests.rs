@@ -9474,7 +9474,7 @@ fn candidate_native_availability_preserves_unselected_historical_offers() {
 
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_source_proof_pairing_test owns it"]
-fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
+fn candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand() {
     let fixture = compiled_publication_fixture();
     let producer = CanonicalProducerIdentity::from_producer_bytes(&fixture.producer);
     let entry = fixture.original.clone();
@@ -9617,6 +9617,13 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                 inputs.projection().snapshot_roles()[&entry.descriptor.owner],
                 role
             );
+            assert!(matches!(
+                inputs.compiler_source_support()
+                    .checked_native_input_decision(entry.descriptor.id, canonical, native.owner())
+                    .unwrap(),
+                crate::artifact_inventory::InputNativeDecision::IssuedChoices(choices)
+                    if choices.is_empty() != full_demand
+            ));
             let mut validation = PackageInterfaceValidation::default();
             let mut selection =
                 crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
@@ -9624,12 +9631,14 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                     &validation.inventory,
                 )
                 .unwrap();
+            // Full availability supplies exact body/dependency support in both
+            // requests. Executable demand remains the separate carried choice.
             for ordinal in &fixture.own_ordinals {
-                assert_eq!(
-                    selection.permits_native_group(entry.descriptor.id, native.owner(), *ordinal),
-                    full_demand,
-                    "request preserves the exact Full/Empty choice for group {ordinal}",
-                );
+                assert!(selection.permits_native_group(
+                    entry.descriptor.id,
+                    native.owner(),
+                    *ordinal,
+                ));
             }
             let physical = CapturedCompilerStage::issue(
                 &mut selection,
@@ -9638,13 +9647,6 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                 &mut validation,
             )
             .unwrap();
-            let selected_original = physical
-                .issued_artifacts()
-                .capture_graph_selection()
-                .namespace
-                .into_iter()
-                .find(|binding| binding.artifact == entry.descriptor.id)
-                .expect("the physical request retains this exact selected Original binding");
             let definitions =
                 crate::certified_products::original_native_group_definitions(native, fixture.first)
                     .unwrap();
@@ -9701,10 +9703,10 @@ fn candidate_reuse_keeps_published_policy_separate_from_withdrawn_demand() {
                     if matches!(error.failure, ArtifactInventoryFailure::NativeGroupUnavailable { artifact, original_ordinal }
                         if artifact == entry.descriptor.id && original_ordinal == fixture.first)
                     && matches!(&error.native_refusal,
-                        Some(crate::artifact_inventory::NativeAdmissionRefusal::InputPermissionDenied {
-                            body_present: true,
-                            selected_original: Some(binding),
-                        }) if *binding == selected_original)),
+                        Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceExplicitEmpty {
+                            owner,
+                            original_ordinal,
+                        }) if owner == &entry.descriptor.owner && *original_ordinal == fixture.first)),
                     "Full availability cannot resurrect explicit Empty demand: {admitted:?}"
                 );
             }
