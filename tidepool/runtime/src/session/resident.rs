@@ -11173,6 +11173,58 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn checked_capture_completes_issued_binding_through_resident() {
+        let mut fixture = checked_capture_fixture(SessionId(1000));
+        let binder = &fixture.bound[0];
+        let id = SessionVarId::from_extract(binder.var_id);
+        let outcome = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_bind_with_sites(
+                    &binder.name,
+                    fixture.compiled.code(),
+                    binder,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        assert_eq!(fixture.prefix.snapshot().compiler_prefix().next_item(), 1);
+        let scope = fixture.execution.private_scope();
+        assert_eq!(
+            fixture
+                .resident
+                .state
+                .resolve_in(scope, &binder.name)
+                .unwrap()
+                .id,
+            id
+        );
+        let custody = fixture
+            .resident
+            .retain_binding_custody_in(scope, &binder.name, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixture.resident.render_retained_preview(&custody, 64),
+            Some("41".into())
+        );
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(SessionModule::val(fixture.reservation.generation()))
+            .is_some());
+        let frozen = fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
+        assert_eq!(frozen.native_write_ids(), [id]);
+    }
+
+    #[test]
     fn checked_capture_refuses_missing_binder_at_binding_receiver() {
         checked_capture_receiver_refusal(CaptureRefusal::MissingBinder);
     }
@@ -11238,6 +11290,17 @@ mod authored_publication_tests {
         let mut foreign = matches!(refusal, CaptureRefusal::ForeignStage)
             .then(|| checked_capture_fixture(SessionId(1002)));
         let (completion, ticket, own_stage) = fixture.capture();
+        own_stage
+            .validate(&fixture.resident.state, &ticket)
+            .unwrap();
+        completion.validate_capture_ticket(&ticket).unwrap();
+        assert!(completion
+            .validates_private_overlay(
+                &fixture.resident.state,
+                fixture.execution.private_scope(),
+                &fixture.bound.iter().collect::<Vec<_>>(),
+            )
+            .unwrap());
         let (stage, _foreign_completion, _foreign_ticket) = match foreign.as_mut() {
             Some(foreign) => {
                 let (completion, ticket, stage) = foreign.capture();
@@ -11262,8 +11325,35 @@ mod authored_publication_tests {
             occurrence: binder.name.clone(),
             record_parent: None,
         };
+        // This receiver-level malformed-input control supplies an independently
+        // evaluated handle. Establish every unchanged entry premise before
+        // changing the binder list or substituting the foreign checked stage.
+        assert_eq!(entry.name.0, binder.name);
+        assert_eq!(
+            entry.module,
+            SessionModule::val(fixture.reservation.generation())
+        );
+        assert_eq!(entry.module.gen.0, ticket.execution().generation());
+        assert_eq!(entry.value.identity.module, binder.module);
+        assert_eq!(entry.value.identity.occurrence, binder.name);
+        assert_eq!(ticket.scope(), scope);
         let id = entry.id;
         let handle = entry.value.handle;
+        assert_eq!(
+            fixture
+                .resident
+                .state
+                .prepared()
+                .unwrap()
+                .prepared_handle_of(handle.raw()),
+            Some(handle)
+        );
+        if matches!(refusal, CaptureRefusal::ForeignStage) {
+            assert!(matches!(
+                stage.validate(&fixture.resident.state, &ticket),
+                Err(SessionError::StaleStagedDeclaration)
+            ));
+        }
         let mut binders = fixture.bound.clone();
         match refusal {
             CaptureRefusal::MissingBinder => binders.clear(),
