@@ -207,7 +207,7 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
       command <- hGetExactly stdin 1
       case BS.head command of
         0 -> pure ()
-        1 -> serve Nothing
+        1 -> serve Nothing >> requests channels handler
         6 -> do
           header <- hGetExactly stdin 144
           unless (BS.take 8 header == BSC.pack "TPNDX001") (fail "worker: invalid native exchange header")
@@ -217,7 +217,8 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
           gate <- newMVar ()
           borrowing <- newIORef Nothing
           let exchange = NativeDemandExchange header thread stdin protocol open state gate borrowing
-          serve (Just exchange) `finally` closeNativeExchange exchange
+          (serve (Just exchange) `finally` closeNativeExchange exchange)
+          requests channels handler
         other -> throwIO (userError ("worker: unknown request command " ++ show other))
       where
         serve native = do
@@ -242,7 +243,6 @@ runWorkerLoop withTransaction = withOutputChannels $ \channels@(OutputChannels p
             case captured of
               UnavailableCapture -> finishCompletion completed >> fail "worker capture unavailable"
               _ -> pure ()
-          requests channels handler
 
 -- Direct CLI shares capture, release assessment and terminal rendering with the
 -- framed owner. Main's callback includes its outer compiler-scope release.
