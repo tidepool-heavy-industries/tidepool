@@ -7,6 +7,11 @@ use tidepool_toolchain::linked_native::AcquiredNativeImport;
 
 #[test]
 fn declarations_precede_first_native_demands_and_display_without_replaying_effects() {
+    let subscriber = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    let _tracing = tracing::subscriber::set_default(subscriber);
     let mut session = SemanticSession::new();
     // The independent oracle uses ordinary values, not compiler graph identities
     // or the implementation of either captured helper.
