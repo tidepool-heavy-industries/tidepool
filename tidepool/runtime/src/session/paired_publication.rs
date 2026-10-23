@@ -754,7 +754,9 @@ impl PersistentSession {
             .log
             .projection_at(private.declaration_tip)
             .filter(|projection| {
-                lib.current_exact_context_in(private_scope).as_ref() == Some(projection.context())
+                lib.current_exact_context_in(private_scope)
+                    .as_ref()
+                    .is_some_and(|current| current.same_authenticated_context(projection.context()))
             })
             .cloned();
         if write_ids.iter().any(|id| {

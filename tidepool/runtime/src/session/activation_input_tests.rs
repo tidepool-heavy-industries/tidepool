@@ -1815,7 +1815,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     let mut repeated_provenance = (*original).clone();
     repeated_provenance.merge(&original).unwrap();
-    assert_eq!(repeated_provenance, *original);
+    assert!(repeated_provenance.same_selected_acquisitions(&original));
     assert!(
         !compiler_context.artifact_view().descriptors().is_empty(),
         "the compiler proof retains its original home closure before type projection"
@@ -1836,8 +1836,8 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         ),
         "same site metadata cannot replace its retained authenticated interface context"
     );
-    assert_eq!(
-        repeated_provenance, *original,
+    assert!(
+        repeated_provenance.same_selected_acquisitions(&original),
         "context collision is atomic"
     );
     let input = destination
@@ -2065,14 +2065,14 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
                 prop_assert_eq!(actual, expected);
                 let mut reversed = indices.clone();
                 reversed.reverse();
-                prop_assert_eq!(&result, &fold(&reversed));
+                prop_assert!(result.same_authenticated_execution(&fold(&reversed)));
                 let mut repeated = result.clone();
                 repeated.merge(&result);
-                prop_assert_eq!(&result, &repeated);
+                prop_assert!(result.same_authenticated_execution(&repeated));
                 let split = 1 + split % (indices.len() - 1);
                 let mut associated = fold(&indices[..split]);
                 associated.merge(&fold(&indices[split..]));
-                prop_assert_eq!(result, associated);
+                prop_assert!(result.same_authenticated_execution(&associated));
                 Ok(())
             },
         )
@@ -2107,7 +2107,7 @@ fn shared_request_site_composes_but_demands_unique_original_preview_context() {
         unchanged.merge(&conflicting),
         Err(ProgramProvenanceError::SiteMetadata(_))
     ));
-    assert_eq!(unchanged, *receiver_original);
+    assert!(unchanged.same_selected_acquisitions(&receiver_original));
 
     drop(source);
     let imported = destination.import_parcel(parcel, RealmId::ROOT).unwrap();

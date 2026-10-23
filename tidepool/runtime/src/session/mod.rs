@@ -2738,7 +2738,14 @@ impl SessionLib {
         }
         if (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
-            || staged.exact_context != self.current_exact_context_in(staged.scope)
+            || !match (
+                &staged.exact_context,
+                self.current_exact_context_in(staged.scope).as_ref(),
+            ) {
+                (Some(staged), Some(current)) => staged.same_authenticated_context(current),
+                (None, None) => true,
+                _ => false,
+            }
         {
             return Err(SessionTransitionReason::PublicBaselineChanged.into());
         }

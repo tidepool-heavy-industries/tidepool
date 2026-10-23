@@ -12,7 +12,7 @@ use tidepool_toolchain::declaration_join::{
 use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
 use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum ExportAuthority {
     Empty,
     Legacy,
@@ -25,7 +25,7 @@ enum ExportAuthority {
 
 /// Selected compiler identities with their original owned lexical closure.
 /// Callers cannot turn names or available interfaces into export authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ExactExportSurface {
     session: SessionId,
     source: Option<SessionModule>,
@@ -201,7 +201,7 @@ impl FacadeIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum FacadeArtifact {
     Source { path: PathBuf, source: String },
     Certified(Arc<CertifiedDeclarationProjection>),
@@ -209,7 +209,7 @@ enum FacadeArtifact {
 
 /// The same issued projection survives descriptor, installation and seed
 /// transfers. Certified interfaces are never reduced to source import strings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct MaterializedFacade {
     identity: FacadeIdentity,
     artifact: FacadeArtifact,

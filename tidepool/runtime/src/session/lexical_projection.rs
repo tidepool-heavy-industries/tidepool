@@ -16,12 +16,17 @@ use super::{DeclarationRetraction, SessionError, SessionLib};
 
 /// A compiler-certified lexical interface together with the exact original
 /// implementation closure. Clones retain the same issued interface and bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct CertifiedDeclarationProjection {
     composition: PublicationComposition,
 }
 
 impl CertifiedDeclarationProjection {
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.composition
+            .same_selected_acquisitions(&other.composition)
+    }
+
     pub fn module_name(&self) -> &str {
         &self.composition.join().reserved().module
     }
@@ -95,7 +100,7 @@ impl InitialDeclarationFacades {
 
 /// Immutable selected declaration facts captured under their runtime owner.
 /// Artifact presence never constructs this lexical selection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct DeclarationProjectionBaseline {
     pub(super) generation: Generation,
     pub(super) owner: ExactModuleIdentity,
@@ -127,7 +132,7 @@ impl DeclarationProjectionBaseline {
 
 /// The immutable native declaration and its separately issued lexical view.
 /// Preparation performs compiler work; adoption only validates and installs it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct PreparedAuthoredDeclaration {
     pub(super) generation: Generation,
     pub(super) parent: Generation,

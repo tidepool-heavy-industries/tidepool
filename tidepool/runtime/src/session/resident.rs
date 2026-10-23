@@ -68,7 +68,7 @@ enum ResidentResumeInput {
 /// Immutable compiler provenance that travels with live Haskell programs.
 /// Sites are globally stable, while the map makes accidental hash collisions
 /// loud before a continuation can be resumed against the wrong type.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     fresh_completion_sites: std::collections::BTreeSet<u64>,
@@ -220,12 +220,22 @@ impl CapturedSourceOrigin {
 
 /// Immutable per-site original-source custody shared with actual native owners.
 /// It retains no lexical roots, compiled turn, renderer or mutable session state.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct NativeSourceCustody {
     sites: Arc<BTreeMap<u64, RuntimeSourceOrigin>>,
 }
 
 impl NativeSourceCustody {
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.sites.len() == other.sites.len()
+            && self.sites.iter().all(|(site, source)| {
+                other
+                    .sites
+                    .get(site)
+                    .is_some_and(|held| source.same_selected_acquisitions(held))
+            })
+    }
+
     pub(super) fn unknown(sites: impl IntoIterator<Item = u64>) -> Self {
         Self::complete(sites, BTreeMap::new())
     }
@@ -283,8 +293,8 @@ impl NativeSourceCustody {
     }
 }
 
-impl PartialEq for RuntimeSourceOrigin {
-    fn eq(&self, other: &Self) -> bool {
+impl RuntimeSourceOrigin {
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
             && self.known().len() == other.known().len()
             && self
@@ -293,7 +303,6 @@ impl PartialEq for RuntimeSourceOrigin {
                 .all(|source| other.known().iter().any(|held| Arc::ptr_eq(source, held)))
     }
 }
-impl Eq for RuntimeSourceOrigin {}
 
 /// Compiler-selected immutable facts. No runtime execution owner or renderer
 /// is retained here; each installation creates its own execution observation.
@@ -440,7 +449,7 @@ impl CompiledProvenancePlan {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct AuthenticatedInputContext {
     types: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
     type_identity: [u8; 32],
@@ -448,6 +457,14 @@ struct AuthenticatedInputContext {
 }
 
 impl AuthenticatedInputContext {
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.type_identity == other.type_identity
+            && self.types.same_authenticated_interfaces(&other.types)
+            && self
+                .execution
+                .same_authenticated_execution(&other.execution)
+    }
+
     #[cfg(test)]
     fn capture(
         types: Arc<tidepool_toolchain::declaration_join::SelectedTypeInterfaces>,
@@ -524,7 +541,11 @@ impl ActivationDisplayOwners {
         let bucket = owners.buckets.entry(display.identity()).or_default();
         bucket.retain(|owner| owner.strong_count() != 0);
         for owner in bucket.iter().filter_map(Weak::upgrade) {
-            if owner.display.as_ref() == Some(&display) {
+            if owner
+                .display
+                .as_ref()
+                .is_some_and(|held| held.same_recorded_facts(&display))
+            {
                 return owner;
             }
         }
@@ -607,25 +628,22 @@ impl OriginalExecutionContext {
     }
 }
 
-impl PartialEq for OriginalExecutionContext {
-    fn eq(&self, other: &Self) -> bool {
+impl OriginalExecutionContext {
+    fn same_authenticated_execution(&self, other: &Self) -> bool {
         self.evidence.same_authenticated_execution(&other.evidence)
     }
 }
 
-impl Eq for OriginalExecutionContext {}
-
-impl PartialEq for OriginalExecutionContexts {
-    fn eq(&self, other: &Self) -> bool {
+impl OriginalExecutionContexts {
+    fn same_authenticated_execution(&self, other: &Self) -> bool {
         self.contexts().count() == other.contexts().count()
             && self.contexts().all(|context| {
                 other
                     .contexts()
-                    .any(|held| held.as_ref() == context.as_ref())
+                    .any(|held| held.same_authenticated_execution(context))
             })
     }
 }
-impl Eq for OriginalExecutionContexts {}
 
 impl OriginalExecutionContexts {
     fn contexts(&self) -> impl Iterator<Item = &Arc<OriginalExecutionContext>> {
@@ -643,7 +661,7 @@ impl OriginalExecutionContexts {
     fn merge(&mut self, other: &Self) {
         for context in other.contexts() {
             match self {
-                Self::Unique(previous) if previous.as_ref() == context.as_ref() => {}
+                Self::Unique(previous) if previous.same_authenticated_execution(context) => {}
                 Self::Unique(previous) => {
                     let mut contexts = BTreeMap::<_, Vec<_>>::new();
                     contexts
@@ -658,7 +676,10 @@ impl OriginalExecutionContexts {
                 }
                 Self::Ambiguous(contexts) => {
                     let bucket = contexts.entry(context.evidence.identity()).or_default();
-                    if !bucket.iter().any(|held| held.as_ref() == context.as_ref()) {
+                    if !bucket
+                        .iter()
+                        .any(|held| held.same_authenticated_execution(context))
+                    {
                         bucket.push(context.clone());
                     }
                 }
@@ -721,6 +742,30 @@ enum ProvenanceMerge {
 }
 
 impl ProgramProvenance {
+    pub fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        self.sites == other.sites
+            && self.fresh_completion_sites == other.fresh_completion_sites
+            && self.source_originals.len() == other.source_originals.len()
+            && self
+                .source_originals
+                .iter()
+                .zip(&other.source_originals)
+                .all(|(left, right)| left.same_authenticated_selection(right))
+            && self
+                .native_sites
+                .same_selected_acquisitions(&other.native_sites)
+            && self.authenticated_inputs.len() == other.authenticated_inputs.len()
+            && self.authenticated_inputs.iter().all(|(site, input)| {
+                other
+                    .authenticated_inputs
+                    .get(site)
+                    .is_some_and(|held| input.same_selected_acquisitions(held))
+            })
+            && self
+                .original_sources
+                .same_selected_acquisitions(&other.original_sources)
+    }
+
     pub fn from_sites(sites: &[YieldSite]) -> Result<Self, ProgramProvenanceError> {
         let mut provenance = Self::default();
         provenance.extend(sites)?;
@@ -846,7 +891,11 @@ impl ProgramProvenance {
                 .or_insert_with(|| interfaces.clone());
         }
         for source in &other.source_originals {
-            if !self.source_originals.contains(source) {
+            if !self
+                .source_originals
+                .iter()
+                .any(|held| held.same_authenticated_selection(source))
+            {
                 self.source_originals.push(source.clone());
             }
         }

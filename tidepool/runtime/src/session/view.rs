@@ -181,7 +181,7 @@ impl SourceImports {
 /// already-compiled references. The distinction is represented here once so
 /// harness, REPL, and actor workbenches cannot assemble subtly different
 /// module sets.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SessionCompileView {
     pub(super) session: SessionId,
     pub(super) lexical_scope: ScopeId,
@@ -194,7 +194,7 @@ pub struct SessionCompileView {
 
 /// The reserved declaration owner and its actual compiler import are one
 /// value, so a local original cannot masquerade as a cumulative interface.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) enum CompileLibrary {
     Source(SessionModule),
     Certified {
@@ -207,6 +207,33 @@ pub(super) enum CompileLibrary {
     },
 }
 impl CompileLibrary {
+    fn same_selected_acquisitions(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Source(left), Self::Source(right)) => left == right,
+            (
+                Self::Certified {
+                    original: left,
+                    projection: left_projection,
+                },
+                Self::Certified {
+                    original: right,
+                    projection: right_projection,
+                },
+            ) => left == right && left_projection.same_selected_acquisitions(right_projection),
+            (
+                Self::Recovered {
+                    original: left,
+                    evidence: left_evidence,
+                },
+                Self::Recovered {
+                    original: right,
+                    evidence: right_evidence,
+                },
+            ) => left == right && left_evidence.same_selected_acquisitions(right_evidence),
+            _ => false,
+        }
+    }
+
     fn original(&self) -> SessionModule {
         match self {
             Self::Source(module) => *module,
@@ -224,7 +251,7 @@ impl CompileLibrary {
 
 /// Immutable lexical metadata shared by readers of the same exact view.
 /// Request identity, generation and injection selection remain on the view.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct CompileViewProjection {
     pub(super) root: PathBuf,
     pub(super) persistent_imports: SourceImports,
@@ -534,7 +561,14 @@ impl SessionCompileView {
             && self.lexical_scope == compiled_against.lexical_scope
             && self.projection.root == compiled_against.projection.root
             && self.projection.persistent_imports == compiled_against.projection.persistent_imports
-            && self.projection.library == compiled_against.projection.library
+            && match (
+                &self.projection.library,
+                &compiled_against.projection.library,
+            ) {
+                (Some(current), Some(compiled)) => current.same_selected_acquisitions(compiled),
+                (None, None) => true,
+                _ => false,
+            }
             && self.projection.visible_values == compiled_against.projection.visible_values
             && self.projection.visible_value_names
                 == compiled_against.projection.visible_value_names
@@ -544,10 +578,7 @@ impl SessionCompileView {
                 &self.projection.exact_context,
                 &compiled_against.projection.exact_context,
             ) {
-                (Some(current), Some(compiled)) => {
-                    Arc::ptr_eq(current, compiled)
-                        || current.semantic_sha256() == compiled.semantic_sha256()
-                }
+                (Some(current), Some(compiled)) => current.same_authenticated_context(compiled),
                 (None, None) => true,
                 _ => false,
             }
