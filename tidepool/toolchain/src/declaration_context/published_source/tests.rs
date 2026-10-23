@@ -1530,7 +1530,19 @@ impl ExactDeclarationContext {
         let endorsement = context
             .endorse_published_original(owner, "crossed-acquisition-history", input_identity)
             .unwrap();
-        let published = support.publish_original(&endorsement).unwrap();
+        assert!(
+            matches!(
+                support.publish_original(&endorsement),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure,
+                        crate::artifact_inventory::ArtifactInventoryFailure::PublicationNativeDomainMismatch { .. }),
+            ),
+            "an endorsement cannot be applied to the support from before context finalization"
+        );
+        let published = context
+            .compiler_source_support()
+            .publish_original(&endorsement)
+            .expect("publication consumes its finalized issuing context");
         assert_acquisition(&published);
         assert_acquisition(&published.publication_birth_support(owner).unwrap());
 

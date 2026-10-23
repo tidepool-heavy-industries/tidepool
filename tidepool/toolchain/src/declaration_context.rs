@@ -466,9 +466,16 @@ impl SourceLexicalScope {
         let previous = previous.selected_interfaces()?;
         let current = current.selected_interfaces()?;
         for node in self.rows() {
-            if previous.get(&node.owner).map(|entry| entry.descriptor.id)
-                != current.get(&node.owner).map(|entry| entry.descriptor.id)
-            {
+            let previous_interface = previous.get(&node.owner).map(|entry| entry.descriptor.id);
+            let current_interface = current.get(&node.owner).map(|entry| entry.descriptor.id);
+            if previous_interface != current_interface {
+                tracing::debug!(
+                    target: "exomonad_harness::compiler",
+                    owner = ?node.owner,
+                    ?previous_interface,
+                    ?current_interface,
+                    "source_scope.canonical_projection_refused"
+                );
                 return Err(failure(
                     "source scope canonical owner changed during projection",
                 ));
