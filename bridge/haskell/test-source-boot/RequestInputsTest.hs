@@ -85,14 +85,12 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), hydrateExactScope)
 import Tidepool.DeclarationJoin (DeclarationExport(..), ExportIdentity(..), interfaceExports, encodeDeclarationExports, normalizeDeclarationExports)
 import Tidepool.ExactScope
-  ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
+  ( ExactScope, SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
   , CanonicalInterfaceProof, bindCanonicalProofInputs, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , canonicalCorePath, canonicalCoreSha256, readExactScope, revalidateExactScope
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
-  , writeCheckedExactCompilation, writeRetainedExactCompilation
-  , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes, readScopedInterfaces
   , exactInputRetentionLimits, optionalInputByteLimit, commitWorldInputRetention
@@ -134,6 +132,10 @@ import Tidepool.ImportSyntax
   , describeImport, beginImportRefinement, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
 import Tidepool.CheckedCell (nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
 import Tidepool.CheckedPrefixImports (refineParsedDeclarationImports)
+import Tidepool.ImportAdmission
+  ( compilationScope, compilationSourceSelection
+  , writeCheckedExactCompilation, writeRetainedExactCompilation
+  , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment, captureSupportedPackageProfileWith)
 import Tidepool.ArtifactBytes
