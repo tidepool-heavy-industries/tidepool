@@ -476,9 +476,10 @@ impl SourceLexicalScope {
                     ?current_interface,
                     "source_scope.canonical_projection_refused"
                 );
-                return Err(failure(
-                    "source scope canonical owner changed during projection",
-                ));
+                return Err(failure(format!(
+                    "source scope canonical owner changed during projection: owner={:?}, previous={previous_interface:?}, current={current_interface:?}",
+                    node.owner,
+                )));
             }
         }
         self.validate_selected(|owner| {

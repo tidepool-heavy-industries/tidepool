@@ -1515,10 +1515,20 @@ impl ExactDeclarationContext {
                 ),
                 "an equal-fact custody acquisition replaced the selected compiler owner"
             );
+        };
+        let assert_unissued = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+            assert_acquisition(support);
             assert!(matches!(
                 support.compiler_roles().native_decision(owner),
                 crate::artifact_inventory::InputNativeDecision::UnissuedPolicy,
             ), "publication and continuation cannot issue a native choice from retained availability");
+        };
+        let assert_empty_request_choice = |support: &crate::artifact_inventory::CompilerSourceSupport| {
+            assert_acquisition(support);
+            assert!(matches!(
+                support.compiler_roles().native_decision(owner),
+                crate::artifact_inventory::InputNativeDecision::IssuedChoices(groups) if groups.is_empty(),
+            ), "request construction issues an explicit empty choice without demanding retained availability");
         };
         let context = self
             .published_context_for_root(owner, expected.descriptor.id)
@@ -1526,7 +1536,7 @@ impl ExactDeclarationContext {
             .rebuild(|facts| facts.compiler_support = support.clone())
             .finish()
             .unwrap();
-        assert_acquisition(context.compiler_source_support());
+        assert_unissued(context.compiler_source_support());
         let endorsement = context
             .endorse_published_original(owner, "crossed-acquisition-history", input_identity)
             .unwrap();
@@ -1543,8 +1553,8 @@ impl ExactDeclarationContext {
             .compiler_source_support()
             .publish_original(&endorsement)
             .expect("publication consumes its finalized issuing context");
-        assert_acquisition(&published);
-        assert_acquisition(&published.publication_birth_support(owner).unwrap());
+        assert_unissued(&published);
+        assert_unissued(&published.publication_birth_support(owner).unwrap());
 
         // An empty source delta still traverses the real source continuation
         // owner with a genuine completed source selection. It must retain the
@@ -1557,8 +1567,8 @@ impl ExactDeclarationContext {
                 &CompilerDependencies::merge(std::iter::empty()).unwrap(),
             )
             .unwrap();
-        assert_acquisition(&extended);
-        assert_acquisition(&extended.publication_birth_support(owner).unwrap());
+        assert_unissued(&extended);
+        assert_unissued(&extended.publication_birth_support(owner).unwrap());
         let context = Arc::new(
             context
                 .rebuild(|facts| facts.compiler_support = extended)
@@ -1571,7 +1581,8 @@ impl ExactDeclarationContext {
         let world = context
             .capture_world_primary_inputs(context.toolchain_identity_sha256())
             .unwrap();
-        assert_acquisition(world.inputs().compiler_source_support());
+        assert_unissued(world.context().compiler_source_support());
+        assert_empty_request_choice(world.inputs().compiler_source_support());
         let additions = incoming
             .compiler_roles()
             .keys()
@@ -1608,9 +1619,9 @@ impl ExactDeclarationContext {
                 );
             }
         }
-        assert_acquisition(continued.primary.context().compiler_source_support());
-        assert_acquisition(continued.primary.inputs().compiler_source_support());
-        assert_acquisition(
+        assert_empty_request_choice(continued.primary.context().compiler_source_support());
+        assert_empty_request_choice(continued.primary.inputs().compiler_source_support());
+        assert_unissued(
             &continued
                 .primary
                 .context()
