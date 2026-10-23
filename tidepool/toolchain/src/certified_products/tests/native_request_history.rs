@@ -1453,15 +1453,18 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
     assert!(no_demand.artifacts().selected_native_groups().is_empty());
     assert!(no_demand.same_selected_acquisitions(inputs.compiler_source_support()));
     let private = OriginalCompilerInputs::from_issued_support(&no_demand);
+    let changed_source = private
+        .for_program_continuation(
+            no_demand.artifacts(),
+            execution.admissions(),
+            &(source.to_owned() + "-- changed\n"),
+        )
+        .err()
+        .expect("a successful receipt does not authenticate different source bytes");
     assert!(
-        private
-            .for_program_continuation(
-                no_demand.artifacts(),
-                execution.admissions(),
-                &(source.to_owned() + "-- changed\n"),
-            )
-            .is_err(),
-        "a successful receipt does not authenticate different source bytes"
+        matches!(&changed_source, CompileError::ExtractFailed(detail)
+            if detail == "program support lacks one authenticated generated source owner"),
+        "changed source must fail source authentication before graph validation: {changed_source:?}"
     );
     let graph = no_demand.artifacts().capture_graph_selection();
     let edges = no_demand.artifacts().binding_dependencies();
