@@ -452,6 +452,7 @@ rust_filegroup(
         "src/session/registry_properties.rs": "tidepool/runtime/src/session/registry_properties.rs",
         "src/session/render.rs": "tidepool/runtime/src/session/render.rs",
         "src/session/resident.rs": "tidepool/runtime/src/session/resident.rs",
+        "src/session/resident_paired_publication_tests.rs": "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "src/session/source_admission.rs": "tidepool/runtime/src/session/source_admission.rs",
         "src/session/staged_world_acceptance_tests.rs": "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "src/session/turn.rs": "tidepool/runtime/src/session/turn.rs",
@@ -717,6 +718,7 @@ rust_filegroup(
         "src/session/registry_properties.rs": "tidepool/runtime/src/session/registry_properties.rs",
         "src/session/render.rs": "tidepool/runtime/src/session/render.rs",
         "src/session/resident.rs": "tidepool/runtime/src/session/resident.rs",
+        "src/session/resident_paired_publication_tests.rs": "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "src/session/source_admission.rs": "tidepool/runtime/src/session/source_admission.rs",
         "src/session/staged_world_acceptance_tests.rs": "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "src/session/turn.rs": "tidepool/runtime/src/session/turn.rs",
@@ -802,6 +804,7 @@ tidepool_rust_binary(
         "tidepool/runtime/src/session/package_runtime_tests.rs",
         "tidepool/runtime/src/session/paired_publication/linearization_tests.rs",
         "tidepool/runtime/src/session/registry_properties.rs",
+        "tidepool/runtime/src/session/resident_paired_publication_tests.rs",
         "tidepool/runtime/src/session/staged_world_acceptance_tests.rs",
         "tidepool/runtime/src/session/turn_scaling_tests.rs",
         "tidepool/runtime/src/session/typed_segment_tests.rs",
@@ -1480,6 +1483,46 @@ tidepool_rust_test_cases(
     visibility = ["PUBLIC"],
 )
 
+tidepool_rust_test_cases(
+    name = "runtime_world_publication_histories",
+    binary = ":tidepool_runtime_unit_tests",
+    exact_tests = [
+        "session::resident::paired_publication_tests::paired_independent_authored_rebase_preserves_originals_and_current_winners",
+        "session::resident::paired_publication_tests::paired_first_authored_publication_preserves_atomic_visibility",
+        "session::resident::paired_publication_tests::paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
+    ],
+    expected_count = 3,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 1860000,
+    case_compiler_modes = {"session::resident::paired_publication_tests::paired_independent_authored_rebase_preserves_originals_and_current_winners": "owned-resident", "session::resident::paired_publication_tests::paired_first_authored_publication_preserves_atomic_visibility": "owned-resident", "session::resident::paired_publication_tests::paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners": "owned-resident"},
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//bridge/haskell:freer_resume_prepared",
+        "//bridge/haskell:freer_retention_prepared",
+        "//bridge/haskell:m3_vertical_prepared",
+        "toolchains//:ghc",
+        "//build/package:compiler_service_deployment",
+    ],
+    resource_env = {
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
+        "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FREER_RESUME_FIXTURE_DIR": "$(location //bridge/haskell:freer_resume_prepared)",
+        "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR": "$(location //bridge/haskell:freer_retention_prepared)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_HASKELL_ACTORS_DIR": "$(location //bridge/haskell:facade_embedded_sources)/actors",
+        "TIDEPOOL_M3_FIXTURE_DIR": "$(location //bridge/haskell:m3_vertical_prepared)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
 rust_compile_fail(
     name = "compile_fail_compiler_cell_program_requires_runtime_settlement",
     source = "tests/compile_fail/compiler_cell_program_requires_runtime_settlement.rs",
@@ -1938,6 +1981,7 @@ filegroup(
         "tidepool/runtime/src/session/registry_properties.rs": "src/session/registry_properties.rs",
         "tidepool/runtime/src/session/render.rs": "src/session/render.rs",
         "tidepool/runtime/src/session/resident.rs": "src/session/resident.rs",
+        "tidepool/runtime/src/session/resident_paired_publication_tests.rs": "src/session/resident_paired_publication_tests.rs",
         "tidepool/runtime/src/session/source_admission.rs": "src/session/source_admission.rs",
         "tidepool/runtime/src/session/staged_world_acceptance_tests.rs": "src/session/staged_world_acceptance_tests.rs",
         "tidepool/runtime/src/session/turn.rs": "src/session/turn.rs",

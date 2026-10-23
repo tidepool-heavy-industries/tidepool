@@ -11,7 +11,7 @@ import System.IO (IOMode(ReadWriteMode), hClose, openTempFile, withFile)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (createLink, createNamedPipe, createSymbolicLink, ownerReadMode, ownerWriteMode, unionFileModes)
 import System.Timeout (timeout)
-import Tidepool.ExtractRequest (RequestField(..), WorkerRequest(..), workerArgv, workerRequestFromArgv)
+import Tidepool.ExtractRequest (RequestField(..), AdmittedWorkerRequest, admittedSourceFiles, admittedRequestOperation, AdmittedRequestOperation(..), inspectionInputs, inspectionBatch, admitWorkerRequest, workerArgv, workerRequestFromArgv)
 import Tidepool.HarnessSource (harnessProfilePragmaLine, spliceHarnessProfilePragma)
 
 harnessSourceChecks :: IO ()
@@ -27,32 +27,29 @@ harnessSourceChecks = withScratch $ \root -> do
   originals <- mapM BS.readFile [first, second]
   ordinary <- request [Input first, Input second, OutputDir out]
   ordinaryCopy <- spliceHarnessProfilePragma ordinary
-  equal "ordinary mode only rewrites first input" [out </> "Input.hs", second] (requestFiles ordinaryCopy)
+  equal "ordinary mode only rewrites first input" [out </> "Input.hs", second] (admittedSourceFiles ordinaryCopy)
   copied <- readFile (out </> "Input.hs")
   equal "exact pragma and one diagnostic line" (harnessProfilePragmaLine ++ "\n" ++ body) copied
   implicit <- request [Input first]
   implicitCopy <- spliceHarnessProfilePragma implicit
-  equal "default output directory" [root </> "first" </> "Input_cbor" </> "Input.hs"] (requestFiles implicitCopy)
-  empty <- request [OutputDir out]
-  unchanged <- spliceHarnessProfilePragma empty
-  equal "empty input remains empty" [] (requestFiles unchanged)
+  equal "default output directory" [root </> "first" </> "Input_cbor" </> "Input.hs"] (admittedSourceFiles implicitCopy)
   inspections <- request [Input first, Input second, Input first, OutputDir out,
-    InspectInfo "value", InspectInfo "value", InspectInfo "value", InspectTypeBatch first]
+    InspectType "Int", InspectType "Int", InspectType "Int", InspectOut "unused", InspectTypeBatch first]
   inspectionCopies <- spliceHarnessProfilePragma inspections
   let query0 = out </> "inspection-query-0" </> "Input.hs"
       query1 = out </> "inspection-query-1" </> "Input.hs"
-  equal "raw duplicates share indexed copy; basename peers do not" [query0, query1, query0] (requestFiles inspectionCopies)
+  equal "raw duplicates share indexed copy; basename peers do not" [query0, query1, query0] (inspectionSourceFiles inspectionCopies)
   directories <- listDirectory out
   unless ("inspection-query-2" `notElem` directories) (fail "duplicate input created another copy")
-  equal "batch copy stays separate" (Just (out </> "inspection-type-batch" </> "Input.hs")) (requestInspectTypeBatch inspectionCopies)
+  equal "batch copy stays separate" (Just (out </> "inspection-type-batch" </> "Input.hs")) (inspectionBatchPath inspectionCopies)
   equal "second basename contents" (harnessProfilePragmaLine ++ "\nmodule Input where\nvalue = 2\n") =<< readFile query1
   -- Equivalent spellings deliberately remain separate raw request identities.
-  aliases <- request [Input first, Input (root </> "first" </> "." </> "Input.hs"), OutputDir out, InspectInfo "value"]
+  aliases <- request [Input first, Input (root </> "first" </> "." </> "Input.hs"), OutputDir out, InspectInfo "value", InspectInfo "value", InspectOut "unused"]
   aliasCopies <- spliceHarnessProfilePragma aliases
-  equal "raw-path identity is preserved" [query0, query1] (requestFiles aliasCopies)
+  equal "raw-path identity is preserved" [query0, query1] (admittedSourceFiles aliasCopies)
   equal "caller bytes unchanged" originals =<< mapM BS.readFile [first, second]
   missing <- request [Input (root </> "missing"), OutputDir out]
-  failure <- try (spliceHarnessProfilePragma missing) :: IO (Either IOException WorkerRequest)
+  failure <- try (spliceHarnessProfilePragma missing) :: IO (Either IOException AdmittedWorkerRequest)
   unless (either isDoesNotExistError (const False) failure) (fail "missing input lost filesystem error")
   directorySource <- request [Input (root </> "first"), OutputDir out]
   expectFileFailure "directory cannot be read as source" (spliceHarnessProfilePragma directorySource)
@@ -97,17 +94,17 @@ crossInputAliasChecks root first = do
   missingUnused <- request [Input first, Input (root </> "unused-missing"), OutputDir (root </> "unused-copy")]
   rewritten <- spliceHarnessProfilePragma missingUnused
   equal "missing unused input preserves first-only behavior"
-    [root </> "unused-copy" </> "Input.hs", root </> "unused-missing"] (requestFiles rewritten)
+    [root </> "unused-copy" </> "Input.hs", root </> "unused-missing"] (admittedSourceFiles rewritten)
   createDirectoryIfMissing True (out </> "inspection-query-0")
   writeFile singletonVictim victimBytes
   check "inspection copy aliases different input"
-    [Input first, Input singletonVictim, OutputDir out, InspectInfo "value"] singletonVictim
+    [Input first, Input singletonVictim, OutputDir out, InspectInfo "value", InspectInfo "value", InspectOut "unused"] singletonVictim
   check "inspection copy aliases batch source"
-    [Input first, OutputDir out, InspectInfo "value", InspectTypeBatch singletonVictim] singletonVictim
+    [Input first, Input first, OutputDir out, InspectType "Int", InspectType "Int", InspectOut "unused", InspectTypeBatch singletonVictim] singletonVictim
   createDirectoryIfMissing True (out </> "inspection-type-batch")
   writeFile batchVictim victimBytes
   check "batch copy aliases singleton source"
-    [Input batchVictim, OutputDir out, InspectInfo "value", InspectTypeBatch first] batchVictim
+    [Input batchVictim, Input batchVictim, OutputDir out, InspectType "Int", InspectType "Int", InspectOut "unused", InspectTypeBatch first] batchVictim
 
 cancellationCheck :: FilePath -> FilePath -> IO ()
 cancellationCheck root out = do
@@ -117,7 +114,7 @@ cancellationCheck root out = do
   withFile fifo ReadWriteMode $ \_ -> do
     result <- newEmptyMVar
     tid <- forkIO $ do
-      outcome <- try (spliceHarnessProfilePragma args) :: IO (Either SomeException WorkerRequest)
+      outcome <- try (spliceHarnessProfilePragma args) :: IO (Either SomeException AdmittedWorkerRequest)
       putMVar result outcome
     let waitBlocked = do
           state <- threadStatus tid
@@ -134,17 +131,17 @@ cancellationCheck root out = do
       Just (Left exception) | Just ThreadKilled <- fromException exception -> pure ()
       _ -> fail "harness source swallowed or replaced cancellation"
 
-request :: [RequestField] -> IO WorkerRequest
+request :: [RequestField] -> IO AdmittedWorkerRequest
 request fields = case workerRequestFromArgv (workerArgv fields) of
-  Right (Just args) -> pure args
+  Right (Just args) -> either (fail . show) pure (admitWorkerRequest args)
   other -> fail ("invalid test request: " ++ show other)
 
 equal :: (Eq a, Show a) => String -> a -> a -> IO ()
 equal label expected actual = unless (expected == actual) (fail (label ++ ": " ++ show actual))
 
-expectFileFailure :: String -> IO WorkerRequest -> IO ()
+expectFileFailure :: String -> IO AdmittedWorkerRequest -> IO ()
 expectFileFailure label action = do
-  result <- try action :: IO (Either IOException WorkerRequest)
+  result <- try action :: IO (Either IOException AdmittedWorkerRequest)
   unless (either (const True) (const False) result) (fail label)
 
 withScratch :: (FilePath -> IO a) -> IO a
@@ -157,3 +154,13 @@ withScratch = bracket acquire removeDirectoryRecursive
       removeFile path
       createDirectory path
       pure path
+
+inspectionSourceFiles :: AdmittedWorkerRequest -> [FilePath]
+inspectionSourceFiles request = case admittedRequestOperation request of
+  AdmittedInspection payload -> map fst (inspectionInputs payload)
+  _ -> error "inspection fixture expected"
+
+inspectionBatchPath :: AdmittedWorkerRequest -> Maybe FilePath
+inspectionBatchPath request = case admittedRequestOperation request of
+  AdmittedInspection payload -> inspectionBatch payload
+  _ -> error "inspection fixture expected"

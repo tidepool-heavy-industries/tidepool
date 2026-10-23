@@ -983,7 +983,7 @@ pub(crate) fn decode_world_typed_segment_plans(
     decode_typed_segment_plan_facts(
         value,
         reservation.plan().items(),
-        reservation.slots(),
+        &reservation.slots().collect::<Vec<_>>(),
         *reservation.admission_digest(),
     )
 }
@@ -4125,14 +4125,16 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
-    pub fn world_selected_dependency_terminals(
+    pub fn world_stage_dependencies(
         &self,
-    ) -> Result<Vec<crate::compiler_world::SelectedDependencyTerminal>, CompileError> {
+    ) -> Option<&Arc<crate::compiler_world::SealedStageDependencies>> {
         match &self.cell.specification {
-            CheckedCellSpecification::World { program, .. } => {
-                program.selected_dependency_terminals(self.index)
-            }
-            CheckedCellSpecification::Finite(_) => Ok(Vec::new()),
+            CheckedCellSpecification::World { program, .. } => Some(
+                program.item(self.index)
+                    .expect("exact checked World item belongs to its program")
+                    .proof().stage().dependencies(),
+            ),
+            CheckedCellSpecification::Finite(_) => None,
         }
     }
 
@@ -4546,10 +4548,10 @@ impl PreparedCheckedItemOutput {
                 if let PreparedItemOrigin::World(program) = origin {
                     let expected = program
                         .reservation()
-                        .expected_bindings()
+                        .items()
                         .get(item.index)
                         .ok_or_else(|| failure("World turn has no reserved binding identities"))?;
-                    let bound = decode_world_item_binders(&fields[2], expected)?;
+                    let bound = decode_world_item_binders(&fields[2], expected.bindings())?;
                     if bound.as_slice()
                         != program
                             .item(item.index)
@@ -5037,58 +5039,93 @@ pub(crate) fn admit_world_checked_items(
 /// The reservation and original captured output remain retained in its basis.
 pub(crate) fn admit_world_cell(
     program: Arc<crate::compiler_world::CheckedWorldCellProgram>,
-    sources: &[(&crate::declaration_context::ExactSourceAdmission, &str)],
-    aliases: &[std::path::PathBuf],
-    planned_declarations: BTreeMap<usize, PlannedCheckedDeclaration>,
-) -> Result<Arc<ExactCheckedCell>, CompileError> {
-    if sources.len() != program.stages().len() {
-        return Err(failure(
-            "World checked cell lacks its exact stage source admissions",
-        ));
+    stages: Vec<crate::declaration_context::SealedWorldStage>,
+) -> Result<
+    (
+        Arc<ExactCheckedCell>,
+        Vec<crate::artifacts::ProgramItemAdmission>,
+    ),
+    CompileError,
+> {
+    use crate::declaration_context::SealedWorldStageItems;
+    if stages.len() != program.stages().len() {
+        return Err(failure("World checked cell lacks its sealed stages"));
     }
-    for (index, (source, text)) in sources.iter().enumerate() {
-        if !source.matches_world_stage(&program, index, text)? {
+    let mut evidence = Vec::with_capacity(stages.len());
+    let mut aliases = std::collections::BTreeSet::new();
+    let mut planned_declarations = BTreeMap::new();
+    let mut items = Vec::with_capacity(program.items().len());
+    for (index, sealed) in stages.into_iter().enumerate() {
+        let (stage, source, stage_items) = sealed.into_parts();
+        if !Arc::ptr_eq(&stage, &program.stages()[index])
+            || !source
+                .source
+                .matches_world_stage(&program, index, &source.text)?
+        {
             return Err(failure(
                 "World checked cell source belongs to another stage",
             ));
         }
-    }
-    let mut originals = 0;
-    for item in program.items() {
-        match item.kind() {
-            crate::compiler_world::WorldItemProofKind::Executable(_) => {
-                if planned_declarations.contains_key(&item.ordinal()) {
-                    return Err(failure("World executable has a declaration certificate"));
+        match stage_items {
+            SealedWorldStageItems::Original {
+                ordinal,
+                planned,
+                context,
+            } => {
+                if ordinal != items.len() || stage.ordinals() != [ordinal] {
+                    return Err(failure("World original is not the next reserved item"));
                 }
-            }
-            crate::compiler_world::WorldItemProofKind::Declaration(proof)
-            | crate::compiler_world::WorldItemProofKind::Prologue(proof) => {
-                originals += 1;
-                let planned = planned_declarations.get(&item.ordinal()).ok_or_else(|| {
-                    failure("World original lacks its planned declaration certificate")
-                })?;
-                let (stage_source, stage_text) = sources[item.proof().stage().index()];
+                let item = program
+                    .item(ordinal)
+                    .ok_or_else(|| failure("World original has no reserved item"))?;
+                let proof = match item.kind() {
+                    crate::compiler_world::WorldItemProofKind::Declaration(proof)
+                    | crate::compiler_world::WorldItemProofKind::Prologue(proof) => proof,
+                    crate::compiler_world::WorldItemProofKind::Executable(_) => {
+                        return Err(failure("World executable has a declaration certificate"))
+                    }
+                };
                 let product = planned.certificate.product();
                 if product.owner().unit != proof.owner().unit
                     || product.owner().module != proof.owner().module
                     || product.owner().skinny_iface_sha256 != *proof.iface_sha256()
                     || planned.certificate.toolchain_identity_sha256() != *program.producer_sha256()
                     || planned.receipt_digest != *program.certificate_sha256()
-                    || planned.source != stage_text
+                    || planned.source != source.text
                     || planned.certificate.source_sha256()
-                        != *stage_source.witness().source_sha256()
+                        != *source.source.witness().source_sha256()
                 {
                     return Err(failure(
                         "World original certificate belongs to another owner or producer",
                     ));
                 }
+                planned_declarations.insert(ordinal, planned);
+                items.push(crate::artifacts::ProgramItemAdmission {
+                    context,
+                    output: None,
+                });
+            }
+            SealedWorldStageItems::Executable(executables) => {
+                if executables.len() != stage.ordinals().len() {
+                    return Err(failure("World executable stage lacks sealed items"));
+                }
+                for (expected, item) in stage.ordinals().iter().zip(executables) {
+                    let (ordinal, output, context) = item.into_parts();
+                    if *expected != ordinal || ordinal != items.len() {
+                        return Err(failure("World executable is not the next reserved item"));
+                    }
+                    items.push(crate::artifacts::ProgramItemAdmission {
+                        context,
+                        output: Some(output),
+                    });
+                }
             }
         }
+        evidence.push((source.text, source.source.evidence().clone()));
+        aliases.extend(source.aliases);
     }
-    if planned_declarations.len() != originals {
-        return Err(failure(
-            "World declaration certificates exceed reserved originals",
-        ));
+    if items.len() != program.items().len() {
+        return Err(failure("World sealed stages do not cover reserved items"));
     }
     let value_inputs = CheckedValueInputs::capture_checked(
         program
@@ -5106,44 +5143,43 @@ pub(crate) fn admit_world_cell(
     let reserved = program
         .reservation()
         .slots()
-        .iter()
         .filter_map(|slot| match slot {
             CheckedPlannedCellSlot::Prologue { declaration }
             | CheckedPlannedCellSlot::Declaration { declaration } => Some(
-                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(*declaration))
+                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(declaration))
                     .module_name(),
             ),
             _ => None,
         })
         .collect();
-    Ok(Arc::new(ExactCheckedCell {
-        producer: *program.producer_sha256(),
-        context: program.primary_context().semantic_sha256(),
-        declaration_context: program.primary_context().clone(),
-        retained_projections: Vec::new(),
-        receipt_digest: *program.certificate_sha256(),
-        checked_source: program.checked_source().clone(),
-        evidence: sources
-            .iter()
-            .map(|(source, text)| ((*text).to_owned(), source.evidence().clone()))
-            .collect(),
-        observations: program.observations().clone(),
-        items: CheckedCellItems::World(program.clone()),
-        include: aliases.to_vec(),
-        planned_declaration: None,
-        planned_declarations,
-        typed_segments: program
-            .segments()
-            .iter()
-            .map(|segment| segment.as_ref().clone())
-            .collect(),
-        value_inputs,
-        specification: CheckedCellSpecification::World {
-            program,
-            injected,
-            reserved,
-        },
-    }))
+    Ok((
+        Arc::new(ExactCheckedCell {
+            producer: *program.producer_sha256(),
+            context: program.primary_context().semantic_sha256(),
+            declaration_context: program.primary_context().clone(),
+            retained_projections: Vec::new(),
+            receipt_digest: *program.certificate_sha256(),
+            checked_source: program.checked_source().clone(),
+            evidence,
+            observations: program.observations().clone(),
+            items: CheckedCellItems::World(program.clone()),
+            include: aliases.into_iter().collect(),
+            planned_declaration: None,
+            planned_declarations,
+            typed_segments: program
+                .segments()
+                .iter()
+                .map(|segment| segment.as_ref().clone())
+                .collect(),
+            value_inputs,
+            specification: CheckedCellSpecification::World {
+                program,
+                injected,
+                reserved,
+            },
+        }),
+        items,
+    ))
 }
 
 pub(crate) fn admit_checked_cell<'a>(

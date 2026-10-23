@@ -98,7 +98,9 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         | SessionError::UnsupportedPrivateValueReplacement
         | SessionError::InvalidPublicBindingPromotion(_)
         | SessionError::InvalidBindingIdentity(_)
-        | SessionError::StaleStagedDeclaration => {
+        | SessionError::StaleStagedDeclaration
+        | SessionError::TransitionRefused(_)
+        | SessionError::DeclarationFacts(_) => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
         // The declaration source is valid; its durable recovery artifact is
@@ -185,6 +187,29 @@ mod tests {
             SessionError::Compile(CompileError::Asks(_))
         ));
         assert_eq!(classify_session(&asks).class, FailureClass::VersionSkew);
+    }
+
+    #[test]
+    fn session_transition_boundary_preserves_each_runtime_reason() {
+        use crate::session::SessionTransitionReason as R;
+        for expected in [
+            R::OwnerChanged,
+            R::ScopeRevoked,
+            R::WrongPhase,
+            R::SourceRevoked,
+            R::RetainedValueUnavailable,
+            R::PreparedValueChanged,
+            R::PublicBaselineChanged,
+        ] {
+            let error = SessionError::from(expected);
+            assert!(
+                matches!(&error, SessionError::TransitionRefused(actual) if *actual == expected)
+            );
+            let classified = classify_session(&error);
+            assert_eq!(classified.class, FailureClass::Runtime);
+            assert_eq!(classified.phase, Phase::Run);
+            assert_eq!(classified.message, error.to_string());
+        }
     }
 
     #[test]

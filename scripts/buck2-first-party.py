@@ -1088,6 +1088,8 @@ def compile_fail_cases(package, library):
         "type_interfaces_cannot_issue_completion": (),
         "retained_context_is_not_selected_type_interfaces": (),
         "generic_request_has_no_world_primary_advance": (),
+        "frozen_execution_rejects_raw_write_selection": (),
+        "frozen_execution_rejects_recovered_compiler_context": ("tidepool-toolchain",),
         "compiler_cell_requires_settled": (),
         "compiler_cell_program_requires_runtime_settlement": (),
         "compiler_renderer_requires_settled": (),
@@ -1331,6 +1333,32 @@ def actor_notebook_contract_test_cases(binary):
             '    visibility = ["PUBLIC"],', ")", "",
         ]))
     return "\n".join(rules)
+
+
+def runtime_world_publication_test_cases(binary):
+    tests = ["session::resident::paired_publication_tests::" + name for name in (
+        "paired_independent_authored_rebase_preserves_originals_and_current_winners",
+        "paired_first_authored_publication_preserves_atomic_visibility",
+        "paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
+    )]
+    tests.append("session::resident::world_cell_test_support::source_hidden_join::"
+                 "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")
+    env, resources, worker = compiler_service_test_inputs(
+        "tidepool-runtime", "runtime_world_publication_histories"
+    )
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "runtime_world_publication_histories",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        '    case_compiler_modes = {' + ", ".join(
+            json.dumps(test) + ': "owned-resident"' for test in tests
+        ) + "},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
 
 
 def runtime_test_cases(binary):
@@ -1990,6 +2018,9 @@ tidepool_buildscript_run(
                 '    visibility = ["PUBLIC"],', ")", ""]))
             if package_name == "tidepool-runtime":
                 world_tests = [
+                    "session::resident::activation_input_tests::frozen_activation_replays_same_input_and_refuses_second_private_input",
+                    "session::resident::activation_input_tests::frozen_world_retry_keeps_completed_effect_and_original_binding",
+                    "session::resident::activation_input_tests::frozen_world_unchanged_and_declaration_controls_preserve_source_refusals",
                     "session::resident::activation_input_tests::frozen_private_execution_refuses_a_later_checked_start",
                     "session::resident::activation_input_tests::resident_parcel_preserves_original_authenticated_request_across_sessions",
                     "session::resident::activation_input_tests::active_world_item_freeze_refusal_preserves_completion_and_publication",
@@ -2507,6 +2538,7 @@ tidepool_buildscript_run(
             rules.append(facade_test_cases(unit_target["name"]))
         if package_name == "tidepool-runtime":
             rules.append(runtime_test_cases(unit_target["name"]))
+            rules.append(runtime_world_publication_test_cases(unit_target["name"]))
         if package_name == "exomonad-actor":
             rules.append(actor_observation_test_cases(unit_target["name"]))
             rules.append(actor_private_publication_test_cases(unit_target["name"]))

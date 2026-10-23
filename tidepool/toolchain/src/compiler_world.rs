@@ -9,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
-use tidepool_extract_cmd::{InspectionNamespace, InspectionScope, StructuredInspection};
+use tidepool_extract_cmd::{
+    CompilerResponseRejection, InspectionNamespace, InspectionScope, StructuredInspection,
+};
 
 use crate::artifact_inventory::CanonicalProducerIdentity;
 use crate::cache::SourceRootManifest;
@@ -505,7 +507,7 @@ impl CompilerWorldHostSuccessor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct WorldBindingFact {
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
     session_var: tidepool_repr::SessionVarId,
@@ -725,11 +727,18 @@ impl CompilerWorldCellOperand {
 /// The current occurrence table, coupled to genuine checked rows by its
 /// publication owner. Aliases keep independent names and share their row.
 #[derive(Clone)]
-pub struct CompilerWorldBindings {
+pub struct VisibleWorldBindings {
     query_scope: u64,
     entries: imbl::OrdMap<String, WorldBindingFact>,
     metadata_bytes: u64,
     row_users: imbl::OrdMap<String, usize>,
+    rows: imbl::OrdMap<String, Arc<CheckedValueArtifact>>,
+}
+
+struct VisibleWorldBindingAdvance {
+    bindings: VisibleWorldBindings,
+    occurrences: std::collections::BTreeSet<String>,
+    rows: std::collections::BTreeSet<String>,
 }
 
 // The occurrence is the existing SnapshotKey<String>. The row link names the
@@ -744,94 +753,236 @@ type WorldBindingSnapshotFact = (
     cid::Cid,
 );
 
-impl CompilerWorldBindings {
+impl VisibleWorldBindings {
     /// Charge borrowed metadata before cloning it. Callers can feed the actual
     /// BindingTable iterator directly; no intermediate all-binding Vec is needed.
     pub fn from_published_bindings<'a>(
         query_scope: u64,
         bindings: impl IntoIterator<Item = CompilerWorldBinding<'a>>,
     ) -> Result<Self, CompileError> {
+        let mut selected = Self {
+            query_scope,
+            entries: Default::default(),
+            metadata_bytes: 128,
+            row_users: Default::default(),
+            rows: Default::default(),
+        };
         let allowance = capture_allowance()?;
-        let mut reserved = 128u64;
-        if reserved > allowance {
-            return Err(binding_capture_refusal(reserved, allowance));
+        if selected.metadata_bytes > allowance {
+            return Err(binding_capture_refusal(selected.metadata_bytes, allowance));
         }
-        let mut entries = imbl::OrdMap::new();
-        let mut row_users = imbl::OrdMap::new();
         for input in bindings {
             crate::host_work::checkpoint()?;
-            let symbol = input.symbol;
-            let fields = [
-                input.occurrence,
-                symbol.unit.as_str(),
-                symbol.module.as_str(),
-                symbol.namespace.as_str(),
-                symbol.occurrence.as_str(),
-            ];
-            if fields
-                .iter()
-                .any(|field| field.is_empty() || field.contains('\0'))
-                || symbol
-                    .record_parent
-                    .as_ref()
-                    .is_some_and(|parent| parent.contains('\0'))
-            {
-                return Err(source_failure("invalid current compiler binding identity"));
-            }
-            let bytes = binding_metadata_bound(
-                fields.map(str::len),
-                symbol.record_parent.as_ref().map_or(0, |p| p.len()),
-            )?;
-            reserved = reserved
-                .checked_add(bytes)
-                .ok_or_else(source_size_failure)?;
-            if reserved > allowance {
-                return Err(binding_capture_refusal(reserved, allowance));
-            }
-            if entries.contains_key(input.occurrence) {
-                return Err(source_failure("duplicate visible compiler occurrence"));
-            }
-            let owner = input.row.owner().module_name();
-            let count = row_users.get(&owner).copied().unwrap_or(0);
-            row_users.insert(owner, count + 1);
-            entries.insert(
-                input.occurrence.to_owned(),
-                WorldBindingFact {
-                    symbol: symbol.clone(),
-                    session_var: input.session_var,
-                    defining_scope: input.defining_scope,
-                    row: input.row,
-                },
-            );
+            selected.insert(input)?;
         }
-        Ok(Self {
-            query_scope,
-            entries,
-            metadata_bytes: reserved,
-            row_users,
+        Ok(selected)
+    }
+
+    fn insert(&mut self, input: CompilerWorldBinding<'_>) -> Result<(), CompileError> {
+        let symbol = input.symbol;
+        let fields = [
+            input.occurrence,
+            symbol.unit.as_str(),
+            symbol.module.as_str(),
+            symbol.namespace.as_str(),
+            symbol.occurrence.as_str(),
+        ];
+        if fields
+            .iter()
+            .any(|field| field.is_empty() || field.contains('\0'))
+            || symbol
+                .record_parent
+                .as_ref()
+                .is_some_and(|parent| parent.contains('\0'))
+            || symbol.unit != "main"
+            || symbol.namespace != "value"
+            || symbol.module != input.row.owner().module_name()
+        {
+            return Err(source_failure("invalid current compiler binding identity"));
+        }
+        if self.entries.contains_key(input.occurrence) {
+            return Err(source_failure("duplicate visible compiler occurrence"));
+        }
+        let metadata_bytes = self
+            .metadata_bytes
+            .checked_add(binding_metadata_bound(
+                fields.map(str::len),
+                symbol.record_parent.as_ref().map_or(0, String::len),
+            )?)
+            .ok_or_else(source_size_failure)?;
+        let allowance = capture_allowance()?;
+        if metadata_bytes > allowance {
+            return Err(binding_capture_refusal(metadata_bytes, allowance));
+        }
+        let owner = input.row.owner().module_name();
+        if self
+            .rows
+            .get(&owner)
+            .is_some_and(|old| !old.same_world_type_row(&input.row))
+        {
+            return Err(source_failure(
+                "competing checked rows for one current compiler owner",
+            ));
+        }
+        let users = self
+            .row_users
+            .get(&owner)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(source_size_failure)?;
+        self.metadata_bytes = metadata_bytes;
+        self.row_users.insert(owner.clone(), users);
+        if !self.rows.contains_key(&owner) {
+            self.rows.insert(owner, input.row.clone());
+        }
+        self.entries.insert(
+            input.occurrence.to_owned(),
+            WorldBindingFact {
+                symbol: symbol.clone(),
+                session_var: input.session_var,
+                defining_scope: input.defining_scope,
+                row: input.row,
+            },
+        );
+        Ok(())
+    }
+
+    fn remove(&mut self, occurrence: &str) -> Result<(), CompileError> {
+        let Some(old) = self.entries.remove(occurrence) else {
+            return Ok(());
+        };
+        self.metadata_bytes = self
+            .metadata_bytes
+            .checked_sub(binding_metadata_bound(
+                [
+                    occurrence.len(),
+                    old.symbol.unit.len(),
+                    old.symbol.module.len(),
+                    old.symbol.namespace.len(),
+                    old.symbol.occurrence.len(),
+                ],
+                old.symbol.record_parent.as_ref().map_or(0, String::len),
+            )?)
+            .ok_or_else(|| source_failure("predecessor binding metadata charge underflow"))?;
+        let owner = old.row.owner().module_name();
+        let users = self
+            .row_users
+            .get(&owner)
+            .copied()
+            .ok_or_else(|| source_failure("predecessor binding has no row custody count"))?;
+        if users == 1 {
+            self.row_users.remove(&owner);
+            self.rows.remove(&owner);
+        } else {
+            self.row_users.insert(owner, users - 1);
+        }
+        Ok(())
+    }
+
+    fn advance(
+        &self,
+        query_scope: u64,
+        changes: impl IntoIterator<Item = (String, Option<WorldBindingFact>)>,
+    ) -> Result<VisibleWorldBindingAdvance, CompileError> {
+        let changes: Vec<_> = changes.into_iter().collect();
+        let mut occurrences = std::collections::BTreeSet::new();
+        let mut rows = std::collections::BTreeSet::new();
+        for (occurrence, fact) in &changes {
+            if !occurrences.insert(occurrence.clone()) {
+                return Err(source_failure("duplicate visible compiler binding change"));
+            }
+            if let Some(old) = self.entries.get(occurrence) {
+                rows.insert(old.row.owner().module_name());
+            }
+            if let Some(fact) = fact {
+                rows.insert(fact.row.owner().module_name());
+            }
+        }
+        let mut bindings = self.clone();
+        bindings.query_scope = query_scope;
+        for (occurrence, _) in &changes {
+            bindings.remove(occurrence)?;
+        }
+        for (occurrence, fact) in changes {
+            if let Some(fact) = fact {
+                bindings.insert(CompilerWorldBinding::from_checked_value(
+                    &occurrence,
+                    &fact.symbol,
+                    fact.session_var,
+                    fact.defining_scope,
+                    fact.row,
+                ))?;
+            }
+        }
+        Ok(VisibleWorldBindingAdvance {
+            bindings,
+            occurrences,
+            rows,
         })
     }
 
-    pub(crate) fn cold_rows(&self) -> Result<Vec<Arc<CheckedValueArtifact>>, CompileError> {
-        let mut rows = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
-        for entry in self.entries.values() {
-            crate::host_work::checkpoint()?;
-            crate::host_work::record_host_work(
-                crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
-                1,
-            );
-            let owner = entry.row.owner().module_name();
-            if let Some(previous) = rows.get(&owner) {
-                if !previous.same_world_type_row(&entry.row) {
-                    return Err(source_failure(
-                        "competing checked rows for one current compiler owner",
-                    ));
-                }
-            } else {
-                rows.insert(owner, Arc::clone(&entry.row));
-            }
+    #[cfg(test)]
+    pub(crate) fn assert_shared_row_alias_removal_for_test(&self) {
+        assert_eq!(self.entries.len(), 2);
+        assert_eq!(self.rows.len(), 1);
+        assert_eq!(
+            self.row_users.values().copied().collect::<Vec<_>>(),
+            vec![2]
+        );
+        let names = self.entries.keys().cloned().collect::<Vec<_>>();
+        assert!(self
+            .advance(
+                self.query_scope,
+                [(names[0].clone(), None), (names[0].clone(), None)]
+            )
+            .is_err());
+        assert_eq!(
+            self.entries.len(),
+            2,
+            "refused change preserves predecessor"
+        );
+        let next = self
+            .advance(self.query_scope, [(names[0].clone(), None)])
+            .unwrap()
+            .bindings;
+        let expected = Self::from_published_bindings(
+            self.query_scope,
+            next.entries.iter().map(|(name, fact)| {
+                CompilerWorldBinding::from_checked_value(
+                    name,
+                    &fact.symbol,
+                    fact.session_var,
+                    fact.defining_scope,
+                    fact.row.clone(),
+                )
+            }),
+        )
+        .unwrap();
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(
+            next.row_users.values().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(next.rows.len(), expected.rows.len());
+        assert_eq!(next.metadata_bytes, expected.metadata_bytes);
+        for (owner, row) in &next.rows {
+            assert!(expected.rows.get(owner).unwrap().same_world_type_row(row));
+            assert!(self.rows.get(owner).unwrap().same_world_type_row(row));
         }
-        Ok(rows.into_values().collect())
+        let empty = next
+            .advance(self.query_scope, [(names[1].clone(), None)])
+            .unwrap()
+            .bindings;
+        let expected_empty =
+            Self::from_published_bindings(self.query_scope, std::iter::empty()).unwrap();
+        assert!(empty.entries.is_empty() && empty.rows.is_empty() && empty.row_users.is_empty());
+        assert_eq!(empty.metadata_bytes, expected_empty.metadata_bytes);
+        assert_eq!(
+            self.entries.len(),
+            2,
+            "successful derivation preserves predecessor"
+        );
     }
 
     /// The scope this occurrence table was published for.
@@ -1222,8 +1373,12 @@ impl CompilerWorldLexicalSurface {
 #[derive(Clone)]
 pub struct CompilerWorldOpenInputs {
     primary_context: Arc<ExactDeclarationContext>,
-    visible_rows: imbl::OrdMap<String, Arc<CheckedValueArtifact>>,
-    bindings: CompilerWorldBindings,
+    resources: WorldInputResources,
+}
+
+#[derive(Clone)]
+struct WorldInputResources {
+    bindings: VisibleWorldBindings,
     sources: Arc<CapturedCompilerSources>,
     lexical: CompilerWorldLexicalSurface,
     directory: Arc<tempfile::TempDir>,
@@ -1232,29 +1387,26 @@ pub struct CompilerWorldOpenInputs {
 impl CompilerWorldOpenInputs {
     pub(crate) fn from_primary_selection(
         primary_context: Arc<ExactDeclarationContext>,
-        visible_rows: Vec<Arc<CheckedValueArtifact>>,
-        bindings: CompilerWorldBindings,
+        bindings: VisibleWorldBindings,
         sources: Arc<CapturedCompilerSources>,
         lexical: CompilerWorldLexicalSurface,
         directory: Arc<tempfile::TempDir>,
     ) -> Result<Self, CompileError> {
         Ok(Self {
             primary_context,
-            visible_rows: visible_rows
-                .into_iter()
-                .map(|row| (row.owner().module_name(), row))
-                .collect(),
-            bindings,
-            sources,
-            lexical,
-            directory,
+            resources: WorldInputResources {
+                bindings,
+                sources,
+                lexical,
+                directory,
+            },
         })
     }
 }
 
 pub struct CompilerWorldRestoration {
     logical_id: [u8; 32],
-    inputs: CompilerWorldOpenInputs,
+    inputs: WorldInputResources,
     product: Arc<[u8]>,
     compiler_input_identity: [u8; 32],
     primary_root: MaterializedContext,
@@ -1289,7 +1441,9 @@ impl WorldRealizationObservation {
             .as_ref()
             .is_some_and(|actual| !reference.matches_location(actual))
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         Ok(Self {
             reference,
@@ -1323,10 +1477,11 @@ impl CompilerWorldRestoration {
     /// Rebuild only from this product's current immutable facts. The receiving
     /// compiler still decides whether a complete acquisition is needed.
     fn prepare_cold(&self) -> Result<Arc<Self>, CompileError> {
-        let cold = self
-            .inputs
-            .clone()
-            .prepare_for(self.producer, self.profile)?;
+        let cold = self.inputs.clone().prepare_for(
+            self.primary_inputs.clone(),
+            self.producer,
+            self.profile,
+        )?;
         if cold.logical_id != self.logical_id
             || cold.compiler_input_identity != self.compiler_input_identity
         {
@@ -1878,7 +2033,7 @@ impl CheckedWorldSuccessor {
     }
 
     pub fn compiler_context(&self) -> &Arc<ExactDeclarationContext> {
-        &self.world.restoration.inputs.primary_context
+        self.world.restoration.primary_inputs.context()
     }
 }
 
@@ -1998,7 +2153,7 @@ impl crate::checked_cell::CellProgram {
                 changes.insert(name.to_owned(), false);
             }
         }
-        let mut additions = CompilerWorldBindings::from_published_bindings(
+        let mut additions = VisibleWorldBindings::from_published_bindings(
             predecessor.restoration.inputs.bindings.query_scope,
             added,
         )?;
@@ -2070,7 +2225,7 @@ impl crate::checked_cell::CellProgram {
             source_failure("declaration successor requires its checked lexical product")
         })?;
         let row = native.value_interface_certificate();
-        let additions = CompilerWorldBindings::from_published_bindings(
+        let additions = VisibleWorldBindings::from_published_bindings(
             predecessor.restoration.inputs.bindings.query_scope,
             bindings,
         )?;
@@ -2142,12 +2297,6 @@ impl WorldPrimaryAdvance {
         match self {
             Self::NativeCompletion(_) => None,
             Self::Declaration { lexical, .. } => Some(lexical),
-        }
-    }
-
-    fn into_inputs(self) -> crate::declaration_context::WorldPrimaryInputs {
-        match self {
-            Self::NativeCompletion(advance) | Self::Declaration { advance, .. } => advance.primary,
         }
     }
 }
@@ -2247,9 +2396,9 @@ impl CompilerWorld {
                     ));
                 }
                 Ok(WorldPrimaryAdvance::Declaration {
-                    advance: declaration
-                        .advance
-                        .with_native_completion_from(&private.restoration.inputs.primary_context)?,
+                    advance: declaration.advance.with_native_completion_from(
+                        private.restoration.primary_inputs.context(),
+                    )?,
                     lexical: declaration.lexical,
                 })
             })
@@ -2258,7 +2407,7 @@ impl CompilerWorld {
                 || {
                     self.restoration
                         .primary_inputs
-                        .with_native_completion_from(&private.restoration.inputs.primary_context)
+                        .with_native_completion_from(private.restoration.primary_inputs.context())
                         .map(WorldPrimaryAdvance::NativeCompletion)
                 },
                 Ok,
@@ -2376,7 +2525,7 @@ impl CompilerWorld {
                 row,
             ));
         }
-        let additions = CompilerWorldBindings::from_published_bindings(
+        let additions = VisibleWorldBindings::from_published_bindings(
             self.restoration.inputs.bindings.query_scope,
             compiler_bindings,
         )?;
@@ -2445,7 +2594,7 @@ impl CompilerWorld {
             return Ok(self.clone());
         }
         let mut inputs = prior.inputs.clone();
-        inputs.primary_context = advance.primary.context().clone();
+        let primary_inputs = advance.primary.clone();
         if let Some(lexical) = lexical {
             inputs.lexical = lexical.clone();
         }
@@ -2463,7 +2612,7 @@ impl CompilerWorld {
         let primary_root = runtime_materializer
             .materialize_context(
                 Some(&prior.primary_root),
-                &inputs.primary_context.snapshot(),
+                &primary_inputs.context().snapshot(),
             )
             .map_err(|error| source_failure(error.to_string()))?;
         let runtime_staged = runtime_materializer
@@ -2514,7 +2663,7 @@ impl CompilerWorld {
         let lexical_root = if lexical_changed {
             inputs
                 .lexical
-                .materialize(&inputs.primary_context, &mut materializer)?
+                .materialize(primary_inputs.context(), &mut materializer)?
         } else {
             prior.lexical_root
         };
@@ -2619,13 +2768,15 @@ impl CompilerWorld {
     ) -> Result<Arc<Self>, CompileError> {
         let prior = &self.restoration;
         let mut inputs = prior.inputs.clone();
+        let primary_inputs = primary.as_ref().map_or_else(
+            || prior.primary_inputs.clone(),
+            |advance| advance.support().primary.clone(),
+        );
         if let Some(advance) = &primary {
-            inputs.primary_context = advance.support().primary.context().clone();
             if let Some(lexical) = advance.lexical() {
                 inputs.lexical = lexical.clone();
             }
         }
-        inputs.bindings.query_scope = query_scope;
         let directory = Arc::new(crate::artifacts::compiler_scratch_directory()?);
         inputs.directory = directory.clone();
         let mut facts = prior.bindings.facts().clone();
@@ -2651,7 +2802,7 @@ impl CompilerWorld {
             primary_root = runtime_materializer
                 .materialize_context(
                     Some(&prior.primary_root),
-                    &inputs.primary_context.snapshot(),
+                    &primary_inputs.context().snapshot(),
                 )
                 .map_err(|error| source_failure(error.to_string()))?;
             let runtime_staged = runtime_materializer
@@ -2690,93 +2841,35 @@ impl CompilerWorld {
             if primary.lexical().is_some() {
                 lexical_root = inputs
                     .lexical
-                    .materialize(&inputs.primary_context, &mut materializer)?;
+                    .materialize(primary_inputs.context(), &mut materializer)?;
             }
         }
-        // Remove all touched heads first, then add their resulting actual
-        // selections. A row shared by several changed names is issued once.
-        let changes: Vec<_> = changes.into_iter().collect();
-        for (occurrence, _) in &changes {
-            if let Some(old) = inputs.bindings.entries.remove(occurrence) {
-                inputs.bindings.metadata_bytes = inputs
-                    .bindings
-                    .metadata_bytes
-                    .checked_sub(binding_metadata_bound(
-                        [
-                            occurrence.len(),
-                            old.symbol.unit.len(),
-                            old.symbol.module.len(),
-                            old.symbol.namespace.len(),
-                            old.symbol.occurrence.len(),
-                        ],
-                        old.symbol.record_parent.as_ref().map_or(0, String::len),
-                    )?)
-                    .ok_or_else(|| {
-                        source_failure("predecessor binding metadata charge underflow")
-                    })?;
-                let owner = old.row.owner().module_name();
-                let users = inputs
-                    .bindings
-                    .row_users
-                    .get(&owner)
-                    .copied()
-                    .ok_or_else(|| {
-                        source_failure("predecessor binding has no row custody count")
-                    })?;
-                if users == 1 {
-                    inputs.bindings.row_users.remove(&owner);
-                    inputs.visible_rows.remove(&owner);
-                    row_roots.remove(&owner);
-                    let interface = old.row.certified_interface().interface();
-                    visible_changes.insert(
-                        (interface.unit().to_owned(), interface.module().to_owned()),
-                        ciborium::value::Value::Null,
-                    );
-                } else {
-                    inputs.bindings.row_users.insert(owner, users - 1);
+        let delta = prior.inputs.bindings.advance(query_scope, changes)?;
+        inputs.bindings = delta.bindings;
+        for owner in delta.rows {
+            let selected = inputs.bindings.rows.get(&owner);
+            let previous = prior.inputs.bindings.rows.get(&owner);
+            if let Some(artifact) = selected {
+                if previous.is_some_and(|old| old.same_world_type_row(artifact)) {
+                    if !row_roots.contains_key(&owner) {
+                        return Err(source_failure(
+                            "predecessor checked row lacks its semantic root",
+                        ));
+                    }
+                    continue;
                 }
-                facts.remove(occurrence);
-            }
-        }
-        for (occurrence, fact) in changes {
-            let Some(fact) = fact else {
-                continue;
-            };
-            let owner = fact.row.owner().module_name();
-            if let Some(selected) = inputs.visible_rows.get(&owner) {
-                if !selected.same_world_type_row(&fact.row) {
-                    return Err(source_failure(
-                        "promotion selects competing checked rows for one owner",
-                    ));
-                }
-            } else if let Some(selected) = prior
-                .inputs
-                .visible_rows
-                .get(&owner)
-                .filter(|selected| selected.same_world_type_row(&fact.row))
-            {
-                let root = prior.binding_rows.get(&owner).ok_or_else(|| {
-                    source_failure("predecessor checked row lacks its semantic root")
-                })?;
-                inputs.visible_rows.insert(owner.clone(), selected.clone());
-                row_roots.insert(owner.clone(), *root);
-                let interface = fact.row.certified_interface().interface();
-                visible_changes
-                    .remove(&(interface.unit().to_owned(), interface.module().to_owned()));
-            } else {
-                let (entry, parts) = fact.row.world_type_parts()?;
+                let (entry, parts) = artifact.world_type_parts()?;
                 let transport = rows.row(&entry, parts)?.0;
                 let semantic = world_semantic_row(&transport, &prior.producer)?;
-                let (_, receipt) = fact.row.world_issuer();
+                let (_, receipt) = artifact.world_issuer();
                 let root = materializer
                     .materialize_value(&world_array(vec![
                         semantic,
-                        world_blob(fact.row.certified_interface().artifact_id().0),
+                        world_blob(artifact.certified_interface().artifact_id().0),
                         world_blob(receipt),
                     ]))
                     .map_err(|error| source_failure(error.to_string()))?;
-                row_roots.insert(owner.clone(), root);
-                inputs.visible_rows.insert(owner.clone(), fact.row.clone());
+                row_roots.insert(owner, root);
                 visible_changes.insert(
                     (
                         entry.descriptor.owner.unit.clone(),
@@ -2784,36 +2877,23 @@ impl CompilerWorld {
                     ),
                     transport,
                 );
+            } else if let Some(old) = previous {
+                row_roots.remove(&owner);
+                let interface = old.certified_interface().interface();
+                visible_changes.insert(
+                    (interface.unit().to_owned(), interface.module().to_owned()),
+                    ciborium::value::Value::Null,
+                );
             }
-            let users = inputs.bindings.row_users.get(&owner).copied().unwrap_or(0);
-            inputs.bindings.row_users.insert(
-                owner.clone(),
-                users.checked_add(1).ok_or_else(source_size_failure)?,
-            );
+        }
+        for occurrence in delta.occurrences {
+            let Some(fact) = inputs.bindings.entries.get(&occurrence) else {
+                facts.remove(&occurrence);
+                continue;
+            };
             let symbol = &fact.symbol;
-            inputs.bindings.metadata_bytes = inputs
-                .bindings
-                .metadata_bytes
-                .checked_add(binding_metadata_bound(
-                    [
-                        occurrence.len(),
-                        symbol.unit.len(),
-                        symbol.module.len(),
-                        symbol.namespace.len(),
-                        symbol.occurrence.len(),
-                    ],
-                    symbol.record_parent.as_ref().map_or(0, String::len),
-                )?)
-                .ok_or_else(source_size_failure)?;
-            let allowance = capture_allowance()?;
-            if inputs.bindings.metadata_bytes > allowance {
-                return Err(binding_capture_refusal(
-                    inputs.bindings.metadata_bytes,
-                    allowance,
-                ));
-            }
             facts.insert(
-                occurrence.clone(),
+                occurrence,
                 (
                     (
                         symbol.unit.clone(),
@@ -2826,11 +2906,10 @@ impl CompilerWorld {
                     fact.defining_scope,
                     fact.row.owner().gen.0,
                     *row_roots
-                        .get(&owner)
+                        .get(&fact.row.owner().module_name())
                         .ok_or_else(|| source_failure("captured binder lacks its row root"))?,
                 ),
             );
-            inputs.bindings.entries.insert(occurrence, fact);
         }
         let bindings = materializer
             .materialize_map(Some(&prior.bindings), &facts)
@@ -2906,10 +2985,7 @@ impl CompilerWorld {
             runtime_context_blocks,
             primary_blocks,
             primary_associations,
-            primary_inputs: primary.map_or_else(
-                || prior.primary_inputs.clone(),
-                WorldPrimaryAdvance::into_inputs,
-            ),
+            primary_inputs,
             bindings,
             binding_rows: row_roots,
             lexical_root,
@@ -3785,19 +3861,44 @@ pub(crate) fn world_context_fixture(
 }
 
 impl CompilerWorldOpenInputs {
-    fn materialize_primary(
-        &self,
+    fn prepare(
+        self,
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+    ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
+        let identity = endpoint.identity();
+        let producer = CanonicalProducerIdentity::from_compiler(identity).sha256();
+        let profile = *identity
+            .package_source_association()
+            .ok_or_else(|| {
+                source_failure("compiler world requires a retained service package source")
+            })?
+            .profile_id();
+        self.prepare_for(producer, profile)
+    }
+
+    fn prepare_for(
+        self,
         producer: [u8; 32],
-    ) -> Result<
-        (
-            Arc<ExactDeclarationContext>,
-            MaterializedContext,
-            ReachableBlocks,
-        ),
-        CompileError,
-    > {
-        let primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
-        let snapshot = primary_context.snapshot();
+        profile: [u8; 32],
+    ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
+        let context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
+        crate::host_work::record_host_work(
+            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
+            1,
+        );
+        let primary = context.capture_world_primary_inputs(producer)?;
+        let advance =
+            primary.with_type_interfaces(self.resources.lexical.observation_type_interfaces())?;
+        self.resources
+            .prepare_for(advance.primary, producer, profile)
+    }
+}
+
+impl WorldInputResources {
+    fn materialize_primary(
+        primary: &crate::declaration_context::WorldPrimaryInputs,
+    ) -> Result<(MaterializedContext, ReachableBlocks), CompileError> {
+        let snapshot = primary.context().snapshot();
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
         let context = materializer
@@ -3819,47 +3920,17 @@ impl CompilerWorldOpenInputs {
             crate::host_work::HostWorkCounter::MaterializationGraphVisit,
             work.link_visits.saturating_add(work.unlink_visits),
         );
-        Ok((primary_context, primary_root, primary_blocks))
-    }
-
-    fn prepare(
-        self,
-        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
-    ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
-        let identity = endpoint.identity();
-        let producer = CanonicalProducerIdentity::from_compiler(identity).sha256();
-        let profile = *identity
-            .package_source_association()
-            .ok_or_else(|| {
-                source_failure("compiler world requires a retained service package source")
-            })?
-            .profile_id();
-        self.prepare_for(producer, profile)
+        Ok((primary_root, primary_blocks))
     }
 
     fn prepare_for(
-        mut self,
+        self,
+        primary_inputs: crate::declaration_context::WorldPrimaryInputs,
         producer: [u8; 32],
         profile: [u8; 32],
     ) -> Result<Arc<CompilerWorldRestoration>, CompileError> {
-        // Capture the cold primary once, then apply the same exact TYPE-role
-        // owner used by warm derivation before any logical root is encoded.
-        self.primary_context = Arc::new((*self.primary_context).clone().admit_producer(producer)?);
-        let primary_inputs = self
-            .primary_context
-            .capture_world_primary_inputs(producer)?;
-        let type_advance =
-            primary_inputs.with_type_interfaces(self.lexical.observation_type_interfaces())?;
-        self.primary_context = type_advance.primary.context().clone();
-        let primary_inputs = type_advance.primary;
-        let (primary_context, primary_root, runtime_context_blocks) =
-            self.materialize_primary(producer)?;
+        let (primary_root, runtime_context_blocks) = Self::materialize_primary(&primary_inputs)?;
         let primary_blocks = ReachableBlocks::default();
-        self.primary_context = primary_context;
-        crate::host_work::record_host_work(
-            crate::host_work::HostWorkCounter::ColdWorldCompilerBasisCapture,
-            1,
-        );
         crate::host_work::record_host_work(
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
@@ -3892,7 +3963,7 @@ impl CompilerWorldOpenInputs {
             .ok_or_else(source_size_failure)?;
         let mut binding_materializer = Materializer::new(&primary_blocks);
         let (base, primary_associations) = materialize_primary_associations(
-            &self.primary_context,
+            primary_inputs.context(),
             &producer,
             self.directory.path(),
             &mut rows,
@@ -3900,9 +3971,13 @@ impl CompilerWorldOpenInputs {
             &mut remaining_raw,
         )?;
         let mut binding_rows = imbl::OrdMap::new();
-        let mut visible = Vec::with_capacity(self.visible_rows.len());
-        for artifact in self.visible_rows.values() {
+        let mut visible = Vec::with_capacity(self.bindings.rows.len());
+        for artifact in self.bindings.rows.values() {
             crate::host_work::checkpoint()?;
+            crate::host_work::record_host_work(
+                crate::host_work::HostWorkCounter::ColdWorldBuilderRowVisit,
+                1,
+            );
             let (entry, parts) = artifact.world_type_parts()?;
             remaining_raw = remaining_raw
                 .checked_sub(binding_row_metadata_bound(
@@ -3941,7 +4016,7 @@ impl CompilerWorldOpenInputs {
             .map_err(|error| source_failure(error.to_string()))?;
         let lexical_root = self
             .lexical
-            .materialize(&self.primary_context, &mut binding_materializer)?;
+            .materialize(primary_inputs.context(), &mut binding_materializer)?;
         let staged = binding_materializer
             .finish()
             .map_err(|error| source_failure(error.to_string()))?;
@@ -4091,7 +4166,7 @@ fn world_acquisition_outcome(
     root: &str,
 ) -> Result<WorldAcquisitionOutcome, CompileError> {
     use tidepool_extract_cmd::EnsureExactInputsOutcome as O;
-    match O::decode(&run.output.stdout).map_err(|_| world_response_error(false))? {
+    match O::decode(&run.output.stdout).map_err(world_response_decode_error)? {
         O::Ready {
             world,
             realization,
@@ -4106,7 +4181,9 @@ fn world_acquisition_outcome(
         O::Rejected(reason) => Err(source_failure(format!(
             "compiler refused world acquisition: {reason:?}"
         ))),
-        _ => Err(world_response_error(true)),
+        _ => Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        )),
     }
 }
 
@@ -4271,10 +4348,18 @@ fn ensure_world(
             let (acquisition, files) = cold_world_acquisition(restoration)?;
             match submit(acquisition, files)? {
                 WorldAcquisitionOutcome::Ready(ready) => ready,
-                WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+                WorldAcquisitionOutcome::Missing(_) => {
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ))
+                }
             }
         }
-        WorldAcquisitionOutcome::Missing(_) => return Err(world_response_error(true)),
+        WorldAcquisitionOutcome::Missing(_) => {
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ))
+        }
     };
     crate::host_work::record_host_work(
         crate::host_work::HostWorkCounter::WorldEnsureCompleteReady,
@@ -4383,7 +4468,9 @@ pub fn query_scope(
     provenance: &crate::inspection::ScopeProvenance,
 ) -> Result<ScopedWorldQueryResult, CompileError> {
     if provenance.scope != crate::inspection::NameScope::Current {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     scoped_world_action(|| {
         let bytes = query_world_transport(
@@ -4600,6 +4687,7 @@ impl WorldCellOutputAdmission {
 
 /// Bytes and their observed seal from the one named output acquisition. This
 /// carries physical custody, independently of semantic or native admission.
+#[derive(Clone, Debug)]
 pub(crate) struct WorldOutputFile {
     bytes: Arc<[u8]>,
     sha256: [u8; 32],
@@ -4634,14 +4722,16 @@ pub(crate) enum WorldCellStageIdentity {
 impl WorldCellStageIdentity {
     pub(crate) fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         let ciborium::value::Value::Array(fields) = value else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         match fields.first().map(answer_text).transpose()? {
             Some("exec") if fields.len() == 2 => {
                 let typed_digest = answer_text(&fields[1])?;
                 let digest = crate::execution_source::parse_digest(typed_digest)?;
                 if world_hex(&digest) != typed_digest {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
                 Ok(Self::Executable {
                     typed_digest: typed_digest.to_owned(),
@@ -4659,7 +4749,7 @@ impl WorldCellStageIdentity {
                     Self::Prologue { ordinal, owner }
                 })
             }
-            _ => Err(world_response_error(false)),
+            _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
         }
     }
 
@@ -4736,7 +4826,7 @@ pub(crate) struct CheckedWorldCellStage {
     ordinals: Vec<usize>,
     outputs: WorldStageOutputs,
     selected_inputs: Vec<WorldCellRuntimeInput>,
-    dependency_terminals: Vec<DependencyTerminalReference>,
+    dependencies: Arc<SealedStageDependencies>,
     demanded_rows: Vec<Arc<CheckedValueArtifact>>,
     demanded_session_bindings: Vec<tidepool_repr::SessionVarId>,
 }
@@ -4762,13 +4852,8 @@ impl CheckedWorldCellStage {
     pub(crate) fn demanded_session_bindings(&self) -> &[tidepool_repr::SessionVarId] {
         &self.demanded_session_bindings
     }
-    pub(crate) fn dependency_terminals(&self) -> &[DependencyTerminalReference] {
-        &self.dependency_terminals
-    }
-    fn selected(&self, reference: &WorldInputRef) -> bool {
-        self.selected_inputs
-            .binary_search_by(|selected| selected.reference.cmp(reference))
-            .is_ok()
+    pub(crate) fn dependencies(&self) -> &Arc<SealedStageDependencies> {
+        &self.dependencies
     }
 }
 
@@ -4803,51 +4888,122 @@ impl<'a> WorldCellRuntimeInputs<'a> {
 
 #[derive(Clone, Debug)]
 enum WorldCellRuntimeInputSource {
-    BaseWorld(Arc<CheckedValueArtifact>),
-    PriorStage,
-    CellOperand(Arc<CheckedValueArtifact>),
+    BaseWorld {
+        binding: WorldBindingFact,
+        seal: ParsedWorldRowSeal,
+    },
+    CellOperand {
+        operand: Arc<CompilerWorldCellOperand>,
+        seal: ParsedWorldRowSeal,
+    },
+    PriorStage(WorldPriorProducedInput),
 }
 
-/// Exact input observations authenticated by the same completed stage.
-/// Runtime consumers independently resolve and lease the current native root.
+#[derive(Clone, Debug)]
+struct WorldPriorProducedInput {
+    producer: Arc<WorldItemOutputEvidence>,
+    consumer: usize,
+    binder_index: usize,
+    symbol: tidepool_repr::execution_schema::SymbolIdentity,
+    defining_scope: u64,
+    interface: WorldOutputFile,
+}
+
+/// Input evidence linked to its actual issuing binding, operand or captured
+/// producer output. It grants no access to a live runtime value.
 #[derive(Clone, Debug)]
 pub struct WorldCellRuntimeInput {
-    reference: WorldInputRef,
+    occurrence: String,
     source: WorldCellRuntimeInputSource,
 }
 impl WorldCellRuntimeInput {
+    fn view(&self) -> WorldInputRefView<'_> {
+        let (origin, symbol, session_var, defining_scope, generation, seal): (
+            _,
+            _,
+            _,
+            _,
+            _,
+            &[u8],
+        ) = match &self.source {
+            WorldCellRuntimeInputSource::BaseWorld { binding, seal } => (
+                WorldCellRuntimeInputOrigin::BaseWorld,
+                &binding.symbol,
+                binding.session_var.raw(),
+                binding.defining_scope,
+                binding.row.owner().gen.0,
+                seal.encoded.as_slice(),
+            ),
+            WorldCellRuntimeInputSource::CellOperand { operand, seal } => (
+                WorldCellRuntimeInputOrigin::CellOperand,
+                operand.symbol(),
+                operand.session_var().raw(),
+                operand.defining_scope(),
+                operand.generation(),
+                seal.encoded.as_slice(),
+            ),
+            WorldCellRuntimeInputSource::PriorStage(prior) => {
+                let binder = &prior
+                    .producer
+                    .executable()
+                    .expect("issued prior producer")
+                    .binders()[prior.binder_index];
+                (
+                    WorldCellRuntimeInputOrigin::PriorStage {
+                        producer: prior.producer.index,
+                        consumer: prior.consumer,
+                    },
+                    &prior.symbol,
+                    binder.varid(),
+                    prior.defining_scope,
+                    prior.producer.generation,
+                    prior.interface.sha256(),
+                )
+            }
+        };
+        WorldInputRefView {
+            origin,
+            occurrence: &self.occurrence,
+            symbol,
+            session_var,
+            defining_scope,
+            generation,
+            seal,
+        }
+    }
     pub fn origin(&self) -> WorldCellRuntimeInputOrigin {
-        self.reference.origin
+        self.view().origin
     }
     pub fn occurrence(&self) -> &str {
-        &self.reference.occurrence
+        &self.occurrence
     }
     pub fn symbol(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
-        &self.reference.symbol
+        self.view().symbol
     }
     pub fn session_var(&self) -> tidepool_repr::SessionVarId {
-        tidepool_repr::SessionVarId::from_extract(self.reference.session_var)
+        tidepool_repr::SessionVarId::from_extract(self.view().session_var)
     }
     pub fn defining_scope(&self) -> u64 {
-        self.reference.defining_scope
+        self.view().defining_scope
     }
     pub fn generation(&self) -> u64 {
-        self.reference.generation
+        self.view().generation
     }
     pub fn seal(&self) -> &[u8] {
-        &self.reference.seal
+        self.view().seal
     }
     pub fn checked_row(&self) -> Option<&Arc<CheckedValueArtifact>> {
         match &self.source {
-            WorldCellRuntimeInputSource::BaseWorld(row)
-            | WorldCellRuntimeInputSource::CellOperand(row) => Some(row),
-            WorldCellRuntimeInputSource::PriorStage => None,
+            WorldCellRuntimeInputSource::BaseWorld { binding, .. } => Some(&binding.row),
+            WorldCellRuntimeInputSource::CellOperand { operand, .. } => Some(operand.checked_row()),
+            WorldCellRuntimeInputSource::PriorStage(_) => None,
         }
     }
 }
 
 /// Parsed stage data remains private until its input owners and captured
 /// producer evidence have been authenticated by preparation admission.
+#[derive(Clone)]
 struct DecodedWorldCellStage {
     index: usize,
     identity: WorldCellStageIdentity,
@@ -4929,39 +5085,47 @@ pub(crate) enum WorldItemProofKind {
 /// transport trees and copied native manifests are not retained alongside it.
 #[derive(Debug)]
 pub(crate) struct WorldItemProof {
+    output: Arc<WorldItemOutputEvidence>,
+    stage: Arc<CheckedWorldCellStage>,
+}
+#[derive(Debug)]
+struct WorldItemOutputEvidence {
     index: usize,
     ordinal: u64,
     generation: u64,
-    stage: Arc<CheckedWorldCellStage>,
+    stage_index: usize,
     kind: WorldItemProofKind,
 }
-impl WorldItemProof {
-    pub(crate) fn index(&self) -> usize {
-        self.index
-    }
-    pub(crate) fn ordinal(&self) -> u64 {
-        self.ordinal
-    }
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-    pub(crate) fn stage(&self) -> &Arc<CheckedWorldCellStage> {
-        &self.stage
-    }
-    pub(crate) fn kind(&self) -> &WorldItemProofKind {
-        &self.kind
-    }
-    pub(crate) fn executable(&self) -> Option<&WorldExecutableItemProof> {
+impl WorldItemOutputEvidence {
+    fn executable(&self) -> Option<&WorldExecutableItemProof> {
         match &self.kind {
             WorldItemProofKind::Executable(proof) => Some(proof),
             _ => None,
         }
     }
+}
+impl WorldItemProof {
+    pub(crate) fn index(&self) -> usize {
+        self.output.index
+    }
+    pub(crate) fn ordinal(&self) -> u64 {
+        self.output.ordinal
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.output.generation
+    }
+    pub(crate) fn stage(&self) -> &Arc<CheckedWorldCellStage> {
+        &self.stage
+    }
+    pub(crate) fn kind(&self) -> &WorldItemProofKind {
+        &self.output.kind
+    }
+    pub(crate) fn executable(&self) -> Option<&WorldExecutableItemProof> {
+        self.output.executable()
+    }
     pub(crate) fn signatures(&self) -> &[crate::checked_cell::ExactCheckedSignature] {
-        match &self.kind {
-            WorldItemProofKind::Executable(proof) => &proof.signatures,
-            _ => &[],
-        }
+        self.executable()
+            .map_or(&[], |proof| proof.signatures.as_slice())
     }
 }
 
@@ -5170,28 +5334,6 @@ impl CheckedWorldCellProgram {
         self.items.get(ordinal)
     }
 
-    pub(crate) fn selected_dependency_terminals(
-        &self,
-        ordinal: usize,
-    ) -> Result<Vec<SelectedDependencyTerminal>, CompileError> {
-        let item = self
-            .item(ordinal)
-            .ok_or_else(|| world_response_error(true))?;
-        let stage = item.proof.stage();
-        let issuer =
-            self.native_demand_completion()
-                .checked_stage(self, stage, self.validation())?;
-        issuer
-            .operation()
-            .reserve::<SelectedDependencyTerminal>(stage.dependency_terminals().len())
-            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        stage
-            .dependency_terminals()
-            .iter()
-            .map(|reference| issuer.select_dependency_terminal(reference))
-            .collect()
-    }
-
     pub(crate) fn primary_context(&self) -> &Arc<ExactDeclarationContext> {
         self.output.primary_context()
     }
@@ -5300,7 +5442,7 @@ impl CheckedWorldCellProgram {
         {
             if proof.index() != ordinal
                 || proof.ordinal() != ordinal as u64
-                || proof.generation() != world_cell_generation(slot)
+                || proof.generation() != world_cell_generation(&slot)
             {
                 return Err(source_failure(
                     "world cell item proof differs from its reservation",
@@ -5439,11 +5581,12 @@ fn world_cell_output_certificate(
             stage
                 .selected_inputs
                 .iter()
-                .map(|selected| &selected.reference),
+                .map(WorldCellRuntimeInput::view),
             &mut frame,
         );
-        frame(&(stage.dependency_terminals.len() as u64).to_le_bytes());
-        for terminal in &stage.dependency_terminals {
+        frame(&(stage.dependencies.rows.len() as u64).to_le_bytes());
+        for row in &stage.dependencies.rows {
+            let terminal = &row.reference;
             frame_dependency_terminal(terminal, &mut frame);
         }
     }
@@ -5524,7 +5667,7 @@ fn frame_dependency_terminal(
 fn frame_world_stage_selection<'a>(
     identity: &WorldCellStageIdentity,
     ordinals: &[usize],
-    selected: impl ExactSizeIterator<Item = &'a WorldInputRef>,
+    selected: impl ExactSizeIterator<Item = WorldInputRefView<'a>>,
     frame: &mut impl FnMut(&[u8]),
 ) {
     frame(&identity.identity_bytes());
@@ -5614,28 +5757,10 @@ fn prepare_world_cell_outputs(
             plan.operand().map(|operand| operand.request()),
             plan.receipt(),
             reservation
-                .slots()
+                .items()
                 .iter()
                 .enumerate()
-                .map(|(ordinal, slot)| {
-                    use crate::checked_cell::CheckedPlannedCellSlot as S;
-                    use tidepool_extract_cmd::PlannedCellSlotRef as P;
-                    (
-                        ordinal as u64,
-                        match slot {
-                            S::Prologue { declaration } => P::Prologue(*declaration),
-                            S::Declaration { declaration } => P::Declaration(*declaration),
-                            S::Bind { value } => P::Bind(*value),
-                            S::Expression {
-                                capture,
-                                observation_name,
-                            } => P::Expression {
-                                generation: *capture,
-                                observation: observation_name,
-                            },
-                        },
-                    )
-                }),
+                .map(|(ordinal, item)| (ordinal as u64, item.request_slot())),
             directory.path(),
             &output,
         )
@@ -5687,7 +5812,7 @@ fn prepare_world_cell_outputs(
         let run = bound
             .execute_with_native_demand(&command, owner, &mut resolver)
             .map_err(CompileError::CompilerEndpoint);
-        let (native_demands, refusal) = resolver.finish();
+        let native_demands = resolver.finish();
         let run = run?;
 
         diagnostics.completed(
@@ -5696,9 +5821,7 @@ fn prepare_world_cell_outputs(
             run.success(),
             &run.output.stderr,
         );
-        if let Some(refusal) = refusal {
-            return Err(refusal);
-        }
+        let native_demands = native_demands?;
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
         let bytes = crate::certified_products::read_bounded_with_operation(
             &output,
@@ -5725,21 +5848,20 @@ fn world_cell_slots(
     use tidepool_extract_cmd::PlannedCellSlot as P;
     reservation
         .slots()
-        .iter()
         .enumerate()
         .map(|(index, slot)| {
             (
                 index as u64,
                 match slot {
-                    S::Prologue { declaration } => P::Prologue(*declaration),
-                    S::Declaration { declaration } => P::Declaration(*declaration),
-                    S::Bind { value } => P::Bind(*value),
+                    S::Prologue { declaration } => P::Prologue(declaration),
+                    S::Declaration { declaration } => P::Declaration(declaration),
+                    S::Bind { value } => P::Bind(value),
                     S::Expression {
                         capture,
                         observation_name,
                     } => P::Expression {
-                        generation: *capture,
-                        observation: observation_name.clone(),
+                        generation: capture,
+                        observation: observation_name,
                     },
                 },
             )
@@ -5761,7 +5883,7 @@ fn world_output_manifest(
     inventory: &tidepool_repr::execution_schema::InventoryOperation,
 ) -> Result<BTreeMap<PathBuf, [u8; 32]>, CompileError> {
     let ciborium::value::Value::Array(entries) = value else {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     };
     inventory
         .charge_value_copies(value, 1)
@@ -5771,9 +5893,9 @@ fn world_output_manifest(
         crate::host_work::checkpoint()?;
         let entry = answer_array(entry, 2)?;
         let path = PathBuf::from(answer_text(&entry[0])?);
-        relative_source_path(&path).map_err(|_| world_response_error(false))?;
+        relative_source_path(&path).map_err(world_response_decode_error)?;
         if files.insert(path, answer_hash(&entry[1])?).is_some() {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         }
     }
     Ok(files)
@@ -5790,7 +5912,7 @@ fn world_output_symbol(
         ciborium::value::Value::Array(v) if v.len() == 2 && answer_u64(&v[0])? == 1 => {
             Some(answer_text(&v[1])?.to_owned())
         }
-        _ => return Err(world_response_error(false)),
+        _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
     };
     Ok(tidepool_repr::execution_schema::SymbolIdentity {
         unit: answer_text(&fields[0])?.to_owned(),
@@ -5818,7 +5940,9 @@ fn validate_world_native_entry_observation(
         || !bounded(&symbol.occurrence)
         || symbol.occurrence != typed_item.entry()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     Ok(())
 }
@@ -5835,47 +5959,139 @@ pub enum WorldCellRuntimeInputOrigin {
 impl WorldCellRuntimeInputOrigin {
     fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         let ciborium::value::Value::Array(fields) = value else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         match fields.as_slice() {
             [tag] if answer_u64(tag)? == 0 => Ok(Self::BaseWorld),
             [tag, producer, consumer] if answer_u64(tag)? == 1 => Ok(Self::PriorStage {
                 producer: usize::try_from(answer_u64(producer)?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(world_response_decode_error)?,
                 consumer: usize::try_from(answer_u64(consumer)?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(world_response_decode_error)?,
             }),
             [tag] if answer_u64(tag)? == 2 => Ok(Self::CellOperand),
-            _ => Err(world_response_error(false)),
+            _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
         }
     }
 }
 
-/// Parsed transport observations; none of these values supplies its own row or
-/// runtime authority. Each origin is matched to the issuing owner below.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// A row seal is parsed as a CID at ingress; its encoded form is retained for
+/// exact observation framing. It cannot be confused with an interface digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedWorldRowSeal {
+    cid: cid::Cid,
+    encoded: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ParsedWorldInputSource {
+    BaseWorld(ParsedWorldRowSeal),
+    PriorStage {
+        producer: usize,
+        consumer: usize,
+        interface: [u8; 32],
+    },
+    CellOperand(ParsedWorldRowSeal),
+}
+
+/// Decoded observations contain no checked row or producer authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WorldInputRef {
-    origin: WorldCellRuntimeInputOrigin,
+    source: ParsedWorldInputSource,
     occurrence: String,
     symbol: tidepool_repr::execution_schema::SymbolIdentity,
     session_var: u64,
     defining_scope: u64,
     generation: u64,
-    seal: Vec<u8>,
+}
+
+/// Borrowed facts used only for ordering, comparison and receipt framing.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WorldInputRefView<'a> {
+    origin: WorldCellRuntimeInputOrigin,
+    occurrence: &'a str,
+    symbol: &'a tidepool_repr::execution_schema::SymbolIdentity,
+    session_var: u64,
+    defining_scope: u64,
+    generation: u64,
+    seal: &'a [u8],
+}
+
+impl PartialOrd for WorldInputRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for WorldInputRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.view().cmp(&other.view())
+    }
 }
 
 impl WorldInputRef {
     fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         let fields = answer_array(value, 7)?;
+        let origin = WorldCellRuntimeInputOrigin::decode(&fields[0])?;
+        let bytes = answer_blob(&fields[6])?;
+        let source = match origin {
+            WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } => {
+                ParsedWorldInputSource::PriorStage {
+                    producer,
+                    consumer,
+                    interface: answer_hash(&fields[6])?,
+                }
+            }
+            WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand => {
+                let seal = ParsedWorldRowSeal {
+                    cid: cid::Cid::try_from(bytes)
+                        .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
+                    encoded: bytes.to_vec(),
+                };
+                if origin == WorldCellRuntimeInputOrigin::BaseWorld {
+                    ParsedWorldInputSource::BaseWorld(seal)
+                } else {
+                    ParsedWorldInputSource::CellOperand(seal)
+                }
+            }
+        };
         Ok(Self {
-            origin: WorldCellRuntimeInputOrigin::decode(&fields[0])?,
+            source,
             occurrence: answer_text(&fields[1])?.to_owned(),
             symbol: world_output_symbol(&fields[2])?,
             session_var: answer_u64(&fields[3])?,
             defining_scope: answer_u64(&fields[4])?,
             generation: answer_u64(&fields[5])?,
-            seal: answer_blob(&fields[6])?.to_vec(),
         })
+    }
+    fn view(&self) -> WorldInputRefView<'_> {
+        let (origin, seal): (_, &[u8]) = match &self.source {
+            ParsedWorldInputSource::BaseWorld(seal) => {
+                (WorldCellRuntimeInputOrigin::BaseWorld, &seal.encoded)
+            }
+            ParsedWorldInputSource::CellOperand(seal) => {
+                (WorldCellRuntimeInputOrigin::CellOperand, &seal.encoded)
+            }
+            ParsedWorldInputSource::PriorStage {
+                producer,
+                consumer,
+                interface,
+            } => (
+                WorldCellRuntimeInputOrigin::PriorStage {
+                    producer: *producer,
+                    consumer: *consumer,
+                },
+                interface,
+            ),
+        };
+        WorldInputRefView {
+            origin,
+            occurrence: &self.occurrence,
+            symbol: &self.symbol,
+            session_var: self.session_var,
+            defining_scope: self.defining_scope,
+            generation: self.generation,
+            seal,
+        }
     }
     fn matches(
         &self,
@@ -5914,6 +6130,16 @@ pub(crate) struct DependencyTerminalReference {
 }
 
 impl DependencyTerminalReference {
+    fn occurrence(&self) -> crate::declaration_context::NativeRetainedOccurrence<'_> {
+        crate::declaration_context::NativeRetainedOccurrence {
+            demander: self.demander,
+            global_index: self.global_index,
+            binding: &self.binding,
+            identity: &self.identity,
+            generation: self.generation,
+        }
+    }
+
     fn decode(value: &ciborium::value::Value) -> Result<Self, CompileError> {
         use crate::artifact_inventory::{
             ArtifactBinding, ArtifactId, ArtifactSelectionId, NativeGroupBinding, NativeGroupIssuer,
@@ -5922,7 +6148,7 @@ impl DependencyTerminalReference {
         let origin = match answer_u64(&fields[0])? {
             0 => DependencyTerminalOrigin::SourceDefinition,
             1 => DependencyTerminalOrigin::NativeOriginal,
-            _ => return Err(world_response_error(false)),
+            _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
         };
         let decode_binding = |value: &ciborium::value::Value| {
             let fields = answer_array(value, 2)?;
@@ -5964,13 +6190,39 @@ impl DependencyTerminalReference {
                     ArtifactSelectionId(answer_hash(&demander[1])?),
                 ),
                 original_ordinal: u32::try_from(answer_u64(&demander[2])?)
-                    .map_err(|_| world_response_error(false))?,
+                    .map_err(world_response_decode_error)?,
             },
             global_index: u32::try_from(answer_u64(&fields[3])?)
-                .map_err(|_| world_response_error(false))?,
+                .map_err(world_response_decode_error)?,
             binding: decode_binding(&fields[4])?,
             identity: decode_identity(&fields[5])?,
             generation: answer_u64(&fields[6])?,
+        })
+    }
+}
+
+/// Once-authenticated dependency rows for an actually emitted stage.
+/// Rows retain immutable facts, never a backreference to their stage or handles.
+#[derive(Debug)]
+pub struct SealedStageDependencies {
+    request: Arc<native_demand::DependencyRequestIdentity>,
+    first_ordinal: usize,
+    rows: Vec<SealedDependencyRow>,
+}
+
+#[derive(Debug)]
+struct SealedDependencyRow {
+    reference: DependencyTerminalReference,
+    evidence: crate::declaration_context::RetainedValueEvidence,
+}
+
+impl SealedStageDependencies {
+    pub fn terminals(
+        self: &Arc<Self>,
+    ) -> impl ExactSizeIterator<Item = SelectedDependencyTerminal> + '_ {
+        (0..self.rows.len()).map(|index| SelectedDependencyTerminal {
+            owner: Arc::clone(self),
+            index,
         })
     }
 }
@@ -5979,49 +6231,62 @@ impl DependencyTerminalReference {
 /// owner of this request and stage. Runtime value authority remains separate.
 #[derive(Clone, Debug)]
 pub struct SelectedDependencyTerminal {
-    reference: DependencyTerminalReference,
-    issuer: native_demand::CheckedWorldStageNativeInputs,
+    owner: Arc<SealedStageDependencies>,
+    index: usize,
 }
 
 impl SelectedDependencyTerminal {
+    fn reference(&self) -> &DependencyTerminalReference {
+        &self.owner.rows[self.index].reference
+    }
     /// Compare immutable compiler evidence only. The receiving runtime must
     /// independently resolve and retain its actual scoped prepared value.
     pub fn matches_checked_value(&self, row: &CheckedValueArtifact) -> Result<bool, CompileError> {
-        self.issuer
-            .matches_dependency_terminal_checked_value(&self.reference, row)
+        self.owner.rows[self.index]
+            .evidence
+            .matches_checked_value(row)
     }
 
     pub fn origin(&self) -> DependencyTerminalOrigin {
-        self.reference.origin
+        self.reference().origin
     }
     pub fn original_use(&self) -> &crate::certified_products::ReceiptImportOwner {
-        &self.reference.original_use
+        &self.reference().original_use
     }
     pub fn demander(&self) -> crate::artifact_inventory::NativeGroupBinding {
-        self.reference.demander
+        self.reference().demander
     }
     pub fn global_index(&self) -> u32 {
-        self.reference.global_index
+        self.reference().global_index
     }
     pub fn binding(&self) -> crate::artifact_inventory::ArtifactBinding {
-        self.reference.binding
+        self.reference().binding
     }
     pub fn identity(&self) -> &tidepool_repr::execution_schema::SymbolIdentity {
-        &self.reference.identity
+        &self.reference().identity
     }
     pub fn generation(&self) -> u64 {
-        self.reference.generation
+        self.reference().generation
     }
     pub fn stage_first_ordinal(&self) -> usize {
-        self.issuer.stage().ordinals()[0]
+        self.owner.first_ordinal
     }
 }
 
-fn admit_world_stage_inputs(
-    decoded: DecodedWorldCellStage,
-    plan: &crate::cell_plan::CompilerWorldCellPlan,
+struct LinkedWorldStageInputs {
+    selected: Vec<WorldCellRuntimeInput>,
+    rows: Vec<Arc<CheckedValueArtifact>>,
+    session_bindings: Vec<tidepool_repr::SessionVarId>,
+}
+
+fn link_world_stage_inputs(
+    decoded: &DecodedWorldCellStage,
+    stage_table: &[DecodedWorldCellStage],
+    outputs: &[Arc<WorldItemOutputEvidence>],
+    captured_files: &BTreeMap<PathBuf, WorldOutputFile>,
+    reservation: &crate::cell_plan::CompilerWorldCellReservation,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
-) -> Result<Arc<CheckedWorldCellStage>, CompileError> {
+) -> Result<LinkedWorldStageInputs, CompileError> {
     operation
         .reserve::<WorldCellRuntimeInput>(decoded.selected_inputs.len())
         .and_then(|_| {
@@ -6031,44 +6296,52 @@ fn admit_world_stage_inputs(
             operation.reserve::<tidepool_repr::SessionVarId>(decoded.selected_inputs.len())
         })
         .map_err(|e| CompileError::CompilerEvidence(Box::new(e.into())))?;
+    let plan = reservation.plan();
     let world = plan.world();
     let mut rows = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut bindings = std::collections::BTreeSet::new();
     let mut selected_inputs = Vec::with_capacity(decoded.selected_inputs.len());
-    for input in decoded.selected_inputs {
+    for input in &decoded.selected_inputs {
         crate::host_work::checkpoint()?;
-        let source = match input.origin {
-            WorldCellRuntimeInputOrigin::BaseWorld => {
+        let source = match &input.source {
+            ParsedWorldInputSource::BaseWorld(seal) => {
                 let actual = world
                     .restoration
                     .inputs
                     .bindings
                     .entries
                     .get(&input.occurrence)
-                    .ok_or_else(|| world_response_error(true))?;
-                if !input.matches(
-                    &actual.symbol,
-                    actual.session_var,
-                    actual.defining_scope,
-                    actual.row.owner().gen.0,
-                ) {
-                    return Err(world_response_error(true));
-                }
-                let observed = cid::Cid::try_from(input.seal.as_slice())
-                    .map_err(|_| world_response_error(false))?;
+                    .ok_or_else(|| {
+                        world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                    })?;
                 let expected = world
                     .restoration
                     .bindings
                     .facts()
                     .get(&input.occurrence)
-                    .ok_or_else(|| world_response_error(true))?;
-                if observed != expected.4 {
-                    return Err(world_response_error(true));
+                    .ok_or_else(|| {
+                        world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                    })?;
+                if !input.matches(
+                    &actual.symbol,
+                    actual.session_var,
+                    actual.defining_scope,
+                    actual.row.owner().gen.0,
+                ) || seal.cid != expected.4
+                {
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
-                WorldCellRuntimeInputSource::BaseWorld(Arc::clone(&actual.row))
+                WorldCellRuntimeInputSource::BaseWorld {
+                    binding: actual.clone(),
+                    seal: seal.clone(),
+                }
             }
-            WorldCellRuntimeInputOrigin::CellOperand => {
-                let operand = plan.operand().ok_or_else(|| world_response_error(true))?;
+            ParsedWorldInputSource::CellOperand(seal) => {
+                let operand = plan.operand().ok_or_else(|| {
+                    world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                })?;
                 let alias = match operand.exposure() {
                     WorldCellOperandExposure::Input => "input",
                     WorldCellOperandExposure::SessionInput => "sessionInput",
@@ -6080,22 +6353,42 @@ fn admit_world_stage_inputs(
                         operand.defining_scope(),
                         operand.generation(),
                     )
+                    || seal.cid != *operand.row_fact_cid()
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
-                let observed = cid::Cid::try_from(input.seal.as_slice())
-                    .map_err(|_| world_response_error(false))?;
-                if observed != *operand.row_fact_cid() {
-                    return Err(world_response_error(true));
+                WorldCellRuntimeInputSource::CellOperand {
+                    operand: Arc::clone(operand),
+                    seal: seal.clone(),
                 }
-                WorldCellRuntimeInputSource::CellOperand(Arc::clone(operand.checked_row()))
             }
-            WorldCellRuntimeInputOrigin::PriorStage { .. } => {
-                WorldCellRuntimeInputSource::PriorStage
+            ParsedWorldInputSource::PriorStage {
+                producer, consumer, ..
+            } => {
+                let output = outputs.get(*producer).ok_or_else(|| {
+                    world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                })?;
+                let consumer = stage_table
+                    .binary_search_by_key(consumer, |stage| stage.ordinals[0])
+                    .ok()
+                    .and_then(|index| stage_table.get(index))
+                    .ok_or_else(|| {
+                        world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                    })?;
+                WorldCellRuntimeInputSource::PriorStage(link_world_prior_input(
+                    input,
+                    output,
+                    consumer,
+                    decoded,
+                    reservation.defining_scope(),
+                    captured_files,
+                )?)
             }
         };
         let selected = WorldCellRuntimeInput {
-            reference: input,
+            occurrence: input.occurrence.clone(),
             source,
         };
         bindings.insert(selected.session_var().raw());
@@ -6107,7 +6400,9 @@ fn admit_world_stage_inputs(
                 std::collections::btree_map::Entry::Occupied(old)
                     if !old.get().same_world_type_row(row) =>
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -6117,59 +6412,75 @@ fn admit_world_stage_inputs(
         }
         selected_inputs.push(selected);
     }
-    Ok(Arc::new(CheckedWorldCellStage {
+    Ok(LinkedWorldStageInputs {
+        selected: selected_inputs,
+        rows: rows.into_values().collect(),
+        session_bindings: bindings
+            .into_iter()
+            .map(tidepool_repr::SessionVarId::from_extract)
+            .collect(),
+    })
+}
+
+fn admit_world_stage_inputs(
+    decoded: DecodedWorldCellStage,
+    linked: LinkedWorldStageInputs,
+    dependencies: Arc<SealedStageDependencies>,
+) -> Arc<CheckedWorldCellStage> {
+    Arc::new(CheckedWorldCellStage {
         index: decoded.index,
         identity: decoded.identity,
         ordinals: decoded.ordinals,
         outputs: decoded.outputs,
-        selected_inputs,
-        dependency_terminals: decoded.dependency_terminals,
-        demanded_rows: rows.into_values().collect(),
-        demanded_session_bindings: bindings
-            .into_iter()
-            .map(tidepool_repr::SessionVarId::from_extract)
-            .collect(),
-    }))
+        selected_inputs: linked.selected,
+        dependencies,
+        demanded_rows: linked.rows,
+        demanded_session_bindings: linked.session_bindings,
+    })
 }
 
-fn validate_world_prior_input(
+fn link_world_prior_input(
     input: &WorldInputRef,
-    producer: &WorldItemProof,
-    consumer: &CheckedWorldCellStage,
-    enclosing: &CheckedWorldCellStage,
+    producer: &Arc<WorldItemOutputEvidence>,
+    consumer: &DecodedWorldCellStage,
+    enclosing: &DecodedWorldCellStage,
     defining_scope: u64,
     captured_files: &BTreeMap<PathBuf, WorldOutputFile>,
-) -> Result<(), CompileError> {
-    let WorldCellRuntimeInputOrigin::PriorStage {
+) -> Result<WorldPriorProducedInput, CompileError> {
+    let ParsedWorldInputSource::PriorStage {
         producer: ordinal,
         consumer: consumer_ordinal,
-    } = input.origin
+        interface: seal,
+    } = &input.source
     else {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     };
     let executable = producer
         .executable()
-        .ok_or_else(|| world_response_error(true))?;
-    if producer.index() != ordinal
-        || consumer.ordinals().first() != Some(&consumer_ordinal)
-        || producer.stage().index() >= consumer.index()
-        || consumer.index() > enclosing.index()
-        || (consumer.index() < enclosing.index() && !consumer.selected(input))
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
+    if producer.index != *ordinal
+        || consumer.ordinals.first() != Some(consumer_ordinal)
+        || producer.stage_index >= consumer.index
+        || consumer.index > enclosing.index
+        || (consumer.index < enclosing.index
+            && consumer.selected_inputs.binary_search(input).is_err())
         || input.defining_scope != defining_scope
-        || input.generation != producer.generation()
+        || input.generation != producer.generation
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
-    let binder = executable
+    let binder_index = executable
         .binders()
         .iter()
-        .find(|binder| binder.name() == input.occurrence)
-        .ok_or_else(|| world_response_error(true))?;
-    // The reserved ID was checked by the binder decoder. Compare the exact
-    // reserved Val owner too; native/interface admission still consumes the
-    // same captured bytes through the existing product issuer.
+        .position(|binder| binder.name() == input.occurrence)
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
+    let binder = &executable.binders()[binder_index];
     if binder.module()
-        != tidepool_repr::SessionModule::val(tidepool_repr::Generation(producer.generation()))
+        != tidepool_repr::SessionModule::val(tidepool_repr::Generation(producer.generation))
             .module_name()
         || input.session_var != binder.varid()
         || input.symbol.unit != "main"
@@ -6178,15 +6489,26 @@ fn validate_world_prior_input(
         || input.symbol.occurrence != binder.name()
         || input.symbol.record_parent.is_some()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     let interface = captured_files
         .get(&PathBuf::from(format!("item-{ordinal}/value.hi")))
-        .ok_or_else(|| world_response_error(true))?;
-    if input.seal.as_slice() != interface.sha256() {
-        return Err(world_response_error(true));
+        .ok_or_else(|| world_response_error(CompilerResponseRejection::ProvenanceMismatch))?;
+    if seal != interface.sha256() {
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
-    Ok(())
+    Ok(WorldPriorProducedInput {
+        producer: Arc::clone(producer),
+        consumer: *consumer_ordinal,
+        binder_index,
+        symbol: input.symbol.clone(),
+        defining_scope,
+        interface: interface.clone(),
+    })
 }
 
 fn admit_world_preparation_response(
@@ -6196,7 +6518,7 @@ fn admit_world_preparation_response(
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
-    native_demands: Arc<native_demand::WorldNativeDemandCompletion>,
+    native_demands: native_demand::WorldDependencyObservations,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
     if !Arc::ptr_eq(&reservation, &native_demands.reservation)
         || !Arc::ptr_eq(&validation.inventory, &native_demands.operation)
@@ -6218,7 +6540,9 @@ fn admit_world_preparation_response(
         || answer_hash(&fields[2])? != plan_digest
         || answer_hash(&fields[3])? != *reservation.admission_digest()
     {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     let outcome = answer_array(&fields[4], 2)?;
     if answer_text(&outcome[0])? == "rejected" {
@@ -6227,17 +6551,17 @@ fn admit_world_preparation_response(
             || !answer_array(&fields[7], 0)?.is_empty()
             || !answer_array(&fields[8], 0)?.is_empty()
         {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         }
         return Ok(Err(match answer_u64(&outcome[1])? {
             0 => WorldQueryRejection::Unsupported,
             1 => WorldQueryRejection::Unavailable,
             2 => WorldQueryRejection::Corrupt,
-            _ => return Err(world_response_error(false)),
+            _ => return Err(world_response_error(CompilerResponseRejection::Malformed)),
         }));
     }
     if answer_text(&outcome[0])? != "prepared" {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     validation
         .inventory
@@ -6270,39 +6594,33 @@ fn admit_world_preparation_response(
         .reserve::<ciborium::value::Value>(completed.len())
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     let common_files = world_output_manifest(&fields[6], &validation.inventory)?;
-    let stages = decode_world_stages(
+    let decoded_stages = decode_world_stages(
         &fields[8],
-        reservation.slots(),
+        &reservation.slots().collect::<Vec<_>>(),
         &segments,
         &common_files,
         &validation.inventory,
-    )?
-    .into_iter()
-    .map(|stage| admit_world_stage_inputs(stage, plan, &validation.inventory))
-    .collect::<Result<Vec<_>, _>>()?;
-    native_demands.require_emitted_stages(&stages)?;
+    )?;
     validation
         .inventory
-        .reserve::<Arc<WorldItemProof>>(completed.len())
-        .and_then(|_| {
-            validation
-                .inventory
-                .reserve::<Arc<CheckedWorldCellStage>>(completed.len())
-        })
+        .reserve::<Arc<WorldItemOutputEvidence>>(completed.len())
+        .and_then(|_| validation.inventory.reserve::<usize>(completed.len()))
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-    let stages_by_ordinal: Vec<_> = stages
+    let stage_indices_by_ordinal: Vec<_> = decoded_stages
         .iter()
-        .flat_map(|stage| stage.ordinals().iter().map(move |_| Arc::clone(stage)))
+        .flat_map(|stage| stage.ordinals.iter().map(move |_| stage.index))
         .collect();
-    let mut item_proofs = Vec::with_capacity(completed.len());
+    let mut output_evidence = Vec::with_capacity(completed.len());
     let mut captured_files = BTreeMap::new();
     for (index, (completed, slot)) in completed.iter().zip(reservation.slots()).enumerate() {
         crate::host_work::checkpoint()?;
         let completed = answer_array(completed, 3)?;
         if answer_u64(&completed[0])? != index as u64
-            || answer_u64(&completed[1])? != world_cell_generation(slot)
+            || answer_u64(&completed[1])? != world_cell_generation(&slot)
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         let item_path = PathBuf::from(format!("item-{index}/world-item.cbor"));
         let item_bytes = crate::certified_products::read_bounded_with_operation(
@@ -6316,13 +6634,15 @@ fn admit_world_preparation_response(
             .charge(item_bytes.len())
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
         if world_digest(&item_bytes) != answer_hash(&completed[2])? {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         let item = validation
             .inventory
             .decode_value(&item_bytes, 4 << 20)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-        let stage = Arc::clone(&stages_by_ordinal[index]);
+        let stage = &decoded_stages[stage_indices_by_ordinal[index]];
         let original = matches!(
             slot,
             crate::checked_cell::CheckedPlannedCellSlot::Prologue { .. }
@@ -6334,11 +6654,13 @@ fn admit_world_preparation_response(
             || answer_hash(&observed[2])? != plan_digest
             || answer_hash(&observed[3])? != *reservation.admission_digest()
             || answer_u64(&observed[4])? != index as u64
-            || answer_u64(&observed[5])? != world_cell_generation(slot)
+            || answer_u64(&observed[5])? != world_cell_generation(&slot)
             || answer_hash(&observed[source_index])?
                 != world_digest(plan.items()[index].source().as_bytes())
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         let kind = if original {
             validation
@@ -6346,22 +6668,23 @@ fn admit_world_preparation_response(
                 .charge_value_copies(&observed[7], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             if answer_text(&observed[0])? != "TPCWORIGINAL1" {
-                return Err(world_response_error(false));
+                return Err(world_response_error(CompilerResponseRejection::Malformed));
             }
             let fields = answer_array(&observed[7], 5)?;
             let expected_kind = match slot {
                 crate::checked_cell::CheckedPlannedCellSlot::Prologue { .. } => "prologue",
                 _ => "declaration",
             };
-            let owner = stage
-                .identity()
-                .original_owner()
-                .ok_or_else(|| world_response_error(true))?;
+            let owner = stage.identity.original_owner().ok_or_else(|| {
+                world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+            })?;
             if answer_text(&fields[0])? != expected_kind
                 || answer_text(&fields[1])? != owner.unit
                 || answer_text(&fields[2])? != owner.module
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
             let original = WorldOriginalItemProof {
                 owner: owner.clone(),
@@ -6374,16 +6697,18 @@ fn admit_world_preparation_response(
                 WorldItemProofKind::Declaration(original)
             }
         } else {
-            let &(segment_index, item_index) = by_ordinal
-                .get(&index)
-                .ok_or_else(|| world_response_error(true))?;
+            let &(segment_index, item_index) = by_ordinal.get(&index).ok_or_else(|| {
+                world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+            })?;
             let segment = &segments[segment_index];
             let typed_item = &segment.items()[item_index];
             if answer_text(&observed[0])? != "TPCWITEM2"
                 || answer_text(&observed[6])? != segment.digest()
                 || answer_text(&observed[8])? != typed_item.entry()
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
             validation
                 .inventory
@@ -6397,8 +6722,8 @@ fn admit_world_preparation_response(
                 .inventory
                 .charge_value_copies(&observed[10], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
-            let native_ordinal = u32::try_from(answer_u64(&observed[10])?)
-                .map_err(|_| world_response_error(false))?;
+            let native_ordinal =
+                u32::try_from(answer_u64(&observed[10])?).map_err(world_response_decode_error)?;
             // Field 11 is the two-list `[binders, signatures]`. Binder order and
             // identity must match the reservation, and each signature must name
             // this typed item's entry and ordered capture.
@@ -6407,12 +6732,13 @@ fn admit_world_preparation_response(
                 .charge_value_copies(&observed[11], 1)
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
             let evidence = answer_array(&observed[11], 2)?;
-            let expected_bindings = reservation
-                .expected_bindings()
-                .get(index)
-                .ok_or_else(|| world_response_error(true))?;
-            let binders =
-                crate::checked_cell::decode_world_item_binders(&evidence[0], expected_bindings)?;
+            let expected_bindings = reservation.items().get(index).ok_or_else(|| {
+                world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+            })?;
+            let binders = crate::checked_cell::decode_world_item_binders(
+                &evidence[0],
+                expected_bindings.bindings(),
+            )?;
             let captures = typed_item.body().captures();
             let signatures = crate::checked_cell::decode_world_item_signatures(
                 &evidence[1],
@@ -6431,7 +6757,7 @@ fn admit_world_preparation_response(
                 .count()
                 != 1
             {
-                return Err(world_response_error(false));
+                return Err(world_response_error(CompilerResponseRejection::Malformed));
             }
             for (path, digest) in &manifest {
                 validation
@@ -6468,36 +6794,55 @@ fn admit_world_preparation_response(
                 sha256: answer_hash(&completed[2])?,
             },
         );
-        item_proofs.push(Arc::new(WorldItemProof {
+        output_evidence.push(Arc::new(WorldItemOutputEvidence {
             index,
             ordinal: index as u64,
-            generation: world_cell_generation(slot),
-            stage,
+            generation: world_cell_generation(&slot),
+            stage_index: stage.index,
             kind,
         }));
     }
+    let linked_inputs = decoded_stages
+        .iter()
+        .map(|stage| {
+            link_world_stage_inputs(
+                stage,
+                &decoded_stages,
+                &output_evidence,
+                &captured_files,
+                &reservation,
+                &validation.inventory,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let stages = decoded_stages
+        .into_iter()
+        .zip(linked_inputs)
+        .map(|(mut stage, linked)| {
+            let dependencies = native_demands.seal_stage_dependencies(
+                stage.ordinals[0],
+                std::mem::take(&mut stage.dependency_terminals),
+            )?;
+            Ok(admit_world_stage_inputs(stage, linked, dependencies))
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+    let native_demands = native_demands.bind_emitted_stages(&stages)?;
+    validation
+        .inventory
+        .reserve::<Arc<WorldItemProof>>(output_evidence.len())
+        .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+    let item_proofs = output_evidence
+        .into_iter()
+        .map(|output| {
+            Arc::new(WorldItemProof {
+                stage: Arc::clone(&stages[output.stage_index]),
+                output,
+            })
+        })
+        .collect();
     let mut demanded = BTreeMap::<String, Arc<CheckedValueArtifact>>::new();
     let mut demanded_session_bindings = std::collections::BTreeSet::new();
     for stage in &stages {
-        for input in &stage.selected_inputs {
-            crate::host_work::checkpoint()?;
-            if let WorldCellRuntimeInputOrigin::PriorStage { producer, consumer } = input.origin() {
-                let produced = item_proofs
-                    .get(producer)
-                    .ok_or_else(|| world_response_error(true))?;
-                let captured = stages_by_ordinal
-                    .get(consumer)
-                    .ok_or_else(|| world_response_error(true))?;
-                validate_world_prior_input(
-                    &input.reference,
-                    produced,
-                    captured,
-                    stage,
-                    reservation.defining_scope(),
-                    &captured_files,
-                )?;
-            }
-        }
         validation
             .inventory
             .reserve::<u64>(stage.demanded_session_bindings().len())
@@ -6518,7 +6863,9 @@ fn admit_world_preparation_response(
                 std::collections::btree_map::Entry::Occupied(old)
                     if !old.get().same_world_type_row(row) =>
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
                 std::collections::btree_map::Entry::Occupied(_) => {}
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -6580,10 +6927,10 @@ fn decode_world_stages(
 ) -> Result<Vec<DecodedWorldCellStage>, CompileError> {
     use crate::checked_cell::CheckedPlannedCellSlot as Slot;
     let ciborium::value::Value::Array(rows) = value else {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     };
     if rows.len() > slots.len() {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     operation
         .charge_value_copies(value, 1)
@@ -6596,25 +6943,27 @@ fn decode_world_stages(
         let fields = answer_array(row, 5)?;
         let identity = WorldCellStageIdentity::decode(&fields[0])?;
         let ciborium::value::Value::Array(raw_ordinals) = &fields[1] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         if raw_ordinals.is_empty() || raw_ordinals.len() > slots.len().saturating_sub(next) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         let ordinals = raw_ordinals
             .iter()
-            .map(|value| {
-                usize::try_from(answer_u64(value)?).map_err(|_| world_response_error(false))
-            })
+            .map(|value| usize::try_from(answer_u64(value)?).map_err(world_response_decode_error))
             .collect::<Result<Vec<_>, _>>()?;
         if ordinals.iter().copied().ne(next..next + ordinals.len()) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         match &identity {
             WorldCellStageIdentity::Executable { typed_digest } => {
-                let segment = segments
-                    .get(next_segment)
-                    .ok_or_else(|| world_response_error(true))?;
+                let segment = segments.get(next_segment).ok_or_else(|| {
+                    world_response_error(CompilerResponseRejection::ProvenanceMismatch)
+                })?;
                 if typed_digest != segment.digest()
                     || segment
                         .items()
@@ -6622,14 +6971,18 @@ fn decode_world_stages(
                         .map(|item| item.ordinal())
                         .ne(ordinals.iter().copied())
                 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
                 next_segment += 1;
             }
             WorldCellStageIdentity::Declaration { ordinal, owner }
             | WorldCellStageIdentity::Prologue { ordinal, owner } => {
                 if ordinals.len() != 1 || *ordinal != next as u64 {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
                 let generation = match (slots.get(next), &identity) {
                     (
@@ -6640,13 +6993,19 @@ fn decode_world_stages(
                         Some(Slot::Prologue { declaration }),
                         WorldCellStageIdentity::Prologue { .. },
                     ) => *declaration,
-                    _ => return Err(world_response_error(true)),
+                    _ => {
+                        return Err(world_response_error(
+                            CompilerResponseRejection::ProvenanceMismatch,
+                        ))
+                    }
                 };
                 let expected =
                     tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
                         .module_name();
                 if owner.unit != "main" || owner.module != expected {
-                    return Err(world_response_error(true));
+                    return Err(world_response_error(
+                        CompilerResponseRejection::ProvenanceMismatch,
+                    ));
                 }
             }
         }
@@ -6657,10 +7016,12 @@ fn decode_world_stages(
          -> Result<WorldStageFileRef, CompileError> {
             let fields = answer_array(value, 2)?;
             let relative = PathBuf::from(answer_text(&fields[0])?);
-            relative_source_path(&relative).map_err(|_| world_response_error(false))?;
+            relative_source_path(&relative).map_err(world_response_decode_error)?;
             let sha256 = answer_hash(&fields[1])?;
             if relative != namespace.join(expected) || manifest.get(&relative) != Some(&sha256) {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
             Ok(WorldStageFileRef { relative, sha256 })
         };
@@ -6670,7 +7031,7 @@ fn decode_world_stages(
             certified_products: decode_ref(&bundle[2], "certified-products.cbor")?,
         };
         let ciborium::value::Value::Array(raw_inputs) = &fields[3] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         operation
             .reserve::<WorldInputRef>(raw_inputs.len())
@@ -6681,12 +7042,15 @@ fn decode_world_stages(
             .collect::<Result<Vec<_>, _>>()?;
         selected_inputs.sort_unstable();
         if selected_inputs.windows(2).any(|pair| {
-            pair[0].origin == pair[1].origin && pair[0].occurrence == pair[1].occurrence
+            pair[0].view().origin == pair[1].view().origin
+                && pair[0].occurrence == pair[1].occurrence
         }) {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         let ciborium::value::Value::Array(raw_terminals) = &fields[4] else {
-            return Err(world_response_error(false));
+            return Err(world_response_error(CompilerResponseRejection::Malformed));
         };
         operation
             .reserve::<DependencyTerminalReference>(raw_terminals.len())
@@ -6700,7 +7064,9 @@ fn decode_world_stages(
             .windows(2)
             .any(|pair| pair[0] == pair[1])
         {
-            return Err(world_response_error(true));
+            return Err(world_response_error(
+                CompilerResponseRejection::ProvenanceMismatch,
+            ));
         }
         next += ordinals.len();
         stages.push(DecodedWorldCellStage {
@@ -6713,7 +7079,9 @@ fn decode_world_stages(
         });
     }
     if next != slots.len() || next_segment != segments.len() {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     Ok(stages)
 }
@@ -6725,9 +7093,9 @@ fn capture_world_output(
     files: &mut BTreeMap<PathBuf, WorldOutputFile>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<(), CompileError> {
-    relative_source_path(&relative).map_err(|_| world_response_error(false))?;
+    relative_source_path(&relative).map_err(world_response_decode_error)?;
     if files.contains_key(&relative) {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     validation
         .inventory
@@ -6749,7 +7117,9 @@ fn capture_world_output(
         .charge(bytes.len().checked_mul(2).ok_or_else(source_size_failure)?)
         .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
     if world_digest(&bytes) != digest {
-        return Err(world_response_error(true));
+        return Err(world_response_error(
+            CompilerResponseRejection::ProvenanceMismatch,
+        ));
     }
     validation
         .record_captured_bytes(&path, &bytes)
@@ -6805,16 +7175,16 @@ fn query_world_transport(
     });
     let run = world_execute(&cmd, endpoint, Vec::new())?;
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
-    let file = std::fs::File::open(&output).map_err(|_| world_response_error(false))?;
+    let file = std::fs::File::open(&output).map_err(world_response_io_error)?;
     let allowance = capture_allowance()?;
     if file.metadata()?.len() > allowance {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     use std::io::Read;
     let mut bytes = Vec::new();
     crate::host_work::read_to_end(&mut file.take(allowance.saturating_add(1)), &mut bytes)?;
     if bytes.len() as u64 > allowance {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     tracing::debug!(
         reply_bytes = bytes.len(),
@@ -6824,14 +7194,23 @@ fn query_world_transport(
     Ok(bytes)
 }
 
-fn world_response_error(provenance: bool) -> CompileError {
-    use tidepool_extract_cmd::CompilerResponseRejection as R;
-    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response(
-        if provenance {
-            R::ProvenanceMismatch
-        } else {
-            R::Malformed
-        },
+fn world_response_error(reason: CompilerResponseRejection) -> CompileError {
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response(reason))
+}
+
+fn world_response_decode_error(
+    cause: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> CompileError {
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response_with_cause(
+        CompilerResponseRejection::Malformed,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, cause),
+    ))
+}
+
+fn world_response_io_error(cause: std::io::Error) -> CompileError {
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response_with_cause(
+        CompilerResponseRejection::UnreadableOutput,
+        cause,
     ))
 }
 
@@ -6844,9 +7223,10 @@ fn world_answer_decode_error(
         E::Malformed(_) => R::Malformed,
         E::ProvenanceMismatch(_) => R::ProvenanceMismatch,
     };
-    let mut rejection = tidepool_extract_cmd::reject_compiler_response(reason);
-    rejection.source = std::io::Error::new(std::io::ErrorKind::InvalidData, cause);
-    CompileError::CompilerEndpoint(rejection)
+    CompileError::CompilerEndpoint(tidepool_extract_cmd::reject_compiler_response_with_cause(
+        reason,
+        std::io::Error::new(std::io::ErrorKind::InvalidData, cause),
+    ))
 }
 
 fn answer_array(
@@ -6855,39 +7235,39 @@ fn answer_array(
 ) -> Result<&[ciborium::value::Value], CompileError> {
     match value {
         ciborium::value::Value::Array(v) if v.len() == count => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_text(value: &ciborium::value::Value) -> Result<&str, CompileError> {
     match value {
         ciborium::value::Value::Text(v) => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_u64(value: &ciborium::value::Value) -> Result<u64, CompileError> {
     match value {
         ciborium::value::Value::Integer(v) => {
-            u64::try_from(*v).map_err(|_| world_response_error(false))
+            u64::try_from(*v).map_err(world_response_decode_error)
         }
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_blob(value: &ciborium::value::Value) -> Result<&[u8], CompileError> {
     match value {
         ciborium::value::Value::Bytes(v) => Ok(v),
-        _ => Err(world_response_error(false)),
+        _ => Err(world_response_error(CompilerResponseRejection::Malformed)),
     }
 }
 fn answer_hash(value: &ciborium::value::Value) -> Result<[u8; 32], CompileError> {
     answer_blob(value)?
         .try_into()
-        .map_err(|_| world_response_error(false))
+        .map_err(world_response_decode_error)
 }
 fn answer_cbor(bytes: &[u8]) -> Result<ciborium::value::Value, CompileError> {
     let mut input = std::io::Cursor::new(bytes);
-    let value = ciborium::de::from_reader(&mut input).map_err(|_| world_response_error(false))?;
+    let value = ciborium::de::from_reader(&mut input).map_err(world_response_decode_error)?;
     if input.position() != bytes.len() as u64 {
-        return Err(world_response_error(false));
+        return Err(world_response_error(CompilerResponseRejection::Malformed));
     }
     Ok(value)
 }
@@ -6909,14 +7289,18 @@ fn authenticate_module_receipt(
                 || (matches!(receipt_use, ModuleReceiptUse::Requested)
                     && sources.selected_sources.contains_key(&receipt.module))
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
         }
         origin @ WorldModuleOrigin::Home { path, .. } => {
             if relative_source_path(Path::new(path)).is_err()
                 || sources.selected_sources.get(&receipt.module) != Some(origin)
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
         }
     }
@@ -6977,7 +7361,9 @@ fn decode_world_answer(
                 || absence.source_domain != *sources.seal()
                 || absence.package_profile != *profile
             {
-                return Err(world_response_error(true));
+                return Err(world_response_error(
+                    CompilerResponseRejection::ProvenanceMismatch,
+                ));
             }
         }
         WorldAnswer::Rejected(_) => {}
@@ -7010,8 +7396,8 @@ mod answer_tests {
     #[test]
     fn response_rejections_preserve_typed_cause_and_uncertain_settlement() {
         use tidepool_extract_cmd::CompilerResponseRejection as R;
-        for (provenance, expected) in [(false, R::Malformed), (true, R::ProvenanceMismatch)] {
-            let CompileError::CompilerEndpoint(error) = world_response_error(provenance) else {
+        for expected in [R::Malformed, R::ProvenanceMismatch] {
+            let CompileError::CompilerEndpoint(error) = world_response_error(expected) else {
                 panic!("response refusal must retain endpoint cause");
             };
             assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
@@ -7027,6 +7413,54 @@ mod answer_tests {
         }
     }
 
+    #[test]
+    fn malformed_cbor_retains_decoder_cause_and_refuses_replay() {
+        let error = answer_cbor(&[0xff]).expect_err("invalid CBOR must not become absence");
+        let CompileError::CompilerEndpoint(rejection) = error else {
+            panic!("decoder refusal must preserve endpoint settlement");
+        };
+        let failure = rejection
+            .source
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<tidepool_extract_cmd::CompilerResponseFailure>())
+            .expect("response boundary reason");
+        assert_eq!(failure.reason(), CompilerResponseRejection::Malformed);
+        assert!(failure
+            .cause()
+            .get_ref()
+            .is_some_and(|cause| cause.is::<ciborium::de::Error<std::io::Error>>()));
+        assert!(!rejection.definitely_unsubmitted());
+        assert!(!rejection.permits_rebind());
+    }
+
+    #[test]
+    fn unreadable_response_preserves_missing_and_inaccessible_output() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = world_response_io_error(std::io::Error::from(kind));
+            let CompileError::CompilerEndpoint(rejection) = error else {
+                panic!("unreadable accepted output must refuse");
+            };
+            assert_eq!(rejection.source.kind(), kind);
+            let failure = rejection
+                .source
+                .get_ref()
+                .and_then(|cause| {
+                    cause.downcast_ref::<tidepool_extract_cmd::CompilerResponseFailure>()
+                })
+                .expect("response boundary reason");
+            assert_eq!(
+                failure.reason(),
+                CompilerResponseRejection::UnreadableOutput
+            );
+            assert_eq!(failure.cause().kind(), kind);
+            assert!(!rejection.definitely_unsubmitted());
+            assert!(!rejection.permits_rebind());
+        }
+    }
+
     pub(super) fn assert_captured_stage_output_refusals(program: &CheckedWorldCellProgram) {
         use ciborium::value::Value;
         use tidepool_extract_cmd::CompilerResponseRejection as Rejection;
@@ -7036,33 +7470,50 @@ mod answer_tests {
         assert!(tidepool_extract_cmd::CompilerTransactionOrigin::current().is_none());
         let bytes = std::fs::read(program.directory().path().join("cell-prepared.cbor"))
             .expect("actual retained preparation output");
-        let replay = |bytes: &[u8]| {
-            admit_world_preparation_response(
-                program.output.origin.clone(),
-                program.output.request_correlation.clone(),
-                Arc::clone(program.reservation()),
-                Arc::clone(program.directory()),
-                bytes,
-                crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(Arc::clone(
+        let output_evidence = program
+            .output
+            .item_proofs
+            .iter()
+            .map(|proof| Arc::clone(&proof.output))
+            .collect::<Vec<_>>();
+        let slots = program.reservation().slots().collect::<Vec<_>>();
+        let replay = |bytes: &[u8]| -> Result<(), CompileError> {
+            let packet = program
+                .output
+                .validation
+                .inventory
+                .decode_value(bytes, 8 << 20)
+                .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let fields = answer_array(&packet, 9)?;
+            let stages = decode_world_stages(
+                &fields[8],
+                &slots,
+                &program.output.segments,
+                &program.output.common_files,
+                &program.output.validation.inventory,
+            )?;
+            for stage in &stages {
+                link_world_stage_inputs(
+                    stage,
+                    &stages,
+                    &output_evidence,
+                    &program.output.captured_files,
+                    program.reservation(),
                     &program.output.validation.inventory,
-                )),
-                Arc::clone(&program.output.native_demands),
-            )
+                )?;
+            }
+            Ok(())
         };
-        match replay(&bytes) {
-            Ok(Ok(_)) => {}
-            Ok(Err(refusal)) => panic!("actual preparation replay refused: {refusal:?}"),
-            Err(error) => panic!("actual preparation replay failed: {error:?}"),
-        }
+        replay(&bytes).expect("actual retained stage table and linked inputs");
         let packet = answer_cbor(&bytes).expect("actual preparation packet");
-        let fields = answer_array(&packet, 9).expect("actual PREP5 fields");
+        let fields = answer_array(&packet, 9).expect("actual PREP6 fields");
         let Value::Array(stages) = &fields[8] else {
             panic!("actual preparation stage table");
         };
         assert!(stages.len() >= 2, "requires a genuine multi-stage producer");
         let last = stages.len() - 1;
         let bundle_ref = |stage: usize, role: usize| {
-            answer_array(&answer_array(&stages[stage], 4).unwrap()[2], 3).unwrap()[role].clone()
+            answer_array(&answer_array(&stages[stage], 5).unwrap()[2], 3).unwrap()[role].clone()
         };
         let assert_refused = |mutated: Value, expected: Rejection| {
             // All correlation, reservation, manifest and item fields are the
@@ -7119,7 +7570,60 @@ mod answer_tests {
                 assert_refused(crossed, Rejection::ProvenanceMismatch);
             }
         }
-        eprintln!("actual stage-output decoder controls: 1 baseline, 12 typed refusals");
+        let (prior_stage, prior_input) = stages
+            .iter()
+            .enumerate()
+            .find_map(|(stage_index, stage)| {
+                let stage = answer_array(stage, 5).unwrap();
+                let Value::Array(inputs) = &stage[3] else {
+                    unreachable!()
+                };
+                inputs.iter().enumerate().find_map(|(index, input)| {
+                    let reference = WorldInputRef::decode(input).unwrap();
+                    matches!(reference.source, ParsedWorldInputSource::PriorStage { .. })
+                        .then_some((stage_index, index))
+                })
+            })
+            .expect("actual historical producer fixture selects a prior value");
+        for mutation in 0..5 {
+            let mut altered = packet.clone();
+            let Value::Array(fields) = &mut altered else {
+                unreachable!()
+            };
+            let Value::Array(stages) = &mut fields[8] else {
+                unreachable!()
+            };
+            let Value::Array(stage) = &mut stages[prior_stage] else {
+                unreachable!()
+            };
+            let Value::Array(inputs) = &mut stage[3] else {
+                unreachable!()
+            };
+            let Value::Array(reference) = &mut inputs[prior_input] else {
+                unreachable!()
+            };
+            match mutation {
+                0 => {
+                    let Value::Array(origin) = &mut reference[0] else {
+                        unreachable!()
+                    };
+                    origin[1] = (slots.len() as u64).into();
+                }
+                1 => reference[1] = world_text("missingProducerBinder"),
+                2 => reference[4] = answer_u64(&reference[4]).unwrap().saturating_add(1).into(),
+                3 => reference[5] = answer_u64(&reference[5]).unwrap().saturating_add(1).into(),
+                _ => reference[6] = world_blob([5; 31]),
+            }
+            assert_refused(
+                altered,
+                if mutation == 4 {
+                    Rejection::Malformed
+                } else {
+                    Rejection::ProvenanceMismatch
+                },
+            );
+        }
+        eprintln!("actual stage decoder/link controls: 1 baseline, 12 output and 5 prior-input typed refusals");
     }
     fn sources(first: &[u8], second: &[u8]) -> CapturedCompilerSources {
         let root = |body: &[u8]| CapturedCompilerSourceRoot {
@@ -7275,7 +7779,7 @@ mod answer_tests {
         ]);
         let input = WorldInputRef::decode(&packet).unwrap();
         assert_eq!(
-            input.origin,
+            input.view().origin,
             WorldCellRuntimeInputOrigin::PriorStage {
                 producer: 0,
                 consumer: 2
@@ -7297,25 +7801,20 @@ mod answer_tests {
             relative: PathBuf::from(name),
             sha256: [1; 32],
         };
-        let stage = |index, ordinal| {
-            Arc::new(CheckedWorldCellStage {
-                index,
-                identity: WorldCellStageIdentity::Executable {
-                    typed_digest: "11".repeat(32),
-                },
-                ordinals: vec![ordinal],
-                outputs: WorldStageOutputs {
-                    source_receipt: file("source"),
-                    module_products: file("modules"),
-                    certified_products: file("certified"),
-                },
-                selected_inputs: vec![],
-                dependency_terminals: vec![],
-                demanded_rows: vec![],
-                demanded_session_bindings: vec![],
-            })
+        let stage = |index, ordinal| DecodedWorldCellStage {
+            index,
+            identity: WorldCellStageIdentity::Executable {
+                typed_digest: "11".repeat(32),
+            },
+            ordinals: vec![ordinal],
+            outputs: WorldStageOutputs {
+                source_receipt: file("source"),
+                module_products: file("modules"),
+                certified_products: file("certified"),
+            },
+            selected_inputs: vec![],
+            dependency_terminals: vec![],
         };
-        let producer_stage = stage(0, 0);
         let consumer = stage(1, 2);
         // DATA for the correlation check, without a checked-program issuer or
         // native/interface authority. Joined producer tests own that evidence.
@@ -7332,11 +7831,11 @@ mod answer_tests {
             &[("x".into(), tidepool_repr::SessionVarId::from_extract(71))],
         )
         .unwrap();
-        let producer = WorldItemProof {
+        let producer = Arc::new(WorldItemOutputEvidence {
             index: 0,
             ordinal: 0,
             generation: 7,
-            stage: producer_stage,
+            stage_index: 0,
             kind: WorldItemProofKind::Executable(WorldExecutableItemProof {
                 entry: "entry".into(),
                 native_ordinal: 4,
@@ -7346,7 +7845,7 @@ mod answer_tests {
                 signatures: vec![],
                 manifest: BTreeMap::new(),
             }),
-        };
+        });
         let files = BTreeMap::from([(
             PathBuf::from("item-0/value.hi"),
             WorldOutputFile {
@@ -7355,33 +7854,21 @@ mod answer_tests {
             },
         )]);
         assert!(
-            validate_world_prior_input(&input, &producer, &consumer, &consumer, 900, &files)
-                .is_ok()
+            link_world_prior_input(&input, &producer, &consumer, &consumer, 900, &files).is_ok()
         );
         assert!(
-            validate_world_prior_input(&input, &producer, &consumer, &consumer, 100, &files)
-                .is_err(),
+            link_world_prior_input(&input, &producer, &consumer, &consumer, 100, &files).is_err(),
             "public World scope cannot replace the actual reservation scope"
         );
-        assert!(validate_world_prior_input(
-            &input,
-            &producer,
-            &stage(0, 2),
-            &consumer,
-            900,
-            &files
-        )
-        .is_err());
-        assert!(validate_world_prior_input(
-            &input,
-            &producer,
-            &stage(1, 1),
-            &consumer,
-            900,
-            &files
-        )
-        .is_err());
-        assert!(validate_world_prior_input(
+        assert!(
+            link_world_prior_input(&input, &producer, &stage(0, 2), &consumer, 900, &files)
+                .is_err()
+        );
+        assert!(
+            link_world_prior_input(&input, &producer, &stage(1, 1), &consumer, 900, &files)
+                .is_err()
+        );
+        assert!(link_world_prior_input(
             &input,
             &producer,
             &consumer,
@@ -7398,47 +7885,42 @@ mod answer_tests {
             },
         )]);
         assert!(
-            validate_world_prior_input(&input, &producer, &consumer, &consumer, 900, &wrong)
-                .is_err()
+            link_world_prior_input(&input, &producer, &consumer, &consumer, 900, &wrong).is_err()
         );
         let later = stage(3, 5);
         assert!(
-            validate_world_prior_input(&input, &producer, &consumer, &later, 900, &files).is_err(),
+            link_world_prior_input(&input, &producer, &consumer, &later, 900, &files).is_err(),
             "earlier availability without selected custody cannot supply a later stage"
         );
-        let mut selected_consumer = (*consumer).clone();
-        selected_consumer
-            .selected_inputs
-            .push(WorldCellRuntimeInput {
-                reference: input.clone(),
-                source: WorldCellRuntimeInputSource::PriorStage,
-            });
-        assert!(validate_world_prior_input(
-            &input,
-            &producer,
-            &selected_consumer,
-            &later,
-            900,
-            &files
-        )
-        .is_ok());
+        let mut selected_consumer = consumer.clone();
+        selected_consumer.selected_inputs.push(input.clone());
+        assert!(
+            link_world_prior_input(&input, &producer, &selected_consumer, &later, 900, &files)
+                .is_ok()
+        );
         for changed in [0, 1, 2, 3] {
             let mut altered = selected_consumer.clone();
-            let reference = &mut altered.selected_inputs[0].reference;
+            let reference = &mut altered.selected_inputs[0];
             match changed {
-                0 => reference.seal[0] ^= 1,
+                0 => {
+                    let ParsedWorldInputSource::PriorStage { interface, .. } =
+                        &mut reference.source
+                    else {
+                        unreachable!()
+                    };
+                    interface[0] ^= 1;
+                }
                 1 => reference.defining_scope += 1,
                 2 => reference.session_var += 1,
                 _ => reference.generation += 1,
             }
             assert!(
-                validate_world_prior_input(&input, &producer, &altered, &later, 900, &files)
-                    .is_err(),
+                link_world_prior_input(&input, &producer, &altered, &later, 900, &files).is_err(),
                 "a matching join key cannot replace the full earlier selected witness"
             );
         }
         assert!(
-            validate_world_prior_input(&input, &producer, &consumer, &stage(0, 0), 900, &files)
+            link_world_prior_input(&input, &producer, &consumer, &stage(0, 0), 900, &files)
                 .is_err(),
             "a future original capture consumer cannot authorize an earlier stage"
         );
@@ -7458,6 +7940,17 @@ mod answer_tests {
             changed[0] = origin;
             assert!(WorldInputRef::decode(&world_array(changed)).is_err());
         }
+        for bad_seal in [world_blob([5; 31]), world_blob([5; 33])] {
+            let mut changed = fields.clone();
+            changed[6] = bad_seal;
+            assert!(WorldInputRef::decode(&world_array(changed)).is_err());
+        }
+        let mut as_base = fields.clone();
+        as_base[0] = world_array(vec![integer(0)]);
+        assert!(
+            WorldInputRef::decode(&world_array(as_base)).is_err(),
+            "an interface digest is not a row CID"
+        );
         let a = (
             WorldCellRuntimeInputOrigin::PriorStage {
                 producer: 0,
@@ -7497,7 +7990,13 @@ mod answer_tests {
                 integer(id),
                 integer(900),
                 integer(7),
-                world_blob([seal; 32]),
+                world_blob(
+                    cid::Cid::new_v1(
+                        0x71,
+                        cid::multihash::Multihash::<64>::wrap(0x12, &[seal; 32]).unwrap(),
+                    )
+                    .to_bytes(),
+                ),
             ]))
             .unwrap()
         };
@@ -7523,7 +8022,7 @@ mod answer_tests {
                 frame_world_stage_selection(
                     &identities[ordinal],
                     &[ordinal],
-                    refs.iter(),
+                    refs.iter().map(WorldInputRef::view),
                     &mut frame,
                 );
             }
@@ -7543,7 +8042,12 @@ mod answer_tests {
         for changed in [0, 1, 2, 3, 4] {
             let mut different = base.clone();
             match changed {
-                0 => different.seal[0] ^= 1,
+                0 => {
+                    let ParsedWorldInputSource::BaseWorld(seal) = &mut different.source else {
+                        unreachable!()
+                    };
+                    seal.encoded[0] ^= 1;
+                }
                 1 => different.defining_scope += 1,
                 2 => different.session_var += 1,
                 3 => different.generation += 1,
@@ -7615,6 +8119,13 @@ mod answer_tests {
                 &InventoryOperation::new(Default::default()),
             )
         };
+        let row_seal = |byte| {
+            cid::Cid::new_v1(
+                0x71,
+                cid::multihash::Multihash::<64>::wrap(0x12, &[byte; 32]).unwrap(),
+            )
+            .to_bytes()
+        };
         let base = world_array(vec![
             world_array(vec![world_integer(0)]),
             world_text("x"),
@@ -7628,7 +8139,7 @@ mod answer_tests {
             world_integer(71),
             world_integer(900),
             world_integer(7),
-            world_blob([5; 32]),
+            world_blob(row_seal(5)),
         ]);
         let mut repeated = rows.clone();
         for row in &mut repeated {
@@ -7658,7 +8169,7 @@ mod answer_tests {
                 let Value::Array(fields) = &mut duplicate else {
                     unreachable!()
                 };
-                fields[6] = world_blob([9; 32]);
+                fields[6] = world_blob(row_seal(9));
             }
             let mut changed = rows.clone();
             let Value::Array(fields) = &mut changed[0] else {
@@ -7991,17 +8502,16 @@ mod answer_tests {
         let sources = Arc::new(sources(b"module Module where\n", b"module Module where\n"));
         let cold = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             None,
-            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
+            VisibleWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
             CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(cold.primary_context.snapshot().producer_sha256(), [0; 32]);
-        let (bound, root, blocks) = cold
-            .materialize_primary(
-                CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256(),
-            )
-            .unwrap();
+        let prepared = cold.clone().prepare_for(canonical, [0; 32]).unwrap();
+        let bound = prepared.primary_inputs.context().clone();
+        let root = prepared.primary_root.clone();
+        let blocks = &prepared.runtime_context_blocks;
         assert_eq!(bound.snapshot().producer_sha256(), canonical);
         // The original published owner remains unchanged. Inspect the actual
         // production materializer's root through its independent reader.
@@ -8014,18 +8524,16 @@ mod answer_tests {
         assert_eq!(restored.snapshot().producer_sha256(), canonical);
         let issued = crate::artifacts::ModuleCandidateOffer::compiler_world_inputs(
             Some(bound),
-            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
+            VisibleWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             Arc::clone(&sources),
             CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
         assert_eq!(
             issued
-                .materialize_primary(
-                    CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
-                )
+                .prepare_for(canonical, [0; 32])
                 .unwrap()
-                .1
+                .primary_root
                 .root(),
             root.root()
         );
@@ -8033,16 +8541,12 @@ mod answer_tests {
             Some(Arc::new(
                 (*cold.primary_context).clone().admit_producer(raw).unwrap(),
             )),
-            CompilerWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
+            VisibleWorldBindings::from_published_bindings(0, std::iter::empty()).unwrap(),
             sources,
             CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None).unwrap(),
         )
         .unwrap();
-        assert!(wrong
-            .materialize_primary(
-                CanonicalProducerIdentity::from_compiler(endpoint.identity()).sha256()
-            )
-            .is_err());
+        assert!(wrong.prepare_for(canonical, [0; 32]).is_err());
     }
 
     #[test]
@@ -8256,11 +8760,25 @@ mod identity_tests {
             let CompileError::CompilerEndpoint(rejection) = world_answer_decode_error(cause) else {
                 panic!("accepted response rejection must retain endpoint settlement");
             };
-            let retained = rejection
+            let failure = rejection
                 .source
+                .get_ref()
+                .and_then(|error| {
+                    error.downcast_ref::<tidepool_extract_cmd::CompilerResponseFailure>()
+                })
+                .expect("the response boundary reason");
+            let retained = failure
+                .cause()
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<E>())
                 .expect("the original typed decoder cause");
+            assert_eq!(
+                failure.reason(),
+                match retained {
+                    E::Malformed(_) => CompilerResponseRejection::Malformed,
+                    E::ProvenanceMismatch(_) => CompilerResponseRejection::ProvenanceMismatch,
+                }
+            );
             assert_eq!(retained.to_string(), message);
             assert!(rejection.to_string().contains(&message));
         }

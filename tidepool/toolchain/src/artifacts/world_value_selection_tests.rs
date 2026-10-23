@@ -3,7 +3,7 @@ use crate::cell_plan::WorldCellAdmissionSubject;
 use crate::checked_cell::{CheckedPlannedCellSlot, ProducedValueTypeInterfaces};
 use crate::compiler_world::{
     CapturedCompilerSourceRoot, CapturedCompilerSources, CheckedWorldCellProgram, CompilerWorld,
-    CompilerWorldBindings, CompilerWorldCellOperand, CompilerWorldLexicalSurface,
+    CompilerWorldCellOperand, CompilerWorldLexicalSurface, VisibleWorldBindings,
     WorldCellOperandExposure, WorldSourceSelection,
 };
 use crate::linked_native::{
@@ -548,7 +548,39 @@ fn prior_source_home_links_bind_first_packagefree_and_packageful_targets() {
                 ),
             ));
         }
-        let reservation = plan.reserve(plan.issue_admission_token(subject, slots, binders)?)?;
+        let reservation = plan.reserve(
+            plan.issue_admission_token(
+                subject,
+                slots
+                    .into_iter()
+                    .zip(binders)
+                    .map(|(slot, bindings)| {
+                        use crate::cell_plan::WorldCellReservationRequest as Request;
+                        use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+                        match slot {
+                            Slot::Prologue { declaration } => {
+                                assert!(bindings.is_empty());
+                                Request::Prologue { declaration }
+                            }
+                            Slot::Declaration { declaration } => {
+                                assert!(bindings.is_empty());
+                                Request::Declaration { declaration }
+                            }
+                            Slot::Bind { value } => Request::Bind { value, bindings },
+                            Slot::Expression {
+                                capture,
+                                observation_name,
+                            } => {
+                                assert_eq!(bindings.len(), 1);
+                                let binding = bindings.into_iter().next().unwrap();
+                                assert_eq!(binding.0, observation_name);
+                                Request::Expression { capture, binding }
+                            }
+                        }
+                    })
+                    .collect(),
+            )?,
+        )?;
         let checked = crate::compiler_world::admit_world_cell_program(
             &endpoint,
             reservation,
@@ -830,7 +862,7 @@ fn open_world_with_primary_and_module(
     let source = WorldSourceSelection::new(*sources.seal(), "world-selection-source")?;
     let inputs = ModuleCandidateOffer::compiler_world_inputs(
         primary,
-        CompilerWorldBindings::from_published_bindings(0, std::iter::empty())?,
+        VisibleWorldBindings::from_published_bindings(0, std::iter::empty())?,
         sources,
         CompilerWorldLexicalSurface::from_import_lines(Vec::new(), None)?,
     )?;
@@ -956,7 +988,39 @@ fn prepare_checked_with_template(
             )]
         })
         .collect();
-    let reservation = plan.reserve(plan.issue_admission_token(subject, slots, binders)?)?;
+    let reservation = plan.reserve(
+        plan.issue_admission_token(
+            subject,
+            slots
+                .into_iter()
+                .zip(binders)
+                .map(|(slot, bindings)| {
+                    use crate::cell_plan::WorldCellReservationRequest as Request;
+                    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
+                    match slot {
+                        Slot::Prologue { declaration } => {
+                            assert!(bindings.is_empty());
+                            Request::Prologue { declaration }
+                        }
+                        Slot::Declaration { declaration } => {
+                            assert!(bindings.is_empty());
+                            Request::Declaration { declaration }
+                        }
+                        Slot::Bind { value } => Request::Bind { value, bindings },
+                        Slot::Expression {
+                            capture,
+                            observation_name,
+                        } => {
+                            assert_eq!(bindings.len(), 1);
+                            let binding = bindings.into_iter().next().unwrap();
+                            assert_eq!(binding.0, observation_name);
+                            Request::Expression { capture, binding }
+                        }
+                    }
+                })
+                .collect(),
+        )?,
+    )?;
     crate::compiler_world::admit_world_cell_program(
         endpoint,
         reservation,
@@ -990,13 +1054,13 @@ fn assert_physical_selection(
             recaptured.current_interface(generation)?.artifact_id()
         );
     }
-    let decoded = crate::declaration_context::decode_world_source_receipt(checked, 0)?;
-    let segment = decoded.issue_segment_originals(
-        None,
+    let pending = crate::declaration_context::WorldProgramContinuation::begin(checked).open_next(
+        checked,
         &physical,
         &mut validation,
-        crate::declaration_context::WorldProgramContinuation::begin(checked),
+        &mut |_| {},
     )?;
+    let segment = pending.segment();
     let input = operand.checked_row().certified_interface().artifact_id();
     assert!(
         segment

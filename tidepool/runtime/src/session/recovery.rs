@@ -124,7 +124,7 @@ pub fn observe_declaration_domain(
         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
         != Some(state.clone())
     {
-        return Err(SessionError::StaleStagedDeclaration);
+        return Err(super::SessionTransitionReason::PublicBaselineChanged.into());
     }
     Ok(Some(DeclarationDomainObservation {
         domain,

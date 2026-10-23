@@ -49,6 +49,19 @@ impl EffectHandler<QuietOutput> for ProbeHandler {
         }
         cx.respond(())
     }
+
+    fn prepare(
+        &mut self,
+        request: ProbeRequest,
+        cx: &EffectContext<'_, QuietOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, EffectError> {
+        if matches!(&request, ProbeRequest::Print(value) if value == "-2147483647") {
+            Ok(tidepool_effect::dispatch::EffectDispatch::Unhandled)
+        } else {
+            self.handle(request, cx)
+                .map(tidepool_effect::dispatch::EffectDispatch::Immediate)
+        }
+    }
 }
 
 type ProbeSession = ScaleSession<frunk::HList!(ProbeHandler)>;
@@ -1463,6 +1476,159 @@ fn produced_capture_types_cross_a_declaration_barrier_without_replaying_effects(
 }
 
 #[test]
+fn checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects() {
+    use crate::session::{ResidentHole, ResidentResumeError, SessionTransitionReason};
+    #[derive(Clone, Copy)]
+    enum Scenario {
+        Complete,
+        RevokedScope,
+        RevokedOwner,
+    }
+    for scenario in [
+        Scenario::Complete,
+        Scenario::RevokedScope,
+        Scenario::RevokedOwner,
+    ] {
+        let mut session = SemanticSession::new();
+        let original = session.public_source.original_source().clone();
+        let execution = Arc::new(
+            source_action_with_original(&mut session.resident, original.clone(), |resident, _| {
+                resident.begin_private_execution(session.public)
+            })
+            .unwrap(),
+        );
+        let specification = fixture_cell_recipe(
+            &session.recipe,
+            include_str!("fixtures/typed-segment-checked-resume.hs"),
+            &SourceImports::new(),
+        );
+        let admission = plan_fixture_specification_for(
+            &mut session.resident,
+            &session.public_source,
+            specification,
+            execution.clone(),
+        )
+        .unwrap();
+        let prepared = original
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                crate::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_cell_program_admitted(owner, admission, report),
+            )
+            .unwrap();
+        let (checked, program) = finish_cell_program_admitted(prepared).unwrap();
+        let prefix = session
+            .resident
+            .begin_cell_program(program)
+            .unwrap()
+            .unwrap();
+        let reservation =
+            source_action_with_original(&mut session.resident, original.clone(), |resident, _| {
+                resident.admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+            })
+            .unwrap();
+        let TurnResult::Bind {
+            bound, compiled, ..
+        } = consume_cell_program_item(reservation.clone()).unwrap()
+        else {
+            panic!("checked fixture is one authored binding");
+        };
+        session
+            .resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: execution.private_scope(),
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        let parked = source_action_with_original(
+            &mut session.resident,
+            original.clone(),
+            |resident, report| {
+                resident.run_bind_with_sites(
+                    "parkedValue",
+                    compiled.code(),
+                    &bound[0],
+                    reservation.generation(),
+                    report,
+                )
+            },
+        )
+        .unwrap();
+        let crate::session::ResidentOutcome::Suspended { hole, .. } = parked else {
+            panic!("the real Console request must park the checked binding");
+        };
+        assert_eq!(session.observed(), [1]);
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+        let rewrapped = ResidentHole::plain(hole.cont_id());
+        // The saved owner determines lexical scope; changing checkout context
+        // cannot replace it with the caller's public lexical environment.
+        session
+            .resident
+            .set_run_context(SessionRunContext {
+                lexical_scope: session.public,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        match scenario {
+            Scenario::Complete => {
+                let completed = source_action_with_original(
+                    &mut session.resident,
+                    original,
+                    |resident, report| resident.resume_classified(rewrapped.clone(), (), report),
+                )
+                .unwrap();
+                assert!(matches!(
+                    completed,
+                    crate::session::ResidentOutcome::Completed { .. }
+                ));
+                assert_eq!(session.observed(), [1, 2]);
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+                assert!(session
+                    .resident
+                    .current_binding_in(execution.private_scope(), "parkedValue")
+                    .is_some());
+                let repeated = tidepool_testing::with_settlement(|report| {
+                    session.resident.resume_classified(rewrapped, (), report)
+                });
+                assert!(matches!(
+                    repeated,
+                    Err(ResidentResumeError::Rejected(
+                        ResidentError::WrongContinuation { .. }
+                    ))
+                ));
+                assert_eq!(session.observed(), [1, 2]);
+            }
+            Scenario::RevokedScope | Scenario::RevokedOwner => {
+                let expected = if matches!(scenario, Scenario::RevokedScope) {
+                    session.resident.retire_scope(execution.private_scope());
+                    SessionTransitionReason::ScopeRevoked
+                } else {
+                    let next = execution.owner.epoch().checked_add(1).unwrap();
+                    execution
+                        .owner
+                        .with_source_transition(|transition| transition.advance_epoch(next));
+                    SessionTransitionReason::OwnerChanged
+                };
+                let refused = tidepool_testing::with_settlement(|report| {
+                    session.resident.resume_classified(rewrapped, (), report)
+                });
+                assert!(
+                    matches!(refused, Err(ResidentResumeError::Rejected(ResidentError::Session(SessionError::TransitionRefused(reason)))) if reason == expected)
+                );
+                assert_eq!(
+                    session.observed(),
+                    [1],
+                    "revocation must refuse before the second effect"
+                );
+                assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
+            }
+        }
+    }
+}
+
+#[test]
 fn historical_source_captures_bind_the_original_value_after_shadowing() {
     use tidepool_toolchain::compiler_world::DependencyTerminalOrigin;
     for (label, source, expected_origin) in [
@@ -1517,8 +1683,9 @@ fn historical_source_captures_bind_the_original_value_after_shadowing() {
                         .iter()
                         .flat_map(|item| {
                             item.checked_item()
-                                .world_selected_dependency_terminals()
-                                .unwrap()
+                                .world_stage_dependencies()
+                                .map(|owner| owner.terminals().collect::<Vec<_>>())
+                                .unwrap_or_default()
                         })
                         .collect::<Vec<_>>();
                     assert!(terminals.iter().any(|terminal| {

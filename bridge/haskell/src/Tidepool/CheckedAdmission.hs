@@ -14,45 +14,39 @@ import Tidepool.Binders (StmtBinders(..), TurnKind(..))
 import Tidepool.CheckedCell (CheckedSignature(..))
 import Tidepool.ExactScope
   ( CheckedCellAdmission(..), CheckedItemAdmission(..) )
-import Tidepool.ExtractRequest (WorkerRequest(..), RequestOperation(..), admitRequestOperation)
+import Tidepool.ExtractRequest (RequestOptions(..), InspectionPayload)
 import Tidepool.ExtractUtil (shaHex)
 
 -- An inspection input cap cannot be used by an executable or publication mode.
-matchesInspectionAdmission :: WorkerRequest -> [String] -> Bool
-matchesInspectionAdmission args values =
-  admitRequestOperation args == Right InspectionOperation && isJust (requestInspectOut args)
-    && not (requestTurn args) && not (requestCell args) && not (requestClassify args)
-    && not (requestCheckSource args) && not (requestCellPlan args)
-    && not (requestCertifyHomeProducts args) && not (requestActivationPreview args)
-    && not (requestHarnessProfile args)
-    && not (isJust (requestDeclarationJoin args))
-    && not (isJust (requestBindGen args))
-    && not (isJust (requestTarget args)) && null (requestTargets args)
-    && Map.null (requestRetainedGenerations args)
-    && requestInjectVals args == values
+matchesInspectionAdmission :: RequestOptions -> InspectionPayload -> [String] -> Bool
+matchesInspectionAdmission args _inspection values =
+  not (optionHarnessProfile args)
+    && not (isJust (optionBindGen args))
+    && Map.null (optionRetainedGenerations args)
+    && optionInjectVals args == values
 
 -- Each checkpoint rereads the ordered recipe inventory, including duplicates.
 -- A successful earlier admission does not authorize changed files later.
-readTurnTemplateDigests :: WorkerRequest -> IO [(String, String)]
-readTurnTemplateDigests args = forM (requestTurnTemplates args) $ \(kind,path) ->
+readTurnTemplateDigests :: [(String, FilePath)] -> IO [(String, String)]
+readTurnTemplateDigests templates = forM templates $ \(kind,path) ->
   (,) kind . shaHex <$> BS.readFile path
 
-requireGeneration :: WorkerRequest -> IO Word64
+requireGeneration :: RequestOptions -> IO Word64
 requireGeneration args = maybe (error "required argument missing: --bind-gen") pure
-  (requestBindGen args)
+  (optionBindGen args)
 
-validateCheckedCellAdmission :: WorkerRequest -> CheckedCellAdmission -> String -> String -> IO ()
-validateCheckedCellAdmission args admission cellSource template = do
-  templateDigests <- readTurnTemplateDigests args
+validateCheckedCellAdmission :: RequestOptions -> [(String, FilePath)] -> CheckedCellAdmission -> String -> String -> IO ()
+validateCheckedCellAdmission args templates admission cellSource template = do
+  templateDigests <- readTurnTemplateDigests templates
   unless (shaHex (TE.encodeUtf8 (T.pack cellSource)) == checkedCellSha256 admission
       && shaHex (TE.encodeUtf8 (T.pack template)) == checkedTemplateSha256 admission
       && templateDigests == checkedTurnTemplates admission
-      && requestInjectVals args == checkedInjectedModules admission)
+      && optionInjectVals args == checkedInjectedModules admission)
     (fail "cell body, wrapper or injected interfaces differ from immutable admission")
 
-validateCheckedItemAdmission :: WorkerRequest -> CheckedItemAdmission -> String -> StmtBinders -> IO ()
-validateCheckedItemAdmission args admission source verdict = do
-  templates <- readTurnTemplateDigests args
+validateCheckedItemAdmission :: RequestOptions -> [(String, FilePath)] -> CheckedItemAdmission -> String -> StmtBinders -> IO ()
+validateCheckedItemAdmission args recipes admission source verdict = do
+  templates <- readTurnTemplateDigests recipes
   generation <- requireGeneration args
   let expectedKind = case sbKind verdict of KBind -> "bind"; KExpr -> "expr"; KDecl -> "decl"
       keys = if expectedKind == "bind"
@@ -60,7 +54,7 @@ validateCheckedItemAdmission args admission source verdict = do
         else ["__tidepool_cell_expr_" ++ show (itemIndex admission)]
   unless (shaHex (TE.encodeUtf8 (T.pack source)) == itemSourceDigest admission
       && expectedKind == itemKind admission && sbBinders verdict == itemBinders admission
-      && generation == itemGeneration admission && requestInjectVals args == itemInjectedModules admission
+      && generation == itemGeneration admission && optionInjectVals args == itemInjectedModules admission
       && templates == itemTurnTemplates admission && map signatureKey (itemSignatures admission) == keys)
     (fail "checked item body, verdict, generation, signatures or recipe differs from its protected offer")
   when ("__tidepool_checked_annotation_" `isInfixOf` source)

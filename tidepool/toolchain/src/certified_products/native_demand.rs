@@ -3,29 +3,35 @@
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DependencyQueryKind {
-    SourceDefinition,
-    NativeOriginal,
+/// The decoder fixes the semantic branch before either owner is invoked.
+pub(crate) enum DependencyQuery {
+    Source(SourceDependencyQuery),
+    Native(NativeDemandPacket),
 }
-impl DependencyQueryKind {
-    pub(crate) fn tag(self) -> u64 {
-        match self {
-            Self::SourceDefinition => 0,
-            Self::NativeOriginal => 1,
-        }
+
+pub(crate) struct SourceDependencyQuery {
+    originals: Vec<ReceiptImportOwner>,
+}
+impl SourceDependencyQuery {
+    pub(crate) fn into_originals(self) -> Vec<ReceiptImportOwner> {
+        self.originals
     }
 }
 
+/// Only this query can enter executable acquisition.
 pub(crate) struct NativeDemandPacket {
-    kind: DependencyQueryKind,
     originals: Vec<ReceiptImportOwner>,
 }
 
 impl NativeDemandPacket {
-    pub(crate) fn kind(&self) -> DependencyQueryKind {
-        self.kind
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8], operation: &InventoryOperation) -> CertResult<Self> {
+        match DependencyQuery::decode(bytes, operation)? {
+            DependencyQuery::Native(query) => Ok(query),
+            DependencyQuery::Source(_) => Err(CertificationError::Receipt("expected native query")),
+        }
     }
+
     pub(crate) fn originals(&self) -> &[ReceiptImportOwner] {
         &self.originals
     }
@@ -58,12 +64,11 @@ impl NativeDemandPacket {
             charge_symbol(operation, binder)?;
             originals.push(original.clone());
         }
-        Ok(Self {
-            kind: self.kind,
-            originals,
-        })
+        Ok(Self { originals })
     }
+}
 
+impl DependencyQuery {
     pub(crate) fn decode(bytes: &[u8], operation: &InventoryOperation) -> CertResult<Self> {
         let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
         let value = operation.decode_value(bytes, limit)?;
@@ -72,11 +77,10 @@ impl NativeDemandPacket {
         if string(&packet[0])? != "TPDEPENDENCYQUERY1" {
             return Err(CertificationError::Receipt("native demand version"));
         }
-        let kind = match number(&packet[1])? {
-            0 => DependencyQueryKind::SourceDefinition,
-            1 => DependencyQueryKind::NativeOriginal,
-            _ => return Err(CertificationError::Receipt("dependency query kind")),
-        };
+        let kind = number(&packet[1])?;
+        if kind > 1 {
+            return Err(CertificationError::Receipt("dependency query kind"));
+        }
         let mut originals = Vec::new();
         for value in array(&packet[2])? {
             crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
@@ -99,7 +103,10 @@ impl NativeDemandPacket {
             operation.reserve::<ReceiptImportOwner>(1)?;
             originals.push(original);
         }
-        Ok(Self { kind, originals })
+        Ok(match kind {
+            0 => Self::Source(SourceDependencyQuery { originals }),
+            _ => Self::Native(NativeDemandPacket { originals }),
+        })
     }
 }
 
@@ -121,29 +128,69 @@ pub(crate) struct NativeDemandUseReply<'a> {
     pub(crate) retained: &'a [crate::declaration_context::NativeRetainedOccurrence<'a>],
 }
 
-pub(crate) fn encode_reply(
-    kind: DependencyQueryKind,
+pub(crate) struct SourceDependencyReply<'a> {
+    pub(crate) original: &'a ReceiptImportOwner,
+    pub(crate) retained: &'a [crate::declaration_context::NativeRetainedOccurrence<'a>],
+}
+
+pub(crate) fn encode_source_reply(
+    replies: &[SourceDependencyReply<'_>],
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    encode_reply(
+        0,
+        replies.len(),
+        replies
+            .iter()
+            .map(|row| (row.original, &[][..], row.retained)),
+        operation,
+    )
+}
+
+pub(crate) fn encode_native_reply(
     replies: &[NativeDemandUseReply<'_>],
     operation: &InventoryOperation,
 ) -> CertResult<Vec<u8>> {
-    operation.reserve::<Value>(replies.len())?;
-    let mut entries = Vec::with_capacity(replies.len());
+    encode_reply(
+        1,
+        replies.len(),
+        replies
+            .iter()
+            .map(|row| (row.original, row.obligations, row.retained)),
+        operation,
+    )
+}
+
+fn encode_reply<'a>(
+    tag: u64,
+    len: usize,
+    replies: impl Iterator<
+        Item = (
+            &'a ReceiptImportOwner,
+            &'a [&'a crate::declaration_context::NativePackageObligation],
+            &'a [crate::declaration_context::NativeRetainedOccurrence<'a>],
+        ),
+    >,
+    operation: &InventoryOperation,
+) -> CertResult<Vec<u8>> {
+    operation.reserve::<Value>(len)?;
+    let mut entries = Vec::with_capacity(len);
     let mut previous = None;
-    for reply in replies {
+    for (reference_use, obligations, retained) in replies {
         crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
-        if previous.is_some_and(|previous| previous >= reply.original) {
+        if previous.is_some_and(|previous| previous >= reference_use) {
             return Err(CertificationError::Receipt(
                 "native reply use order or duplicate",
             ));
         }
-        previous = Some(reply.original);
+        previous = Some(reference_use);
         let ReceiptImportOwner::OriginalBinding {
             unit,
             module,
             interface,
             original,
             binder,
-        } = reply.original
+        } = reference_use
         else {
             return Err(CertificationError::Receipt("native reply use kind"));
         };
@@ -163,21 +210,16 @@ pub(crate) fn encode_reply(
             binding(original),
             value_identity(binder),
         ]);
-        if kind == DependencyQueryKind::SourceDefinition && !reply.obligations.is_empty() {
-            return Err(CertificationError::Receipt(
-                "source dependency query acquired packages",
-            ));
-        }
         entries.push(value_array([
             reference,
-            encode_obligations(reply.obligations, operation)?,
-            encode_retained(reply.retained, operation)?,
+            encode_obligations(obligations, operation)?,
+            encode_retained(retained, operation)?,
         ]));
     }
     encode_value_with_operation(
         &value_array([
             value_text("TPDEPENDENCYREPLY1"),
-            Value::Integer(kind.tag().into()),
+            Value::Integer(tag.into()),
             value_array(entries),
         ]),
         CertificationFormat::ProductReceipt,
@@ -285,6 +327,38 @@ mod tests {
         bytes
     }
 
+    #[test]
+    fn source_query_decodes_to_a_distinct_owner_and_reply_has_no_packages() {
+        let operation = InventoryOperation::new(Default::default());
+        let mut value: Value =
+            ciborium::de::from_reader(packet(vec![original("A")]).as_slice()).unwrap();
+        let Value::Array(fields) = &mut value else {
+            unreachable!()
+        };
+        fields[1] = Value::Integer(0u64.into());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+        assert!(NativeDemandPacket::decode(&bytes, &operation).is_err());
+        let DependencyQuery::Source(query) = DependencyQuery::decode(&bytes, &operation).unwrap()
+        else {
+            panic!("SOURCE query entered native branch");
+        };
+        let originals = query.into_originals();
+        let reply = encode_source_reply(
+            &[SourceDependencyReply {
+                original: &originals[0],
+                retained: &[],
+            }],
+            &operation,
+        )
+        .unwrap();
+        let value: Value = ciborium::de::from_reader(reply.as_slice()).unwrap();
+        let envelope = array(&value).unwrap();
+        assert_eq!(number(&envelope[1]).unwrap(), 0);
+        let rows = array(&envelope[2]).unwrap();
+        assert!(array(&array(&rows[0]).unwrap()[1]).unwrap().is_empty());
+    }
+
     fn original(module: &str) -> Value {
         let binding = |artifact, selection| {
             Value::Array(vec![
@@ -387,8 +461,7 @@ mod tests {
                 retained: &[],
             })
             .collect::<Vec<_>>();
-        let bytes =
-            encode_reply(DependencyQueryKind::NativeOriginal, &replies, &operation).unwrap();
+        let bytes = encode_native_reply(&replies, &operation).unwrap();
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(
             value,
@@ -428,7 +501,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            encode_reply(DependencyQueryKind::NativeOriginal, &duplicate, &operation),
+            encode_native_reply(&duplicate, &operation),
             Err(CertificationError::Receipt(
                 "native reply use order or duplicate"
             ))
@@ -445,13 +518,12 @@ mod tests {
                 retained: &[],
             },
         ];
-        assert!(encode_reply(DependencyQueryKind::NativeOriginal, &reversed, &operation).is_err());
+        assert!(encode_native_reply(&reversed, &operation).is_err());
         let mut conflicting = obligations[0].clone();
         conflicting.interface_digest = [9; 32];
         let conflicting = [obligations[0].clone(), conflicting];
         assert!(matches!(
-            encode_reply(
-                DependencyQueryKind::NativeOriginal,
+            encode_native_reply(
                 &[NativeDemandUseReply {
                     original: replies[0].original,
                     obligations: &conflicting.iter().collect::<Vec<_>>(),
@@ -508,11 +580,9 @@ mod tests {
             },
         ];
         let reply = |retained| {
-            encode_reply(
-                DependencyQueryKind::SourceDefinition,
-                &[NativeDemandUseReply {
+            encode_source_reply(
+                &[SourceDependencyReply {
                     original: &packet.originals()[0],
-                    obligations: &[],
                     retained,
                 }],
                 &operation,

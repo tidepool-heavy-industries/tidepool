@@ -13,7 +13,7 @@ use crate::certified_products::{
 use crate::declaration_join::ExactModuleIdentity;
 use crate::CompileError;
 
-use super::{NativeRetainedOccurrence, WorldPrimaryInputs};
+use super::{NativeRetainedOccurrence, RetainedValueEvidence, WorldPrimaryInputs};
 
 /// An observation keeps the same admitted SOURCE context, exact input selection
 /// and accounting owner alive. It cannot authorize native acquisition or values.
@@ -44,9 +44,10 @@ fn refuse(detail: &'static str) -> CompileError {
 impl SourceDependencyBasis {
     pub(crate) fn observe(
         primary: &WorldPrimaryInputs,
-        references: Vec<ReceiptImportOwner>,
+        query: crate::certified_products::native_demand::SourceDependencyQuery,
         operation: &Arc<InventoryOperation>,
     ) -> Result<Self, CompileError> {
+        let references = query.into_originals();
         for reference in &references {
             crate::host_work::checkpoint()?;
             let ReceiptImportOwner::OriginalBinding { unit, module, .. } = reference else {
@@ -196,26 +197,43 @@ impl SourceDependencyBasis {
 
     /// Compare a runtime row's immutable type/evidence with one exact observed
     /// terminal. Runtime access still belongs to its independently scoped owner.
-    pub(crate) fn matches_checked_value(
+    pub(crate) fn select_retained_values_for_use(
         &self,
-        occurrence: NativeRetainedOccurrence<'_>,
-        row: &crate::checked_cell::CheckedValueArtifact,
-    ) -> Result<bool, CompileError> {
-        if !self.rows.iter().any(|observed| {
-            observed
-                .retained_occurrences()
-                .any(|candidate| candidate == occurrence)
-        }) {
-            return Ok(false);
-        }
-        let selected = self
-            ._membership
-            .acquisition()
-            .artifacts()
-            .observed_payload(&occurrence.binding.artifact)
-            .ok_or_else(|| refuse("observed SOURCE terminal lost its acquired payload"))?;
-        let (actual, _) = row.world_type_parts()?;
-        Ok(selected.as_ref() == actual.as_ref())
+        reference: &ReceiptImportOwner,
+        requested: &[NativeRetainedOccurrence<'_>],
+    ) -> Result<Vec<RetainedValueEvidence>, CompileError> {
+        let observed = self
+            .rows
+            .iter()
+            .find(|row| row.reference() == reference)
+            .ok_or_else(|| refuse("SOURCE terminal has no issued exact use"))?;
+        requested
+            .iter()
+            .map(|occurrence| {
+                let found = observed.retained.binary_search_by(|candidate| {
+                    NativeRetainedOccurrence {
+                        demander: candidate.demander,
+                        global_index: candidate.global_index,
+                        binding: &candidate.binding,
+                        identity: &candidate.identity,
+                        generation: candidate.generation,
+                    }
+                    .cmp(occurrence)
+                });
+                if found.is_err() {
+                    return Err(refuse("SOURCE terminal exceeds its issued exact use"));
+                }
+                let entry = self
+                    ._membership
+                    .acquisition()
+                    .artifacts()
+                    .observed_payload(&occurrence.binding.artifact)
+                    .ok_or_else(|| refuse("observed SOURCE terminal lost its acquired payload"))?;
+                Ok(RetainedValueEvidence {
+                    entry: Arc::clone(entry),
+                })
+            })
+            .collect()
     }
 }
 
@@ -243,6 +261,53 @@ impl SourceDependencyRow {
 mod tests {
     use super::*;
     use crate::artifact_inventory::CompilerInputRole;
+
+    fn source_query(
+        references: Vec<ReceiptImportOwner>,
+        operation: &InventoryOperation,
+    ) -> crate::certified_products::native_demand::SourceDependencyQuery {
+        use crate::certified_products::native_demand::{
+            self, DependencyQuery, SourceDependencyReply,
+        };
+        use ciborium::value::Value;
+        let rows = references
+            .iter()
+            .map(|original| SourceDependencyReply {
+                original,
+                retained: &[],
+            })
+            .collect::<Vec<_>>();
+        let reply = native_demand::encode_source_reply(&rows, operation).unwrap();
+        let Value::Array(mut fields) =
+            ciborium::de::from_reader::<Value, _>(reply.as_slice()).unwrap()
+        else {
+            unreachable!()
+        };
+        let Value::Array(rows) = fields.pop().unwrap() else {
+            unreachable!()
+        };
+        let uses = rows
+            .into_iter()
+            .map(|row| {
+                let Value::Array(mut row) = row else {
+                    unreachable!()
+                };
+                row.remove(0)
+            })
+            .collect::<Vec<_>>();
+        let query = Value::Array(vec![
+            Value::Text("TPDEPENDENCYQUERY1".into()),
+            Value::Integer(0u64.into()),
+            Value::Array(uses),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&query, &mut bytes).unwrap();
+        let DependencyQuery::Source(query) = DependencyQuery::decode(&bytes, operation).unwrap()
+        else {
+            unreachable!()
+        };
+        query
+    }
 
     #[test]
     #[ignore = "requires the declared rooted compiler service"]
@@ -292,14 +357,14 @@ mod tests {
         let before_graph = context.artifact_view().capture_graph_selection();
         let observed = SourceDependencyBasis::observe(
             &primary,
-            vec![reference.clone(), reference.clone()],
+            source_query(vec![reference.clone()], &operation),
             &operation,
         )
         .unwrap();
         assert_eq!(
             observed.rows().len(),
-            2,
-            "ordered duplicate uses remain distinct reply rows"
+            1,
+            "the observed row retains the exact decoded SOURCE use"
         );
         assert!(observed
             .rows()
@@ -333,9 +398,13 @@ mod tests {
             member.get(&reference).is_some(),
             "exact pair membership alone is not SOURCE admission"
         );
-        let error = SourceDependencyBasis::observe(&without_source, vec![reference], &operation)
-            .err()
-            .unwrap();
+        let error = SourceDependencyBasis::observe(
+            &without_source,
+            source_query(vec![reference], &operation),
+            &operation,
+        )
+        .err()
+        .unwrap();
         assert!(
             matches!(error, CompileError::CompilerEvidence(error) if matches!(error.as_ref(), CertificationError::Mismatch("SOURCE dependency owner is outside admitted source scope")))
         );
@@ -529,18 +598,32 @@ mod tests {
             .capture_world_primary_inputs(historical.toolchain_identity_sha256())
             .unwrap();
         let operation = Arc::new(InventoryOperation::new(Default::default()));
-        let observed =
-            SourceDependencyBasis::observe(&primary, vec![reference.clone()], &operation).unwrap();
+        let observed = SourceDependencyBasis::observe(
+            &primary,
+            source_query(vec![reference.clone()], &operation),
+            &operation,
+        )
+        .unwrap();
         assert_eq!(
             &observed._membership.get(&reference).unwrap().0,
             old_product.owner()
         );
         assert!(
-            SourceDependencyBasis::observe(&primary, vec![newer_reference], &operation).is_err(),
+            SourceDependencyBasis::observe(
+                &primary,
+                source_query(vec![newer_reference], &operation),
+                &operation
+            )
+            .is_err(),
             "newer byte custody cannot replace the selected exact source body"
         );
         assert!(
-            SourceDependencyBasis::observe(&primary, vec![reference], &operation).is_ok(),
+            SourceDependencyBasis::observe(
+                &primary,
+                source_query(vec![reference], &operation),
+                &operation
+            )
+            .is_ok(),
             "refusal preserves the historical basis"
         );
     }

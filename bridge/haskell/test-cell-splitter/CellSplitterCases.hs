@@ -103,7 +103,7 @@ import Tidepool.ExtractRequest
   , StructuredInspection(..), InspectionProvenance(..)
   , InspectionRequest(..), RequestField(..), RequestShapeError(..), RequestOperation(..), WorkerRequest(..)
   , ExactNameInspection(..), StructuredNameScope(..), StructuredNameNamespace(..)
-  , admitRequestOperation, validateRequestShape, workerArgv, workerRequestFromArgv )
+  , admitWorkerRequest, requestOperation, validateRequestShape, workerArgv, workerRequestFromArgv )
 import Tidepool.Introspection (InfoEntry(..), InspectionResult(..), runInspection)
 import Tidepool.DependencyEvidence
 import Tidepool.Session
@@ -1082,11 +1082,11 @@ checkingSourceRequestRoundTrip = do
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
         assertEqual "exact acquisition is its own operation" (Right (EnsureExactInputsOperation inputs))
-          (admitRequestOperation request)
+          (requestOperation <$> admitWorkerRequest request)
         assertEqual "exact acquisition has no source" [] (requestFiles request)
         assertEqual "exact acquisition cannot acquire an output" Nothing (requestOutDir request)
         assertEqual "projected source authority is refused" (Left InvalidExactInputsShape)
-          (admitRequestOperation request { requestFiles = ["missing.hs"] })
+          (requestOperation <$> admitWorkerRequest request { requestFiles = ["missing.hs"] })
       other -> fail ("source-free exact inputs rejected: " ++ show other)
   forM_ [Input "missing.hs", OutputDir "missing", Include "missing", SessionArtifacts "missing"
         , ModuleCandidates "missing", HarnessProfile, Turn, PortableOutput, EnsureExactInputs resident] $ \extra ->
@@ -1155,7 +1155,7 @@ checkingSourceRequestRoundTrip = do
     let selected = query { worldQueryQuestion = WorldPublicModuleQuery (constructor publicInspection) }
     case workerRequestFromArgv (workerArgv [WorldQuery selected]) of
       Right (Just request) -> assertEqual "held-world query is one fresh exclusive operation"
-        (Right (WorldQueryOperation selected)) (admitRequestOperation request)
+        (Right (WorldQueryOperation selected)) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("world query rejected: " ++ show other)
   let pin = InspectionProvenance 1 "display-only"
       current = StructuredInspection StructuredCurrentScope StructuredValueName "map" pin
@@ -1165,7 +1165,7 @@ checkingSourceRequestRoundTrip = do
     let selected = query { worldQueryQuestion = WorldScopedQuery operand }
     case workerRequestFromArgv (workerArgv [WorldQuery selected]) of
       Right (Just request) -> assertEqual "closed scoped operand roundtrips through the same exclusive operation"
-        (Right (WorldQueryOperation selected)) (admitRequestOperation request)
+        (Right (WorldQueryOperation selected)) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("scoped world query rejected: " ++ show other)
   forM_ [ Input "missing.hs", Include "ambient", InspectOut "other", EnsureExactInputs resident
         , WorldQuery query ] $ \extra ->
@@ -1193,13 +1193,13 @@ checkingSourceRequestRoundTrip = do
         Right (Just request) -> assertEqual "one sealed private operand roundtrips"
           (case field of WorldCellPlan value -> Right (WorldCellPlanOperation value)
                          WorldCellPrepare value -> Right (WorldCellPrepareOperation value)
-                         _ -> error "closed operand fixture") (admitRequestOperation request)
+                         _ -> error "closed operand fixture") (requestOperation <$> admitWorkerRequest request)
         other -> fail ("private operand framing refused: " ++ show other)
   forM_ cases $ \(field,operation,expected) -> do
     [flag,payload] <- pure (workerArgv [field])
     assertEqual "held cell operation matches independent Rust framing" expected payload
     case workerRequestFromArgv [flag,payload] of
-      Right (Just request) -> assertEqual "held cell admits exactly its own operation" (Right operation) (admitRequestOperation request)
+      Right (Just request) -> assertEqual "held cell admits exactly its own operation" (Right operation) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("held cell codec rejected data fixture: " ++ show other)
     forM_ [0 .. length payload - 1] $ \end -> case workerRequestFromArgv [flag,take end payload] of
       Left _ -> pure ()
@@ -1217,7 +1217,7 @@ checkingSourceRequestRoundTrip = do
         ,(WorldCellPrepare repeatedPrepare,WorldCellPrepareOperation repeatedPrepare)] $ \(field,operation) ->
     case workerRequestFromArgv (workerArgv [field]) of
       Right (Just request) -> assertEqual "ordered expression variants survive held recipe admission"
-        (Right operation) (admitRequestOperation request)
+        (Right operation) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("held cell rejected the ordinary ordered expression alternatives: " ++ show other)
   forM_ [cellPlan {worldCellPlanRecipe=cellRecipe {worldCellSource=replicate (1024*1024+1) 'λ'}}
         ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("","body")]}}
@@ -1236,12 +1236,12 @@ portableOutputRequestValidation :: IO ()
 portableOutputRequestValidation = do
   let valid = [Input "Fixture.hs", Targets ["first", "second"], OutputDir "out", PortableOutput]
       admit fields = case workerRequestFromArgv (workerArgv fields) of
-        Right (Just request) -> pure (request, admitRequestOperation request)
+        Right (Just request) -> pure (request, (requestOperation <$> admitWorkerRequest request))
         other -> fail ("portable request failed to decode: " ++ show other)
   (decoded, accepted) <- admit valid
   assertEqual "portable intent survives typed transport" True (requestPortableOutput decoded)
   assertEqual "portable source operation" (Right SourceOperation) accepted
-  (_, inspectionAccepted) <- admit [Input "Fixture.hs", InspectInfo "value"]
+  (_, inspectionAccepted) <- admit [Input "Fixture.hs", InspectInfo "value", InspectOut "inspection"]
   assertEqual "inspection positive uses the inspection operation"
     (Right InspectionOperation) inspectionAccepted
   (_, mixedAccepted) <- admit (valid ++ [InspectInfo "value"])
@@ -1252,7 +1252,7 @@ portableOutputRequestValidation = do
     , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
     case workerRequestFromArgv (workerArgv (valid ++ [conflict])) of
       Left _ -> pure ()
-      Right (Just request) -> case admitRequestOperation request of
+      Right (Just request) -> case (requestOperation <$> admitWorkerRequest request) of
         Left _ -> pure ()
         Right operation -> fail ("portable request accepted conflicting mode: " ++ show operation)
       other -> fail ("portable conflicting request has no decoded operation: " ++ show other)
@@ -1304,7 +1304,7 @@ requestShapeValidation = do
           , [Input "Probe.hs", CheckSource, Include "lib", ModuleCandidates "scope", BuildProductsDir "products"]
           , Right ())
         , ("cell plan accepts common compile context"
-          , [Input "Cell.hs", CellPlan, Include "lib", OutputDir "out", Target "Main", Targets ["A"], SessionRoot "session"]
+          , [Input "Cell.hs", CellPlan, CellTemplate "template", CellOut "cell-out", Include "lib", OutputDir "out", SessionRoot "session"]
           , Right ())
         ]
         ++ [("source check rejects " ++ label, [Input "Probe.hs", CheckSource, field], Left InvalidSourceCheckShape)
@@ -1348,23 +1348,23 @@ requestShapeValidation = do
 requestOperationAdmission :: IO ()
 requestOperationAdmission = do
   let admit fields = case workerRequestFromArgv (workerArgv fields) of
-        Right (Just request) -> admitRequestOperation request
+        Right (Just request) -> (requestOperation <$> admitWorkerRequest request)
         Left _ -> Left ConflictingRequestOperations
         Right Nothing -> Left ConflictingRequestOperations
       recipes =
         [ ([], SourceOperation)
-        , ([Turn], TurnOperation)
-        , ([Turn, ActivationPreview], ActivationPreviewOperation)
-        , ([Classify], ClassificationOperation)
-        , ([Cell], CellOperation)
-        , ([CellPlan], CellPlanOperation)
+        , ([Turn, TurnOut "turn"], TurnOperation)
+        , ([Turn, ActivationPreview, TurnOut "turn"], ActivationPreviewOperation)
+        , ([Classify, ClassifyOut "classify"], ClassificationOperation)
+        , ([Cell, CellTemplate "template", CellOut "cell"], CellOperation)
+        , ([CellPlan, CellTemplate "template", CellOut "cell"], CellPlanOperation)
         , ([CheckSource], SourceCheckOperation)
-        , ([InspectType "Int", InspectInfo "Maybe"], InspectionOperation)
+        , ([InspectType "Int", InspectOut "inspect"], InspectionOperation)
         , ([DeclarationJoin "join", DeclarationJoinOut "receipt"], DeclarationOperation "join" "receipt")
         ]
       context = [Input "Input.hs", Include "lib", BuildProductsDir "products"]
   forM_ recipes $ \(fields, expected) ->
-    forM_ [context ++ fields ++ fields, reverse (context ++ fields), fields ++ context] $ \history ->
+    forM_ [context ++ (if expected == InspectionOperation then [Input "Other.hs"] else []) ++ fields ++ fields, reverse (context ++ fields), fields ++ context] $ \history ->
       assertEqual ("operation history " ++ show history) (Right expected) (admit history)
   -- Every pair of distinct primary recipes conflicts; preview is deliberately
   -- a refinement of Turn, rather than a second operation.
@@ -1379,6 +1379,18 @@ requestOperationAdmission = do
     case admit (context ++ [Turn, ActivationPreview] ++ fields) of
       Left _ -> pure ()
       Right operation -> fail ("preview with another operation admitted as " ++ show operation)
+  forM_ [ [Input "unreadable-fifo", Turn, HarnessProfile]
+        , [Input "unreadable-fifo", Cell, CellOut "output", HarnessProfile]
+        , [Input "unreadable-fifo", Classify, HarnessProfile]
+        , [Input "unreadable-fifo", InspectInfo "value", HarnessProfile]
+        , [Input "unreadable-fifo", InspectInfo "value", InspectInfo "other", InspectOut "output", HarnessProfile]
+        , [Input "unreadable-fifo", Turn, TurnOut "output", Cell, HarnessProfile]
+        , [Input "source", Input "", Target "value"]
+        , [Input "source", TurnOut "orphan-output", HarnessProfile]
+        , [Input "source", CellTemplate "orphan-template", HarnessProfile]
+        ] $ \fields -> case admit fields of
+          Left _ -> pure ()
+          Right operation -> fail ("malformed full request admitted as " ++ show operation)
   assertEqual "output-only declaration is refused before source dispatch"
     (Left IncompleteDeclarationOperation) (admit (context ++ [DeclarationJoinOut "receipt"]))
   assertEqual "manifest-only declaration is refused before declaration IO"
@@ -1393,11 +1405,11 @@ requestOperationAdmission = do
         Left _ -> pure ()
         Right operation -> fail ("orphan declaration field admitted as " ++ show operation)
   assertEqual "inspection queries share one operation" (Right InspectionOperation)
-    (admit (context ++ [InspectType "Int", InspectInfo "Maybe", InspectionStrict, InspectOut "out"]))
+    (admit (context ++ [Input "Other.hs", InspectType "Int", InspectInfo "Maybe", InspectionStrict, InspectOut "out"]))
   assertEqual "multi-target stable-value source context is ancillary" (Right SourceOperation)
     (admit (context ++ [Targets ["a", "b"], SessionRoot "session", InjectVal "Val1"]))
   assertEqual "cell planning templates and injection are ancillary" (Right CellPlanOperation)
-    (admit (context ++ [CellPlan, CellTemplate "template", TurnTemplate "expr" "turn-template", InjectVal "Val1"]))
+    (admit (context ++ [CellPlan, CellOut "cell", CellTemplate "template", TurnTemplate "expr" "turn-template", InjectVal "Val1"]))
 
 requestFieldOrdering :: IO ()
 requestFieldOrdering = do

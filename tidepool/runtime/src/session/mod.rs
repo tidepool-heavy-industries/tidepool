@@ -19,11 +19,11 @@
 mod admission;
 mod source_admission;
 pub use source_admission::{
-    ConfirmedSourcePublication,
-    OwnSourceFenceReopened, RuntimeSourceAdmission, RuntimeSourceCompilerTransaction,
-    RuntimeSourceFence, RuntimeSourceFenceTransition, RuntimeSourceLeaseClaim,
-    RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView, RuntimeSourceReopen,
-    SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase, SourceFenceTransitionFailure,
+    ConfirmedSourcePublication, OwnSourceFenceReopened, RuntimeSourceAdmission,
+    RuntimeSourceCompilerTransaction, RuntimeSourceFence, RuntimeSourceFenceTransition,
+    RuntimeSourceLeaseClaim, RuntimeSourcePublicationPrerequisite, RuntimeSourcePublicationView,
+    RuntimeSourceReopen, SourceAdmissionError, SourceAdmissionHook, SourceAdmissionPhase,
+    SourceFenceTransitionFailure,
 };
 mod binding_table;
 mod dialect;
@@ -101,14 +101,14 @@ pub use persistent::{
 
 pub use admission::{
     NativeSetupAdmissionFailure, NativeSetupInputInventory, PendingHostValueWrite,
-    PrivateExecutionAdmission, PrivatePreparationSnapshot, ReservedNotebookScope,
-    RuntimeBindingInterfaceReservation,
+    PrivateCellPreparation, PrivateExecutionAdmission, PrivateHostCarrierPreparation,
+    PrivatePreparationSnapshot, ReservedNotebookScope, RuntimeBindingInterfaceReservation,
     RuntimeCellAdmission, RuntimeCheckedItemAdmission, RuntimeCheckedPrefix,
     RuntimeCheckedPrefixSnapshot, RuntimeDurablePublicReadiness, RuntimeHostBindingAdmission,
-    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand, PrivateCellPreparation, PrivateHostCarrierPreparation,
+    RuntimeLexicalScopeLease, RuntimeOriginalSource, RuntimeWorldCellOperand,
     UnpublishedNotebookScope,
 };
-pub use paired_publication::FinalExecutionIntent;
+pub use paired_publication::FrozenWorldExecution;
 pub use paired_publication::{
     AcceptedDeclarationPublication, CertifiedDeclarationPublication, DeclarationPublicationBase,
     DeclarationPublicationRejection, ExecutionPublication, RejectedDeclarationPublication,
@@ -394,8 +394,72 @@ pub enum DurablePublicAdmissionFailure {
     ManifestChecksum { published: String, current: String },
 }
 
+/// Mutable runtime conditions checked by the owning transition on session re-entry.
+/// Immutable fact and permission failures retain their own error types.
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTransitionReason {
+    #[error("the runtime owner or its epoch changed")]
+    OwnerChanged,
+    #[error("the runtime scope was revoked")]
+    ScopeRevoked,
+    #[error("the execution is in the wrong phase")]
+    WrongPhase,
+    #[error("the retained source was revoked")]
+    SourceRevoked,
+    #[error("the retained runtime value is unavailable")]
+    RetainedValueUnavailable,
+    #[error("the prepared value or its checked row changed")]
+    PreparedValueChanged,
+    #[error("the public publication baseline changed")]
+    PublicBaselineChanged,
+}
+
+/// Incompatible immutable facts at declaration projection and commit admission.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum DeclarationFactsFailure {
+    #[error("authored declaration {generation:?} has incompatible original owner {actual:?}")]
+    AuthoredOwner {
+        generation: Generation,
+        actual: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    },
+    #[error("declaration projection has no selected original interface for {original:?}")]
+    MissingOriginalInterface {
+        original: tidepool_toolchain::declaration_join::ExactModuleIdentity,
+    },
+    #[error("declaration context has no original artifact {original:?}")]
+    MissingOriginalArtifact {
+        original: tidepool_toolchain::artifact_inventory::ArtifactId,
+    },
+    #[error("declaration in scope {scope:?} omits selected published source facts")]
+    PublishedSourceSelectionMissing { scope: ScopeId },
+    #[error("declaration in scope {scope:?} requires certification against its published sources")]
+    PublishedSourceRequiresCertification { scope: ScopeId },
+    #[error("authored declaration generation differs: expected={expected:?}, actual={actual:?}")]
+    AuthoredGeneration {
+        expected: Generation,
+        actual: Generation,
+    },
+    #[error("authored declaration {generation:?} parent differs: expected={expected:?}, actual={actual:?}")]
+    AuthoredParent {
+        generation: Generation,
+        expected: Generation,
+        actual: Generation,
+    },
+    #[error("declaration {generation:?} has unavailable or non-preceding parent {parent:?}")]
+    InvalidParent {
+        generation: Generation,
+        parent: Generation,
+    },
+    #[error("joined declaration does not certify reserved generation {generation:?}")]
+    JoinedGeneration { generation: Generation },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    DeclarationFacts(#[from] DeclarationFactsFailure),
+    #[error(transparent)]
+    TransitionRefused(#[from] SessionTransitionReason),
     #[error(transparent)]
     SourceAdmission(#[from] SourceAdmissionError),
     #[error(transparent)]
@@ -632,7 +696,7 @@ pub struct DurableWriteBase {
 
 #[derive(Clone)]
 enum PublicationIntent {
-    Final(Arc<FinalExecutionIntent>),
+    Final(Arc<FrozenWorldExecution>),
     HostBindings(BindingPublicationPolicy),
 }
 
@@ -695,7 +759,7 @@ impl CertifiedPublication {
 
 pub enum PublicationAttempt {
     Settled(PublicManifestCommit),
-    Rebase(Arc<FinalExecutionIntent>),
+    Rebase(Arc<FrozenWorldExecution>),
     RestageMetadata(CertifiedPublication),
 }
 
@@ -913,7 +977,7 @@ fn authored_native_dependencies(
         .descriptors()
         .into_iter()
         .find(|descriptor| descriptor.id == original)
-        .ok_or(SessionError::StaleStagedDeclaration)?
+        .ok_or(DeclarationFactsFailure::MissingOriginalArtifact { original })?
         .owner;
     Ok(native_binding_dependencies(
         context.authored_native_binding_custody_requirements(&std::collections::BTreeSet::from(
@@ -1466,7 +1530,7 @@ impl SessionLib {
         base: &mut PublicManifestBase,
     ) -> Result<Generation, SessionError> {
         if !self.publication_baseline_is_current(base)? {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(SessionTransitionReason::PublicBaselineChanged.into());
         }
         let reserved = if self.durable_graph.is_some() {
             self.reserve_join_generation_durable()?
@@ -2633,26 +2697,40 @@ impl SessionLib {
                 && staged.module == SessionModule::lib(staged.generation)
         } else {
             self.durable_graph.is_none()
-                && generation_lease::requested_end(self.log.generation(), 1)
-                    == Ok(staged.generation)
-                && self
-                    .next_module()
-                    .is_ok_and(|module| module == staged.module)
+                && generation_lease::requested_end(self.log.generation(), 1)? == staged.generation
+                && self.next_module()? == staged.module
         };
-        if staged.session_id != self.id
-            || staged.root != self.root
-            || (!staged.reserved && staged.base_generation != self.log.generation())
+        if staged.session_id != self.id || staged.root != self.root {
+            return Err(SessionTransitionReason::OwnerChanged.into());
+        }
+        if (!staged.reserved && staged.base_generation != self.log.generation())
             || staged.base_tip != self.scope_tip(staged.scope)
             || staged.exact_context != self.current_exact_context_in(staged.scope)
-            || !slot_matches
-            || staged.visible_values != visible_values
         {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(SessionTransitionReason::PublicBaselineChanged.into());
         }
-        if staged.certified_authored.as_ref().is_some_and(|prepared| {
-            prepared.generation != staged.generation || prepared.parent != staged.base_tip
-        }) {
-            return Err(SessionError::StaleStagedDeclaration);
+        if !slot_matches {
+            return Err(SessionTransitionReason::WrongPhase.into());
+        }
+        if staged.visible_values != visible_values {
+            return Err(SessionTransitionReason::PreparedValueChanged.into());
+        }
+        if let Some(prepared) = &staged.certified_authored {
+            if prepared.generation != staged.generation {
+                return Err(DeclarationFactsFailure::AuthoredGeneration {
+                    expected: staged.generation,
+                    actual: prepared.generation,
+                }
+                .into());
+            }
+            if prepared.parent != staged.base_tip {
+                return Err(DeclarationFactsFailure::AuthoredParent {
+                    generation: staged.generation,
+                    expected: staged.base_tip,
+                    actual: prepared.parent,
+                }
+                .into());
+            }
         }
         if !self.source_selections_preserved(
             staged.scope,
@@ -2661,7 +2739,10 @@ impl SessionLib {
                 .as_ref()
                 .map(|prepared| prepared.projection.context()),
         ) {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(DeclarationFactsFailure::PublishedSourceSelectionMissing {
+                scope: staged.scope,
+            }
+            .into());
         }
         let staged_graph = if staged.reserved
             && staged.persistence == DeclarationPersistence::Durable
@@ -2670,7 +2751,7 @@ impl SessionLib {
             let prepared = staged
                 .certified_authored
                 .as_ref()
-                .ok_or(SessionError::StaleStagedDeclaration)?;
+                .ok_or(SessionTransitionReason::WrongPhase)?;
             Some(self.stage_private_authored_graph(&staged, prepared.projection.context())?)
         } else {
             None
@@ -2697,7 +2778,7 @@ impl SessionLib {
                 .tips
                 .get(&staged.scope)
                 .cloned()
-                .ok_or(SessionError::StaleStagedDeclaration)?;
+                .ok_or(SessionTransitionReason::ScopeRevoked)?;
             tip.tip = generation;
             tip.exact_context = next_context;
             let scope = staged.scope;
@@ -2740,7 +2821,7 @@ impl SessionLib {
                 .tips
                 .get(&staged.scope)
                 .cloned()
-                .ok_or(SessionError::StaleStagedDeclaration)?;
+                .ok_or(SessionTransitionReason::ScopeRevoked)?;
             tip.tip = staged.generation;
             tip.exact_context = next_context;
             let store = self.held_recovery_store()?;
@@ -2770,7 +2851,7 @@ impl SessionLib {
         let state = self
             .durable_graph
             .as_ref()
-            .ok_or(SessionError::StaleStagedDeclaration)?;
+            .ok_or(SessionTransitionReason::OwnerChanged)?;
         let invalid = |detail: &str| SessionError::RecoveryManifest {
             path: state.path.clone(),
             detail: detail.into(),
@@ -2780,7 +2861,7 @@ impl SessionLib {
             .ensure_ready()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         if state.allocation_ceiling < staged.generation {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(SessionTransitionReason::WrongPhase.into());
         }
         let prepared = staged
             .certified_authored
@@ -2914,7 +2995,9 @@ impl SessionLib {
         mut turn: DeclTurn,
     ) -> Result<Generation, SessionError> {
         if !self.published_source_selections_in(scope).is_empty() {
-            return Err(SessionError::StaleStagedDeclaration);
+            return Err(
+                DeclarationFactsFailure::PublishedSourceRequiresCertification { scope }.into(),
+            );
         }
         let tip = self.scope_tip(scope);
         turn.parent = (tip.0 > 0).then_some(tip);
@@ -2926,7 +3009,7 @@ impl SessionLib {
             let admission = store
                 .begin_native_transition()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            assert!(self.log.commit_reserved_authored(generation, turn));
+            self.log.commit_reserved_authored(generation, turn)?;
             self.set_scope_tip_in(scope, generation);
             complete_native_transition(Some(admission))?;
             Ok(generation)
@@ -3053,7 +3136,7 @@ impl SessionLib {
             )?;
             candidate.turn.retracts = retracts;
             let mut log = self.log.clone();
-            assert!(log.commit_reserved_authored(candidate.generation, candidate.turn.clone()));
+            log.commit_reserved_authored(candidate.generation, candidate.turn.clone())?;
             candidate.rendered = render::render_module(&log, candidate.generation, &self.env);
             let scratch = tempfile::tempdir()?;
             let staged = validate_declaration_candidate(candidate, scratch.path(), settlement)?;
@@ -3630,7 +3713,9 @@ mod tests {
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         assert!(matches!(
             lib.adopt_staged_batch_with_receipt_and_vals_in(committed_copy.clone(), &[]),
-            Err(SessionError::StaleStagedDeclaration)
+            Err(SessionError::TransitionRefused(
+                SessionTransitionReason::PublicBaselineChanged
+            ))
         ));
         lib.discard_staged(&committed_copy);
         assert!(root
@@ -4007,7 +4092,9 @@ mod tests {
         );
         assert!(matches!(
             lib.adopt_staged_batch_with_receipt_and_vals_in(stale.clone(), &[]),
-            Err(SessionError::StaleStagedDeclaration)
+            Err(SessionError::TransitionRefused(
+                SessionTransitionReason::PublicBaselineChanged
+            ))
         ));
         lib.discard_staged(&stale);
         assert!(

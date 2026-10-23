@@ -183,7 +183,7 @@ pub struct PrivateExecutionAdmission {
         std::collections::HashMap<tidepool_repr::SessionVarId, CertifiedPrivateValueWrite>,
     >,
     state: Arc<parking_lot::Mutex<PrivateExecutionState>>,
-    pub(super) final_intent: OnceLock<Arc<super::FinalExecutionIntent>>,
+    pub(super) final_intent: OnceLock<Arc<super::FrozenWorldExecution>>,
 }
 
 struct PrivateExecutionState {
@@ -212,6 +212,30 @@ enum PrivateAuthoredProgram {
     },
     Failed,
 }
+
+/// A freeze borrows its exact completed private owner. Compiler evidence alone
+/// cannot construct this runtime frontier or substitute a different admission.
+pub(super) struct CompletedPrivateFrontier<'a> {
+    admission: &'a PrivateExecutionAdmission,
+    frontier: Arc<PrivateSettledFrontier>,
+    scope_lease: Arc<RuntimeLexicalScopeLease>,
+}
+
+impl<'a> CompletedPrivateFrontier<'a> {
+    pub(super) fn admission(&self) -> &'a PrivateExecutionAdmission {
+        self.admission
+    }
+
+    pub(super) fn publication(&self) -> PrivateCompilerProgress {
+        self.frontier.publication()
+    }
+
+    pub(super) fn scope_lease(&self) -> &Arc<RuntimeLexicalScopeLease> {
+        &self.scope_lease
+    }
+}
+
+static_assertions::assert_not_impl_any!(CompletedPrivateFrontier<'static>: Clone, Copy);
 
 impl std::fmt::Debug for PrivateAuthoredProgram {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1385,17 +1409,28 @@ impl PrivateExecutionAdmission {
         }
     }
 
-    pub(super) fn publication_progress(
+    pub(super) fn completed_frontier(
         &self,
         world: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-    ) -> Result<PrivateCompilerProgress, SessionError> {
+    ) -> Result<CompletedPrivateFrontier<'_>, SessionError> {
         let state = self.state.lock();
+        if !matches!(
+            state.phase,
+            PrivateExecutionPhase::Freezing | PrivateExecutionPhase::Frozen
+        ) {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
         match &state.authored {
             PrivateAuthoredProgram::Ready(frontier)
                 if frontier.matches_world(world)
-                    && state.accepted_visible_revision == state.applied_visible_revision =>
+                    && state.accepted_visible_revision == state.applied_visible_revision
+                    && state.pending_hosts.is_empty() =>
             {
-                Ok(frontier.publication())
+                Ok(CompletedPrivateFrontier {
+                    admission: self,
+                    frontier: Arc::clone(frontier),
+                    scope_lease: Arc::clone(&self.scope_lease),
+                })
             }
             _ => Err(SessionError::WorldCellPublicationIncomplete),
         }
@@ -3133,6 +3168,48 @@ pub(crate) struct CheckedTurnCompletion {
 }
 
 impl CheckedTurnCompletion {
+    pub(crate) fn validate_reentry(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.prefix.settled.checkpoint()?;
+        if !self.prefix.admission.belongs_to(session) {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        if self.scope != scope {
+            return Err(super::SessionTransitionReason::ScopeRevoked.into());
+        }
+        session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
+        if let Some(private) = self.prefix.admission.private_execution() {
+            private.ensure_open()?;
+        }
+        if self.prefix.admission.world_reservation().is_some() {
+            self.prefix
+                .admission
+                .original_source()?
+                .validate_source_issuer()?;
+        }
+        let state = self.prefix.state.lock();
+        if state
+            .in_flight
+            .as_ref()
+            .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        if !state
+            .snapshot
+            .is_current_predecessor(&self.prefix.admission, session, self.scope)
+        {
+            return Err(super::SessionTransitionReason::PublicBaselineChanged.into());
+        }
+        if let Some(retained) = &self.prefix.retained_inputs {
+            retained.validate_item(session, self.execution.item())?;
+        }
+        Ok(())
+    }
+
     /// Native installation changes runtime selection and custody, not the
     /// compiler prefix from which this exact item was prepared. Keep its
     /// association current before evaluation can suspend on a compiler query.
@@ -3882,10 +3959,10 @@ impl RuntimeCellAdmission {
                 },
                 RuntimeCellCompilerBasis::World { reservation, .. } => {
                     use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-                    match reservation.slots().get(index) {
+                    match reservation.items().get(index).map(|item| item.slot()) {
                         Some(
                             Slot::Prologue { declaration } | Slot::Declaration { declaration },
-                        ) => Some(Generation(*declaration)),
+                        ) => Some(Generation(declaration)),
                         _ => None,
                     }
                 }
@@ -4285,22 +4362,23 @@ impl PersistentSession {
         let (generation, observation_name) =
             if let Some(reservation) = prefix.admission.world_reservation() {
                 let slot = reservation
-                    .slots()
+                    .items()
                     .get(item.index())
-                    .ok_or(SessionError::StaleStagedDeclaration)?;
+                    .ok_or(SessionError::StaleStagedDeclaration)?
+                    .slot();
                 let (generation, observation) = match (slot, item.kind()) {
                     (
                         Slot::Prologue { declaration } | Slot::Declaration { declaration },
                         CheckedKind::Declaration,
-                    ) => (*declaration, None),
-                    (Slot::Bind { value }, CheckedKind::Bind) => (*value, None),
+                    ) => (declaration, None),
+                    (Slot::Bind { value }, CheckedKind::Bind) => (value, None),
                     (
                         Slot::Expression {
                             capture,
                             observation_name,
                         },
                         CheckedKind::Expression,
-                    ) => (*capture, Some(observation_name.clone())),
+                    ) => (capture, Some(observation_name)),
                     _ => return Err(SessionError::StaleStagedDeclaration),
                 };
                 (Generation(generation), observation)
@@ -4421,9 +4499,13 @@ impl PersistentSession {
             .ok_or(SessionError::StaleStagedDeclaration)?;
         let generation = if let Some(reservation) = prefix.admission.world_reservation() {
             use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
-            match reservation.slots().get(item.index()) {
+            match reservation
+                .items()
+                .get(item.index())
+                .map(|item| item.slot())
+            {
                 Some(Slot::Prologue { declaration } | Slot::Declaration { declaration }) => {
-                    Generation(*declaration)
+                    Generation(declaration)
                 }
                 _ => return Err(SessionError::StaleStagedDeclaration),
             }
@@ -5155,7 +5237,11 @@ impl PersistentSession {
         if !admission.belongs_to(self)
             || !Arc::ptr_eq(checked.reservation(), reservation)
             || program.admission_digest() != admission.digest()
-            || program.slots() != reservation.slots()
+            || program
+                .slots()
+                .iter()
+                .cloned()
+                .ne(reservation.items().iter().map(|item| item.slot()))
             || program.items().len() != checked.items().len()
             || program.items().iter().enumerate().any(|(ordinal, item)| {
                 item.checked_item().index() != ordinal
@@ -6568,7 +6654,10 @@ impl PersistentSession {
             if stages.contains_key(&stage) {
                 continue;
             }
-            let selected = checked.world_selected_dependency_terminals()?;
+            let selected = checked
+                .world_stage_dependencies()
+                .ok_or(super::SessionTransitionReason::WrongPhase)?
+                .terminals();
             let mut bound = Vec::with_capacity(selected.len());
             for terminal in selected {
                 let module = tidepool_repr::SessionModule::val(Generation(terminal.generation()));
@@ -7084,7 +7173,7 @@ impl PersistentSession {
         preparation: Option<Arc<PrivatePreparationSnapshot>>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
         use tidepool_toolchain::cell_plan::ParsedCellPlanKind as Kind;
-        use tidepool_toolchain::checked_cell::CheckedPlannedCellSlot as Slot;
+        use tidepool_toolchain::cell_plan::WorldCellReservationRequest as Request;
 
         self.validate_lexical_scope_lease(scope, &retained_scope)?;
         let transaction = self
@@ -7131,25 +7220,10 @@ impl PersistentSession {
         reserved_generations
             .try_reserve_exact(declaration_count)
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let mut slots = Vec::new();
-        slots
+        let mut requests = Vec::new();
+        requests
             .try_reserve_exact(plan.items().len())
             .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        let mut expected_bindings = Vec::new();
-        expected_bindings
-            .try_reserve_exact(plan.items().len())
-            .map_err(|_| SessionError::StaleStagedDeclaration)?;
-        for item in plan.items() {
-            let mut bindings = Vec::new();
-            bindings
-                .try_reserve_exact(if item.kind() == Kind::Expression {
-                    1
-                } else {
-                    item.binders().len()
-                })
-                .map_err(|_| SessionError::StaleStagedDeclaration)?;
-            expected_bindings.push(bindings);
-        }
         {
             let admission = store
                 .as_ref()
@@ -7171,15 +7245,15 @@ impl PersistentSession {
         let (initial_value_generation, _) = self.reserve_value_generations(native_count)?;
         let mut declarations = reserved_generations.iter().copied();
         let mut next_value = initial_value_generation.0;
-        for (item, expected) in plan.items().iter().zip(&mut expected_bindings) {
-            let slot = match item.kind() {
-                Kind::Prologue => Slot::Prologue {
+        for item in plan.items() {
+            let request = match item.kind() {
+                Kind::Prologue => Request::Prologue {
                     declaration: declarations
                         .next()
                         .ok_or(SessionError::StaleStagedDeclaration)?
                         .0,
                 },
-                Kind::Declaration => Slot::Declaration {
+                Kind::Declaration => Request::Declaration {
                     declaration: declarations
                         .next()
                         .ok_or(SessionError::StaleStagedDeclaration)?
@@ -7189,13 +7263,17 @@ impl PersistentSession {
                     let value = next_value;
                     next_value += 1;
                     let module = tidepool_repr::SessionModule::val(Generation(value)).module_name();
+                    let mut bindings = Vec::new();
+                    bindings
+                        .try_reserve_exact(item.binders().len())
+                        .map_err(|_| SessionError::StaleStagedDeclaration)?;
                     for name in item.binders() {
                         let id = tidepool_repr::SessionVarId::from_extract(
                             tidepool_codegen::prepared_program::session_var_id(&module, name),
                         );
-                        expected.push((name.clone(), id));
+                        bindings.push((name.clone(), id));
                     }
-                    Slot::Bind { value }
+                    Request::Bind { value, bindings }
                 }
                 Kind::Expression => {
                     let capture = next_value;
@@ -7212,16 +7290,22 @@ impl PersistentSession {
                             &observation_name,
                         ),
                     );
-                    expected.push((observation_name.clone(), id));
-                    Slot::Expression {
+                    Request::Expression {
                         capture,
-                        observation_name,
+                        binding: (observation_name, id),
                     }
                 }
             };
-            slots.push(slot);
+            requests.push(request);
         }
-        self.validate_new_binding_ids(expected_bindings.iter().flatten().map(|(_, id)| *id))?;
+        self.validate_new_binding_ids(requests.iter().flat_map(|request| {
+            let bindings = match request {
+                Request::Bind { bindings, .. } => bindings.as_slice(),
+                Request::Expression { binding, .. } => std::slice::from_ref(binding),
+                Request::Prologue { .. } | Request::Declaration { .. } => &[],
+            };
+            bindings.iter().map(|(_, id)| *id)
+        }))?;
         let mut authorization = Vec::new();
         purpose.frame_authorization(&mut |bytes| authorization.push(bytes.to_vec()));
         let transaction = self
@@ -7237,7 +7321,7 @@ impl PersistentSession {
                 scope.0,
                 authorization,
             )?;
-        let token = plan.issue_admission_token(subject, slots, expected_bindings)?;
+        let token = plan.issue_admission_token(subject, requests)?;
         let reservation = plan.reserve(token)?;
         let digest = tidepool_toolchain::checked_cell::AdmissionDigest::finalize(
             *reservation.admission_digest(),
@@ -7255,8 +7339,8 @@ impl PersistentSession {
             initial_value_generation,
             declarations: RuntimeCellDeclarations {
                 root: self.lib().root.clone(),
-                declaration_baseline: if !reservation.slots().iter().any(|slot| {
-                    matches!(slot,
+                declaration_baseline: if !reservation.items().iter().any(|item| {
+                    matches!(item.slot(),
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue { .. } |
                     tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration { .. })
                 }) {
@@ -8463,7 +8547,7 @@ mod tests {
             )
             .unwrap();
         let intent = session
-            .freeze_execution_intent(&private, vec![], vec![])
+            .freeze_private_execution(&private)
             .unwrap();
         let ExecutionPublication::Bindings(base) = session
             .restage_execution_publication(owner.clone(), intent.clone())
@@ -8487,8 +8571,8 @@ mod tests {
             Err(SessionError::StaleStagedDeclaration)
         ));
         assert!(matches!(
-            session.freeze_execution_intent(&private, vec![], vec![]),
-            Err(SessionError::StaleStagedDeclaration)
+            session.freeze_private_execution(&private),
+            Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
         ));
         assert!(matches!(
             session.restage_execution_publication(owner.clone(), intent),
@@ -8734,8 +8818,8 @@ mod tests {
             None
         );
         assert!(matches!(
-            second.freeze_execution_intent(&private, vec![], vec![]),
-            Err(SessionError::StaleStagedDeclaration)
+            second.freeze_private_execution(&private),
+            Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
         ));
         let first_cell = first
             .admit_cell_in(
