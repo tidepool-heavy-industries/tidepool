@@ -22795,7 +22795,8 @@ mod tests {
         let mut roles = publication
             .context()
             .compiler_input_projection()
-            .snapshot_roles();
+            .snapshot_roles()
+            .clone();
         let role = roles.get_mut(&root).unwrap();
         let CompilerInputRole::PublishedSourceOriginal { original, .. } = role else {
             unreachable!()
@@ -22804,7 +22805,7 @@ mod tests {
         *original = fixture.root.descriptor.id;
         let mut projection = CompilerInputProjection::default();
         for (owner, role) in roles {
-            projection.admit_role(owner.clone(), role.clone()).unwrap();
+            projection.admit_role(owner, role).unwrap();
         }
         assert!(publication
             .context()
