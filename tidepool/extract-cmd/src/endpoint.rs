@@ -2075,6 +2075,7 @@ thread_local! {
 pub enum CompilerResponseRejection {
     Malformed,
     ProvenanceMismatch,
+    UnreadableOutput,
 }
 
 impl std::fmt::Display for CompilerResponseRejection {
@@ -2082,6 +2083,7 @@ impl std::fmt::Display for CompilerResponseRejection {
         f.write_str(match self {
             Self::Malformed => "malformed accepted compiler response",
             Self::ProvenanceMismatch => "accepted compiler response provenance differs",
+            Self::UnreadableOutput => "accepted compiler response output is unreadable",
         })
     }
 }
@@ -2104,6 +2106,47 @@ pub fn reject_compiler_response(reason: CompilerResponseRejection) -> SpawnError
         "compiler response",
         io::Error::new(io::ErrorKind::InvalidData, reason),
     )
+}
+
+/// A response refusal retaining the error from the decoder or output reader.
+/// The reason describes the boundary; the cause keeps its original type and I/O kind.
+#[derive(Debug)]
+pub struct CompilerResponseFailure {
+    reason: CompilerResponseRejection,
+    cause: io::Error,
+}
+
+impl CompilerResponseFailure {
+    pub fn reason(&self) -> CompilerResponseRejection {
+        self.reason
+    }
+
+    pub fn cause(&self) -> &io::Error {
+        &self.cause
+    }
+}
+
+impl std::fmt::Display for CompilerResponseFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.reason, self.cause)
+    }
+}
+
+impl std::error::Error for CompilerResponseFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+/// Refuse the accepted response on its original transaction without discarding
+/// the decoder or filesystem failure. The refusal grants no retry permission.
+pub fn reject_compiler_response_with_cause(
+    reason: CompilerResponseRejection,
+    cause: io::Error,
+) -> SpawnError {
+    let mut rejection = reject_compiler_response(reason);
+    rejection.source = io::Error::new(cause.kind(), CompilerResponseFailure { reason, cause });
+    rejection
 }
 
 /// Retain an input descriptor through the enclosing compiler transaction's END
@@ -2981,6 +3024,40 @@ mod tests {
         config.source_file = Some("tidepool/extract-cmd/src/endpoint.rs");
         config.test_name = Some(test_name);
         config
+    }
+
+    #[test]
+    fn rejected_response_preserves_io_kind_and_original_typed_cause() {
+        #[derive(Debug)]
+        struct OutputAccessDenied;
+        impl std::fmt::Display for OutputAccessDenied {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("output access denied")
+            }
+        }
+        impl std::error::Error for OutputAccessDenied {}
+
+        let rejection = reject_compiler_response_with_cause(
+            CompilerResponseRejection::UnreadableOutput,
+            io::Error::new(io::ErrorKind::PermissionDenied, OutputAccessDenied),
+        );
+        assert_eq!(rejection.source.kind(), io::ErrorKind::PermissionDenied);
+        let failure = rejection
+            .source
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<CompilerResponseFailure>())
+            .expect("response refusal retains its boundary reason");
+        assert_eq!(
+            failure.reason(),
+            CompilerResponseRejection::UnreadableOutput
+        );
+        assert_eq!(failure.cause().kind(), io::ErrorKind::PermissionDenied);
+        assert!(failure
+            .cause()
+            .get_ref()
+            .is_some_and(|cause| cause.is::<OutputAccessDenied>()));
+        assert!(!rejection.definitely_unsubmitted());
+        assert!(!rejection.permits_rebind());
     }
 
     #[test]
