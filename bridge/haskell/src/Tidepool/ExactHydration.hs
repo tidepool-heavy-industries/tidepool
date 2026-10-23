@@ -1443,6 +1443,7 @@ newOriginalInterfaceArtifactsWithLookup readInput borrow env finalized retained 
   unless (all (\(origin,snapshot) -> let (owner,bytes) = capturedSessionInterface snapshot
           in case Map.lookup owner snapshots of
             Just (selectedOrigin,selectedSnapshot) -> selectedOrigin == origin
+              && sameCapturedSessionInterfaceOwner selectedSnapshot snapshot
               && capturedSessionInterface selectedSnapshot == (owner,bytes)
               && capturedSessionInterfaceEvidence selectedSnapshot == capturedSessionInterfaceEvidence snapshot
             Nothing -> False) snapshotsWithOrigin) $ throwIO ConflictingOriginalInterfaces
