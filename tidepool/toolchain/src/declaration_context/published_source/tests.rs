@@ -96,6 +96,20 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     let root = &fixture.root;
     let helper = &fixture.helper;
     let genuine = source.artifact_view().capture_graph_selection();
+    let genuine_groups = genuine
+        .native_groups
+        .iter()
+        .copied()
+        .filter(|group| group.binding.artifact() == root.descriptor.id)
+        .collect::<BTreeSet<_>>();
+    assert!(!genuine_groups.is_empty());
+    let demand = genuine_groups
+        .iter()
+        .map(|group| NativeGroupKey {
+            artifact: group.binding.artifact(),
+            original_ordinal: group.original_ordinal,
+        })
+        .collect();
     let producer = root.descriptor.producer_sha256;
     let mut entries = source.artifact_view().entries();
     entries.push(Arc::new(ArtifactEntry::canonical(
@@ -108,26 +122,20 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     )));
     let independent = ArtifactInventory::default();
     // This issues native DATA from already certified payloads. It has no
-    // completed output or SOURCE publication authority.
+    // completed output or SOURCE publication authority. Match the actual
+    // issuer's group demand independently of its broader byte custody.
     let foreign_view = independent
-        .admit_shared(&independent.empty_view(), entries)
+        .admit_recovery_selection(&independent.empty_view(), entries, &demand)
         .unwrap()
         .select_roots(vec![root.descriptor.id])
         .unwrap();
     let foreign = foreign_view.capture_graph_selection();
-    let genuine_groups = genuine
-        .native_groups
-        .iter()
-        .copied()
-        .filter(|group| group.binding.artifact() == root.descriptor.id)
-        .collect::<BTreeSet<_>>();
     let foreign_groups = foreign
         .native_groups
         .iter()
         .copied()
         .filter(|group| group.binding.artifact() == root.descriptor.id)
         .collect::<BTreeSet<_>>();
-    assert!(!genuine_groups.is_empty());
     assert_eq!(
         genuine_groups
             .iter()
@@ -835,21 +843,61 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
         support.projection().snapshot_roles()[&root.descriptor.owner],
         role
     );
-    for group in original_graph.roots.iter().filter(|node| {
-        matches!(
-            node,
-            crate::artifact_inventory::ArtifactBindingNode::Group(_)
-        )
-    }) {
-        assert!(
-            support
-                .artifacts()
-                .capture_graph_selection()
-                .roots
-                .contains(group),
-            "published policy replaced the complete issued demand"
-        );
-    }
+    let selected_originals = published
+        .compiler_input_roles()
+        .iter()
+        .filter_map(CompilerInputRole::original)
+        .collect::<BTreeSet<_>>();
+    let expected_groups = original_graph
+        .roots
+        .iter()
+        .filter_map(|node| match node {
+            crate::artifact_inventory::ArtifactBindingNode::Group(group)
+                if selected_originals.contains(&group.binding.artifact()) =>
+            {
+                Some(*group)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(!expected_groups.is_empty());
+    let certified_graph = support.artifacts().capture_graph_selection();
+    assert_eq!(support.projection(), published.compiler_input_projection());
+    assert_eq!(certified_graph.namespace, before.namespace);
+    assert_eq!(
+        certified_graph
+            .roots
+            .iter()
+            .filter_map(|node| match node {
+                crate::artifact_inventory::ArtifactBindingNode::Group(group) => Some(*group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>(),
+        expected_groups,
+        "certification retains complete demand for the selected compiler originals"
+    );
+    let private_groups = original_graph
+        .roots
+        .iter()
+        .filter_map(|node| match node {
+            crate::artifact_inventory::ArtifactBindingNode::Group(group)
+                if !selected_originals.contains(&group.binding.artifact()) =>
+            {
+                Some(*group)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !private_groups.is_empty(),
+        "the completed output also holds the private executable wrapper"
+    );
+    assert!(
+        private_groups
+            .iter()
+            .all(|group| support.artifacts().contains_issued_native_group(*group)),
+        "unselected completed bodies retain their exact issued custody"
+    );
     assert!(originals
         .native_closure()
         .binding_dependencies()
