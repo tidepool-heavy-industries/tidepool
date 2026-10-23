@@ -6,7 +6,7 @@ module Tidepool.ImportSyntax
   , importOccurrenceId, importOccurrenceDescriptor, importOccurrenceSpan
   , CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences, capturedParsedSource
   , DriverImportSyntax, matchDriverImports, driverImportOccurrences, driverParsedModule
-  , RefinedImportSyntax, refinedParsedModule, refinedImportOccurrences
+  , RefinedImportSyntax, beginImportRefinement, refinedParsedModule, refinedImportOccurrences
   , ImportLineage(..), importOccurrenceLineage
   , ImportSyntaxError(..)
   ) where
