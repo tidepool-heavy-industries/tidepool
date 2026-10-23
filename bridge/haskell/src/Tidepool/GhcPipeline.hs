@@ -312,7 +312,7 @@ import Tidepool.DependencyEvidence
   , DependencyModule(..), DependencyImport(..), DependencyQualifier(..), ProductAvailability(..)
   , renderDependencyQualifier, sourceEvidenceWithFingerprint, selectedFreshHomeRequirements, revalidateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
+  ( parseCapturedGeneratedImports, OriginalInterfaceArtifacts, originalInterfaceSha256, ExactIfaceArtifact(..), depanalSourceModules, freshExactState, PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts, retainClosedHomeContext, hydrateExactScope, hydrateExactScopeWithProducts, HydratedExactInterfaces, VerifiedExactInterface, verifiedExactInterface, exactInterfaceSummary, serializeOriginalInterface, exactHomeInstancesFor
   , ExactInterfaceOperations, exactInterfaceOperations
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader, selectVerifiedExactInterfaces, selectVerifiedValueInterfaces
   , CheckedValueImportAuthority, noCheckedValueImports, checkedValueImportAuthorityFromVerified
@@ -9238,11 +9238,11 @@ residentCompileOne guard producer selection retained universeRef active interpre
         , Just digest <- [Map.lookup (exactUnit artifact,exactModule artifact) originals]
         , Just home <- [lookupHpt (hsc_HPT final) (moduleName owner)]
         , mi_module (hm_iface home) == owner]
-      -- Store only dependencies in the reusable view. A module target and its
-      -- diagnostic/hooks cells belong to this successful attempt's result.
-      retainedView = hscUpdateFlags (const baseFlags) $
-        hscUpdateHPT (filterHpt (\home -> mi_module (hm_iface home) /= targetOwner)) final
-          {hsc_targets=[],hsc_type_env_vars=emptyKnotVars}
+      -- A SOURCE-cycle dependency can retain the target's HMI as part of its
+      -- details knot. The closure keeps it only when reached by another home;
+      -- the target still never enters sourceNodes.
+      retainedHomes = hscUpdateFlags (const baseFlags) final
+  retainedView <- liftIO (retainClosedHomeContext (universePackageFinder universe) (Just targetOwner) retainedHomes)
   liftIO $ do
     evictCompilerRecovery recovery (== targetOwner)
     writeIORef active (Just context)
