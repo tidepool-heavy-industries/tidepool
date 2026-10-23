@@ -983,7 +983,7 @@ pub(crate) fn decode_world_typed_segment_plans(
     decode_typed_segment_plan_facts(
         value,
         reservation.plan().items(),
-        &reservation.slots().cloned().collect::<Vec<_>>(),
+        &reservation.slots().collect::<Vec<_>>(),
         *reservation.admission_digest(),
     )
 }
@@ -5111,7 +5111,7 @@ pub(crate) fn admit_world_cell(
         .filter_map(|slot| match slot {
             CheckedPlannedCellSlot::Prologue { declaration }
             | CheckedPlannedCellSlot::Declaration { declaration } => Some(
-                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(*declaration))
+                tidepool_repr::SessionModule::lib(tidepool_repr::Generation(declaration))
                     .module_name(),
             ),
             _ => None,
