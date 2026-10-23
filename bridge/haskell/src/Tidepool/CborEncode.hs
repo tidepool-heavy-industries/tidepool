@@ -19,7 +19,7 @@ import Tidepool.Binders
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
   , CellSourceSpan(..), CheckedBinderPin(..), SourcePrologue(..)
   , CellExpressionPlan
-  , LocatedPragma(..), locatedImportSpan, locatedImportSource, PragmaKind(..), DeclarationSource(..)
+  , LocatedPragma(..), LocatedImport, locatedImportSpan, locatedImportSource, PragmaKind(..), DeclarationSource(..)
   , StmtBinders(..), turnKindWireName )
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures, encodeCellExpressionPlan)
 import Tidepool.TypedSegment (TypedSegmentPlan, typedSegmentPlanDigest, typedSegmentReservationDigest
