@@ -88,19 +88,13 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
     let base = context
         .prepare_compilation(&scratch.path().join("base"), &producer)
         .unwrap();
-    let mut issued_row_counts = vec![base.materialization.as_ref().unwrap().rows.len()];
+    let mut issued_row_counts = vec![base.materialization.rows.len()];
     let mut previous_artifacts = base.artifacts.clone();
     let mut directory_files = vec![private_directory_file_bytes(
-        base.materialization.as_ref().unwrap().directory().path(),
+        base.materialization.directory().path(),
     )];
-    let mut owners = vec![Arc::downgrade(base.materialization.as_ref().unwrap())];
-    let mut directories = vec![base
-        .materialization
-        .as_ref()
-        .unwrap()
-        .directory()
-        .path()
-        .to_path_buf()];
+    let mut owners = vec![Arc::downgrade(&base.materialization)];
+    let mut directories = vec![base.materialization.directory().path().to_path_buf()];
     // The request owns its closed compiler view and physical cache. Publish
     // that actual support before retiring the request; raw paths and Weak
     // observations do not retain the files for the next history step.
@@ -171,7 +165,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         let request = context
             .prepare_compilation(&scratch.path().join(format!("item-{index}")), &producer)
             .unwrap();
-        let owner = request.materialization.as_ref().unwrap();
+        let owner = &request.materialization;
         assert_eq!(
             owner.rows.len(),
             1,
@@ -266,15 +260,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         let request = captured
             .prepare_compilation(&scratch.path().join("capture"), &producer)
             .unwrap();
-        assert_eq!(
-            request
-                .materialization
-                .as_ref()
-                .unwrap()
-                .payload_work
-                .written_bytes,
-            0
-        );
+        assert_eq!(request.materialization.payload_work.written_bytes, 0);
         assert!(request
             .artifacts
             .iter()
@@ -325,15 +311,7 @@ fn check_materialized_capture_history(length: usize, first: usize, second: usize
         .prepare_compilation(&scratch.path().join("fork"), &producer)
         .unwrap();
     assert_eq!(request.artifacts.len(), 1);
-    assert_eq!(
-        request
-            .materialization
-            .as_ref()
-            .unwrap()
-            .payload_work
-            .written_bytes,
-        0
-    );
+    assert_eq!(request.materialization.payload_work.written_bytes, 0);
     assert!(expected.contains(&request.artifacts[0]));
     assert!(request.artifacts[0].interface.path.is_file());
     drop(request);
@@ -368,13 +346,7 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
     let request = context
         .prepare_compilation(&scratch.path().join("full"), &producer)
         .unwrap();
-    let directory = request
-        .materialization
-        .as_ref()
-        .unwrap()
-        .directory()
-        .path()
-        .to_path_buf();
+    let directory = request.materialization.directory().path().to_path_buf();
     let before = private_directory_census(&directory);
     let before_files = private_directory_file_bytes(&directory);
     let selected = context.compiler_metadata_snapshot().unwrap().entries
@@ -382,7 +354,7 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
         .descriptor
         .id;
     let capture = captured_materialization_context(&context, vec![selected]);
-    let weak = Arc::downgrade(request.materialization.as_ref().unwrap());
+    let weak = Arc::downgrade(&request.materialization);
     drop(request);
     drop(context);
     assert!(weak.upgrade().is_none());
@@ -404,15 +376,7 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
         "selected files remain readable after historical metadata is dropped"
     );
     assert_eq!(private_directory_file_bytes(&directory), before_files);
-    assert_eq!(
-        request
-            .materialization
-            .as_ref()
-            .unwrap()
-            .payload_work
-            .written_bytes,
-        0
-    );
+    assert_eq!(request.materialization.payload_work.written_bytes, 0);
     drop(request);
     drop(capture);
     assert!(!directory.exists());
@@ -430,11 +394,11 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
     let second_request = second
         .prepare_compilation(&scratch.path().join("second"), &producer)
         .unwrap();
-    let first_owner = first_request.materialization.as_ref().unwrap();
-    let second_owner = second_request.materialization.as_ref().unwrap();
+    let first_owner = &first_request.materialization;
+    let second_owner = &second_request.materialization;
     let metadata = first.compiler_metadata_snapshot().unwrap();
     let beta = metadata.entries[&identity("fixture", "Beta")].descriptor.id;
-    let narrow = captured_materialization_context(&first, vec![beta]);
+    let narrow = captured_materialization_context(&second, vec![beta]);
     let narrow_metadata = Arc::new(narrow.compiler_metadata_snapshot().unwrap());
     let empty = captured_materialization_context(&first, vec![]);
     let empty_metadata = empty.compiler_metadata_snapshot().unwrap();
@@ -497,9 +461,15 @@ fn demanded_rows_match_full_postorder_and_preserve_exported_file_leases() {
         root_override.selected_rows(&narrow_metadata)[&beta],
         first_owner.rows[&beta].as_ref()
     ));
-    let mut selected_request = first_request.clone();
-    selected_request.materialization = Some(diamond.clone());
-    selected_request.transport_metadata = narrow_metadata;
+    let selected_request = narrow
+        .prepare_compilation(&scratch.path().join("selected"), &producer)
+        .unwrap();
+    assert!(std::ptr::eq(
+        selected_request
+            .materialization
+            .selected_rows(&selected_request.transport_metadata)[&beta],
+        second_owner.rows[&beta].as_ref(),
+    ));
     let observation = HostWorkObservation::new();
     let files = observation.scope(|| selected_request.input_transport_files());
     let mut expected = BTreeMap::new();
@@ -563,8 +533,8 @@ fn materialization_frontier_preserves_issuer_precedence_and_narrow_release() {
     let second_request = second
         .prepare_compilation(&scratch.path().join("second"), &producer)
         .unwrap();
-    let first_owner = first_request.materialization.as_ref().unwrap();
-    let second_owner = second_request.materialization.as_ref().unwrap();
+    let first_owner = &first_request.materialization;
+    let second_owner = &second_request.materialization;
     assert_eq!(
         first_owner.rows.keys().collect::<Vec<_>>(),
         second_owner.rows.keys().collect::<Vec<_>>()
@@ -1419,20 +1389,8 @@ fn compiler_support_merge_keeps_preferred_physical_rows_after_donor_drop() {
             .iter()
             .map(|path| std::fs::read(path).unwrap())
             .collect::<Vec<_>>();
-        let preferred_directory = preferred
-            .materialization
-            .as_ref()
-            .unwrap()
-            .directory()
-            .path()
-            .to_path_buf();
-        let excluded_directory = excluded
-            .materialization
-            .as_ref()
-            .unwrap()
-            .directory()
-            .path()
-            .to_path_buf();
+        let preferred_directory = preferred.materialization.directory().path().to_path_buf();
+        let excluded_directory = excluded.materialization.directory().path().to_path_buf();
         let support = left
             .compiler_source_support()
             .merge(right.compiler_source_support())
@@ -1452,15 +1410,7 @@ fn compiler_support_merge_keeps_preferred_physical_rows_after_donor_drop() {
             preferred_paths,
             "the last physical issuer wins even for byte-identical artifacts"
         );
-        assert_eq!(
-            request
-                .materialization
-                .as_ref()
-                .unwrap()
-                .payload_work
-                .written_bytes,
-            0
-        );
+        assert_eq!(request.materialization.payload_work.written_bytes, 0);
         drop(first_request);
         drop(second_request);
         drop(first);

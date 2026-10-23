@@ -8227,7 +8227,7 @@ pub(crate) struct ExactCompilationRequest {
     pub(crate) producer_sha256: [u8; 32],
     pub(crate) artifacts: Vec<DeclarationArtifact>,
     pub(crate) groups: Arc<CertifiedArtifactGroupBindings>,
-    materialization: Option<Arc<RetainedArtifactMaterialization>>,
+    materialization: Arc<RetainedArtifactMaterialization>,
     program: ProgramSourceSupportState,
     source_search_include: Option<Arc<[PathBuf]>>,
     checked_value_imports: crate::checked_cell::CheckedValueImportAuthority,
@@ -8562,13 +8562,6 @@ impl ExactRequestInputs {
             private,
             current_inputs,
         ))
-    }
-
-    #[cfg(test)]
-    fn for_context(context: Arc<ExactDeclarationContext>) -> Arc<Self> {
-        let scaffold = ProtectedScaffoldRequirements::default();
-        let compiler = scaffold.compiler_inputs(&context, None).unwrap();
-        Self::issue(context, scaffold, None, compiler)
     }
 }
 
@@ -10757,9 +10750,7 @@ impl ExactCompilationRequest {
             crate::host_work::HostWorkCounter::InputFdEnumeration,
             1,
         );
-        let Some(materialization) = &self.materialization else {
-            return Vec::new();
-        };
+        let materialization = &self.materialization;
         let metadata = &self.transport_metadata;
         let mut files = BTreeMap::new();
         let mut slice_visits = 0usize;
@@ -10829,11 +10820,7 @@ impl ExactCompilationRequest {
     /// The transported view owns product evidence: an advertised original
     /// replaces the compiler's canonical role for the same owner there.
     pub(crate) fn validate_artifacts(&self) -> Result<(), CompileError> {
-        let rows = self
-            .materialization
-            .as_ref()
-            .map(|retained| retained.selected_rows(&self.transport_metadata))
-            .unwrap_or_default();
+        let rows = self.materialization.selected_rows(&self.transport_metadata);
         self.context().validate_artifacts_with_owned_rows(
             &self.artifacts,
             &self.transport_metadata,
@@ -17335,7 +17322,7 @@ impl PreparedNativeCompilerTransport {
             producer_sha256: producer.sha256(),
             artifacts,
             groups,
-            materialization: Some(retained),
+            materialization: retained,
             program: ProgramSourceSupportState::default(),
             source_search_include: None,
             checked_value_imports: Default::default(),
@@ -20104,6 +20091,17 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
 
+    const PROGRAM_TEST_PRODUCER: &[u8] = b"declaration context program fixture";
+    const SOURCE_TEST_PRODUCER: &[u8] = b"declaration context source fixture";
+
+    fn program_test_producer_sha256() -> [u8; 32] {
+        CanonicalProducerIdentity::from_producer_bytes(PROGRAM_TEST_PRODUCER).sha256()
+    }
+
+    fn source_test_producer_sha256() -> [u8; 32] {
+        CanonicalProducerIdentity::from_producer_bytes(SOURCE_TEST_PRODUCER).sha256()
+    }
+
     fn support_product(module: &str) -> CertifiedRecoveryProduct {
         support_product_in_unit("fixture", module)
     }
@@ -20154,7 +20152,7 @@ mod tests {
         crate::certified_products::tests::recovered_witness_fixtures(&[
             crate::certified_products::fixture_finalized_product(
                 support_draft_with_interface(unit, module, interface),
-                [2; 32],
+                program_test_producer_sha256(),
             ),
         ])
         .remove(0)
@@ -20326,7 +20324,9 @@ mod tests {
         let producer = products
             .first()
             .map(|product| product.module_interface())
-            .map_or([2; 32], |interface| interface.producer_sha256());
+            .map_or(program_test_producer_sha256(), |interface| {
+                interface.producer_sha256()
+            });
         certified_product_artifact_view(producer, products, &[], None).unwrap()
     }
 
@@ -20383,7 +20383,9 @@ mod tests {
         let producer = products
             .first()
             .map(|product| product.module_interface())
-            .map_or([2; 32], |interface| interface.producer_sha256());
+            .map_or(program_test_producer_sha256(), |interface| {
+                interface.producer_sha256()
+            });
         let output = (|| -> Result<CapturedCompilerStage, CompileError> {
             let mut validation = PackageInterfaceValidation::default();
             let entries = products
@@ -20442,7 +20444,9 @@ mod tests {
         let producer = products
             .first()
             .map(|product| product.module_interface())
-            .map_or([2; 32], |interface| interface.producer_sha256());
+            .map_or(program_test_producer_sha256(), |interface| {
+                interface.producer_sha256()
+            });
         let entries = products
             .iter()
             .map(|product| Arc::new(ArtifactEntry::original(producer, product.clone()).unwrap()))
@@ -20492,10 +20496,19 @@ mod tests {
     #[test]
     fn program_support_requires_explicit_authenticated_original_offer() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
         let product = support_product("Hidden");
         let offer = support_offer(std::slice::from_ref(&product));
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-1"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let native = request
             .admit_fixture_support(empty.clone(), &offer, &[], None)
             .unwrap();
@@ -20516,7 +20529,9 @@ mod tests {
             .unwrap(),
             artifacts: offer.artifacts().clone(),
         };
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-2"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let retained = request
             .admit_fixture_support(empty.clone(), &types, &[], None)
             .unwrap();
@@ -20531,7 +20546,9 @@ mod tests {
             support_product("InstanceOwner"),
             support_product("InstanceRelay"),
         ]);
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-3"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let admitted = request
             .admit_fixture_support(
                 empty.clone(),
@@ -20563,7 +20580,9 @@ mod tests {
             &mut PackageInterfaceValidation::default(),
         )
         .unwrap();
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-4"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let retained = request
             .admit_fixture_support(
                 empty.clone(),
@@ -20584,11 +20603,20 @@ mod tests {
     #[test]
     fn program_support_omits_only_authenticated_generated_original() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
         let before = empty.semantic_sha256();
         let selection = |fixture: &CompilerSupportFixture| fixture.source_selection().unwrap();
         let missing = support_offer(&[support_product("Hidden")]);
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-5"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let refusal = request
             .admit_program_support_with_selection(
                 empty.clone(),
@@ -20619,7 +20647,7 @@ mod tests {
         let source = std::fs::read(directory.path().join("Consumer.hs")).unwrap();
         let generated = crate::certified_products::fixture_source_finalized_product_with_source(
             support_draft_with_interface("fixture", "Consumer", b"Consumer interface".to_vec()),
-            [2; 32],
+            program_test_producer_sha256(),
             vec![],
             Sha256::digest(&source).into(),
         );
@@ -20711,7 +20739,8 @@ mod tests {
                 .is_err(),
             "retaining an issued interface does not preserve its native role"
         );
-        let variant = scaffold_native_fixture([2; 32], "fixture", "Hidden", 99);
+        let variant =
+            scaffold_native_fixture(program_test_producer_sha256(), "fixture", "Hidden", 99);
         assert!(
             private
                 .for_program_continuation(
@@ -20762,7 +20791,12 @@ mod tests {
 
         for (unit, module) in [("foreign", "Consumer"), ("fixture", "AnotherConsumer")] {
             let offer = support_offer(&[support_product_in_unit(unit, module)]);
-            let mut request = program_request(directory.path(), empty.clone());
+            let mut request = empty
+                .prepare_compilation(
+                    &directory.path().join(format!("request-{unit}-{module}")),
+                    PROGRAM_TEST_PRODUCER,
+                )
+                .unwrap();
             assert!(request
                 .admit_program_support_with_selection(
                     empty.clone(),
@@ -20781,8 +20815,18 @@ mod tests {
     }
 
     fn support_admission(root: &Path) -> ExactSourceAdmission {
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(root, context);
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request_root = tempfile::tempdir_in(root).unwrap();
+        let request = context
+            .prepare_compilation(request_root.path(), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         support_admission_for_request(root, &request)
     }
 
@@ -21676,7 +21720,7 @@ mod tests {
     fn published_original_choice_history_fixture() -> &'static ExactDeclarationContext {
         static FIXTURE: std::sync::OnceLock<ExactDeclarationContext> = std::sync::OnceLock::new();
         FIXTURE.get_or_init(|| {
-            let producer = [2; 32];
+            let producer = program_test_producer_sha256();
             let products = ["Alpha", "Beta"].map(|module| {
                 crate::certified_products::fixture_source_finalized_product(
                     crate::certified_products::tests::original_groups_fixture_with_interface(
@@ -23891,7 +23935,7 @@ mod tests {
 
     #[test]
     fn recovery_capture_admits_embedded_canonical_and_refuses_corruption() {
-        let producer = [2; 32];
+        let producer = program_test_producer_sha256();
         let root = tempfile::tempdir().unwrap();
         let package_path = root.path().join("External.hi");
         let package_bytes = [0x43];
@@ -24363,7 +24407,7 @@ mod tests {
         use crate::certified_products::tests::{
             original_groups_fixture_with_interface, recovered_witness_fixtures,
         };
-        let producer = [2; 32];
+        let producer = program_test_producer_sha256();
         let product = |module: &str,
                        mut groups: Vec<(
             u32,
@@ -25613,7 +25657,7 @@ mod tests {
                 .for_source_owners(&BTreeSet::from([parent_owner.clone()]))
                 .unwrap();
             let context = ExactDeclarationContext::retained_execution_support_fixture(
-                [2; 32],
+                program_test_producer_sha256(),
                 support,
                 vec![
                     ExactLexicalNode {
@@ -26310,7 +26354,7 @@ mod tests {
             .entries_for_owners(std::iter::once(identity("fixture", "Value")))
             .unwrap();
         let entry = &entries[&identity("fixture", "Value")];
-        let owner = request.materialization.as_ref().unwrap();
+        let owner = &request.materialization;
         let row = owner.issued_value_row(entry).unwrap();
         let ArtifactPayload::Interface(interface, role) = &entry.payload else {
             panic!("value interface fixture");
@@ -26365,13 +26409,7 @@ mod tests {
             .iter()
             .map(|artifact| artifact.interface.path.clone())
             .collect::<Vec<_>>();
-        let owned_root = request
-            .materialization
-            .as_ref()
-            .unwrap()
-            .directory()
-            .path()
-            .to_path_buf();
+        let owned_root = request.materialization.directory().path().to_path_buf();
         assert!(owned_root.starts_with(packet.path()));
         assert!(!paths.is_empty());
         assert!(paths.iter().all(|path| path.starts_with(&owned_root)));
@@ -26380,7 +26418,7 @@ mod tests {
             .entries_for_owners(std::iter::once(identity("fixture", "Value")))
             .unwrap();
         let value_entry = &value_entry[&identity("fixture", "Value")];
-        let owner = request.materialization.as_ref().unwrap();
+        let owner = &request.materialization;
         assert!(
             owner.issued_value_row(value_entry).is_none(),
             "packet-owned files cannot issue independently retained checked custody"
@@ -26393,7 +26431,7 @@ mod tests {
         let second_request = context
             .prepare_fixture_compilation(second_packet.path(), &producer)
             .unwrap();
-        let second_owner = second_request.materialization.as_ref().unwrap();
+        let second_owner = &second_request.materialization;
         assert!(
             !Arc::ptr_eq(owner, second_owner),
             "each transformed request owns fresh packet backing"
@@ -26419,7 +26457,7 @@ mod tests {
             .zip(&second_paths)
             .all(|(first, (second, _))| first != second));
         let second_weak = Arc::downgrade(second_owner);
-        let weak = Arc::downgrade(request.materialization.as_ref().unwrap());
+        let weak = Arc::downgrade(&request.materialization);
         drop(request);
         drop(second_request);
         drop(context);
@@ -26557,7 +26595,7 @@ mod tests {
                 .is_none(),
             "request closure must exercise a transformed materialization view"
         );
-        let owner = request.materialization.as_ref().unwrap();
+        let owner = &request.materialization;
         assert!(Arc::ptr_eq(
             owner,
             &request
@@ -26701,7 +26739,7 @@ mod tests {
         let first = context
             .prepare_compilation(&scratch.path().join("first"), &producer)
             .unwrap();
-        let retained = first.materialization.as_ref().unwrap();
+        let retained = &first.materialization;
         let weak = Arc::downgrade(retained);
         let owned = retained.directory().path().to_path_buf();
         let paths = first.artifacts.clone();
@@ -26727,7 +26765,7 @@ mod tests {
         assert_eq!(fresh.close, CompilerTransactionClose::NotStarted);
         assert!(Arc::ptr_eq(
             &weak.upgrade().unwrap(),
-            recovered.materialization.as_ref().unwrap()
+            &recovered.materialization
         ));
         assert_eq!(recovered.artifacts, paths);
         drop(context);
@@ -27000,8 +27038,8 @@ mod tests {
         let first_request = prepare("first", first_inputs, first_private);
         let second_request = prepare("second", second_inputs, second_private);
         assert!(!Arc::ptr_eq(
-            first_request.materialization.as_ref().unwrap(),
-            second_request.materialization.as_ref().unwrap()
+            &first_request.materialization,
+            &second_request.materialization
         ));
         for (request, expected) in [
             (&first_request, &first_request_bindings),
@@ -27025,7 +27063,7 @@ mod tests {
                 .retained_materialization(&request.transport_metadata)
                 .unwrap()
                 .unwrap();
-            assert!(Arc::ptr_eq(&hit, request.materialization.as_ref().unwrap()));
+            assert!(Arc::ptr_eq(&hit, &request.materialization));
             let rows =
                 RetainedArtifactMaterialization::selected_group_refs([hit.as_ref()], expected);
             let cached = CertifiedArtifactGroupBindings::from_issued_rows(
@@ -27140,7 +27178,7 @@ mod tests {
             .unwrap();
         let paths = first.artifacts.clone();
         let groups = Arc::clone(&first.groups);
-        let retained = first.materialization.as_ref().unwrap();
+        let retained = &first.materialization;
         let owned_root = retained.directory().path().to_path_buf();
         let weak = Arc::downgrade(retained);
         let semantic = first.semantic_sha256;
@@ -27186,7 +27224,7 @@ mod tests {
             .iter()
             .zip(second.groups.iter())
             .all(|(left, right)| std::ptr::eq(left.group(), right.group())));
-        let current = second.materialization.as_ref().unwrap();
+        let current = &second.materialization;
         assert_eq!(
             current
                 .selected_rows(&second.transport_metadata)
@@ -27396,14 +27434,13 @@ mod tests {
         captured.normalize().unwrap();
         let captured = Arc::new(captured);
         let mut captured_row = None;
-        request.materialization.as_ref().unwrap().visit_owners(
-            &mut BTreeSet::new(),
-            &mut |owner| {
+        request
+            .materialization
+            .visit_owners(&mut BTreeSet::new(), &mut |owner| {
                 if let Some(row) = owner.rows.get(&id) {
                     captured_row = Some((row.interface.path.clone(), Arc::downgrade(row)));
                 }
-            },
-        );
+            });
         let (captured_path, physical_row) = captured_row.unwrap();
         assert_eq!(captured_path, file.path);
         let selected_owner = Arc::downgrade(
@@ -27494,7 +27531,7 @@ mod tests {
         let completed = descendant
             .prepare_compilation(&scratch.path().join("descendant"), &producer)
             .unwrap();
-        let owner = completed.materialization.as_ref().unwrap();
+        let owner = &completed.materialization;
         assert!(owner._parents.is_empty());
         let late = ancestor
             .prepare_compilation(&scratch.path().join("late-ancestor"), &producer)
@@ -27537,7 +27574,7 @@ mod tests {
         let request = next
             .prepare_compilation(&scratch.path().join("next"), &producer)
             .unwrap();
-        let next_owner = request.materialization.as_ref().unwrap();
+        let next_owner = &request.materialization;
         assert_eq!(next_owner.rows.len(), 1);
         assert_eq!(next_owner._parents.len(), 1);
         assert!(Arc::ptr_eq(&next_owner._parents[0], owner));
@@ -27558,7 +27595,7 @@ mod tests {
         let first = a
             .prepare_compilation(&scratch.path().join("a1"), &producer)
             .unwrap();
-        let a_owner = first.materialization.as_ref().unwrap();
+        let a_owner = &first.materialization;
         let a_directory = a_owner._directory.as_ref().unwrap();
         let a_directory_weak = Arc::downgrade(a_directory);
         let a_files = private_directory_file_bytes(a_directory.path());
@@ -27611,7 +27648,7 @@ mod tests {
             );
         }
         assert_eq!(second.artifacts.len(), first.artifacts.len() + 1);
-        let b_owner = second.materialization.as_ref().unwrap();
+        let b_owner = &second.materialization;
         assert_eq!(b_owner.rows.len(), 1, "B owns only its new physical row");
         let b_metadata = b.compiler_metadata_snapshot().unwrap();
         assert!(b_owner.rows.contains_key(
@@ -27652,17 +27689,8 @@ mod tests {
         assert_eq!(third.artifacts, first.artifacts);
         assert_eq!(third.semantic_sha256, first.semantic_sha256);
         assert_ne!(third.semantic_sha256, second.semantic_sha256);
-        assert!(Arc::ptr_eq(
-            third.materialization.as_ref().unwrap(),
-            first.materialization.as_ref().unwrap()
-        ));
-        let root_a = first
-            .materialization
-            .as_ref()
-            .unwrap()
-            .directory()
-            .path()
-            .to_path_buf();
+        assert!(Arc::ptr_eq(&third.materialization, &first.materialization));
+        let root_a = first.materialization.directory().path().to_path_buf();
         drop(first);
         drop(third);
         drop(a);
@@ -27945,16 +27973,16 @@ mod tests {
             .prepare_compilation(&scratch.path().join("joined"), &producer)
             .unwrap();
         assert_eq!(native_descriptor(&joined_request), base_descriptor);
-        let joined_owner = joined_request.materialization.as_ref().unwrap();
+        let joined_owner = &joined_request.materialization;
         assert!(joined_request.groups.is_empty());
         assert!(
             joined_owner.groups.is_empty(),
             "availability selects no compiler group"
         );
         assert_eq!(joined_owner._parents.len(), 2);
-        let base_owner = base_request.materialization.as_ref().unwrap();
+        let base_owner = &base_request.materialization;
         for branch in [&left_request, &right_request] {
-            let owner = branch.materialization.as_ref().unwrap();
+            let owner = &branch.materialization;
             assert!(branch.groups.is_empty());
             assert!(owner.groups.is_empty());
             assert_eq!(owner.rows.len(), 1);
@@ -28058,7 +28086,7 @@ mod tests {
                 .descriptor
                 .id;
             let joined_row = issued_row(joined_owner, id);
-            let branch_row = issued_row(branch.materialization.as_ref().unwrap(), id);
+            let branch_row = issued_row(&branch.materialization, id);
             assert!(Arc::ptr_eq(joined_row, branch_row));
             assert_eq!(joined_row.artifact(), *physical);
             if expected.owner() == right_product.owner() {
@@ -28092,7 +28120,7 @@ mod tests {
             let mixed = RetainedArtifactMaterialization::select_custody_inputs(
                 &[
                     Arc::clone(joined_owner),
-                    Arc::clone(replacement_request.materialization.as_ref().unwrap()),
+                    Arc::clone(&replacement_request.materialization),
                 ],
                 &metadata.retained,
                 &replacement_request
@@ -28542,7 +28570,7 @@ mod tests {
                 "target demand does not promote compiler-input selection"
             );
         }
-        let private_owner = original.materialization.as_ref().unwrap();
+        let private_owner = &original.materialization;
         let private_root = private_owner.directory().path().to_path_buf();
         let retained_interface = original
             .artifacts
@@ -28711,7 +28739,7 @@ mod tests {
         let request = next
             .prepare_compilation(&scratch.path().join("projected"), &producer)
             .unwrap();
-        let projected_owner = request.materialization.as_ref().unwrap();
+        let projected_owner = &request.materialization;
         assert!(projected_owner.rows.is_empty());
         assert_eq!(projected_owner.payload_work.written_bytes, 0);
         assert!(
@@ -28731,7 +28759,9 @@ mod tests {
         for artifact in &request.artifacts {
             assert!(original.artifacts.contains(artifact));
         }
-        let blocked = program_request(scratch.path(), Arc::clone(&next));
+        let blocked = next
+            .prepare_compilation(&scratch.path().join("request-7"), &producer)
+            .unwrap();
         assert!(
             blocked
                 .validate_receipt(
@@ -28776,12 +28806,7 @@ mod tests {
                 .prepare_compilation(&scratch.path().join("base"), &producer)
                 .unwrap();
             let mut previous = first.artifacts;
-            let mut written_bytes = first
-                .materialization
-                .as_ref()
-                .unwrap()
-                .payload_work
-                .written_bytes;
+            let mut written_bytes = first.materialization.payload_work.written_bytes;
             let mut inherited_rows = 0;
             for index in 0..descendants {
                 let product = crate::certified_products::fixture_finalized_product(
@@ -28828,7 +28853,7 @@ mod tests {
                 for artifact in &previous {
                     assert!(request.artifacts.contains(artifact));
                 }
-                let retained = request.materialization.as_ref().unwrap();
+                let retained = &request.materialization;
                 assert_eq!(
                     retained.rows.len(),
                     1,
@@ -28999,37 +29024,6 @@ mod tests {
         assert!(type_only.recovery_products().is_empty());
         assert!(!context.recovery_products().is_empty());
         assert_ne!(type_only.semantic_sha256(), expected);
-    }
-
-    fn program_request(
-        root: &Path,
-        context: Arc<ExactDeclarationContext>,
-    ) -> ExactCompilationRequest {
-        let manifest = root.join("scope");
-        std::fs::write(&manifest, b"scope").unwrap();
-        let inputs = ExactRequestInputs::for_context(context);
-        let groups = Arc::new(
-            CertifiedArtifactGroupBindings::from_issued_rows(
-                inputs.compiler.artifacts(),
-                &BTreeMap::new(),
-            )
-            .unwrap(),
-        );
-        ExactCompilationRequest {
-            transport_metadata: NativeCompilerTransport::lower_metadata(&inputs.compiler).unwrap(),
-            inputs,
-            manifest,
-            request_sha256: sha256(b"scope"),
-            semantic_sha256: [1; 32],
-            producer_sha256: [2; 32],
-            artifacts: vec![],
-            groups,
-            materialization: None,
-            program: ProgramSourceSupportState::default(),
-            source_search_include: None,
-            checked_value_imports: Default::default(),
-            generated_scaffold_imports: Vec::new(),
-        }
     }
 
     pub(crate) fn generated_source_admission_fixture(
@@ -29303,8 +29297,17 @@ mod tests {
     #[test]
     fn source_import_roles_bind_root_coverage_and_preserve_authored_overlap() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(directory.path(), empty.clone());
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request = empty
+            .prepare_compilation(&directory.path().join("request-8"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = support_receipt(directory.path(), &request);
         let original = read_receipt(&receipt);
         for mask in [1, 2, 4, 5, 6] {
@@ -29465,8 +29468,17 @@ mod tests {
     #[test]
     fn projected_source_receipts_compare_checked_import_role_owners() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(directory.path(), empty);
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request = empty
+            .prepare_compilation(&directory.path().join("request-9"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = support_receipt(directory.path(), &request);
         let original = read_receipt(&receipt);
         let output = directory.path().join("outputs");
@@ -29598,8 +29610,17 @@ mod tests {
     #[test]
     fn completed_receipt_preserves_replay_refusal_and_exact_import_authority() {
         let directory = tempfile::tempdir().unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(directory.path(), context.clone());
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request = context
+            .prepare_compilation(&directory.path().join("request-10"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = import_receipt(directory.path(), &request, "Unadmitted");
         let mut value = read_receipt(&receipt);
         // Start with a complete control that claims no retained import.
@@ -29663,8 +29684,10 @@ mod tests {
         }
 
         let directory = tempfile::tempdir().unwrap();
-        let (context, _) = metadata_fixture();
-        let request = program_request(directory.path(), context.clone());
+        let (context, producer) = metadata_fixture();
+        let request = context
+            .prepare_compilation(&directory.path().join("request-11"), &producer)
+            .unwrap();
         let before_context = context.semantic_sha256();
         let before_graph = request
             .compiler_inputs()
@@ -29793,8 +29816,17 @@ mod tests {
     #[test]
     fn receipt_observations_reject_changed_snapshots_and_trailing_bytes() {
         let directory = tempfile::tempdir().unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(directory.path(), context);
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request = context
+            .prepare_compilation(&directory.path().join("request-12"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = import_receipt(directory.path(), &request, "Unadmitted");
         let expected = std::fs::read(&receipt).unwrap();
         assert!(read_exact_compilation_receipt(&receipt).is_ok());
@@ -29872,7 +29904,7 @@ mod tests {
                         format!("{module} interface").into_bytes(),
                     )
                 },
-                [7; 32],
+                source_test_producer_sha256(),
                 imports,
                 Sha256::digest(source.as_bytes()).into(),
             )
@@ -29889,7 +29921,12 @@ mod tests {
             .collect::<Vec<_>>();
         let entries = products
             .iter()
-            .map(|product| Arc::new(ArtifactEntry::original([7; 32], product.clone()).unwrap()))
+            .map(|product| {
+                Arc::new(
+                    ArtifactEntry::original(source_test_producer_sha256(), product.clone())
+                        .unwrap(),
+                )
+            })
             .collect::<Vec<_>>();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
         let artifacts = if sparse {
@@ -29918,7 +29955,7 @@ mod tests {
                 let output = (|| -> Result<OriginalCompilerInputs, CompileError> {
     let fixture_products: &[CertifiedRecoveryProduct] = &products;
     let entries = fixture_products.iter().map(|product| {
-        ArtifactEntry::original([7; 32], product.clone()).map(Arc::new)
+        ArtifactEntry::original(source_test_producer_sha256(), product.clone()).map(Arc::new)
     }).collect::<Result<Vec<_>, _>>()?;
     let inventory = ArtifactInventory::default();
     let artifacts = inventory.admit_shared_with_demand(
@@ -29941,7 +29978,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let mut context = ExactDeclarationContext::from_facts(DeclarationContextFacts {
             source_scope: SourceLexicalScope::default(),
             compiler_support: support,
-            producer: [7; 32],
+            producer: source_test_producer_sha256(),
 
             template_imports: None,
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
@@ -29980,9 +30017,11 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .map(Path::to_path_buf)
             .chain(std::iter::once(root.to_path_buf()))
             .collect::<Vec<_>>();
-        let mut request =
-            program_request(root, Arc::clone(&context)).with_source_search_context(&include);
-        request.producer_sha256 = [7; 32];
+        let mut request = context
+            .prepare_compilation(&root.join("request-13"), SOURCE_TEST_PRODUCER)
+            .unwrap()
+            .with_source_search_context(&include);
+
         let receipt = import_receipt_source_owner(
             root,
             &request,
@@ -30233,7 +30272,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             let evidence = support_product_in_unit("main", &owner.module);
             Arc::new(
                 CertifiedValueInterface::from_checked_compilation(
-                    [7; 32],
+                    source_test_producer_sha256(),
                     owner.clone(),
                     evidence.interface_bytes().to_vec(),
                     evidence.package_imports_bytes().to_vec(),
@@ -30260,10 +30299,12 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             Arc::from(values[0].interface().interface_bytes()),
         )])
         .unwrap();
-        let mut request = program_request(directory.path(), context.clone())
+        let mut request = context
+            .prepare_compilation(&directory.path().join("request-14"), SOURCE_TEST_PRODUCER)
+            .unwrap()
             .with_checked_value_imports(inputs.import_authority())
             .with_source_search_context(&[directory.path().to_path_buf()]);
-        request.producer_sha256 = [7; 32];
+
         // Rebind the actual request identity, preserving every SOURCE row,
         // role and current-source proof from the original receipt.
         let mut receipt_value = read_receipt(&receipt);
@@ -30280,7 +30321,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let artifacts = context
             .artifact_view()
             .merge_fixture_selections(&support_view(&[scaffold_native_fixture(
-                [7; 32], "main", "Consumer", 1,
+                source_test_producer_sha256(),
+                "main",
+                "Consumer",
+                1,
             )]))
             .unwrap();
         let original = (&request)
@@ -30682,7 +30726,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn source_selected_canonical_receipt_admits_support_without_native_products() {
         let directory = tempfile::tempdir().unwrap();
-        let (mut request, native, receipt) = source_selected_receipt(directory.path(), true, None);
+        let (_original_request, native, receipt) =
+            source_selected_receipt(directory.path(), true, None);
         let originals = native
             .artifact_view()
             .entries_for_owners([identity("main", "A"), identity("main", "B")].into_iter())
@@ -30709,14 +30754,23 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 )
                 .unwrap(),
 
-                producer: [7; 32],
+                producer: source_test_producer_sha256(),
 
                 template_imports: None,
 
                 lexical: crate::exact_context::ExactLexicalSnapshot::default(),
             },
         ));
-        request.inputs = ExactRequestInputs::for_context(Arc::clone(&context));
+        let mut request = context
+            .prepare_compilation(
+                &directory.path().join("canonical-request"),
+                SOURCE_TEST_PRODUCER,
+            )
+            .unwrap();
+        let mut wire = read_receipt(&receipt);
+        wire.as_array_mut().unwrap()[2] = text(&request.request_sha256);
+        wire.as_array_mut().unwrap()[3] = text(hex(&request.semantic_sha256));
+        write_receipt(&receipt, &wire);
         let admission = request.validate_receipt(&receipt, None, &context).unwrap();
         let retained = request
             .admit_fixture_support(
@@ -30764,19 +30818,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     fn checked_value_import_authority_keeps_hidden_and_future_owners_unselected() {
         let root = tempfile::tempdir().unwrap();
         let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(
-                    &match support_offer(&[support_product("Hidden")]) {
-                        CompilerSupportFixture::Complete(inputs) => {
-                            inputs.compiler_source_support().clone()
-                        }
-                        CompilerSupportFixture::RecordedRoles { .. } => {
-                            unreachable!("closed output fixture")
-                        }
-                    },
-                )
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[support_product("Hidden")]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
+            .unwrap(),
         );
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(7));
         let inputs = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
@@ -30784,7 +30840,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             Arc::from(b"original thin interface".as_slice()),
         )])
         .unwrap();
-        let request = program_request(root.path(), context.clone())
+        let request = context
+            .prepare_compilation(&root.path().join("request-15"), PROGRAM_TEST_PRODUCER)
+            .unwrap()
             .with_checked_value_imports(inputs.import_authority());
         request.checked_value_imports.validate().unwrap();
         let receipt = import_receipt_owner(
@@ -30851,8 +30909,18 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let source = RECEIVER_INTERFACE_SOURCE;
         let path = root.join("Ref.hs");
         std::fs::write(&path, source).unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(root, context);
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request_root = tempfile::tempdir_in(root).unwrap();
+        let request = context
+            .prepare_compilation(request_root.path(), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = support_receipt(root, &request);
         let mut value = read_receipt(&receipt);
         let fields = value.as_array_mut().unwrap();
@@ -30928,7 +30996,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let evidence = support_product_in_unit("main", "Tidepool.Session.Val.G1");
         Arc::new(
             CertifiedValueInterface::from_checked_compilation(
-                [2; 32],
+                program_test_producer_sha256(),
                 identity("main", "Tidepool.Session.Val.G1"),
                 evidence.interface_bytes().to_vec(),
                 evidence.package_imports_bytes().to_vec(),
@@ -30941,9 +31009,18 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn program_support_preserves_interface_only_receiver_dependency_without_native_authority() {
         let directory = tempfile::tempdir().unwrap();
-        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), baseline.clone());
-        let support = interface_only_agent_ref_offer([2; 32], "main");
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-17"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
+        let support = interface_only_agent_ref_offer(program_test_producer_sha256(), "main");
         let context = request
             .admit_fixture_support(
                 baseline,
@@ -31009,12 +31086,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn program_support_refuses_fresh_value_type_without_reserved_output_authority() {
         let directory = tempfile::tempdir().unwrap();
-        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), baseline.clone());
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-18"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let context = request
             .admit_fixture_support(
                 baseline,
-                &interface_only_agent_ref_offer([2; 32], "main"),
+                &interface_only_agent_ref_offer(program_test_producer_sha256(), "main"),
                 &[interface_only_agent_ref_admission(directory.path(), "main")],
                 None,
             )
@@ -31033,7 +31119,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 )),
                 Arc::new(ArtifactEntry::canonical(
                     crate::certified_products::fixture_source_module_interface(
-                        [2; 32],
+                        program_test_producer_sha256(),
                         "main",
                         "Tidepool.Agent.Ref",
                         Sha256::digest(RECEIVER_INTERFACE_SOURCE.as_bytes()).into(),
@@ -31079,7 +31165,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn interface_only_receiver_support_separates_type_custody_from_source_and_native_authority() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
         let assert_missing_ref = |error: CompileError| {
             assert!(matches!(error, CompileError::ArtifactInventory(error)
                 if matches!(&error.failure, ArtifactInventoryFailure::MissingDependency {
@@ -31093,11 +31186,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .extend_program_value_interface(receiver_value_interface())
                 .unwrap_err(),
         );
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-19"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let wrong_owner = request
             .admit_fixture_support(
                 empty.clone(),
-                &interface_only_agent_ref_offer([2; 32], "foreign"),
+                &interface_only_agent_ref_offer(program_test_producer_sha256(), "foreign"),
                 &[interface_only_agent_ref_admission(
                     directory.path(),
                     "foreign",
@@ -31111,7 +31206,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .extend_program_value_interface(receiver_value_interface())
                 .unwrap_err(),
         );
-        let support = interface_only_agent_ref_offer([2; 32], "main");
+        let support = interface_only_agent_ref_offer(program_test_producer_sha256(), "main");
         let hidden = Arc::new(
             (*empty)
                 .clone()
@@ -31125,7 +31220,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 )
                 .unwrap(),
         );
-        let mut request = program_request(directory.path(), hidden.clone());
+        let mut request = hidden
+            .prepare_compilation(&directory.path().join("request-20"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let retained = request
             .admit_fixture_support(
                 hidden.clone(),
@@ -31147,11 +31244,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         .is_err());
         // A canonical certificate without consumed source grants type custody
         // while leaving authored names and source support unselected.
-        let mut request = program_request(directory.path(), empty.clone());
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-21"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let retained = request
             .admit_fixture_support(
                 empty.clone(),
-                &interface_only_agent_ref_offer([2; 32], "main"),
+                &interface_only_agent_ref_offer(program_test_producer_sha256(), "main"),
                 &[],
                 None,
             )
@@ -31160,7 +31259,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert!(retained.lexical_graph().is_empty());
         assert!(request.program.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
-        let mut foreign = program_request(directory.path(), empty.clone());
+        let mut foreign = empty
+            .prepare_compilation(&directory.path().join("request-22"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         assert!(foreign
             .admit_fixture_support(
                 empty.clone(),
@@ -31380,8 +31481,18 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             scaffold_native_fixture(baseline.owner.facts.producer, "fixture", module, 1)
         });
         let offer = support_offer(&products);
-        let mut request = program_request(directory.path(), baseline.clone());
-        request.producer_sha256 = baseline.owner.facts.producer;
+        let mut request = baseline
+            .prepare_compilation(
+                &directory.path().join("request-23"),
+                ExtractCmd::new()
+                    .unwrap()
+                    .bind()
+                    .unwrap()
+                    .identity()
+                    .producer_bytes(),
+            )
+            .unwrap();
+
         let context = request
             .admit_fixture_support(
                 baseline.clone(),
@@ -31536,19 +31647,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let hidden = support_product("Hidden");
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&[hidden]) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed compiler output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[hidden]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(directory.path(), baseline.clone());
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-24"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let admission = support_admission_for_request(directory.path(), &request);
         let context = request
             .admit_fixture_support(
@@ -31667,21 +31784,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let foreign = support_admission(directory.path());
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&[support_product(
-                    "Unrelated",
-                )]) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[support_product("Unrelated")]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(directory.path(), Arc::clone(&baseline));
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-25"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = support_receipt(directory.path(), &request);
         let honest = request.validate_receipt(&receipt, None, &baseline).unwrap();
         let before = baseline.semantic_sha256();
@@ -31710,22 +31831,32 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             support_product("InstanceRelay"),
         ];
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&products) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed compiler output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&products) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(
-            directory.path(),
-            Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap()),
-        );
+        let mut request = (Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        ))
+        .prepare_compilation(&directory.path().join("request-26"), PROGRAM_TEST_PRODUCER)
+        .unwrap();
         let receipt = support_receipt(directory.path(), &request);
         let admitted = request
             .validate_receipt(&receipt, None, request.context())
@@ -31766,8 +31897,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn program_support_refuses_conflicting_selected_edges() {
         let directory = tempfile::tempdir().unwrap();
-        let empty = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), empty.clone());
+        let empty = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let mut request = empty
+            .prepare_compilation(&directory.path().join("request-27"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let original = support_admission_for_request(directory.path(), &request);
         let receipt = support_receipt(directory.path(), &request);
         let mut wire = read_receipt(&receipt);
@@ -31797,7 +31937,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let hidden = support_product("Hidden");
         let relay = crate::certified_products::fixture_finalized_product_with_requirements(
             support_draft("InstanceRelay"),
-            [2; 32],
+            program_test_producer_sha256(),
             Some(BTreeMap::from([(
                 ("fixture".into(), "Hidden".into()),
                 hidden.module_interface().interface_sha256(),
@@ -31807,23 +31947,29 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .remove(0)
             .product;
         let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&[hidden, relay]) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed compiler output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[hidden, relay]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
+            .unwrap(),
         );
         let entries = context
             .artifact_view()
             .entries_for_owners(std::iter::once(identity("fixture", "InstanceRelay")))
             .unwrap();
-        let mut request = program_request(directory.path(), context.clone());
+        let mut request = context
+            .prepare_compilation(&directory.path().join("request-28"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         request.program.program_support = Some(ProgramSourceSupport {
             compiler_support: context
                 .compiler_source_support()
@@ -31841,10 +31987,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .compiler_support;
         let support = selected_support.artifacts();
         let selected_context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(selected_support)
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(selected_support)
+            .unwrap(),
         );
         let selected_inputs = ProtectedScaffoldRequirements::default()
             .compiler_inputs(&selected_context, None)
@@ -31931,7 +32081,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             let evidence = support_product(module);
             Arc::new(
                 CertifiedValueInterface::from_checked_compilation(
-                    [2; 32],
+                    program_test_producer_sha256(),
                     identity("fixture", module),
                     evidence.interface_bytes().to_vec(),
                     evidence.package_imports_bytes().to_vec(),
@@ -32068,21 +32218,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     fn retained_value_source_surface_preserves_selected_support_and_refuses_hidden_owners() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(
-                    &match support_offer(&[support_product("Hidden")]) {
-                        CompilerSupportFixture::Complete(inputs) => {
-                            inputs.compiler_source_support().clone()
-                        }
-                        CompilerSupportFixture::RecordedRoles { .. } => {
-                            unreachable!("closed output fixture")
-                        }
-                    },
-                )
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[support_product("Hidden")]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(directory.path(), baseline.clone());
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-29"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let context = request
             .admit_fixture_support(
                 baseline,
@@ -32256,7 +32410,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         }
         following.normalize().unwrap();
         let following = Arc::new(following);
-        let next = program_request(directory.path(), following.clone());
+        let next = following
+            .prepare_compilation(&directory.path().join("request-30"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         assert!(next
             .validate_receipt(
                 &import_receipt(directory.path(), &next, "InstanceRelay"),
@@ -32328,20 +32484,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let owner = support_product("InstanceOwner");
         let relay = support_product("InstanceRelay");
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(std::slice::from_ref(&hidden))
-                {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed compiler output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(std::slice::from_ref(&hidden)) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(directory.path(), baseline.clone());
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-31"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let context = {
             let fixture = &support_offer(&[hidden.clone(), owner.clone(), relay.clone()]);
             let selection = fixture.source_selection().unwrap();
@@ -32431,7 +32592,8 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let mut expected_roots = BTreeMap::new();
         let mut expected_roles = BTreeMap::new();
         for product in [&owner, &relay, &additional] {
-            let native = ArtifactEntry::original([2; 32], product.clone()).unwrap();
+            let native =
+                ArtifactEntry::original(program_test_producer_sha256(), product.clone()).unwrap();
             let interface = ArtifactEntry::canonical(product.module_interface().clone());
             expected_roles.insert(
                 native.descriptor.owner.clone(),
@@ -32568,19 +32730,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         assert_eq!(variant.module_interface(), original.module_interface());
         assert_ne!(variant.owner(), original.owner());
         let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&[original]) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed compiler output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[original]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed compiler output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let mut request = program_request(directory.path(), context.clone());
+        let mut request = context
+            .prepare_compilation(&directory.path().join("request-32"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let support = support_offer(&[variant]);
         let assert_native_refusal = |error| {
             assert!(matches!(error, CompileError::ArtifactInventory(error)
@@ -32611,29 +32779,35 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             unchanged[0].owner()
         );
         let canonical = certified_product_artifact_view(
-            [2; 32],
+            program_test_producer_sha256(),
             &[],
             &[unchanged[0].module_interface().clone()],
             None,
         )
         .unwrap();
         let canonical_context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(
-                    &recover_fixture_compiler_support(
-                        CompilerInputProjection::from_issued_entries(&[Arc::new(
-                            ArtifactEntry::canonical(unchanged[0].module_interface().clone()),
-                        )])
-                        .unwrap(),
-                        canonical,
-                        [],
-                    )
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(
+                &recover_fixture_compiler_support(
+                    CompilerInputProjection::from_issued_entries(&[Arc::new(
+                        ArtifactEntry::canonical(unchanged[0].module_interface().clone()),
+                    )])
                     .unwrap(),
+                    canonical,
+                    [],
                 )
                 .unwrap(),
+            )
+            .unwrap(),
         );
-        let mut canonical_request = program_request(directory.path(), canonical_context.clone());
+        let mut canonical_request = canonical_context
+            .prepare_compilation(&directory.path().join("request-33"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let promoted = canonical_request
             .admit_fixture_support(canonical_context, &unchanged_support, &[], None)
             .unwrap();
@@ -32679,8 +32853,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn authenticated_home_resume_source_surface_follows_ordinary_source_policy() {
         let directory = tempfile::tempdir().unwrap();
-        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), baseline.clone());
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-34"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = support_receipt(directory.path(), &request);
         let mut value = read_receipt(&receipt);
         let fields = value.as_array_mut().unwrap();
@@ -32781,7 +32964,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .iter()
             .any(|node| node.owner == identity("main", "Tidepool.Internal.Resume")));
         assert!(context.lexical_graph().is_empty());
-        let next = program_request(directory.path(), context.clone());
+        let next = context
+            .prepare_compilation(&directory.path().join("request-35"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = import_receipt_owner(
             directory.path(),
             &next,
@@ -32811,19 +32996,21 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     fn program_values_retain_private_type_owners_without_selecting_their_names() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(
-                    &match support_offer(&[support_product("Public")]) {
-                        CompilerSupportFixture::Complete(inputs) => {
-                            inputs.compiler_source_support().clone()
-                        }
-                        CompilerSupportFixture::RecordedRoles { .. } => {
-                            unreachable!("closed output fixture")
-                        }
-                    },
-                )
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[support_product("Public")]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
+            .unwrap(),
         );
         let mut baseline = (*baseline).clone();
         edit_lexical(&mut baseline, |nodes| {
@@ -32833,7 +33020,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             })
         });
         let baseline = Arc::new(baseline);
-        let mut request = program_request(directory.path(), baseline.clone());
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-36"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let context = request
             .admit_fixture_support(
                 baseline,
@@ -32849,7 +33038,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             let evidence = support_product(module);
             Arc::new(
                 CertifiedValueInterface::from_checked_compilation(
-                    [2; 32],
+                    program_test_producer_sha256(),
                     identity("fixture", module),
                     evidence.interface_bytes().to_vec(),
                     evidence.package_imports_bytes().to_vec(),
@@ -32914,8 +33103,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn program_admission_keeps_semantic_growth_and_group_witnesses_without_transport_writes() {
         let directory = tempfile::tempdir().unwrap();
-        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let physical = program_request(directory.path(), baseline.clone());
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let physical = baseline
+            .prepare_compilation(&directory.path().join("request-37"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let before = std::fs::read_dir(directory.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -32928,7 +33126,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 &BTreeMap::new(),
                 b"admission later interface".to_vec(),
             ),
-            [2; 32],
+            program_test_producer_sha256(),
         );
         let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
             .remove(0)
@@ -32949,7 +33147,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
         );
         let hidden = support_product("AdmissionHidden");
-        let hidden_id = ArtifactEntry::original([2; 32], hidden.clone())
+        let hidden_id = ArtifactEntry::original(program_test_producer_sha256(), hidden.clone())
             .unwrap()
             .descriptor
             .id;
@@ -32957,7 +33155,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             let fixture_products: &[CertifiedRecoveryProduct] = &[hidden];
             let entries = fixture_products
                 .iter()
-                .map(|product| ArtifactEntry::original([2; 32], product.clone()).map(Arc::new))
+                .map(|product| {
+                    ArtifactEntry::original(program_test_producer_sha256(), product.clone())
+                        .map(Arc::new)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let inventory = ArtifactInventory::default();
             let artifacts = inventory.admit_shared_with_demand(
@@ -33037,10 +33238,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let inputs = Arc::clone(&continued.inputs);
         let groups = Arc::clone(&continued.groups);
         let wrong_producer = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .admit_producer([3; 32])
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .admit_producer([3; 32])
+            .unwrap(),
         );
         let refusal = continued
             .in_program_context(wrong_producer)
@@ -33374,8 +33579,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             Err(CompileError::ExtractFailed(detail)) if detail == "exact declaration context: interface differs from owned bytes"));
         let owned = effective
             .materialization
-            .as_ref()
-            .unwrap()
             .selected_rows(&effective.transport_metadata);
         let slice = &owned.values().next().unwrap().owned_inputs
             [&original_inputs::OriginalInputKind::Interface];
@@ -33405,21 +33608,25 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     fn unchanged_program_context_reuses_exact_inputs_and_checks_other_owners() {
         let directory = tempfile::tempdir().unwrap();
         let context = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&match support_offer(&[support_product(
-                    "Unchanged",
-                )]) {
-                    CompilerSupportFixture::Complete(inputs) => {
-                        inputs.compiler_source_support().clone()
-                    }
-                    CompilerSupportFixture::RecordedRoles { .. } => {
-                        unreachable!("closed output fixture")
-                    }
-                })
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&match support_offer(&[support_product("Unchanged")]) {
+                CompilerSupportFixture::Complete(inputs) => {
+                    inputs.compiler_source_support().clone()
+                }
+                CompilerSupportFixture::RecordedRoles { .. } => {
+                    unreachable!("closed output fixture")
+                }
+            })
+            .unwrap(),
         );
-        let physical = program_request(directory.path(), context.clone());
+        let physical = context
+            .prepare_compilation(&directory.path().join("request-38"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let baseline = physical.program_admission();
         REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.set(0));
         COMPILER_METADATA_SNAPSHOTS.with(|count| count.set(0));
@@ -33472,7 +33679,10 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             let fixture_products: &[CertifiedRecoveryProduct] = &[];
             let entries = fixture_products
                 .iter()
-                .map(|product| ArtifactEntry::original([2; 32], product.clone()).map(Arc::new))
+                .map(|product| {
+                    ArtifactEntry::original(program_test_producer_sha256(), product.clone())
+                        .map(Arc::new)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let inventory = ArtifactInventory::default();
             let artifacts = inventory.admit_shared_with_demand(
@@ -33563,12 +33773,13 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 7,
                 &packages,
             ),
-            [2; 32],
+            program_test_producer_sha256(),
         );
         let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
             .remove(0)
             .product;
-        let entry = Arc::new(ArtifactEntry::original([2; 32], product).unwrap());
+        let entry =
+            Arc::new(ArtifactEntry::original(program_test_producer_sha256(), product).unwrap());
         let target = entry.descriptor.owner.clone();
         let inventory = ArtifactInventory::default();
         let view = inventory
@@ -33576,7 +33787,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap();
         let context = Arc::new(
             ExactDeclarationContext::retained_execution_fixture(
-                [2; 32],
+                program_test_producer_sha256(),
                 &view,
                 CompilerInputProjection::from_issued_entries(&[entry]).unwrap(),
                 vec![ExactLexicalNode {
@@ -33588,7 +33799,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             )
             .unwrap(),
         );
-        let physical = program_request(directory.path(), context.clone());
+        let physical = context
+            .prepare_compilation(&directory.path().join("request-39"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         assert!(!physical
             .compiler_inputs()
             .metadata
@@ -33745,7 +33958,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             CompilerSupportFixture::Complete(inputs) => inputs.compiler_source_support().clone(),
             CompilerSupportFixture::RecordedRoles { .. } => unreachable!("closed original output"),
         };
-        let original = ArtifactEntry::original([2; 32], product.clone())
+        let original = ArtifactEntry::original(program_test_producer_sha256(), product.clone())
             .unwrap()
             .descriptor
             .id;
@@ -33844,7 +34057,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn execution_support_keeps_carried_partial_availability_and_instance_origin() {
         use crate::artifact_inventory::NativeOriginalRequirement;
-        let producer = [2; 32];
+        let producer = program_test_producer_sha256();
         let product = crate::certified_products::fixture_finalized_product(
             crate::certified_products::tests::original_groups_fixture_with_interface(
                 "ExecutionSupport",
@@ -33934,10 +34147,14 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .selected_native_groups()
             .is_empty());
         let hidden = Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap()
-                .extend_issued_compiler_support(&hidden_support)
-                .unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap()
+            .extend_issued_compiler_support(&hidden_support)
+            .unwrap(),
         );
         assert!(hidden
             .interface_owners()
@@ -33948,7 +34165,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             .unwrap()
             .entries
             .is_empty());
-        let request = program_request(directory.path(), hidden.clone());
+        let request = hidden
+            .prepare_compilation(&directory.path().join("request-40"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let receipt = import_receipt(directory.path(), &request, "Unadmitted");
         let mut value = read_receipt(&receipt);
         value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
@@ -34378,8 +34597,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let directory = tempfile::tempdir().unwrap();
         let inventory =
             tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
-        let baseline = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let mut request = program_request(directory.path(), baseline.clone());
+        let baseline = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let mut request = baseline
+            .prepare_compilation(&directory.path().join("request-41"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let source = "module Consumer where\n";
         let source_path = directory.path().join("Consumer.hs");
         let fixture = import_receipt(directory.path(), &request, "Unadmitted");
@@ -34570,8 +34798,17 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
     #[test]
     fn generated_source_owner_accepts_separate_projection_receipts_and_checks_every_snapshot() {
         let directory = tempfile::tempdir().unwrap();
-        let context = Arc::new(ExactDeclarationContext::new(&[], &[], vec![]).unwrap());
-        let request = program_request(directory.path(), context);
+        let context = Arc::new(
+            ExactDeclarationContext::from_authenticated_interfaces(
+                program_test_producer_sha256(),
+                &ArtifactInventory::default().empty_view(),
+                CompilerInputProjection::default(),
+            )
+            .unwrap(),
+        );
+        let request = context
+            .prepare_compilation(&directory.path().join("request-42"), PROGRAM_TEST_PRODUCER)
+            .unwrap();
         let source = "module Consumer where\n";
         let fixture = import_receipt(directory.path(), &request, "Unadmitted");
         let mut receipt = read_receipt(&fixture);
@@ -34827,10 +35064,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
         let compiler_identity = endpoint.identity().clone();
         // Inspect the actual issuing owner, not a second native-row decoder.
-        let materialization = request
-            .materialization
-            .as_ref()
-            .expect("live input materialization");
+        let materialization = &request.materialization;
         let metadata = &request.transport_metadata;
         let rows = materialization.selected_rows(metadata);
         let mut supplied_kinds = BTreeSet::new();
@@ -36409,7 +36643,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let collision_graph = collision.join(format!("execution-{}.cbor", hex(&graph.digest())));
         std::fs::write(&collision_graph, b"prior immutable capture").unwrap();
         let collision_request = context.prepare_compilation(&collision, producer).unwrap();
-        assert!(collision_request.materialization.is_some());
+        collision_request.validate_artifacts().unwrap();
         assert_eq!(
             std::fs::read(&collision_graph).unwrap(),
             b"prior immutable capture",

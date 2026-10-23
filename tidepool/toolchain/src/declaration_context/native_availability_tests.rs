@@ -2731,13 +2731,7 @@ fn value_interface_append_keeps_materialized_inputs_until_last_context_release()
     let completed = context
         .prepare_compilation(scratch.path(), PRODUCER)
         .unwrap();
-    let directory = completed
-        .materialization
-        .as_ref()
-        .unwrap()
-        ._directory
-        .as_ref()
-        .unwrap();
+    let directory = completed.materialization._directory.as_ref().unwrap();
     let directory_owner = Arc::downgrade(directory);
     let directory_path = directory.path().to_path_buf();
     let interface = crate::certified_products::fixture_module_interface(
@@ -2815,7 +2809,7 @@ fn custody_only_native_offer_keeps_materialized_inputs_after_issuer_release() {
     let completed = context
         .prepare_compilation(scratch.path(), PRODUCER)
         .unwrap();
-    let materialization = completed.materialization.as_ref().unwrap();
+    let materialization = &completed.materialization;
     let directory = materialization._directory.as_ref().unwrap();
     let directory_owner = Arc::downgrade(directory);
     let directory_path = directory.path().to_path_buf();
@@ -12620,13 +12614,7 @@ fn completed_request_carries_exact_entries_without_reconstruction() {
     let request = context
         .prepare_compilation(scratch.path(), PRODUCER)
         .unwrap();
-    let directory = request
-        .materialization
-        .as_ref()
-        .unwrap()
-        ._directory
-        .as_ref()
-        .unwrap();
+    let directory = request.materialization._directory.as_ref().unwrap();
     let directory_owner = Arc::downgrade(directory);
     let directory_path = directory.path().to_path_buf();
     assert!(std::fs::read_dir(&directory_path).unwrap().next().is_some());
