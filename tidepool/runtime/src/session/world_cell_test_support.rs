@@ -254,3 +254,112 @@ where
     .map_err(crate::RuntimeError::from)
     .map_err(Into::into)
 }
+
+/// Compile and execute every issued item; only actual completion advances World.
+pub(in crate::session) fn execute_fixture_cell_for<H, O>(
+    resident: &mut ResidentSession<H, O>,
+    source_owner: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    recipe: &InputRecipe,
+    execution: &Arc<crate::session::PrivateExecutionAdmission>,
+    source: &str,
+) -> (
+    crate::session::Generation,
+    Vec<crate::session::Generation>,
+    Arc<crate::session::RuntimeCheckedPrefix>,
+)
+where
+    H: crate::DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let original = source_owner.original_source().clone();
+    let admission =
+        plan_fixture_cell_for(resident, source_owner, recipe, source, execution.clone())
+            .expect("plan the cell through its actual World");
+    let settled = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, report| turn::prepare_cell_program_admitted(owner, admission, report),
+        )
+        .unwrap();
+    let (checked, program) =
+        turn::finish_cell_program_admitted(settled).expect("check the complete publication cell");
+    let prefix = resident
+        .begin_cell_program(program)
+        .unwrap()
+        .expect("nonempty publication cell");
+    let previous = resident.run_context();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..previous
+        })
+        .unwrap();
+    let mut declarations = Vec::new();
+    let before_native = tidepool_extract_cmd::extract_spawn_count();
+    for index in 0..checked.items.len() {
+        let item = checked.checked_item(index).unwrap();
+        let reservation = source_action_with_original(resident, original.clone(), |resident, _| {
+            resident.admit_checked_item(prefix.clone(), item.clone())
+        })
+        .unwrap();
+        if item.kind() == tidepool_toolchain::checked_cell::CheckedItemKind::Declaration {
+            let committed =
+                source_action_with_original(resident, original.clone(), |resident, _| {
+                    resident.adopt_checked_declaration(reservation)
+                })
+                .unwrap();
+            declarations.push(committed.generation);
+        } else {
+            assert_eq!(
+                item.kind(),
+                tidepool_toolchain::checked_cell::CheckedItemKind::Bind,
+                "publication values are actual checked bind items"
+            );
+            let turn::TurnResult::Bind {
+                bound, compiled, ..
+            } = turn::consume_cell_program_item(reservation.clone()).unwrap()
+            else {
+                panic!("checked value must compile a binding");
+            };
+            assert_eq!(bound.len(), 1);
+            let outcome =
+                source_action_with_original(resident, original.clone(), |resident, report| {
+                    resident.run_bind_with_sites(
+                        &bound[0].name,
+                        compiled.code(),
+                        &bound[0],
+                        reservation.generation(),
+                        report,
+                    )
+                })
+                .unwrap();
+            assert!(
+                matches!(outcome, ResidentOutcome::Completed { .. }),
+                "actual publication value must complete: {outcome:?}"
+            );
+            let visible = resident
+                .public_visibility_snapshot_in(execution.private_scope())
+                .unwrap();
+            assert!(visible
+                .bindings
+                .iter()
+                .any(|(name, id)| name == &bound[0].name
+                    && *id == SessionVarId::from_extract(bound[0].var_id)));
+        }
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), index + 1);
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before_native,
+            "execution consumes its sealed native program without recompilation"
+        );
+    }
+    resident.set_run_context(previous).unwrap();
+    (
+        resident.state.lib().scope_tip(execution.private_scope()),
+        declarations,
+        prefix,
+    )
+}
