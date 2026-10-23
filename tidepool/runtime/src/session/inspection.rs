@@ -547,7 +547,7 @@ pub(super) enum InspectionWorldInputs {
     Cold {
         primary:
             Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
-        bindings: tidepool_toolchain::compiler_world::CompilerWorldBindings,
+        bindings: tidepool_toolchain::compiler_world::VisibleWorldBindings,
         lexical: tidepool_toolchain::compiler_world::CompilerWorldLexicalSurface,
     },
 }
