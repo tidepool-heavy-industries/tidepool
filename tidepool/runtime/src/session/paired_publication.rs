@@ -1548,8 +1548,6 @@ impl SessionLib {
     }
 }
 #[cfg(test)]
-mod linearization_tests;
-#[cfg(test)]
 mod semantic_currency_tests;
 
 #[cfg(test)]

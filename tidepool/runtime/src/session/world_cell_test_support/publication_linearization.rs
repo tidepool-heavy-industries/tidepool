@@ -352,7 +352,10 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
         settled
     );
     assert_eq!(stored(), settled_domain);
-    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), compiler_requests);
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        compiler_requests
+    );
 }
 
 #[test]
@@ -367,4 +370,174 @@ fn paired_publication_before_guarded_cancellation_preserves_committed_winner() {
     for persistence in [Persistence::Durable, Persistence::Ephemeral] {
         actual_binding_publication_keeps_winner(persistence, First::Publication);
     }
+}
+
+#[test]
+fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_reexecution() {
+    let root = tempfile::tempdir().unwrap();
+    tidepool_testing::eval_harness::require_extract();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(
+        SessionId(4484),
+        root.path().join("session"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let recovery = RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|report| recovery.attach_root(&mut lib, report)).unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source_a = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let source_b = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public_a = source_a.scope();
+    let public_b = source_b.scope();
+    let owner_a =
+        RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/a").unwrap(), 1).unwrap();
+    let owner_b =
+        RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/b").unwrap(), 1).unwrap();
+    resident
+        .initialize_durable_public_scope(owner_a.clone(), public_a)
+        .unwrap();
+    resident
+        .initialize_durable_public_scope(owner_b.clone(), public_b)
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source_a);
+    bootstrap_world_for(&mut resident, &recipe, &source_b);
+    let a = Arc::new(
+        source_action_with_original(
+            &mut resident,
+            source_a.original_source().clone(),
+            |resident, _| resident.begin_durable_private_execution(&owner_a, public_a),
+        )
+        .unwrap(),
+    );
+    let b = Arc::new(
+        source_action_with_original(
+            &mut resident,
+            source_b.original_source().clone(),
+            |resident, _| resident.begin_durable_private_execution(&owner_b, public_b),
+        )
+        .unwrap(),
+    );
+    execute_fixture_cell_for(
+        &mut resident,
+        &source_a,
+        &recipe,
+        &a,
+        "let observationA = (73 :: Int)",
+    );
+    execute_fixture_cell_for(&mut resident, &source_a, &recipe, &a, "observationA");
+    let id_a = resident
+        .state
+        .resolve_in(a.private_scope(), "observationA")
+        .unwrap()
+        .id;
+    let intent_a = resident.freeze_private_execution(&a).unwrap();
+    let before_a = resident
+        .state
+        .public_visibility_snapshot_in(a.private_scope())
+        .unwrap();
+    let ExecutionPublication::Bindings(base_a) = resident
+        .state
+        .restage_execution_publication(owner_a.clone(), intent_a.clone())
+        .unwrap()
+    else {
+        panic!("binding-only publication");
+    };
+    let staged_a = base_a.stage().unwrap();
+
+    // The sibling completes once after A has frozen and staged its exact
+    // result. Its observation invalidates caches, and its domain commit makes A's
+    // staged graph stale; neither event changes A's private semantic view.
+    execute_fixture_cell_for(
+        &mut resident,
+        &source_b,
+        &recipe,
+        &b,
+        "let observationB = (74 :: Int)",
+    );
+    execute_fixture_cell_for(&mut resident, &source_b, &recipe, &b, "observationB");
+    let id_b = resident
+        .state
+        .resolve_in(b.private_scope(), "observationB")
+        .unwrap()
+        .id;
+    let intent_b = resident.freeze_private_execution(&b).unwrap();
+    let ExecutionPublication::Bindings(base_b) = resident
+        .state
+        .restage_execution_publication(owner_b, intent_b)
+        .unwrap()
+    else {
+        panic!("binding-only publication");
+    };
+    assert!(matches!(
+        resident
+            .state
+            .attempt_public_manifest(base_b.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    assert_eq!(
+        resident
+            .state
+            .public_visibility_snapshot_in(a.private_scope())
+            .unwrap(),
+        before_a
+    );
+    let compiler_requests = tidepool_extract_cmd::extract_spawn_count();
+    let decision_a = PublicationDecision::new();
+    assert!(matches!(
+        resident
+            .state
+            .attempt_public_manifest(staged_a, &decision_a)
+            .unwrap(),
+        crate::session::PublicationAttempt::RestageMetadata(_)
+    ));
+    assert_eq!(decision_a.phase(), PublicationPhase::Running);
+    let ExecutionPublication::Bindings(retry_a) = resident
+        .state
+        .restage_execution_publication(owner_a, intent_a.clone())
+        .unwrap()
+    else {
+        panic!("same binding-only intent");
+    };
+    assert!(matches!(
+        resident
+            .state
+            .attempt_public_manifest(retry_a.stage().unwrap(), &decision_a)
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    assert_eq!(
+        resident
+            .state
+            .resolve_in(public_a, "observationA")
+            .unwrap()
+            .id,
+        id_a
+    );
+    assert_eq!(
+        resident
+            .state
+            .resolve_in(public_b, "observationB")
+            .unwrap()
+            .id,
+        id_b
+    );
+    assert!(Arc::ptr_eq(
+        &intent_a,
+        &resident.freeze_private_execution(&a).unwrap()
+    ));
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        compiler_requests
+    );
 }
