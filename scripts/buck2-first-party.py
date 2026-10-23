@@ -1911,7 +1911,50 @@ tidepool_buildscript_run(
             env, resources, worker = compiler_service_test_inputs(package_name, unit_target["name"], mixed=True)
         unit_extra = runtime_arguments(env, resources, worker)
         if package_name == "tidepool-toolchain":
-            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident", "artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof": "owned-resident", "declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes": "owned-resident", "declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand": "owned-resident", "declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner": "owned-resident"},'
+            toolchain_output_context_cases = [
+                'declaration_context::tests::context_role_observations_are_compact_and_bind_publication_policy',
+                'declaration_context::tests::selected_raw_materialization_skips_retained_bytes_and_refuses_missing_custody',
+                'declaration_context::tests::role_snapshot_equality_preserves_proof_availability_and_refuses_false_baselines',
+                'declaration_context::tests::compiler_role_conflict_diagnostics_bind_actual_publication',
+                'declaration_context::tests::merkle_context_history_matches_canonical_and_cold_facts',
+                'declaration_context::tests::held_context_receipt_reuses_authenticated_blocks_without_reads',
+                'declaration_context::tests::captured_template_data_cannot_enlarge_issued_source_publication',
+                'declaration_context::tests::published_original_selection_refuses_unissued_root_and_custody_loss',
+                'declaration_context::tests::published_original_manifest_binds_native_selection_and_restored_policy',
+                'declaration_context::tests::publication_target_selection_distinguishes_authored_native_and_source_origins',
+                'declaration_context::tests::publication_target_retains_source_policy_without_published_native_group_demand',
+                'declaration_context::tests::publication_fact_snapshot_does_not_retain_restored_native_row',
+                'declaration_context::tests::published_original_refuses_substituted_native_identity',
+                'declaration_context::tests::published_original_composition_recovery_history',
+                'declaration_context::tests::program_support_scopes_published_roles_to_exact_carriers_without_retiring_parent',
+                'declaration_context::tests::program_support_completion_keeps_unrelated_publication_out_of_transient_offer',
+            ]
+            toolchain_output_evidence_cases = [
+                'declaration_context::published_source::tests::published_source_composition_preserves_sealed_selection_across_repeated_imports',
+                'declaration_context::published_source::tests::authored_certifier_preserves_published_policy_with_complete_demand',
+                'declaration_context::published_source::tests::published_native_custody_does_not_require_dependency_namespace_originals',
+                'declaration_context::published_source::history_properties::publication_reopening_keeps_birth_when_current_roles_change',
+                'declaration_context::published_source::history_properties::publication_reopening_refuses_missing_type_namespace_with_retained_custody',
+                'declaration_context::published_source::history_properties::published_role_refuses_missing_issuer_selection',
+                'declaration_context::published_source::history_properties::published_source_narrowing_preserves_native_dependency_custody',
+            ]
+            toolchain_retained_proof_cases = [
+                'artifact_inventory::tests::ordinary_publication_and_display_preserve_the_actual_sealed_issuer',
+            ]
+            toolchain_existing_resident_cases = [
+                'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground',
+                'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof',
+                'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes',
+                'declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand',
+                'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner',
+            ]
+            toolchain_resident_cases = (
+                toolchain_existing_resident_cases + toolchain_output_context_cases
+                + toolchain_output_evidence_cases + toolchain_retained_proof_cases
+            )
+            unit_extra += '\n    case_compiler_modes = {' + ", ".join(
+                json.dumps(case) + ': "owned-resident"' for case in toolchain_resident_cases
+            ) + "},"
         if package_name == "tidepool":
             unit_extra += '\n    compile_env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},'
         if package_name == "exomonad-host":
@@ -2313,6 +2356,27 @@ tidepool_buildscript_run(
                     "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 1260000,",
                     "    case_compiler_modes = {" + json.dumps(world_case) + ': "owned-resident"},',
                     runtime_arguments(world_env, world_resources, world_worker),
+                    '    visibility = ["PUBLIC"],', ")", "",
+                ]))
+            output_publication_cohorts = [
+                ("toolchain_output_context_publication_test", toolchain_output_context_cases),
+                ("toolchain_output_publication_evidence_test", toolchain_output_evidence_cases),
+                ("toolchain_retained_output_proof_test", toolchain_retained_proof_cases),
+            ]
+            for cohort_target, cohort_cases in output_publication_cohorts:
+                cohort_env, cohort_resources, cohort_worker = compiler_service_test_inputs(package_name, cohort_target)
+                rules.append("\n".join([
+                    "tidepool_rust_test_cases(",
+                    f'    name = {json.dumps(cohort_target)},',
+                    f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                    "    exact_tests = [", render_strings(cohort_cases, 8), "    ],",
+                    f"    expected_count = {len(cohort_cases)},", "    ignored = True,",
+                    "    jobs = 1,", "    timeout = 600,",
+                    f"    test_rule_timeout_ms = {(len(cohort_cases) * 600 + 60) * 1000},",
+                    '    case_compiler_modes = {' + ", ".join(
+                        json.dumps(case) + ': "owned-resident"' for case in cohort_cases
+                    ) + "},",
+                    runtime_arguments(cohort_env, cohort_resources, cohort_worker),
                     '    visibility = ["PUBLIC"],', ")", "",
                 ]))
             env, resources, worker = compiler_service_test_inputs(package_name, "toolchain_source_proof_pairing_test")

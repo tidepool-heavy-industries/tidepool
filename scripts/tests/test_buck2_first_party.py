@@ -1737,13 +1737,28 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         self.assertEqual(result.returncode, 0, result.stderr)
         generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
                               "tidepool_rust_isolated_test")
-        self.assertEqual(generated['case_compiler_modes'], {
+        expected_modes = {
             'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground':
             'owned-resident',
             'artifacts::source_proof_pairing_tests::source_selected_receipt_pairs_prior_program_support_with_actual_original_proof': 'owned-resident',
             'declaration_context::native_availability_tests::complete_snapshot_recovery_keeps_proof_only_native_offer_scopes': 'owned-resident',
             'declaration_context::native_availability_tests::candidate_reuse_keeps_full_availability_separate_from_withdrawn_demand': 'owned-resident',
-            'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner': 'owned-resident'})
+            'declaration_context::native_availability_tests::authored_fallback_does_not_requalify_unrelated_selected_published_owner': 'owned-resident' }
+        for target, count in (
+            ('toolchain_output_context_publication_test', 16),
+            ('toolchain_output_publication_evidence_test', 7),
+            ('toolchain_retained_output_proof_test', 1),
+        ):
+            cohort = self.rule('tidepool/toolchain', target, 'tidepool_rust_test_cases')
+            self.assertEqual(cohort['expected_count'], count)
+            self.assertEqual(len(cohort['exact_tests']), count)
+            self.assertTrue(cohort['ignored'])
+            self.assertEqual(cohort['jobs'], 1)
+            modes = {name: 'owned-resident' for name in cohort['exact_tests']}
+            self.assertEqual(cohort['case_compiler_modes'], modes)
+            expected_modes.update(modes)
+        self.assertEqual(generated['case_compiler_modes'], expected_modes)
+
         self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_DEPLOYMENT'],
                          '$(location //build/package:compiler_deployment)')
         self.assertEqual(generated['resource_env']['TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT'],
