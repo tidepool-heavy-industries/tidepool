@@ -3204,12 +3204,38 @@ impl CapturedCheckedValue {
 }
 
 enum PreparedExecutionPurpose<'a> {
-    Authored(Option<Arc<CheckedTurnCompletion>>),
+    Authored(Option<RunningCheckedTicket>),
     HostActivationPreview {
         lease: Arc<super::RuntimeLexicalScopeLease>,
         images: &'a super::prepared::NativeImageBundle,
     },
 }
+
+/// The active invocation owns failure settlement until it transfers the
+/// obligation to a captured result or the actual parked continuation.
+struct RunningCheckedTicket {
+    completion: Option<Arc<CheckedTurnCompletion>>,
+}
+
+impl RunningCheckedTicket {
+    fn completion(&self) -> &Arc<CheckedTurnCompletion> {
+        self.completion.as_ref().expect("an active running ticket")
+    }
+
+    fn handoff(mut self) {
+        self.completion.take();
+    }
+}
+
+impl Drop for RunningCheckedTicket {
+    fn drop(&mut self) {
+        if let Some(completion) = &self.completion {
+            completion.fail();
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(RunningCheckedTicket: Clone, Copy);
 
 enum TurnInstallationAdmission<'a> {
     Compilation,
@@ -3333,8 +3359,12 @@ impl PreparedCheckedTurn {
         self,
         session: &PersistentSession,
         scope: ScopeId,
-    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
-        self.prefix.start(session, scope, self.execution)
+    ) -> Result<RunningCheckedTicket, SessionError> {
+        self.prefix
+            .start(session, scope, self.execution)
+            .map(|completion| RunningCheckedTicket {
+                completion: Some(completion),
+            })
     }
 }
 
@@ -8638,7 +8668,7 @@ where
                 None => TurnImageAcquisition::Compile,
             },
             provenance,
-            checked.as_deref(),
+            checked.as_ref().map(|ticket| ticket.completion().as_ref()),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -8686,16 +8716,24 @@ where
                 return Err(error);
             }
         };
-        self.complete_prepared(
+        let completed = self.complete_prepared(
             run,
             mode,
             program,
             lexical_scope,
             provenance,
             None,
-            checked,
+            checked
+                .as_ref()
+                .map(|ticket| Arc::clone(ticket.completion())),
             settlement,
-        )
+        );
+        if completed.is_ok() {
+            if let Some(ticket) = checked {
+                ticket.handoff();
+            }
+        }
+        completed
     }
 
     fn install_admitted_turn<'a>(
@@ -10050,7 +10088,11 @@ where
                 .map_err(ResidentError::from)
                 .map_err(ResidentResumeError::Rejected)?;
         }
-        self.reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
+        let running = checked.as_ref().map(|completion| RunningCheckedTicket {
+            completion: Some(Arc::clone(completion)),
+        });
+        let resumed = self
+            .reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
             .map_err(|error| {
                 if self.state.parked_ids().contains(&frame_id) {
                     if let Some(checked) = &checked {
@@ -10063,7 +10105,13 @@ where
                     }
                     ResidentResumeError::Consumed(error)
                 }
-            })
+            });
+        if matches!(&resumed, Ok(_) | Err(ResidentResumeError::Rejected(_))) {
+            if let Some(ticket) = running {
+                ticket.handoff();
+            }
+        }
+        resumed
     }
 
     /// Move the machine onto a stack-sized eval thread, run `body`, and move the
