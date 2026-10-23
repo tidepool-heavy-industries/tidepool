@@ -89,6 +89,13 @@ pub struct NativeGroupIssuer {
 }
 
 impl NativeGroupIssuer {
+    pub(crate) fn from_observation(artifact: ArtifactId, selection: ArtifactSelectionId) -> Self {
+        Self {
+            artifact,
+            selection,
+        }
+    }
+
     pub fn artifact(self) -> ArtifactId {
         self.artifact
     }
