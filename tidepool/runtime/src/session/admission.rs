@@ -3168,6 +3168,48 @@ pub(crate) struct CheckedTurnCompletion {
 }
 
 impl CheckedTurnCompletion {
+    pub(crate) fn validate_reentry(
+        &self,
+        session: &PersistentSession,
+        scope: ScopeId,
+    ) -> Result<(), SessionError> {
+        self.prefix.settled.checkpoint()?;
+        if !self.prefix.admission.belongs_to(session) {
+            return Err(super::SessionTransitionReason::OwnerChanged.into());
+        }
+        if self.scope != scope {
+            return Err(super::SessionTransitionReason::ScopeRevoked.into());
+        }
+        session.validate_lexical_scope_lease(self.scope, &self.prefix.admission._retained_scope)?;
+        if let Some(private) = self.prefix.admission.private_execution() {
+            private.ensure_open()?;
+        }
+        if self.prefix.admission.world_reservation().is_some() {
+            self.prefix
+                .admission
+                .original_source()?
+                .validate_source_issuer()?;
+        }
+        let state = self.prefix.state.lock();
+        if state
+            .in_flight
+            .as_ref()
+            .is_none_or(|execution| !Arc::ptr_eq(execution, &self.execution))
+        {
+            return Err(super::SessionTransitionReason::WrongPhase.into());
+        }
+        if !state
+            .snapshot
+            .is_current_predecessor(&self.prefix.admission, session, self.scope)
+        {
+            return Err(super::SessionTransitionReason::PublicBaselineChanged.into());
+        }
+        if let Some(retained) = &self.prefix.retained_inputs {
+            retained.validate_item(session, self.execution.item())?;
+        }
+        Ok(())
+    }
+
     /// Native installation changes runtime selection and custody, not the
     /// compiler prefix from which this exact item was prepared. Keep its
     /// association current before evaluation can suspend on a compiler query.
