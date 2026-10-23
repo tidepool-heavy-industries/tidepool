@@ -8,8 +8,8 @@ use super::*;
 use crate::session::paired_publication::{
     tests::{
         assert_allocation_preserves_publication_semantics, assert_original_writes,
-        assert_tip_instance_counts, assert_unfrozen_operator_withdrawal, reject_missing_export,
-        reused_projection,
+        assert_tip_instance_counts, assert_unfrozen_operator_withdrawal, canonical_join_exports,
+        force_new_join, projection_is_reused, reject_missing_export, reused_projection,
     },
     AcceptedDeclarationPublication, CertifiedDeclarationPublication,
     DeclarationPublicationRejection, ExecutionPublication, FrozenWorldExecution,
@@ -18,7 +18,7 @@ use crate::session::{
     recovery, Generation, ModuleEnv, PublicManifestCommit, PublicationDecision, PublicationPhase,
     RecoveryPublicOwner, SessionId, SessionLib,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExportNamespace};
 
 #[derive(Clone)]
@@ -109,6 +109,25 @@ fn ephemeral_binding_stage(
         };
         base.stage().unwrap()
     })
+}
+
+fn force_join(
+    resident: &mut PublicationSession,
+    source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    owner: RecoveryPublicOwner,
+    intent: Arc<FrozenWorldExecution>,
+) -> AcceptedDeclarationPublication {
+    source_action_with_original(
+        resident,
+        source.original_source().clone(),
+        |resident, report| {
+            let base = resident
+                .state
+                .restage_declaration_publication(owner, intent)
+                .unwrap();
+            force_new_join(base, report)
+        },
+    )
 }
 
 fn execute_cell(
@@ -2217,4 +2236,242 @@ fn paired_binding_only_intent_removes_later_value_head_and_preserves_type_namesp
         .contains(&("%%".into(), value_id)));
     resident.retire_scope(a.private_scope());
     assert!(resident.state.bindings().get(value_id).is_some());
+}
+
+#[test]
+fn paired_rich_projection_reuses_exact_members_and_instance_graph() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(
+        SessionId(9835),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/rich-reuse").unwrap(),
+        1,
+    )
+    .unwrap();
+    resident
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let execution = begin_execution(&mut resident, &source, &owner);
+    let original = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &execution,
+        include_str!("fixtures/paired-rich-base.hs"),
+    );
+    let projection = resident
+        .state
+        .lib()
+        .log
+        .projection_at(original)
+        .unwrap()
+        .clone();
+    let intent = resident.freeze_private_execution(&execution).unwrap();
+    let oracle = force_join(&mut resident, &source, owner.clone(), intent.clone());
+    let publication = certify_declarations(&mut resident, &source, owner, intent);
+    assert!(Arc::ptr_eq(reused_projection(&publication), &projection));
+    assert_eq!(
+        canonical_join_exports(&publication),
+        canonical_join_exports(&oracle)
+    );
+    assert_eq!(
+        publication.accepted_join_for_test().instances(),
+        oracle.accepted_join_for_test().instances()
+    );
+    assert_eq!(
+        publication.accepted_join_for_test().family_closure(),
+        oracle.accepted_join_for_test().family_closure()
+    );
+    assert_eq!(
+        publication
+            .accepted_join_for_test()
+            .instances()
+            .classes
+            .len(),
+        1
+    );
+    assert_eq!(
+        publication
+            .accepted_join_for_test()
+            .instances()
+            .families
+            .len(),
+        1
+    );
+    let record = publication
+        .accepted_join_for_test()
+        .exports()
+        .iter()
+        .find(|export| export.head.occurrence == "PublicRecord")
+        .unwrap();
+    assert!(record
+        .children
+        .iter()
+        .any(|child| child.occurrence == "publicField"
+            && child.record_parent.as_deref() == Some("PublicRecord")));
+    let class = publication
+        .accepted_join_for_test()
+        .exports()
+        .iter()
+        .find(|export| export.head.occurrence == "PublicClass")
+        .unwrap();
+    assert!(class
+        .children
+        .iter()
+        .any(|child| child.occurrence == "publicClass"));
+    assert!(class
+        .children
+        .iter()
+        .any(|child| child.occurrence == "PublicFamily"));
+    let published_generation = publication.reserved_generation();
+    assert!(matches!(
+        resident
+            .state
+            .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    resident.retire_scope(execution.private_scope());
+    assert_eq!(
+        resident.state.lib().import_line_in(public).unwrap(),
+        format!("import {}", projection.module_name())
+    );
+    let graph = crate::session::recovery_test_fixture::graph(resident.state.lib());
+    let summary = graph.node(published_generation).unwrap().unwrap();
+    assert_eq!(summary.instances.classes.len(), 1);
+    assert_eq!(summary.instances.selected_family_axioms.len(), 1);
+    assert_eq!(
+        resident
+            .state
+            .lib()
+            .current_declaration_projection_in(public)
+            .unwrap()
+            .module_name(),
+        projection.module_name()
+    );
+    assert_eq!(summary.parent, None);
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 8, ..proptest::test_runner::Config::default() })]
+    #[test]
+    fn paired_projection_history_matches_forced_ghc_join(writes in proptest::collection::vec((0u8..3, -20i16..20), 1..5), contended in proptest::bool::ANY) {
+        tidepool_testing::eval_harness::require_extract();
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let recipe = InputRecipe::capture(effects.preamble().to_owned(), effects.row().to_owned(), effects.include_paths().to_vec());
+        let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
+            .with_validation_include(recipe.include.clone());
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement)).unwrap();
+        let mut resident = ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+        let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+        let public = source.scope();
+        let owner = RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/generated-attempts").unwrap(), 1).unwrap();
+        resident.initialize_durable_public_scope(owner.clone(), public).unwrap();
+        resident.set_run_context(SessionRunContext { lexical_scope: public, ..SessionRunContext::ROOT }).unwrap();
+        bootstrap_world_for(&mut resident, &recipe, &source);
+        let execution = begin_execution(&mut resident, &source, &owner);
+        let mut winners = BTreeMap::new();
+        let mut insertion_order = Vec::new();
+        let mut private_generations = Vec::new();
+        for (name, value) in writes {
+            let occurrence = format!("answer{name}");
+            let generation = execute_cell(&mut resident, &source, &recipe, &execution, &format!("{occurrence} :: Int\n{occurrence} = {value}"));
+            winners.insert(occurrence, generation);
+            insertion_order.push(generation);
+            private_generations.push(generation);
+        }
+        let intent = resident.freeze_private_execution(&execution).unwrap();
+        let private = resident.state.public_visibility_snapshot_in(execution.private_scope()).unwrap();
+        let old = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
+        let old_generation = old.reserved_generation();
+        let old = old.stage().unwrap();
+        let mut current_public_generation = None;
+        if contended {
+            let concurrent = begin_execution(&mut resident, &source, &owner);
+            let original = execute_cell(&mut resident, &source, &recipe, &concurrent, "concurrent :: Int\nconcurrent = 7");
+            insertion_order.push(original);
+            let concurrent_intent = resident.freeze_private_execution(&concurrent).unwrap();
+            let concurrent_publication = certify_declarations(&mut resident, &source, owner.clone(), concurrent_intent);
+            proptest::prop_assert!(projection_is_reused(&concurrent_publication), "concurrent winner itself is unchanged");
+            let generation = concurrent_publication.reserved_generation();
+            proptest::prop_assert!(matches!(resident.attempt_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
+            insertion_order.push(generation);
+            current_public_generation = Some(generation);
+        }
+        let old_decision = PublicationDecision::new();
+        if !contended { old_decision.request_cancellation(); }
+        let old_outcome = resident.attempt_public_manifest(old, &old_decision).unwrap();
+        proptest::prop_assert!(matches!(old_outcome, crate::session::PublicationAttempt::Rebase(_)) && contended || matches!(old_outcome, crate::session::PublicationAttempt::Settled(PublicManifestCommit::Cancelled)) && !contended);
+        let cancelled = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
+        let cancelled_generation = cancelled.reserved_generation();
+        proptest::prop_assert!(Arc::ptr_eq(cancelled.intent(), &intent));
+        let cancellation = PublicationDecision::new(); cancellation.request_cancellation();
+        proptest::prop_assert!(matches!(resident.attempt_public_manifest(cancelled.stage().unwrap(), &cancellation).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Cancelled));
+        let refused = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
+        let refused_generation = refused.reserved_generation();
+        let refused = refused.stage().unwrap();
+        let before_refusal = recovery.state();
+        recovery.store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+        proptest::prop_assert!(matches!(resident.attempt_public_manifest(refused, &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Refused { .. }), "known pre-COMMIT refusal");
+        proptest::prop_assert_eq!(recovery.state(), before_refusal);
+        proptest::prop_assert_eq!(resident.state.public_visibility_snapshot_in(execution.private_scope()).unwrap(), private);
+        let oracle = force_join(&mut resident, &source, owner.clone(), intent.clone());
+        let reused = certify_declarations(&mut resident, &source, owner.clone(), intent.clone());
+        let generation = reused.reserved_generation();
+        proptest::prop_assert!(generation > refused_generation && refused_generation > cancelled_generation && cancelled_generation > old_generation);
+        proptest::prop_assert!(Arc::ptr_eq(reused.intent(), &intent));
+        proptest::prop_assert_eq!(projection_is_reused(&reused), !contended, "full changed public snapshot must force a new join");
+        proptest::prop_assert_eq!(canonical_join_exports(&reused), canonical_join_exports(&oracle));
+        proptest::prop_assert_eq!(reused.accepted_join_for_test().instances(), oracle.accepted_join_for_test().instances());
+        proptest::prop_assert_eq!(reused.accepted_join_for_test().family_closure(), oracle.accepted_join_for_test().family_closure());
+        for (name, generation) in winners {
+            let export = reused.accepted_join_for_test().exports().iter().find(|export| export.head.occurrence == name).unwrap();
+            proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
+        }
+        proptest::prop_assert!(matches!(resident.attempt_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
+        insertion_order.push(generation);
+        let cold = recovery::load_domain_graph(Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()), crate::session::RecoveryDomainId::Root).unwrap();
+        let node = cold.node(generation).unwrap().unwrap();
+        let expected_refs = private_generations.into_iter().chain(current_public_generation).collect::<Vec<_>>();
+        proptest::prop_assert_eq!(&node.implementation_refs, &expected_refs);
+        // The independent model records when facts became durable. It does
+        // not duplicate the writer's numeric generation predicate.
+        for dependency in &node.implementation_refs {
+            proptest::prop_assert!(insertion_order.iter().position(|id| id == dependency).unwrap() < insertion_order.iter().position(|id| *id == generation).unwrap());
+        }
+        proptest::prop_assert!(cold.node(old_generation).unwrap().is_none());
+        proptest::prop_assert!(cold.node(cancelled_generation).unwrap().is_none());
+        proptest::prop_assert!(cold.node(refused_generation).unwrap().is_none());
+        proptest::prop_assert_eq!(cold.surface(&owner).unwrap().unwrap().declaration_root, Some(generation));
+        cold.context(&node.context_root).unwrap();
+    }
 }

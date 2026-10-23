@@ -1,7 +1,5 @@
 //! Owned execution intent and compiler receipts for paired publication.
 
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1706,6 +1704,32 @@ pub(in crate::session) mod tests {
             .any(|identity| identity.namespace == ExportNamespace::Value));
     }
 
+    pub(in crate::session) fn force_new_join(
+        base: DeclarationPublicationBase,
+        report: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> AcceptedDeclarationPublication {
+        let selection = base.selected_facts().unwrap();
+        match base.certify_new_join(selection, report).unwrap() {
+            CertifiedDeclarationPublication::Accepted(accepted) => accepted,
+            CertifiedDeclarationPublication::Rejected(_) => panic!("independent GHC join refused"),
+        }
+    }
+
+    pub(in crate::session) fn canonical_join_exports(
+        publication: &AcceptedDeclarationPublication,
+    ) -> Vec<DeclarationExport> {
+        canonical_exports(publication.receipt.exports())
+    }
+
+    pub(in crate::session) fn projection_is_reused(
+        publication: &AcceptedDeclarationPublication,
+    ) -> bool {
+        matches!(
+            &publication.receipt,
+            PublicationEvidence::ReusedProjection { .. }
+        )
+    }
+
     #[track_caller]
     pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
@@ -1733,217 +1757,5 @@ pub(in crate::session) mod tests {
             .adopt_staged_declaration_in(staged)
             .expect("adopt staged declaration")
             .generation
-    }
-
-    #[test]
-    fn paired_rich_projection_reuses_exact_members_and_instance_graph() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib = SessionLib::open(
-            SessionId(9835),
-            root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/rich-reuse").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let execution = session.begin_private_execution(public).unwrap();
-        let original = commit_certified_source(
-            &mut session,
-            execution.private_scope(),
-            include_str!("fixtures/paired-rich-base.hs"),
-        );
-        let projection = session.lib().log.projection_at(original).unwrap().clone();
-        let intent = session.freeze_private_execution(&execution).unwrap();
-        let base = session
-            .restage_declaration_publication(owner.clone(), intent.clone())
-            .unwrap();
-        let selection = base.selected_facts().unwrap();
-        let CertifiedDeclarationPublication::Accepted(oracle) =
-            tidepool_testing::with_settlement(|settlement| {
-                base.certify_new_join(selection, settlement)
-            })
-            .unwrap()
-        else {
-            panic!("independent GHC join refused")
-        };
-        let publication = accepted(
-            session
-                .restage_declaration_publication(owner, intent.clone())
-                .unwrap(),
-        );
-        assert!(
-            matches!(&publication.receipt, PublicationEvidence::ReusedProjection { projection: selected, .. } if Arc::ptr_eq(selected, &projection))
-        );
-        assert_eq!(
-            canonical_exports(publication.receipt.exports()),
-            canonical_exports(oracle.receipt.exports())
-        );
-        assert_eq!(publication.receipt.instances(), oracle.receipt.instances());
-        assert_eq!(
-            publication.receipt.family_closure(),
-            oracle.receipt.family_closure()
-        );
-        assert_eq!(publication.receipt.instances().classes.len(), 1);
-        assert_eq!(publication.receipt.instances().families.len(), 1);
-        let record = publication
-            .receipt
-            .exports()
-            .iter()
-            .find(|export| export.head.occurrence == "PublicRecord")
-            .unwrap();
-        assert!(record
-            .children
-            .iter()
-            .any(|child| child.occurrence == "publicField"
-                && child.record_parent.as_deref() == Some("PublicRecord")));
-        let class = publication
-            .receipt
-            .exports()
-            .iter()
-            .find(|export| export.head.occurrence == "PublicClass")
-            .unwrap();
-        assert!(class
-            .children
-            .iter()
-            .any(|child| child.occurrence == "publicClass"));
-        assert!(class
-            .children
-            .iter()
-            .any(|child| child.occurrence == "PublicFamily"));
-        let published_generation = publication.reserved_generation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        session.retire_scope(execution.private_scope());
-        assert_eq!(
-            session.lib().import_line_in(public).unwrap(),
-            format!("import {}", projection.module_name())
-        );
-        let graph = crate::session::recovery_test_fixture::graph(session.lib());
-        let summary = graph.node(published_generation).unwrap().unwrap();
-        assert_eq!(summary.instances.classes.len(), 1);
-        assert_eq!(summary.instances.selected_family_axioms.len(), 1);
-        assert_eq!(
-            session
-                .lib()
-                .current_declaration_projection_in(public)
-                .unwrap()
-                .module_name(),
-            projection.module_name()
-        );
-        assert_eq!(summary.parent, None);
-    }
-
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config { cases: 8, ..proptest::test_runner::Config::default() })]
-        #[test]
-        fn paired_projection_history_matches_forced_ghc_join(writes in proptest::collection::vec((0u8..3, -20i16..20), 1..5), contended in proptest::bool::ANY) {
-            tidepool_testing::eval_harness::require_extract();
-            let root = tempfile::tempdir().unwrap();
-            let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-            tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement)).unwrap();
-            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-            let public = session.mint_scope(ScopeId::ROOT).unwrap();
-            let owner = RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/generated-attempts").unwrap(), 1).unwrap();
-            session.initialize_durable_public_scope(owner.clone(), public).unwrap();
-            let execution = session.begin_private_execution(public).unwrap();
-            let mut winners = BTreeMap::new();
-            let mut insertion_order = Vec::new();
-            let mut private_generations = Vec::new();
-            for (name, value) in writes {
-                let occurrence = format!("answer{name}");
-                let generation = commit_certified_source(&mut session, execution.private_scope(), &format!("{occurrence} :: Int\n{occurrence} = {value}"));
-                winners.insert(occurrence, generation);
-                insertion_order.push(generation);
-                private_generations.push(generation);
-            }
-            let intent = session.freeze_private_execution(&execution).unwrap();
-            let private = session.public_visibility_snapshot_in(execution.private_scope()).unwrap();
-            let old = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
-            let old_generation = old.reserved_generation();
-            let old = old.stage().unwrap();
-            let mut current_public_generation = None;
-            if contended {
-                let concurrent = session.begin_private_execution(public).unwrap();
-                let original = commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
-                insertion_order.push(original);
-                let concurrent_intent = session.freeze_private_execution(&concurrent).unwrap();
-                let base = session.restage_declaration_publication(owner.clone(), concurrent_intent).unwrap();
-                let concurrent_publication = accepted(base);
-                proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
-                let generation = concurrent_publication.reserved_generation();
-                proptest::prop_assert!(matches!(session.attempt_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
-                insertion_order.push(generation);
-                current_public_generation = Some(generation);
-            }
-            let old_decision = PublicationDecision::new();
-            if !contended { old_decision.request_cancellation(); }
-            let old_outcome = session.attempt_public_manifest(old, &old_decision).unwrap();
-            proptest::prop_assert!(matches!(old_outcome, crate::session::PublicationAttempt::Rebase(_)) && contended || matches!(old_outcome, crate::session::PublicationAttempt::Settled(PublicManifestCommit::Cancelled)) && !contended);
-            let cancelled = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
-            let cancelled_generation = cancelled.reserved_generation();
-            proptest::prop_assert!(Arc::ptr_eq(cancelled.intent(), &intent));
-            let cancellation = PublicationDecision::new(); cancellation.request_cancellation();
-            proptest::prop_assert!(matches!(session.attempt_public_manifest(cancelled.stage().unwrap(), &cancellation).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Cancelled));
-            let refused = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
-            let refused_generation = refused.reserved_generation();
-            let refused = refused.stage().unwrap();
-            let before_refusal = recovery.state();
-            recovery.store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
-            proptest::prop_assert!(matches!(session.attempt_public_manifest(refused, &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Refused { .. }), "known pre-COMMIT refusal");
-            proptest::prop_assert_eq!(recovery.state(), before_refusal);
-            proptest::prop_assert_eq!(session.public_visibility_snapshot_in(execution.private_scope()).unwrap(), private);
-            let base = session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap();
-            let selection = base.selected_facts().unwrap();
-            let CertifiedDeclarationPublication::Accepted(oracle) = tidepool_testing::with_settlement(|settlement| base.certify_new_join(selection, settlement)).unwrap() else { panic!("GHC oracle refused") };
-            let base = session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap();
-            let reused = accepted(base);
-            let generation = reused.reserved_generation();
-            proptest::prop_assert!(generation > refused_generation && refused_generation > cancelled_generation && cancelled_generation > old_generation);
-            proptest::prop_assert!(Arc::ptr_eq(reused.intent(), &intent));
-            proptest::prop_assert_eq!(matches!(&reused.receipt, PublicationEvidence::ReusedProjection { .. }), !contended, "full changed public snapshot must force a new join");
-            proptest::prop_assert_eq!(canonical_exports(reused.receipt.exports()), canonical_exports(oracle.receipt.exports()));
-            proptest::prop_assert_eq!(reused.receipt.instances(), oracle.receipt.instances());
-            proptest::prop_assert_eq!(reused.receipt.family_closure(), oracle.receipt.family_closure());
-            for (name, generation) in winners {
-                let export = reused.receipt.exports().iter().find(|export| export.head.occurrence == name).unwrap();
-                proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
-            }
-            proptest::prop_assert!(matches!(session.attempt_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
-            insertion_order.push(generation);
-            let cold = recovery::load_domain_graph(Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()), crate::session::RecoveryDomainId::Root).unwrap();
-            let node = cold.node(generation).unwrap().unwrap();
-            let expected_refs = private_generations.into_iter().chain(current_public_generation).collect::<Vec<_>>();
-            proptest::prop_assert_eq!(&node.implementation_refs, &expected_refs);
-            // The independent model records when facts became durable. It does
-            // not duplicate the writer's numeric generation predicate.
-            for dependency in &node.implementation_refs {
-                proptest::prop_assert!(insertion_order.iter().position(|id| id == dependency).unwrap() < insertion_order.iter().position(|id| *id == generation).unwrap());
-            }
-            proptest::prop_assert!(cold.node(old_generation).unwrap().is_none());
-            proptest::prop_assert!(cold.node(cancelled_generation).unwrap().is_none());
-            proptest::prop_assert!(cold.node(refused_generation).unwrap().is_none());
-            proptest::prop_assert_eq!(cold.surface(&owner).unwrap().unwrap().declaration_root, Some(generation));
-            cold.context(&node.context_root).unwrap();
-        }
     }
 }
