@@ -601,12 +601,16 @@ parseCapturedGeneratedImports flags captured@(CapturedGeneratedScaffoldSource pa
         (Left "GHC reported errors in the captured generated root")
       origins <- capturedSourceImportOrigins captured parsed
       syntax <- either (Left . show) Right (captureImportSyntax parsed)
-      pure (CapturedGeneratedImports captured flags syntax
-        (zipWith CapturedGeneratedImportOccurrence (capturedImportOccurrences syntax) origins))
+      occurrences <- associate (capturedImportOccurrences syntax) origins
+      pure (CapturedGeneratedImports captured flags syntax occurrences)
   where
     parser = initParserState (initParserOpts flags)
       (stringToStringBuffer (Text.unpack (TextEncoding.decodeUtf8 bytes)))
       (mkRealSrcLoc (mkFastString path) 1 1)
+    associate [] [] = Right []
+    associate (occurrence:occurrences) (origin:origins) =
+      (CapturedGeneratedImportOccurrence occurrence origin :) <$> associate occurrences origins
+    associate _ _ = Left "captured generated imports lost their checked origin association"
 
 capturedGeneratedImportSource :: CapturedGeneratedImports -> CapturedGeneratedScaffoldSource
 capturedGeneratedImportSource (CapturedGeneratedImports source _ _ _) = source

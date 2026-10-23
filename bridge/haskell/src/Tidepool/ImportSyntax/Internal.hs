@@ -236,11 +236,6 @@ importOccurrenceLineage (ImportOccurrence _ _ _ lineage) = lineage
 
 data CapturedImportSyntax = CapturedImportSyntax ParsedSource [ImportOccurrence]
 
--- This is syntax equality only. The admission owner separately binds the
--- actual source bytes, root, effective policy and compilation attempt.
-instance Eq CapturedImportSyntax where
-  CapturedImportSyntax _ left == CapturedImportSyntax _ right = left == right
-
 captureImportSyntax :: Located (HsModule GhcPs) -> Either ImportSyntaxError CapturedImportSyntax
 captureImportSyntax parsed = CapturedImportSyntax parsed <$> mapM describe
   (zip [0..] (hsmodImports (unLoc parsed)))
@@ -271,7 +266,7 @@ matchDriverImports capturedSyntax@(CapturedImportSyntax _ captured) parsed = do
     bind (ImportOccurrence identity expected _ lineage, located) = do
       actual <- describeImport (unLoc located)
       unless (actual == expected) (Left (DriverImportChanged identity))
-      pure (ImportOccurrence identity actual (getLocA located) lineage)
+      pure (ImportOccurrence identity expected (getLocA located) lineage)
 
 driverImportOccurrences :: DriverImportSyntax -> [ImportOccurrence]
 driverImportOccurrences (DriverImportSyntax _ _ occurrences) = occurrences
