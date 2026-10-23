@@ -1082,11 +1082,11 @@ checkingSourceRequestRoundTrip = do
     case workerRequestFromArgv (workerArgv [EnsureExactInputs inputs]) of
       Right (Just request) -> do
         assertEqual "exact acquisition is its own operation" (Right (EnsureExactInputsOperation inputs))
-          ((requestOperation <$> admitWorkerRequest request))
+          (requestOperation <$> admitWorkerRequest request)
         assertEqual "exact acquisition has no source" [] (requestFiles request)
         assertEqual "exact acquisition cannot acquire an output" Nothing (requestOutDir request)
         assertEqual "projected source authority is refused" (Left InvalidExactInputsShape)
-          ((requestOperation <$> admitWorkerRequest request { requestFiles = ["missing.hs"] }))
+          (requestOperation <$> admitWorkerRequest request { requestFiles = ["missing.hs"] })
       other -> fail ("source-free exact inputs rejected: " ++ show other)
   forM_ [Input "missing.hs", OutputDir "missing", Include "missing", SessionArtifacts "missing"
         , ModuleCandidates "missing", HarnessProfile, Turn, PortableOutput, EnsureExactInputs resident] $ \extra ->
@@ -1155,7 +1155,7 @@ checkingSourceRequestRoundTrip = do
     let selected = query { worldQueryQuestion = WorldPublicModuleQuery (constructor publicInspection) }
     case workerRequestFromArgv (workerArgv [WorldQuery selected]) of
       Right (Just request) -> assertEqual "held-world query is one fresh exclusive operation"
-        (Right (WorldQueryOperation selected)) ((requestOperation <$> admitWorkerRequest request))
+        (Right (WorldQueryOperation selected)) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("world query rejected: " ++ show other)
   let pin = InspectionProvenance 1 "display-only"
       current = StructuredInspection StructuredCurrentScope StructuredValueName "map" pin
@@ -1165,7 +1165,7 @@ checkingSourceRequestRoundTrip = do
     let selected = query { worldQueryQuestion = WorldScopedQuery operand }
     case workerRequestFromArgv (workerArgv [WorldQuery selected]) of
       Right (Just request) -> assertEqual "closed scoped operand roundtrips through the same exclusive operation"
-        (Right (WorldQueryOperation selected)) ((requestOperation <$> admitWorkerRequest request))
+        (Right (WorldQueryOperation selected)) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("scoped world query rejected: " ++ show other)
   forM_ [ Input "missing.hs", Include "ambient", InspectOut "other", EnsureExactInputs resident
         , WorldQuery query ] $ \extra ->
@@ -1193,13 +1193,13 @@ checkingSourceRequestRoundTrip = do
         Right (Just request) -> assertEqual "one sealed private operand roundtrips"
           (case field of WorldCellPlan value -> Right (WorldCellPlanOperation value)
                          WorldCellPrepare value -> Right (WorldCellPrepareOperation value)
-                         _ -> error "closed operand fixture") ((requestOperation <$> admitWorkerRequest request))
+                         _ -> error "closed operand fixture") (requestOperation <$> admitWorkerRequest request)
         other -> fail ("private operand framing refused: " ++ show other)
   forM_ cases $ \(field,operation,expected) -> do
     [flag,payload] <- pure (workerArgv [field])
     assertEqual "held cell operation matches independent Rust framing" expected payload
     case workerRequestFromArgv [flag,payload] of
-      Right (Just request) -> assertEqual "held cell admits exactly its own operation" (Right operation) ((requestOperation <$> admitWorkerRequest request))
+      Right (Just request) -> assertEqual "held cell admits exactly its own operation" (Right operation) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("held cell codec rejected data fixture: " ++ show other)
     forM_ [0 .. length payload - 1] $ \end -> case workerRequestFromArgv [flag,take end payload] of
       Left _ -> pure ()
@@ -1217,7 +1217,7 @@ checkingSourceRequestRoundTrip = do
         ,(WorldCellPrepare repeatedPrepare,WorldCellPrepareOperation repeatedPrepare)] $ \(field,operation) ->
     case workerRequestFromArgv (workerArgv [field]) of
       Right (Just request) -> assertEqual "ordered expression variants survive held recipe admission"
-        (Right operation) ((requestOperation <$> admitWorkerRequest request))
+        (Right operation) (requestOperation <$> admitWorkerRequest request)
       other -> fail ("held cell rejected the ordinary ordered expression alternatives: " ++ show other)
   forM_ [cellPlan {worldCellPlanRecipe=cellRecipe {worldCellSource=replicate (1024*1024+1) 'λ'}}
         ,cellPlan {worldCellPlanRecipe=cellRecipe {worldCellTurnTemplates=[("","body")]}}
@@ -1364,7 +1364,7 @@ requestOperationAdmission = do
         ]
       context = [Input "Input.hs", Include "lib", BuildProductsDir "products"]
   forM_ recipes $ \(fields, expected) ->
-    forM_ [context ++ fields ++ fields, reverse (context ++ fields), fields ++ context] $ \history ->
+    forM_ [context ++ (if expected == InspectionOperation then [Input "Other.hs"] else []) ++ fields ++ fields, reverse (context ++ fields), fields ++ context] $ \history ->
       assertEqual ("operation history " ++ show history) (Right expected) (admit history)
   -- Every pair of distinct primary recipes conflicts; preview is deliberately
   -- a refinement of Turn, rather than a second operation.

@@ -18,7 +18,7 @@ module Tidepool.ExtractRequest
   , InspectionProvenance(..)
   , WorkerRequest(..)
   , RequestOperation(..)
-  , RequestShapeError(..)
+  , RequestShapeError(..), RequiredRequestField(..)
   , AdmittedWorkerRequest, RequestOptions(..)
   , AdmittedRequestOperation
       (AdmittedEnsureExactInputs, AdmittedWorldQuery, AdmittedWorldCellPlan, AdmittedWorldCellPrepare
@@ -505,15 +505,15 @@ admittedSourceFiles request = case admittedRequestOperation request of
 traverseAdmittedSources :: Applicative f => (RequestSourceRole -> FilePath -> f FilePath)
   -> AdmittedWorkerRequest -> f AdmittedWorkerRequest
 traverseAdmittedSources replace (AdmittedWorkerRequest options operation) = AdmittedWorkerRequest options <$> case operation of
-  AdmittedSourcePayload request -> (\source -> AdmittedSourcePayload request {payloadSourceProductSource=source}) <$> sourcePaths (payloadSourceProductSource request)
+  AdmittedSourcePayload request -> (\source -> AdmittedSourcePayload (request {payloadSourceProductSource=source})) <$> sourcePaths (payloadSourceProductSource request)
   AdmittedSourceCheckPayload source -> AdmittedSourceCheckPayload <$> sourcePaths source
   AdmittedTurnPayload turn -> AdmittedTurnPayload <$> turnPaths turn
   AdmittedActivationPreviewPayload turn -> AdmittedActivationPreviewPayload <$> turnPaths turn
   AdmittedCellPayload cell -> AdmittedCellPayload <$> cellPaths cell
   AdmittedCellPlanPayload cell -> AdmittedCellPlanPayload <$> cellPaths cell
-  AdmittedClassificationPayload classification -> (\paths -> AdmittedClassificationPayload classification {payloadClassificationSources=paths})
+  AdmittedClassificationPayload classification -> (\paths -> AdmittedClassificationPayload (classification {payloadClassificationSources=paths}))
     <$> traverse (\(index,path) -> replace (if index == (0 :: Int) then PrimarySource else AdditionalSource) path) (zip [0..] (payloadClassificationSources classification))
-  AdmittedInspectionPayload inspection -> (\inputs batch -> AdmittedInspectionPayload inspection {payloadInspectionInputs=inputs,payloadInspectionBatch=batch})
+  AdmittedInspectionPayload inspection -> (\inputs batch -> AdmittedInspectionPayload (inspection {payloadInspectionInputs=inputs,payloadInspectionBatch=batch}))
     <$> traverse (\(index,(path,query)) -> (\copy -> (copy,query)) <$> replace (InspectionSource index) path)
       (zip [0..] (payloadInspectionInputs inspection))
     <*> traverse (replace InspectionBatchSource) (payloadInspectionBatch inspection)
@@ -530,8 +530,8 @@ admitWorkerRequest args = do
     then pure () else Left InvalidCompilerBudget
   tag <- admitOperationTag args
   checkExclusivePayload tag
-  _ <- traverse (required "output directory" . Just) (requestOutDir args)
-  _ <- traverse (\(kind,path) -> (,) <$> required "template kind" (Just kind) <*> required "template path" (Just path)) (requestTurnTemplates args)
+  _ <- traverse (required RequiredOutputDirectory . Just) (requestOutDir args)
+  _ <- traverse (\(kind,path) -> (,) <$> required RequiredTemplateKind (Just kind) <*> required RequiredTemplatePath (Just path)) (requestTurnTemplates args)
   operation <- case tag of
     EnsureExactInputsOperation value -> pure (AdmittedEnsureExactInputsPayload value)
     WorldQueryOperation value -> pure (AdmittedWorldQueryPayload value)
@@ -540,9 +540,9 @@ admitWorkerRequest args = do
     SourceOperation -> do
       selectedSource <- source
       let targets = case requestTargets args of [] -> maybe [] (:[]) (requestTarget args); values -> values
-      _ <- traverse (required "target" . Just) targets
+      _ <- traverse (required RequiredTarget . Just) targets
       output <- if requestPortableOutput args
-        then PortableSourceOutput <$> required "portable output directory" (requestOutDir args) <*> pure targets
+        then PortableSourceOutput <$> required RequiredPortableOutputDirectory (requestOutDir args) <*> pure targets
         else pure ((if requestCertifyHomeProducts args then CertifiedSourceOutput else NativeSourceOutput) (requestOutDir args) targets)
       pure (AdmittedSourcePayload (SourceProductRequest selectedSource output))
     TurnOperation -> AdmittedTurnPayload <$> turn
@@ -552,23 +552,23 @@ admitWorkerRequest args = do
         && null (requestInjectVals args) && Map.null (requestRetainedGenerations args)) InvalidActivationPreviewShape
       AdmittedActivationPreviewPayload <$> turn
     ClassificationOperation -> AdmittedClassificationPayload <$> (ClassificationRequest
-      <$> (nonempty (requestFiles args) >>= traverse (required "classification source" . Just)) <*> required "classification output" (requestClassifyOut args) <*> pure (requestOutDir args))
+      <$> (nonempty (requestFiles args) >>= traverse (required RequiredClassificationSource . Just)) <*> required RequiredClassificationOutput (requestClassifyOut args) <*> pure (requestOutDir args))
     InspectionOperation -> do
       let paths = requestFiles args; queries = requestInspections args
       unlessShape (not (null paths) && length paths == length queries) InvalidInspectionShape
       unlessShape (case requestInspectTypeBatch args of
         Nothing -> True
         Just _ -> length queries > 1 && all isTypeQuery queries) InvalidInspectionShape
-      _ <- traverse (required "inspection source" . Just) paths
-      _ <- traverse (required "inspection batch" . Just) (requestInspectTypeBatch args)
-      output <- required "inspection output" (requestInspectOut args)
+      _ <- traverse (required RequiredInspectionSource . Just) paths
+      _ <- traverse (required RequiredInspectionBatch . Just) (requestInspectTypeBatch args)
+      output <- required RequiredInspectionOutput (requestInspectOut args)
       pure (AdmittedInspectionPayload (InspectionPayload (zip paths queries) output
         (requestInspectTypeBatch args) (requestInspectionStrict args) (requestOutDir args)))
     CellOperation -> AdmittedCellPayload <$> cell
     CellPlanOperation -> AdmittedCellPlanPayload <$> cell
     SourceCheckOperation -> AdmittedSourceCheckPayload <$> source
     DeclarationOperation manifest output -> AdmittedDeclarationPayload
-      <$> required "declaration manifest" (Just manifest) <*> required "declaration output" (Just output)
+      <$> required RequiredDeclarationManifest (Just manifest) <*> required RequiredDeclarationOutput (Just output)
   pure (AdmittedWorkerRequest options operation)
   where
     options = RequestOptions
@@ -591,10 +591,10 @@ admitWorkerRequest args = do
     nonempty values = pure values
     source = case requestFiles args of
       [] -> Left MissingRequestSource
-      path:rest -> SourceRequest <$> required "source" (Just path) <*> traverse (required "source" . Just) rest
-    turn = TurnRequest <$> source <*> required "turn output" (requestTurnOut args) <*> pure (requestTurnVerdict args)
+      path:rest -> SourceRequest <$> required RequiredSourcePath (Just path) <*> traverse (required RequiredSourcePath . Just) rest
+    turn = TurnRequest <$> source <*> required RequiredTurnOutput (requestTurnOut args) <*> pure (requestTurnVerdict args)
       <*> pure (requestTurnTemplates args) <*> pure (requestOutDir args)
-    cell = CellRequest <$> source <*> required "cell template" (requestCellTemplate args) <*> required "cell output" (requestCellOut args)
+    cell = CellRequest <$> source <*> required RequiredCellTemplate (requestCellTemplate args) <*> required RequiredCellOutput (requestCellOut args)
       <*> pure (requestTurnTemplates args) <*> pure (requestOutDir args)
     unlessShape True _ = Right ()
     unlessShape False failure = Left failure
@@ -631,6 +631,11 @@ data RequestOperation
   | DeclarationOperation FilePath FilePath
   deriving (Eq, Show)
 
+-- Names are data, so refusal consumers never branch on rendered labels.
+data RequiredRequestField
+  = RequiredSourcePath | RequiredTarget | RequiredOutputDirectory | RequiredPortableOutputDirectory | RequiredTurnOutput | RequiredCellTemplate | RequiredCellOutput | RequiredClassificationSource | RequiredClassificationOutput | RequiredInspectionSource | RequiredInspectionBatch | RequiredInspectionOutput | RequiredDeclarationManifest | RequiredDeclarationOutput | RequiredTemplateKind | RequiredTemplatePath
+  deriving (Eq, Show)
+
 data RequestShapeError
   = InvalidExactInputsShape
   | InvalidWorldQueryShape
@@ -643,7 +648,7 @@ data RequestShapeError
   | PreviewRequiresTurn
   | InvalidCompilerBudget
   | MissingRequestSource
-  | MissingRequestField String
+  | MissingRequestField RequiredRequestField
   | InvalidInspectionShape
   | InvalidActivationPreviewShape
   | ConflictingRequestFields
