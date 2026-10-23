@@ -9937,3 +9937,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "compiler_projection_acquisition_tests.rs"]
+mod acquisition_tests;
