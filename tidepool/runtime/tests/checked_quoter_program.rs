@@ -6,18 +6,91 @@ use std::sync::Arc;
 
 use super::compiler_test_support::OwnedEnvironment;
 
-use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::turn::{
-    compile_cell_program_admitted, consume_cell_program_item, TemplateSelector, TurnResult,
+    consume_cell_program_item, finish_cell_program_admitted, finish_world_cell_plan_admitted,
+    prepare_cell_program_admitted, prepare_world_cell_plan_admitted, TemplateSelector, TurnResult,
 };
 use tidepool_runtime::session::{
-    resident_cell_check_template, resident_workbench_templates, ModuleEnv, PersistentSession,
-    SessionLib, SourceImports,
+    resident_cell_check_template, resident_workbench_templates, ModuleEnv, ResidentSession,
+    SessionLib, SessionRunContext, SourceImports,
 };
 use tidepool_testing::effect_surface::TestEffectSurface;
-use tidepool_toolchain::checked_cell::CellRecipe;
 use tidepool_toolchain::CompileError;
+
+fn capture_quoter_sources(
+    includes: &[std::path::PathBuf],
+    effects: &TestEffectSurface,
+) -> (
+    tidepool_runtime::session::GenerationArtifactReference,
+    Arc<tidepool_toolchain::compiler_world::CapturedCompilerSources>,
+) {
+    use std::io::Read;
+    use tidepool_toolchain::compiler_world::{CapturedCompilerSourceRoot, CapturedCompilerSources};
+    let owner = Arc::new(tempfile::tempdir().unwrap());
+    let mut remaining = CapturedCompilerSources::capture_byte_allowance().unwrap();
+    let mut roots = Vec::new();
+    for (ordinal, include) in includes.iter().enumerate() {
+        remaining = remaining
+            .checked_sub(4)
+            .expect("quoter source root framing fits capture allowance");
+        let files = tidepool_toolchain::cache::source_root_manifest(include).unwrap();
+        let destination = owner.path().join(format!("root-{ordinal}"));
+        std::fs::create_dir_all(&destination).unwrap();
+        let mut bodies = std::collections::BTreeMap::new();
+        for (relative, digest) in &files {
+            let input = include.join(relative);
+            let length = std::fs::metadata(&input).unwrap().len();
+            let framed = 8u64
+                .checked_add(relative.as_os_str().len() as u64)
+                .and_then(|size| size.checked_add(length))
+                .unwrap();
+            remaining = remaining
+                .checked_sub(framed)
+                .expect("quoter source bytes fit capture allowance before allocation");
+            let mut body = Vec::new();
+            std::fs::File::open(&input)
+                .unwrap()
+                .take(length.checked_add(1).unwrap())
+                .read_to_end(&mut body)
+                .unwrap();
+            assert_eq!(
+                body.len() as u64,
+                length,
+                "quoter source changed during capture"
+            );
+            assert_eq!(
+                blake3::hash(&body).to_hex().as_str(),
+                digest,
+                "quoter source differs from its observed manifest"
+            );
+            let target = destination.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, &body).unwrap();
+            bodies.insert(relative.clone(), Arc::<[u8]>::from(body));
+        }
+        roots.push(CapturedCompilerSourceRoot {
+            manifest: tidepool_toolchain::cache::SourceRootManifest::from_file_digests(files)
+                .unwrap(),
+            bodies,
+        });
+    }
+    let manifests = roots
+        .iter()
+        .map(|root| root.manifest.clone())
+        .collect::<Vec<_>>();
+    let identity = tidepool_toolchain::cache::source_manifests_identity(
+        b"checked-quoter-world-source",
+        &manifests,
+    );
+    let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
+        serde_json::to_vec(&(effects.preamble(), effects.row(), identity)).unwrap(),
+    );
+    let captured =
+        CapturedCompilerSources::from_captured_roots(roots, Arc::from(reference.bytes()), owner)
+            .unwrap();
+    (reference, Arc::new(captured))
+}
 
 #[test]
 #[serial_test::serial]
@@ -40,65 +113,133 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-    let public = session.mint_scope(ScopeId::ROOT).unwrap();
+    let mut session = ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        1024 * 1024,
+        Some(lib),
+    );
+    let source_owner = session.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source_owner.scope();
+    session
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let mut includes = effects.include_paths().to_vec();
+    includes.insert(0, root.path().to_path_buf());
+    let (reference, sources) = capture_quoter_sources(&includes, &effects);
+    let admitted = session
+        .capture_inspection_world_in(public, &reference, source_owner.original_source())
+        .unwrap();
+    let settled = source_owner
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            tidepool_runtime::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, _| {
+                tidepool_runtime::session::run_admitted_compiler_world(owner, admitted, || {
+                    Ok(Some(sources))
+                })
+            },
+        )
+        .unwrap();
+    let completed = tidepool_runtime::session::finish_admitted_compiler_world(settled).unwrap();
+    assert!(session.install_compiler_world_if_current(
+        &completed,
+        &reference,
+        source_owner.original_source()
+    ));
     let source = include_str!("fixtures/checked-quoter-program.hs");
     for phase in ["first request", "repeated request"] {
-        let execution = Arc::new(session.begin_private_execution(public)?);
-        let view = execution.view()?;
+        let settled = session
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| session.begin_ephemeral_private_execution(public),
+            )
+            .unwrap();
+        assert!(settled.close().resources_retired());
+        let execution = Arc::new(settled.into_outcome().action?);
+        let private = execution.private_scope();
+        let view = session.compile_view_for_execution(&execution)?;
         let imports = view.turn_imports(&SourceImports::from_specs([
             "qualified CheckedQuoterFacade as Q",
         ]));
         let template = resident_cell_check_template(effects.preamble(), effects.row(), &imports);
         let templates = resident_workbench_templates(effects.preamble(), effects.row(), &imports);
-        let specification = Arc::new(
-            CellRecipe::new(
-                source.to_string(),
-                template.clone(),
-                templates
-                    .iter()
-                    .map(|template| {
-                        let selector = match template.kind {
-                            TemplateSelector::Decl => "decl",
-                            TemplateSelector::Bind => "bind",
-                            TemplateSelector::BindDiscard => "binddiscard",
-                            TemplateSelector::Expr => "expr",
-                        };
-                        (selector.into(), template.source.clone())
-                    })
-                    .collect(),
-                view.injected_module_names(),
-            )
-            .unwrap(),
-        );
-        let mut roots = effects.include_paths().to_vec();
-        roots.insert(0, root.path().to_path_buf());
-        let include = view.include_paths(&roots);
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &include,
-                settlement,
-            )
-        })
-        .unwrap();
-        assert_eq!(plan.items().len(), 3);
-        let admission = session
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                [7; 32],
-                include,
+        let specification = Arc::new(tidepool_extract_cmd::WorldCellRecipe {
+            source: source.to_string(),
+            template,
+            turn_templates: templates
+                .iter()
+                .map(|template| {
+                    let selector = match template.kind {
+                        TemplateSelector::Decl => "decl",
+                        TemplateSelector::Bind => "bind",
+                        TemplateSelector::BindDiscard => "binddiscard",
+                        TemplateSelector::Expr => "expr",
+                    };
+                    (selector.into(), template.source.clone())
+                })
+                .collect(),
+        });
+        let settled = session
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
                 None,
+                |_| {},
+                |session, _| session.prepare_private_execution(execution.clone(), None),
             )
             .unwrap();
+        assert!(settled.close().resources_retired());
+        let (snapshot, operand) = settled.into_outcome().action.unwrap().into_parts();
+        assert!(operand.is_none());
+        let settled = source_owner
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, _| {
+                    prepare_world_cell_plan_admitted(owner, snapshot.world(), specification, None)
+                },
+            )
+            .unwrap();
+        let plan = finish_world_cell_plan_admitted(settled).unwrap();
+        let settled = session
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    session.admit_world_planned_cell_with_snapshot(execution, snapshot, plan, None)
+                },
+            )
+            .unwrap();
+        assert!(settled.close().resources_retired());
+        let admission = settled.into_outcome().action.unwrap();
         let started = std::time::Instant::now();
-        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
+        let settled = source_owner
+            .with_source_compiler_transaction(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |owner, report| prepare_cell_program_admitted(owner, admission.clone(), report),
+            )
+            .unwrap();
+        let (checked, program) = finish_cell_program_admitted(settled)
+            .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
         assert_eq!(program.items().len(), 3);
         assert_eq!(
             (0..3)
@@ -118,27 +259,39 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             assert!(item.native().is_some());
             assert!(item.native_products().is_some());
         }
-        let first = &program.items()[0];
-        let sealed = first.native_products().unwrap();
+        let immutable_program = program.program().clone();
+        let first = &immutable_program.items()[0];
         let observation = first
             .native()
             .unwrap()
             .observation_name()
             .expect("expression owns its issued observation capture")
             .to_owned();
-        let prefix = session
-            .begin_cell_program(program.clone())
-            .unwrap()
-            .expect("checked program starts with its first expression");
-        let reservation = session
-            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
+        let settled = session
+            .with_source_compiler_transaction(
+                source_owner.original_source().clone(),
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                tidepool_runtime::CompilerTransactionCancellation::new(),
+                None,
+                |_| {},
+                |session, _| {
+                    let prefix = session
+                        .begin_cell_program(program)
+                        .unwrap()
+                        .expect("checked program starts with its first expression");
+                    session.admit_checked_item(prefix, checked.checked_item(0).unwrap())
+                },
+            )
             .unwrap();
+        assert!(settled.close().resources_retired());
+        let reservation = settled.into_outcome().action.unwrap();
+        let prefix = reservation.prefix().clone();
         assert_eq!(reservation.item().index(), 0);
         assert_eq!(reservation.observation_name(), Some(observation.as_str()));
         // Authored expressions execute through their compiler-issued singleton
         // capture; the sealed execution receipt is a Bind observation.
         let TurnResult::Bind {
-            compiled,
+            compiled: _compiled_first,
             binders,
             bound,
             ..
@@ -154,7 +307,12 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                 .collect::<Vec<_>>(),
             vec![observation.as_str()]
         );
-        let products = &sealed.recovery_products;
+        // Quotation expands during compilation. Only its own native item
+        // supplies the facade original retained for durable recovery.
+        let quoted_item = &immutable_program.items()[1];
+        assert_eq!(quoted_item.checked_item().index(), 1);
+        let quoted_products = quoted_item.native_products().unwrap();
+        let products = &quoted_products.recovery_products;
         let originals = products
             .iter()
             .filter(|product| {
@@ -163,11 +321,6 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             .collect::<Vec<_>>();
         assert_eq!(originals.len(), 1);
         let original = originals[0];
-        // Quotation expands during compilation. The fixture's opaque runtime
-        // wrapper independently supplies a fresh original for durable recovery.
-        let quoted_item = &program.items()[1];
-        assert_eq!(quoted_item.checked_item().index(), 1);
-        let quoted_products = quoted_item.native_products().unwrap();
         assert!(quoted_products.certified_groups.iter().any(|group| {
             group.owner() == original.owner()
                 && group.group().binders().iter().any(|binder| {
@@ -188,14 +341,12 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
                     && global.identity.occurrence == "describe"
             }));
         let durable = tidepool_toolchain::artifacts::compiler_scratch_directory().unwrap();
-        let producer = match program.basis() {
-            tidepool_toolchain::checked_cell::CellProgramBasis::Finite(plan) => {
-                plan.producer_sha256()
-            }
-            tidepool_toolchain::checked_cell::CellProgramBasis::World(output) => {
-                *output.producer_sha256()
-            }
+        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
+            immutable_program.basis()
+        else {
+            panic!("runtime quoter preparation must retain its actual World producer");
         };
+        let producer = *output.producer_sha256();
         let references = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
             durable.path(),
             producer,
@@ -232,7 +383,7 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
             expected_owners.len(),
             "one canonical companion per fixture owner"
         );
-        let original_context = compiled.original_execution_context().unwrap();
+        let original_context = quoted_products.original_execution_context().unwrap();
         let module_interfaces = original_context
             .materialize_module_interfaces(durable.path())
             .unwrap();
@@ -328,6 +479,8 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm(
         // Preparation must retain authority without creating authored bindings
         // or executing the quoted command's contents.
         assert_eq!(session.scope_binding_count(public), 0);
+        assert_eq!(session.scope_binding_count(private), 0);
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
     }
     Ok(())
 }
