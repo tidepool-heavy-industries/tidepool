@@ -8,7 +8,8 @@ module Tidepool.CompilerRequest
   ( BoundCompilerRequest, withBoundCompilerRequest, withBoundCompilerRequestWithNativeDemand, boundWorkerRequest
   , boundAdmittedOperation, boundTurnTemplates, boundRequestExactScope, boundParserFlags
   , compileBoundRequest, compilePreparedRequest, compilePreparedSegmentRequest
-  , runBoundGhc, withBoundExactInterfaceTransaction, cellSegmentRequest
+  , inspectBoundCheckedEnvironment, extractBoundDeclarationBinders
+  , withBoundExactInterfaceTransaction, cellSegmentRequest
   , runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation, commitPreparedWorldDependencies
   , prepareWorldCell
   , standardAuxiliaryRoots, writePreparedArtifacts, YieldSiteDelivery(..), writePreparedSidecars
@@ -40,8 +41,9 @@ import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, CompilerExecutor, compilerExecutionGrant
   , withCompilerExecutor, sameCompilerExecutor, requireCompilerExecutorOpen )
 import Tidepool.CompilerProducts
-  ( writeCertifiedSegmentProducts, writeCertifiedSegmentItemProductsWithInputs
-  , CompletedWorldProducts, completeWorldProducts, completedWorldNative
+  ( writeCertifiedSegmentItemProductsWithInputs
+  , CompletedWorldProducts, stageWorldProducts, pendingWorldNative
+  , completeWorldProducts
   , WorldStageInputs, exchangeWorldNativeDemand, bindWorldStageInputsWithNativeDemand, requireWorldStageInputs, withWorldStageBasis, worldStagePriorOriginals, withWorldStageBindings, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
   , stagedOriginalEntryOrdinal, stagedOriginalOutputFiles, publishStagedOriginalProducts
   , certifiedOriginalProducts, certifiedFinalizedArtifacts
@@ -91,6 +93,7 @@ import Tidepool.PreparedRecovery
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
 import Tidepool.Timing (readTimingEnabled, timePhase)
 import Tidepool.ExtractRequest
+import Tidepool.Introspection (InspectionWork, InspectionResult, runInspectionGhc)
 import Tidepool.GhcPipeline
 import Tidepool.HarnessSource (spliceHarnessProfilePragma)
 import Tidepool.Session
@@ -123,7 +126,7 @@ import GHC.Unit.Types (stringToUnit)
 import GHC.Driver.Ppr (showSDoc)
 import GHC.Utils.Outputable (ppr)
 import Tidepool.Binders
-  ( BoundBinder(..), CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), ExpressionLiftPlan(..)
+  ( ExportItem, extractBindersNamedGhc, BoundBinder(..), CellSourcePlan(..), CellAnalysisItem(..), CellExpressionPlan(..), ExpressionLiftPlan(..)
   , PreparedTypedSegmentSource(..), TurnOut(..), renderAskJson
   , StmtBinders(..), TurnKind(..) )
 import Tidepool.CborEncode (encodeMetadata, encodeTurnOut, encodeCellOut, encodeBoundBinder, encodeTypedSegmentPlan)
@@ -466,6 +469,24 @@ compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ _ execu
   route <- preparedCompletionFor native completed
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
     executor (completedCompilerGuard completed) Nothing route authority,preparedSegmentCaptures result)
+
+-- Production helpers expose their actual checked input or parsed source.
+-- The generic Ghc runner stays private to this request owner.
+inspectBoundCheckedEnvironment :: BoundCompilerRequest -> InspectionWork
+  -> CheckedEnvironmentResult -> [InspectionRequest] -> IO [InspectionResult]
+inspectBoundCheckedEnvironment request work checked inspections = do
+  case boundAdmittedOperation request of
+    AdmittedInspection _ -> pure ()
+    _ -> throwIO CheckedPurposeMismatch
+  runBoundGhc request $ runInspectionGhc work (crHscEnv checked)
+    (crTargetTcGblEnv checked) (crTargetRdrEnv checked) (crInspectionProbes checked) inspections
+
+extractBoundDeclarationBinders :: BoundCompilerRequest -> FilePath -> String -> IO [ExportItem]
+extractBoundDeclarationBinders request path owner = do
+  case boundAdmittedOperation request of
+    AdmittedTurn _ -> pure ()
+    _ -> throwIO CheckedPurposeMismatch
+  runBoundGhc request (extractBindersNamedGhc path (optionIncludes (boundWorkerRequest request)) owner)
 
 runBoundGhc :: BoundCompilerRequest -> Ghc a -> IO a
 runBoundGhc (BoundCompilerRequest scope _ _ admitted _ executor _ _) operation = do
@@ -956,7 +977,7 @@ data PreparedWorldCellItem = PreparedWorldCellItem
 
 -- These outputs remain private until every admitted stage has completed. The
 -- admission owns the compiler cursor; this record owns only emitted DATA.
-data PreparedWorldCellStage = PreparedWorldCellStage
+data PreparedWorldCellStage products = PreparedWorldCellStage
   { preparedWorldStageItems :: [PreparedWorldCellItem]
   , preparedWorldStageSource :: String
   , preparedWorldStageCompilerInputs :: [WorldCellInputReference]
@@ -967,7 +988,7 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
   , preparedWorldStageReceiptFields :: Encoding
   , preparedWorldStageCompletion :: PreparedCompilation
-  , preparedWorldStageProducts :: CompletedWorldProducts
+  , preparedWorldStageProducts :: products
   }
 
 correlateWorldCellItems
@@ -1083,9 +1104,12 @@ prepareWorldCellQuestion bound question = do
           unless (needed `Set.isSubsetOf` Set.fromList
               (map worldCellInputReferenceBinding (Set.toAscList selected) ++ map terminalBinding dependencies))
             (throwIO WorldCellCorrupt)
+          completedProducts <- completeWorldProducts (preparedWorldStageProducts output)
+            needed (Set.toAscList selected) (preparedWorldStageDependencyReferences output)
           let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected
-                ,preparedWorldStageDependencyReferences=dependencies}
-          prepareStages preparation (Just (preparedWorldStageProducts output))
+                ,preparedWorldStageDependencyReferences=dependencies
+                ,preparedWorldStageProducts=completedProducts}
+          prepareStages preparation (Just completedProducts)
             (Set.union earlierSelected selected) (finalizedOutput:reversed)
     -- Parsed demand sees the current source, but a retained Original's
     -- unfolding may reference an input selected by an earlier stage. Loan only
@@ -1188,8 +1212,8 @@ prepareWorldCellQuestion bound question = do
         correlated <- correlateWorldCellItems items artifacts (heldWorldCellStageItems issued) captures
           signaturesByItem
         products <- maybe (fail "world cell has no actual original inventory") pure context
-        completedProducts <- completeWorldProducts originalInterfaces stageDirectory inputs products
-        let staged = completedWorldNative completedProducts
+        pendingProducts <- stageWorldProducts originalInterfaces stageDirectory inputs products
+        let staged = pendingWorldNative pendingProducts
         preparedItemsWithInputs <- forM correlated $ \correlatedItem -> do
           let item = worldCellItemTyped correlatedItem
               sourceItem = worldCellItemSourceIdentity correlatedItem
@@ -1247,7 +1271,7 @@ prepareWorldCellQuestion bound question = do
         _ <- publishStagedOriginalProducts prepared staged
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
-          rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared completedProducts
+          rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared pendingProducts
           (concatMap (paDependencyTerminals . worldCellItemArtifact) correlated)
           (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
             Set.fromList (Map.toList producedGenerations))
@@ -1281,8 +1305,8 @@ prepareWorldCellQuestion bound question = do
         (artifacts,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
           interfaces stageDirectory completion [scaffoldTargetName] [] generations []
         products <- maybe (fail "world declaration has no actual original inventory") pure context
-        completedProducts <- completeWorldProducts interfaces stageDirectory inputs products
-        let staged = completedWorldNative completedProducts
+        pendingProducts <- stageWorldProducts interfaces stageDirectory inputs products
+        let staged = pendingWorldNative pendingProducts
         certified <- publishStagedOriginalProducts prepared staged
         let (unit,owner) = plannedOriginalOwner inventory
         originalProduct <- case [product | product <- certifiedOriginalProducts certified
@@ -1313,9 +1337,9 @@ prepareWorldCellQuestion bound question = do
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
         finishStage stageDirectory identity [fromIntegral ordinal] (plannedSource original)
-          [item] [] completion prepared completedProducts (concatMap paDependencyTerminals artifacts) publicationInputs
-    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared completedProducts terminals executionInputs = do
-        let staged = completedWorldNative completedProducts
+          [item] [] completion prepared pendingProducts (concatMap paDependencyTerminals artifacts) publicationInputs
+    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared pendingProducts terminals executionInputs = do
+        let staged = pendingWorldNative pendingProducts
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
           (preparedCompilationWorldInputs completion)
@@ -1374,7 +1398,7 @@ prepareWorldCellQuestion bound question = do
           , preparedWorldStageTypedPlans = plans
           , preparedWorldStageReceiptFields = stageReceiptFields
           , preparedWorldStageCompletion = completion
-          , preparedWorldStageProducts = completedProducts
+          , preparedWorldStageProducts = pendingProducts
           }
     rawWorldID [] = BS.empty
     rawWorldID (a:b:rest) = BS.cons (fromIntegral (16 * digitToInt a + digitToInt b)) (rawWorldID rest)

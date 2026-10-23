@@ -104,7 +104,7 @@ import Tidepool.ExactScope
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
   , preparedCompilationWorldInputs, prepareCompilationOriginals)
@@ -156,7 +156,7 @@ import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor,
 import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse, retainTypeInterfaceCaptures
   , newPreparedOriginalInterfaceArtifactsWithPrior, writeCertifiedSegmentProducts, withStagedOriginalBindings, StagedProductFailure(..)
   , bindWorldStageInputs, withWorldStageCompilation, newPreparedWorldInterfaceArtifacts
-  , withWorldStageInputs, completeWorldProducts, completedWorldNative)
+  , withWorldStageInputs, stageWorldProducts, pendingWorldNative, completeWorldProducts)
 import Tidepool.ExecutionProjection (ProjectionContext(..))
 import Tidepool.PreparedStg (newPreparedBodyCache, pmModule, pmIdentityResolver)
 import Tidepool.DiagJson (InputRejection(..))
@@ -2529,9 +2529,9 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                 (Just inputs) environment (compilationScope <$> preparedExactCompilation prepared)
                                 (pprProductInterfaces prepared) projection Set.empty (pprModules prepared)
                               originals <- newPreparedWorldInterfaceArtifacts inputs captureDirectory
-                              completedProducts <- completeWorldProducts originals captureDirectory inputs
+                              pendingProducts <- stageWorldProducts originals captureDirectory inputs
                                 (withWorldStageInputs (Just inputs) rawProducts)
-                              let staged = completedWorldNative completedProducts
+                              let staged = pendingWorldNative pendingProducts
                               selected <- withStagedOriginalBindings prepared (Just staged) projection
                               repeated <- withStagedOriginalBindings prepared (Just staged) selected
                               unless (projectionCurrentOriginals selected == projectionCurrentOriginals repeated)
@@ -2560,10 +2560,12 @@ worldCellAdmissionParse = withCapturedWorldContext $ \handles work producer prof
                                       && Map.lookup name (projectionCurrentOriginals aliases) == Just identity)
                                     (fail "two actual Names could not retain one certified identity")
                                 _ -> fail "Name refusal control needs two distinct certified binders"
+                              -- Product bytes alone do not advance the compiler cursor.
+                              withCompiledWorldStage stage (\_ _ -> pure ())
+                              completedProducts <- completeWorldProducts pendingProducts Set.empty [] []
                               stale <- try (withCompiledWorldStage stage (\_ _ -> pure ()))
                                 :: IO (Either InputRejection ())
-                              repeatedFinish <- try (void (completeWorldProducts originals captureDirectory inputs
-                                (withWorldStageInputs (Just inputs) rawProducts))) :: IO (Either InputRejection ())
+                              repeatedFinish <- try (void (completeWorldProducts pendingProducts Set.empty [] [])) :: IO (Either InputRejection ())
                               forM_ [stale,repeatedFinish] $ \refused -> unless
                                 (case refused of Left CheckedPurposeMismatch -> True; _ -> False)
                                 (fail "sealed stage allowed another borrow or completion")
@@ -3533,7 +3535,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   root <- case roots of value:_ -> pure value; _ -> fail "publication fixture has no installed package root"
   let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
       alternate = work </> "alternate-package.hi"
-  (_,location) <- readExactInterface environment owner >>= either (fail . show) pure
+  (_,location) <- readPackageInterface environment owner >>= either (fail . show) pure
   copyFile (packagePath root) alternate
   isolatedFinder <- initFinderCache
   addModuleToFinder isolatedFinder (GWIB owner NotBoot) (location {ml_hi_file=alternate})

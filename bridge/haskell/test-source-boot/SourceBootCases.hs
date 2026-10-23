@@ -53,7 +53,8 @@ import Data.Text.Encoding qualified as TE
 import GHC (runGhc, getSession, setSession, getSessionDynFlags, setSessionDynFlags, SafeHaskellMode(Sf_None), ms_mod, ms_mod_name, ms_location, ms_hsc_src, ms_hspp_buf, ms_hspp_file, ms_hspp_opts, parseModule, typecheckModule, TypecheckedModule(..), ParsedModule(..))
 import GHC.Core qualified as Core
 import GHC.Builtin.Types (boolTy, intTy, charTy, stringTy, intDataCon)
-import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy)
+import GHC.Core.Type (mkVisFunTyMany, mkTyVarTy, mkForAllTy, splitFunTys, splitTyConApp_maybe)
+import GHC.Core.Multiplicity (scaledThing)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Class (className)
 import GHC.Core.InstEnv (instEnvElts, is_cls_nm, is_dfun_name)
@@ -86,7 +87,7 @@ import GHC.Tc.Utils.Monad (initIfaceCheck)
 import GHC.Data.Maybe qualified as MaybeErr
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), HomeModLinkable(..), lookupHpt, addToHpt, emptyHomePackageTable, filterHpt)
 import GHC.Utils.Logger (Logger, initLogger, makeThreadSafe, popLogHook, pushLogHook)
-import GHC.Unit.Finder (initFinderCache, addModuleToFinder, findImportedModule)
+import GHC.Unit.Finder (initFinderCache, addHomeModuleToFinder, addModuleToFinder, findImportedModule)
 import GHC.Unit.Finder.Types (FinderCache(..), FindResult(..), InstalledFindResult(..))
 import GHC.Unit.Module.Location (ml_hi_file, ml_hs_file)
 import GHC.Types.PkgQual (PkgQual(..), RawPkgQual(..))
@@ -95,7 +96,7 @@ import GHC.Types.SourceText (sl_fs)
 import GHC.Builtin.Names (gHC_PRIM)
 import GHC.Tc.Types (tcg_imports, tcg_type_env, tcg_mod)
 import GHC.Unit.Module.Deps (imp_mods, dep_orphs, Usage(..))
-import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
+import GHC.Unit.Module.Graph (ModuleGraph, ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Types.SourceFile (HscSource(..))
 import Control.Monad.IO.Class (liftIO)
 import GHC.Driver.Session (importPaths, ghcMode, GhcMode(CompManager, OneShot), targetProfile, wopt_set, xopt, WarningFlag(Opt_WarnMissingSignatures))
@@ -188,7 +189,7 @@ import Tidepool.DependencyEvidence
   , DependencyQualifier(..), renderDependencyQualifier
   , selectedFreshHomeRequirements, renderDependencyEvidence, validateDependencyEvidence )
 import Tidepool.ExactHydration
-  ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, installExactLexicalGraph
+  ( CheckedTemplateInterface(..), CheckedTemplateImports(..), newOriginalInterfaceArtifacts, originalInterfaceBytes, ExactIfaceArtifact(..), freshExactState, noCheckedValueImports, CheckedValueImportAuthority, noGeneratedScaffoldImports, projectExactLexicalGraph, exactInterfaceSummary
   , runExactInterfaceOperation, readCheckedValueImportAuthority, readExactIfaceArtifacts, hydrateExactScope
   , readVerifiedExactIfaceClosure, readVerifiedExactIfaceClosureWithCheckedValues
   , selectVerifiedExactInterfaces, selectVerifiedValueInterfaces, checkedValueImportAuthorityFromVerified
@@ -229,7 +230,7 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin)
 import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmYieldSites, pmSiteRejections)
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule, emitHostBindingInterface)
@@ -593,16 +594,16 @@ checkedValueImports = withScratch $ \work -> do
   let artifact = ExactIfaceArtifact "main" "Tidepool.Session.Val.G2" hi (digest bytes) []
   fresh <- freshExactState producer
   verified <- readCheckedValueImportAuthority fresh [artifact] >>= either fail pure
-  present <- installExactLexicalGraph sourceGraph [] verified producer >>= either fail pure
-  absent <- installExactLexicalGraph sourceGraph [] verified fresh >>= either fail pure
+  present <- either fail (pure . fst) (projectExactLexicalGraph sourceGraph [] verified noGeneratedScaffoldImports producer)
+  absent <- either fail (pure . fst) (projectExactLexicalGraph sourceGraph [] verified noGeneratedScaffoldImports fresh)
   unless ([ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph present)]
       == [mkModuleName "CheckedValueConsumer"]
       && case lookupHpt (hsc_HPT absent) valueName of Nothing -> True; Just _ -> False) $
     fail "checked value import authority installed a value or added a lexical implementation"
-  unverified <- installExactLexicalGraph sourceGraph [] noCheckedValueImports producer
+  let unverified = projectExactLexicalGraph sourceGraph [] noCheckedValueImports noGeneratedScaffoldImports producer
   unless (case unverified of Left _ -> True; Right _ -> False) $
     fail "an HPT value without checked import authority became importable"
-  collision <- installExactLexicalGraph (hsc_mod_graph producer) [] verified producer
+  let collision = projectExactLexicalGraph (hsc_mod_graph producer) [] verified noGeneratedScaffoldImports producer
   unless (case collision of Left _ -> True; Right _ -> False) $
     fail "checked value authority admitted a fresh source owner"
   forM_ [artifact { exactModule = "Tidepool.Session.Val.G3" }
@@ -3294,7 +3295,7 @@ verifyOriginalOnlyPackageRefusal work original outcomes certified = do
         Left actual | (reason ++ ": " ++ unit ++ ":" ++ name ++ ".") `isPrefixOf` actual -> pure ()
         Left actual -> fail ("original package fault reached another refusal: " ++ actual)
         Right _ -> fail "original-only package demand sealed without its defining interface"
-  (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  (_,location) <- readPackageInterface env owner >>= either (fail . show) pure
   unless (ml_hi_file location == path)
     (fail "original package fault does not target its actual defining interface")
   (_,witness) <- resolvePackageGlobal env binder >>= either fail pure
@@ -6671,7 +6672,7 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   mutable <- forM (zip [0 :: Int ..] selected) $ \(index, root) -> do
     let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
         path = work </> ("package-proof-root-" ++ show index ++ ".hi")
-    (_, location) <- readExactInterface producer owner >>= either (fail . show) pure
+    (_, location) <- readPackageInterface producer owner >>= either (fail . show) pure
     bytes <- BS.readFile (packagePath root)
     BS.writeFile path bytes
     addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
@@ -6988,7 +6989,7 @@ selectedHomeInstanceEdges = withScratch $ \work -> do
     Right _ -> fail "selected home receipt accepted an unmatched source owner"
   libdir <- getLibdir
   runGhc (Just libdir) $ do
-    rebuilt <- liftIO (installExactLexicalGraph (mkModuleGraph consumers) lexical noCheckedValueImports producer)
+    rebuilt <- liftIO (ghcOracleLexicalEnvironment (mkModuleGraph consumers) lexical noCheckedValueImports producer)
     setSession =<< either (liftIO . fail) pure rebuilt
     case consumers of
       [ModuleNode _ summary] -> do
@@ -7142,7 +7143,7 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
     ++ show ((lookupFinished - lookupStarted) `div` 1000000))
   let baseOwner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Base")
       implicit = package { symbolOccurrence = "fmap" }
-  (baseInterface, _) <- readExactInterface producer baseOwner >>= either (fail . show) pure
+  (baseInterface, _) <- readPackageInterface producer baseOwner >>= either (fail . show) pure
   unless (any (\(_, declaration) -> mkVarOcc "fmap" `elem` ifaceDeclImplicitBndrs declaration)
       (mi_decls baseInterface)) $
     fail "package catalog fixture does not demand an implicit class binder"
@@ -7251,7 +7252,7 @@ verifyChangedPackageInterface producer identity encodeIn global = withScratch $ 
   let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
         (mkModuleName (T.unpack (symbolModule identity)))
       path = work </> "mutable-package.hi"
-  (_, location) <- readExactInterface producer owner >>= either (fail . show) pure
+  (_, location) <- readPackageInterface producer owner >>= either (fail . show) pure
   original <- BS.readFile (ml_hi_file location)
   BS.writeFile path original
   finder <- initFinderCache
@@ -7608,11 +7609,10 @@ verifyHydration work cold = do
       Left reason -> liftIO (fail ("fresh SOURCE hydration refused: " ++ reason))
       Right _ -> pure ()
 
--- Observe actual GHC finder operations, without timing thresholds or compiler
--- authority fixtures. A missing package key must never consult an ancestor
--- attempt; package results survive while source choices and file hashes do not.
+-- END releases the active environment while completed dependency owners stay
+-- selectable from the fixed compiler universe in the next request.
 compilerBootStateIsolation :: IO ()
-compilerBootStateIsolation = withScratch $ \work -> do
+compilerBootStateIsolation = withTiming $ withScratch $ \work -> do
   let helper = mkModuleName "BootDependency"
       target = work </> "BootTarget.hs"
   writeFile (work </> "BootDependency.hs")
@@ -7623,8 +7623,8 @@ compilerBootStateIsolation = withScratch $ \work -> do
       initial <- scopedRunGhc scope getSession
       unless (isNothing (lookupHpt (hsc_HPT initial) helper)) $
         fail "new compiler scope inherited a HOME interface before compilation"
-      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
-      unless (fmap renderType (crResultType result) == Just "Int") $
+      result <- scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult result)) == Just "Int") $
         fail "boot-state producer changed the checked result type"
       observed <- scopedRunGhc scope getSession
       unless (isJust (lookupHpt (hsc_HPT observed) helper)) $
@@ -7637,11 +7637,67 @@ compilerBootStateIsolation = withScratch $ \work -> do
         fail "END published the previous attempt's HOME table, graph or targets"
       unless (names == (nsUniqChar (hsc_NC initial),nsNames (hsc_NC initial))) $
         fail "new scope replaced the fixed boot NameCache owner"
-      result <- scopedCompile scope CheckedEnvironment Set.empty GeneralCompile Nothing target [work] Nothing
-      unless (fmap renderType (crResultType result) == Just "Int"
-          && isJust (lookupHpt (hsc_HPT (crHscEnv result)) helper)) $
-        fail "fresh scope could not select its completed dependency after END"
+      (result,diagnostics) <- captureDiagnostics $
+        scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] Nothing
+      unless (fmap renderType (prResultType (pprPipelineResult result)) == Just "Int"
+          && isJust (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult result))) helper)
+          && counterValues "transaction_reused_source_products" diagnostics == [1]) $
+        fail ("fresh scope did not reuse its completed dependency after END: " ++ diagnostics)
 
+-- SOURCE backedges must tie the current target's real TyCon, even when the
+-- boot interface and dependency source are unchanged. Nominal eqType alone
+-- cannot detect an old TyCon with the same Name and a stale representation.
+lazySourceBackedge :: IO ()
+lazySourceBackedge = withTiming $ withScratch $ \work -> do
+  let target = work </> "LazyBackedgeTarget.hs"
+      dependency = mkModuleName "LazyBackedgeDependency"
+      fixture name = "test-source-boot/fixtures" </> name
+      install name = copyFile (fixture name) target
+      compile scope = scopedCompile scope (PreparedProducts Nothing) Set.empty GeneralCompile
+        Nothing target [work] Nothing
+      completed label expected scope = do
+        (prepared,diagnostics) <- captureDiagnostics (compile scope)
+        unless (counterValues "transaction_reused_source_products" diagnostics == [expected]) $
+          fail (label ++ " did not exercise its expected source-reuse cut: " ++ diagnostics)
+        home prepared
+      home prepared = maybe (fail "SOURCE backedge lost its completed dependency") pure
+        (lookupHpt (hsc_HPT (prHscEnv (pprPipelineResult prepared))) dependency)
+      field label expected retained = do
+        identifier <- case [value | value <- typeEnvIds (md_types (hm_details retained))
+            , getOccString value == "observeToken"] of
+          [value] -> pure value
+          _ -> fail (label ++ ": SOURCE dependency lost its actual exported Id")
+        actual <- case splitFunTys (idType identifier) of
+          ([argument],_) | Just (owner,[]) <- splitTyConApp_maybe (scaledThing argument)
+            , [constructor] <- tyConDataCons owner
+            , [payload] <- DC.dataConOrigArgTys constructor -> pure (scaledThing payload)
+          _ -> fail (label ++ ": SOURCE dependency retained an abstract boot TyCon")
+        unless (eqType actual expected) $
+          fail (label ++ ": SOURCE dependency retained the wrong target representation: " ++ renderType actual)
+  forM_ ["LazyBackedgeDependency.hs","LazyBackedgeTarget.hs-boot"] $ \name ->
+    copyFile (fixture name) (work </> name)
+  install "LazyBackedgeTarget.hs"
+  withResidentCompilerScopes [work] $ \runScope -> do
+    -- Force the retained HMI only after its producing request and compiler-view
+    -- directory have ended; the lazy HOME knot must retain actual inputs.
+    retained <- runScope (pure ()) (completed "cold SOURCE backedge" 0)
+    field "cold retained" intTy retained
+    warm <- runScope (pure ()) (completed "warm SOURCE backedge" 1)
+    field "unchanged warm" intTy warm
+    -- B depends on the unchanged SOURCE boot summary. Its source, boot
+    -- dependency digest and exact inputs still match; GHC reties its details
+    -- against the changed ordinary target without a new B frontend.
+    install "LazyBackedgeTargetChanged.hs"
+    changed <- runScope (pure ()) (completed "changed SOURCE backedge" 1)
+    field "changed warm" boolTy changed
+    field "original after target change" intTy retained
+  -- An independently booted compiler supplies the changed-source oracle.
+  withResidentCompilerScopes [work] $ \runScope ->
+    runScope (pure ()) (\scope -> completed "independent cold SOURCE backedge" 0 scope >>= field "independent cold" boolTy)
+
+-- Observe actual GHC finder operations, without timing thresholds or compiler
+-- authority fixtures. A missing package key must never consult an ancestor
+-- attempt; package results survive while source choices and file hashes do not.
 packageFinderHistoryIsolation :: IO ()
 packageFinderHistoryIsolation = withScratch $ \work -> do
   libdir <- getLibdir
@@ -7834,7 +7890,7 @@ lazyHomePackageInstances = withScratch $ \work -> do
       && isJust (lookupHpt (hsc_HPT hydrated) helperName)
       && not (Set.null homeDfuns) && Set.null (Set.intersection homeDfuns externalDfuns)) $
     fail "home table replacement changed the retained original's visibility"
-  lexical <- installExactLexicalGraph consumerGraph [(artifact,[])] noCheckedValueImports selected
+  lexical <- ghcOracleLexicalEnvironment consumerGraph [(artifact,[])] noCheckedValueImports selected
     >>= either fail pure
   removeFile helperSource
   libdir <- getLibdir
@@ -7892,3 +7948,19 @@ lazyHomePackageInstances = withScratch $ \work -> do
 -- Fixture requests pass the production pure admission before compiler binding.
 admitFixtureRequest :: WorkerRequest -> AdmittedWorkerRequest
 admitFixtureRequest request = either (error . show) id (admitWorkerRequest request)
+
+-- Independent GHC oracle: preserve the hydrated HMI, including lazy closures,
+-- while giving GHC the lexical graph used to consume it. A deleted interface
+-- path stays deleted; the retained HPT must suffice. This is not a production
+-- interface installer or a source/native permission issuer.
+ghcOracleLexicalEnvironment :: ModuleGraph -> [(ExactIfaceArtifact, [(String,String)])]
+  -> CheckedValueImportAuthority -> HscEnv -> IO (Either String HscEnv)
+ghcOracleLexicalEnvironment graph lexical checked environment =
+  case projectExactLexicalGraph graph lexical checked noGeneratedScaffoldImports environment of
+    Left failure -> pure (Left failure)
+    Right (projected,rows) -> do
+      forM_ rows $ \(artifact,_) ->
+        addHomeModuleToFinder (hsc_FC projected) (hsc_home_unit projected)
+          (GWIB (mkModuleName (exactModule artifact)) NotBoot)
+          (ms_location (exactInterfaceSummary projected artifact))
+      pure (Right projected)

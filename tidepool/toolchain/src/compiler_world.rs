@@ -18,7 +18,7 @@ use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
 use crate::exact_context::{
-    MaterializedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
+    DecodedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
 };
 use crate::CompileError;
 
@@ -1409,7 +1409,7 @@ pub struct CompilerWorldRestoration {
     inputs: WorldInputResources,
     product: Arc<[u8]>,
     compiler_input_identity: [u8; 32],
-    primary_root: MaterializedContext,
+    primary_root: DecodedContext,
     runtime_context_blocks: ReachableBlocks,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>,
@@ -1739,12 +1739,12 @@ pub struct CompilerWorld {
     position: Option<WorldCellPosition>,
 }
 
-/// The exact typed compiler progress a private execution can carry into public
-/// promotion. Only the compiler owner can classify its own products; runtime
-/// code never guesses this from tool names, `position.is_none()`, or Arc
-/// address identity.
+/// The completed compiler progress a private execution can carry into public
+/// promotion. Changed branches retain their issuing settled frontier; promotion
+/// authenticates its exact kind and lineage. Runtime does not infer progress
+/// from tool names, absent positions or pointer identity.
 #[derive(Clone, Debug)]
-pub enum PrivateCompilerProgress {
+pub enum CompletedPrivateCompilerProgress {
     /// The private World is the exact borrowed public product with no compiler
     /// additions. Publication keeps the latest public World instead of
     /// restoring the older borrowed base.
@@ -1756,10 +1756,6 @@ pub enum PrivateCompilerProgress {
     /// named facts were projected into the private World. No checked item
     /// completed for this invocation.
     HostChanged(Arc<PrivateSettledFrontier>),
-    /// Compiler work started, changed its input, was refused, or otherwise
-    /// never produced a completed checked successor. None of these may become
-    /// either successful publication branch.
-    Incomplete,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1917,11 +1913,11 @@ impl PrivateSettledFrontier {
         Arc::ptr_eq(&self.world, world)
     }
 
-    pub fn publication(self: &Arc<Self>) -> PrivateCompilerProgress {
+    pub fn publication(self: &Arc<Self>) -> CompletedPrivateCompilerProgress {
         match self.kind {
-            PrivateSettledKind::Borrowed => PrivateCompilerProgress::Unchanged,
-            PrivateSettledKind::Host => PrivateCompilerProgress::HostChanged(self.clone()),
-            PrivateSettledKind::Checked => PrivateCompilerProgress::Checked(self.clone()),
+            PrivateSettledKind::Borrowed => CompletedPrivateCompilerProgress::Unchanged,
+            PrivateSettledKind::Host => CompletedPrivateCompilerProgress::HostChanged(self.clone()),
+            PrivateSettledKind::Checked => CompletedPrivateCompilerProgress::Checked(self.clone()),
         }
     }
 
@@ -2343,12 +2339,12 @@ impl CompilerWorld {
         original_public: &Arc<Self>,
         private: &Arc<Self>,
         target_scope: u64,
-        progress: &PrivateCompilerProgress,
+        progress: &CompletedPrivateCompilerProgress,
         declaration: Option<CompilerWorldDeclarationPublication>,
         visible_changes: impl IntoIterator<Item = (&'a str, Option<(tidepool_repr::SessionVarId, u64)>)>,
     ) -> Result<Arc<Self>, CompileError> {
         let checked_prefix = match progress {
-            PrivateCompilerProgress::Checked(frontier) => {
+            CompletedPrivateCompilerProgress::Checked(frontier) => {
                 frontier.validate_publication(
                     original_public,
                     private,
@@ -2356,7 +2352,7 @@ impl CompilerWorld {
                 )?;
                 true
             }
-            PrivateCompilerProgress::HostChanged(frontier) => {
+            CompletedPrivateCompilerProgress::HostChanged(frontier) => {
                 frontier.validate_publication(
                     original_public,
                     private,
@@ -2364,7 +2360,7 @@ impl CompilerWorld {
                 )?;
                 false
             }
-            PrivateCompilerProgress::Unchanged | PrivateCompilerProgress::Incomplete => {
+            CompletedPrivateCompilerProgress::Unchanged => {
                 return Err(source_failure(
                     "private publication progress is not promotable",
                 ));
@@ -3438,7 +3434,7 @@ impl WorldColdRows {
         let iface = find(K::Interface)?;
         let packages = find(K::Packages)?;
         let canonical = match &entry.payload {
-            ArtifactPayload::Original(product) => product.module_interface(),
+            ArtifactPayload::Original(product) => Some(product.module_interface()),
             ArtifactPayload::Canonical(interface) => Some(interface),
             ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
         };
@@ -3897,7 +3893,7 @@ impl CompilerWorldOpenInputs {
 impl WorldInputResources {
     fn materialize_primary(
         primary: &crate::declaration_context::WorldPrimaryInputs,
-    ) -> Result<(MaterializedContext, ReachableBlocks), CompileError> {
+    ) -> Result<(DecodedContext, ReachableBlocks), CompileError> {
         let snapshot = primary.context().snapshot();
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
@@ -4727,7 +4723,8 @@ impl WorldCellStageIdentity {
         match fields.first().map(answer_text).transpose()? {
             Some("exec") if fields.len() == 2 => {
                 let typed_digest = answer_text(&fields[1])?;
-                let digest = crate::execution_source::parse_digest(typed_digest)?;
+                let digest = crate::execution_source::parse_digest(typed_digest)
+                    .map_err(world_response_decode_error)?;
                 if world_hex(&digest) != typed_digest {
                     return Err(world_response_error(
                         CompilerResponseRejection::ProvenanceMismatch,
@@ -6043,8 +6040,7 @@ impl WorldInputRef {
             }
             WorldCellRuntimeInputOrigin::BaseWorld | WorldCellRuntimeInputOrigin::CellOperand => {
                 let seal = ParsedWorldRowSeal {
-                    cid: cid::Cid::try_from(bytes)
-                        .map_err(|_| world_response_error(CompilerResponseRejection::Malformed))?,
+                    cid: cid::Cid::try_from(bytes).map_err(world_response_decode_error)?,
                     encoded: bytes.to_vec(),
                 };
                 if origin == WorldCellRuntimeInputOrigin::BaseWorld {
@@ -6518,7 +6514,7 @@ fn admit_world_preparation_response(
     directory: Arc<tempfile::TempDir>,
     bytes: &[u8],
     mut validation: crate::recovery_artifacts::PackageInterfaceValidation,
-    native_demands: native_demand::WorldDependencyObservations,
+    mut native_demands: native_demand::WorldDependencyObservations,
 ) -> Result<Result<WorldCellOutputAdmission, WorldQueryRejection>, CompileError> {
     if !Arc::ptr_eq(&reservation, &native_demands.reservation)
         || !Arc::ptr_eq(&validation.inventory, &native_demands.operation)
@@ -7393,6 +7389,20 @@ pub fn restore_world(
 #[cfg(test)]
 mod answer_tests {
     use super::*;
+    fn assert_response_rejection<T>(
+        result: Result<T, CompileError>,
+        expected: CompilerResponseRejection,
+    ) -> tidepool_extract_cmd::SpawnError {
+        let Err(CompileError::CompilerEndpoint(error)) = result else {
+            panic!("expected a typed accepted-response refusal: {expected:?}");
+        };
+        assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.response_rejection(), Some(expected));
+        assert!(!error.definitely_unsubmitted());
+        assert!(!error.permits_rebind());
+        error
+    }
+
     #[test]
     fn response_rejections_preserve_typed_cause_and_uncertain_settlement() {
         use tidepool_extract_cmd::CompilerResponseRejection as R;
@@ -7521,19 +7531,7 @@ mod answer_tests {
             assert_eq!(&answer_array(&mutated, 9).unwrap()[..8], &fields[..8]);
             let mut encoded = Vec::new();
             ciborium::ser::into_writer(&mutated, &mut encoded).unwrap();
-            let Err(CompileError::CompilerEndpoint(error)) = replay(&encoded) else {
-                panic!("mutated actual stage output did not reach endpoint refusal");
-            };
-            assert_eq!(error.source.kind(), std::io::ErrorKind::InvalidData);
-            assert_eq!(
-                error
-                    .source
-                    .get_ref()
-                    .and_then(|cause| cause.downcast_ref::<Rejection>()),
-                Some(&expected),
-            );
-            assert!(!error.definitely_unsubmitted());
-            assert!(!error.permits_rebind());
+            assert_response_rejection(replay(&encoded), expected);
         };
         for stage in [0, last] {
             for role in 0..3 {
@@ -7856,27 +7854,29 @@ mod answer_tests {
         assert!(
             link_world_prior_input(&input, &producer, &consumer, &consumer, 900, &files).is_ok()
         );
-        assert!(
-            link_world_prior_input(&input, &producer, &consumer, &consumer, 100, &files).is_err(),
-            "public World scope cannot replace the actual reservation scope"
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &consumer, &consumer, 100, &files),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
-        assert!(
-            link_world_prior_input(&input, &producer, &stage(0, 2), &consumer, 900, &files)
-                .is_err()
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &stage(0, 2), &consumer, 900, &files),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
-        assert!(
-            link_world_prior_input(&input, &producer, &stage(1, 1), &consumer, 900, &files)
-                .is_err()
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &stage(1, 1), &consumer, 900, &files),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
-        assert!(link_world_prior_input(
-            &input,
-            &producer,
-            &consumer,
-            &consumer,
-            900,
-            &BTreeMap::new()
-        )
-        .is_err());
+        assert_response_rejection(
+            link_world_prior_input(
+                &input,
+                &producer,
+                &consumer,
+                &consumer,
+                900,
+                &BTreeMap::new(),
+            ),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
         let wrong = BTreeMap::from([(
             PathBuf::from("item-0/value.hi"),
             WorldOutputFile {
@@ -7884,13 +7884,14 @@ mod answer_tests {
                 sha256: [6; 32],
             },
         )]);
-        assert!(
-            link_world_prior_input(&input, &producer, &consumer, &consumer, 900, &wrong).is_err()
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &consumer, &consumer, 900, &wrong),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
         let later = stage(3, 5);
-        assert!(
-            link_world_prior_input(&input, &producer, &consumer, &later, 900, &files).is_err(),
-            "earlier availability without selected custody cannot supply a later stage"
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &consumer, &later, 900, &files),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
         let mut selected_consumer = consumer.clone();
         selected_consumer.selected_inputs.push(input.clone());
@@ -7914,22 +7915,24 @@ mod answer_tests {
                 2 => reference.session_var += 1,
                 _ => reference.generation += 1,
             }
-            assert!(
-                link_world_prior_input(&input, &producer, &altered, &later, 900, &files).is_err(),
-                "a matching join key cannot replace the full earlier selected witness"
+            assert_response_rejection(
+                link_world_prior_input(&input, &producer, &altered, &later, 900, &files),
+                CompilerResponseRejection::ProvenanceMismatch,
             );
         }
-        assert!(
-            link_world_prior_input(&input, &producer, &consumer, &stage(0, 0), 900, &files)
-                .is_err(),
-            "a future original capture consumer cannot authorize an earlier stage"
+        assert_response_rejection(
+            link_world_prior_input(&input, &producer, &consumer, &stage(0, 0), 900, &files),
+            CompilerResponseRejection::ProvenanceMismatch,
         );
         let Value::Array(fields) = &packet else {
             unreachable!()
         };
         let mut old = fields.clone();
         old.remove(0);
-        assert!(WorldInputRef::decode(&world_array(old)).is_err());
+        assert_response_rejection(
+            WorldInputRef::decode(&world_array(old)),
+            CompilerResponseRejection::Malformed,
+        );
         for origin in [
             world_array(vec![integer(3)]),
             world_array(vec![integer(1), integer(0)]),
@@ -7938,19 +7941,34 @@ mod answer_tests {
         ] {
             let mut changed = fields.clone();
             changed[0] = origin;
-            assert!(WorldInputRef::decode(&world_array(changed)).is_err());
+            assert_response_rejection(
+                WorldInputRef::decode(&world_array(changed)),
+                CompilerResponseRejection::Malformed,
+            );
         }
         for bad_seal in [world_blob([5; 31]), world_blob([5; 33])] {
             let mut changed = fields.clone();
             changed[6] = bad_seal;
-            assert!(WorldInputRef::decode(&world_array(changed)).is_err());
+            assert_response_rejection(
+                WorldInputRef::decode(&world_array(changed)),
+                CompilerResponseRejection::Malformed,
+            );
         }
         let mut as_base = fields.clone();
         as_base[0] = world_array(vec![integer(0)]);
-        assert!(
-            WorldInputRef::decode(&world_array(as_base)).is_err(),
-            "an interface digest is not a row CID"
+        let error = assert_response_rejection(
+            WorldInputRef::decode(&world_array(as_base)),
+            CompilerResponseRejection::Malformed,
         );
+        let failure = error
+            .source
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<tidepool_extract_cmd::CompilerResponseFailure>())
+            .unwrap();
+        assert!(failure
+            .cause()
+            .get_ref()
+            .is_some_and(|cause| cause.is::<cid::Error>()));
         let a = (
             WorldCellRuntimeInputOrigin::PriorStage {
                 producer: 0,
@@ -8176,9 +8194,9 @@ mod answer_tests {
                 unreachable!()
             };
             fields[3] = world_array(vec![base.clone(), duplicate]);
-            assert!(
-                decode(changed, &manifest).is_err(),
-                "duplicate origin/alias refuses even with a different seal"
+            assert_response_rejection(
+                decode(changed, &manifest),
+                CompilerResponseRejection::ProvenanceMismatch,
             );
         }
         let checked = decode(rows.clone(), &manifest).unwrap();
@@ -8196,19 +8214,37 @@ mod answer_tests {
             unreachable!()
         };
         old_fields.pop();
-        assert!(
-            decode(old_rows, &manifest).is_err(),
-            "PREP5 stage rows have no dependency-terminal owner"
+        assert_response_rejection(
+            decode(old_rows, &manifest),
+            CompilerResponseRejection::Malformed,
         );
-        assert!(decode(vec![], &manifest).is_err());
-        assert!(decode(rows[..1].to_vec(), &manifest).is_err());
-        assert!(decode(vec![rows[1].clone(), rows[0].clone()], &manifest).is_err());
-        assert!(decode(vec![rows[0].clone(), rows[0].clone()], &manifest).is_err());
+        assert_response_rejection(
+            decode(vec![], &manifest),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
+        assert_response_rejection(
+            decode(rows[..1].to_vec(), &manifest),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
+        assert_response_rejection(
+            decode(vec![rows[1].clone(), rows[0].clone()], &manifest),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
+        assert_response_rejection(
+            decode(vec![rows[0].clone(), rows[0].clone()], &manifest),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
         let mut corrupt = manifest.clone();
         corrupt.insert(PathBuf::from("stage-0/module-products.cbor"), [99; 32]);
-        assert!(decode(rows.clone(), &corrupt).is_err());
+        assert_response_rejection(
+            decode(rows.clone(), &corrupt),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
         corrupt.remove(Path::new("stage-0/module-products.cbor"));
-        assert!(decode(rows.clone(), &corrupt).is_err());
+        assert_response_rejection(
+            decode(rows.clone(), &corrupt),
+            CompilerResponseRejection::ProvenanceMismatch,
+        );
         // Every field remains independently checked against the actual slot,
         // its original kind and the exact namespace, rather than just a seal.
         for (field, replacement) in [
@@ -8253,28 +8289,43 @@ mod answer_tests {
                 unreachable!()
             };
             fields[field] = replacement;
-            assert!(decode(changed, &manifest).is_err());
+            assert_response_rejection(
+                decode(changed, &manifest),
+                CompilerResponseRejection::ProvenanceMismatch,
+            );
         }
         let exhausted = InventoryOperation::new(InventoryDecodeLimits {
             max_work: 0,
             ..Default::default()
         });
-        assert!(
-            decode_world_stages(&world_array(rows), &slots, &[], &manifest, &exhausted).is_err()
+        assert!(matches!(
+            decode_world_stages(&world_array(rows), &slots, &[], &manifest, &exhausted),
+            Err(CompileError::CompilerEvidence(error)) if matches!(*error,
+                crate::certified_products::CertificationError::Product(
+                    tidepool_repr::execution_schema::ParseError::LimitExceeded("work")
+                )
+            )
+        ));
+        assert_response_rejection(
+            WorldCellStageIdentity::decode(&world_text("exec")),
+            CompilerResponseRejection::Malformed,
         );
-        assert!(WorldCellStageIdentity::decode(&world_text("exec")).is_err());
-        assert!(WorldCellStageIdentity::decode(&world_array(vec![
-            world_text("exec"),
-            world_text("bad digest")
-        ]))
-        .is_err());
-        assert!(WorldCellStageIdentity::decode(&world_array(vec![
-            world_text("future-stage"),
-            world_integer(0),
-            world_text("main"),
-            world_text("Tidepool.Session.Lib.G7")
-        ]))
-        .is_err());
+        assert_response_rejection(
+            WorldCellStageIdentity::decode(&world_array(vec![
+                world_text("exec"),
+                world_text("bad digest"),
+            ])),
+            CompilerResponseRejection::Malformed,
+        );
+        assert_response_rejection(
+            WorldCellStageIdentity::decode(&world_array(vec![
+                world_text("future-stage"),
+                world_integer(0),
+                world_text("main"),
+                world_text("Tidepool.Session.Lib.G7"),
+            ])),
+            CompilerResponseRejection::Malformed,
+        );
     }
 
     #[test]

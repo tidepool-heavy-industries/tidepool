@@ -30,8 +30,7 @@ mod dialect;
 mod generation_lease;
 pub use generation_lease::GenerationExhausted;
 #[cfg(test)]
-#[path = "exact_recovery_acceptance_tests.rs"]
-mod exact_recovery_acceptance_tests;
+use resident::exact_recovery_acceptance_tests;
 pub mod facade;
 mod lexical_projection;
 #[cfg(test)]

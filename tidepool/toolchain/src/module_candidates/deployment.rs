@@ -1875,9 +1875,7 @@ mod tests {
                         ciborium::value::Value::Array(vec![
                             ciborium::value::Value::Text(unit.clone()),
                             ciborium::value::Value::Text(module.clone()),
-                            ciborium::value::Value::Text(
-                                witness.selected_path.to_str().unwrap().into(),
-                            ),
+                            ciborium::value::Value::Text(witness.selected_path.to_str().unwrap().into()),
                             ciborium::value::Value::Text(super::super::hex(&witness.sha256)),
                         ])
                     })
@@ -1905,11 +1903,9 @@ mod tests {
                     let packages = package_rows
                         .remove(&(product.unit.clone(), product.module.clone()))
                         .unwrap();
-                    let source_sha256 = super::super::parse_sha(&sha(&fs::read(module_source(
-                        &product.module,
-                    ))
-                    .unwrap()))
-                    .unwrap();
+                    let source_sha256 =
+                        super::super::parse_sha(&sha(&fs::read(module_source(&product.module)).unwrap()))
+                            .unwrap();
                     let owner = CachedHomeOwner {
                         unit: product.unit.clone(),
                         module: product.module.clone(),
@@ -1935,8 +1931,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let graph = if with_execution {
                 use crate::execution_source::{
-                    CertifiedExecutionSourceGraph, ExecutionSourceAdmission,
-                    ExecutionSourceGraphInput,
+                    CertifiedExecutionSourceGraph, ExecutionSourceAdmission, ExecutionSourceGraphInput,
                 };
                 let input = root.path().join("Input.hs");
                 fs::write(&input, b"target").unwrap();
@@ -1951,49 +1946,76 @@ mod tests {
                         module: owner.module.clone(),
                     })
                     .collect();
-                let ExecutionSourceAdmission::Available(graph) = CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
-                    producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity),
-                    semantic_sha256: None, include: &include, source_path: &input, source: "target", evidence: &evidence,
-                    exact_imports: &std::collections::BTreeMap::new(), owners: &owners, fresh_owners: &fresh,
-                    retained_sources: &std::collections::BTreeMap::new(), packages: package_witnesses,
-                }).unwrap() else { panic!("graph"); };
+                let ExecutionSourceAdmission::Available(graph) =
+                    CertifiedExecutionSourceGraph::admit(ExecutionSourceGraphInput {
+                        producer: crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                            &producer_identity,
+                        ),
+                        semantic_sha256: None,
+                        include: &include,
+                        source_path: &input,
+                        source: "target",
+                        evidence: &evidence,
+                        exact_imports: &std::collections::BTreeMap::new(),
+                        owners: &owners,
+                        fresh_owners: &fresh,
+                        retained_sources: &std::collections::BTreeMap::new(),
+                        packages: package_witnesses,
+                    })
+                    .unwrap()
+                else {
+                    panic!("graph");
+                };
                 Some(graph)
             } else {
                 None
             };
-            let certified = originals.into_iter().map(|(owner, interface, bytes, packages, source_sha256)| {
-                let mut seal = crate::certified_products::encode_home_certification(
-                    &owner, &[], package_witnesses,
-                ).unwrap();
-                if let Some(graph) = &graph {
-                    seal = crate::certified_products::bind_home_execution_source(
-                        &seal, &owner, graph.digest(),
-                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                    ).unwrap();
-                }
-                let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-                    owner.clone(), interface, bytes, packages, seal,
-                ).with_source_sha256(source_sha256);
-                let requirements = (dependency && owner.module == "B").then(|| {
-                    std::collections::BTreeMap::from([(
-                        ("u".into(), "A".into()),
-                        super::super::parse_sha(&sha(b"A")).unwrap(),
-                    )])
-                });
-                let product = crate::certified_products::fixture_finalized_product_with_requirements(
-                    product,
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(&producer_identity).sha256(),
-                    requirements,
-                );
-                let product = match &graph {
-                    Some(graph) => product.with_execution_source(graph.clone()).unwrap(),
-                    None => product,
-                };
-                crate::certified_products::finalize_original_for_inventory(
-                    product,
-                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
-                ).unwrap()
-            }).collect::<Vec<_>>();
+            let certified = originals
+                .into_iter()
+                .map(|(owner, interface, bytes, packages, source_sha256)| {
+                    let mut seal = crate::certified_products::encode_home_certification(
+                        &owner,
+                        &[],
+                        package_witnesses,
+                    )
+                    .unwrap();
+                    if let Some(graph) = &graph {
+                        seal = crate::certified_products::bind_home_execution_source(
+                            &seal,
+                            &owner,
+                            graph.digest(),
+                            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                        )
+                        .unwrap();
+                    }
+                    let draft = crate::recovery_artifacts::OriginalDraft::from_certification(
+                        owner.clone(),
+                        interface,
+                        bytes,
+                        packages,
+                        seal,
+                    );
+                    let draft = match &graph {
+                        Some(graph) => draft.with_execution_source(Arc::clone(graph)).unwrap(),
+                        None => draft,
+                    };
+                    let requirements = (dependency && owner.module == "B").then(|| {
+                        std::collections::BTreeMap::from([(
+                            ("u".into(), "A".into()),
+                            super::super::parse_sha(&sha(b"A")).unwrap(),
+                        )])
+                    });
+                    crate::certified_products::fixture_finalized_product_with_requirements_and_source(
+                        draft,
+                        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                            &producer_identity,
+                        )
+                        .sha256(),
+                        requirements,
+                        source_sha256,
+                    )
+                })
+                .collect::<Vec<_>>();
             let (_, prepared) = super::super::prepare_publication(
                 &producer_identity,
                 &include,

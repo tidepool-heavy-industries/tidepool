@@ -597,7 +597,8 @@ impl CompilerWorldCellReservation {
     }
     pub fn slots(
         &self,
-    ) -> impl ExactSizeIterator<Item = crate::checked_cell::CheckedPlannedCellSlot> + Clone {
+    ) -> impl ExactSizeIterator<Item = crate::checked_cell::CheckedPlannedCellSlot> + Clone + '_
+    {
         self.items.iter().map(ReservedWorldItem::slot)
     }
 }

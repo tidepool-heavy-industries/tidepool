@@ -6,11 +6,14 @@ The supported GHC 9.12.2 resident compiler runs in `CompManager` with one
 definite active HOME unit. The universe retains a fixed boot/package context
 and completed version owners, without a last-operation environment. Each
 attempt selects exact completed HMIs and receives fresh HOME Finder cells.
-Completed HOME usages, direct imports, orphan modules and family-instance
-modules must resolve within their retained HPT closure; missing dependencies
-produce a typed refusal.
-The target HMI survives only when another retained HOME interface reaches it;
-this preserves SOURCE cycles without adding the target to the source memo.
+Each completed source version retains the actual installed `HomeModInfo`,
+checked against its finalized interface; a missing or mismatched HOME produces
+a typed refusal. Completion checks the HOME usage, direct-import, orphan and
+family-instance closure in the completed HPT. A target reached by that check
+remains dependency custody and never becomes a source-memo root. The next
+attempt installs its exact current validity-selected versions; historical
+target custody does not authorize reuse as the current SOURCE target. GHC
+must tie affected SOURCE knots against that current source/boot graph.
 
 GHC typechecks interface declarations lazily. Those actions retain their
 original environment and consult the HPT for HOME declarations. Retaining
@@ -24,10 +27,22 @@ and [HOME interface load refusal](https://github.com/ghc/ghc/blob/ghc-9.12.2-rel
 Tidepool HOME recovery therefore consumes captured HPT interfaces rather than
 bypassing GHC's refusal with a raw interface-file read. Package recovery uses
 the fixed package closure. Temporary make views stay within their compile
-cycle; actual World lexical backing remains with its existing World lease.
+cycle; World source/product backing remains with its existing World lease.
 The active successful attempt remains available through END. A subsequent
 scope starts from the same boot NameCache and package owner with no ambient
 HOME table. Finite entrypoints use that same resident kernel for one scope.
+
+## Completed cell-stage inputs
+
+Writing a stage's certified products leaves its compiler cursor pending. The
+terminal seal pairs the actual final execution/publication inputs with selected
+SOURCE decisions before advancing the prefix. Each produced binder retains
+its selected SOURCE uses under the existing completed-prefix owner. A later
+stage looks up only its referenced predecessor Names and reissues those exact
+uses under the new stage fence before simplification. Native-only decisions
+cannot enter this SOURCE capture, and an unused predecessor binder issues no
+inherited query. Final execution reachability selects the stage's terminals
+again; available capture evidence is not executable demand.
 
 ## Reuse tracing
 

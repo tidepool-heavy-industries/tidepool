@@ -1,121 +1,29 @@
 use super::*;
 
-/// Exact dependency grants remain attached to their issuing owner. Source and
-/// request rows share permissions independently of their supporting proofs.
-pub(crate) struct NativeDependencyCatalog<'a>(DependencyGrantSource<'a>);
-
-enum DependencyGrantSource<'a> {
-    Source(&'a CompilerSourceSupport),
-    Request(&'a crate::declaration_context::ContinuationNativeInputs<'a>),
-}
+/// Exact dependency grants borrow the actual selected source owner.
+pub(crate) struct NativeDependencyCatalog<'a>(&'a CompilerSourceSupport);
 
 impl<'a> NativeDependencyCatalog<'a> {
-    pub(crate) fn from_request(
-        inputs: &'a crate::declaration_context::ContinuationNativeInputs<'a>,
-    ) -> Self {
-        Self(DependencyGrantSource::Request(inputs))
-    }
-
     pub(crate) fn from_source(source: &'a CompilerSourceSupport) -> Result<Self, CompileError> {
-        Ok(Self(DependencyGrantSource::Source(source)))
-    }
-
-    fn current_product<'b>(
-        &'b self,
-        key: NativeGroupKey,
-        entry: &'b Arc<ArtifactEntry>,
-    ) -> Result<Option<crate::certified_products::CurrentProductRef<'b>>, CompileError> {
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => inputs.current_product(key, entry),
-            DependencyGrantSource::Source(_) => Ok(None),
-        }
+        Ok(Self(source))
     }
 
     pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
-        match &self.0 {
-            DependencyGrantSource::Source(source) => source.input_decisions(),
-            DependencyGrantSource::Request(inputs) => inputs.input_decisions(),
-        }
+        self.0.input_decisions()
     }
 
     pub(super) fn original_namespace_pair(
         &self,
         owner: &ExactModuleIdentity,
     ) -> Result<Option<(ArtifactBinding, ArtifactBinding)>, CompileError> {
-        match &self.0 {
-            DependencyGrantSource::Request(inputs) => inputs.original_namespace_pair(owner),
-            DependencyGrantSource::Source(source) => {
-                Ok(source.world_primary_type_row(owner).and_then(|row| {
-                    row.original_binding
-                        .map(|original| (*original, *row.interface_binding))
-                }))
-            }
-        }
+        Ok(self.0.world_primary_type_row(owner).and_then(|row| {
+            row.original_binding
+                .map(|original| (*original, *row.interface_binding))
+        }))
     }
 
     pub(crate) fn decision<'b>(&'b self, owner: &ExactModuleIdentity) -> InputNativeDecision<'b> {
-        let projection = match &self.0 {
-            DependencyGrantSource::Source(source) => source.projection(),
-            DependencyGrantSource::Request(inputs) => inputs.projection(),
-        };
-        match projection.snapshot_roles().get(owner) {
-            Some(role) => self.input_decisions().for_role(owner, role),
-            None => InputNativeDecision::UnissuedPolicy,
-        }
-    }
-
-    /// Borrow historical qualifications only when this request's actual rows
-    /// permit every exact binding. A retained Full offer alone grants nothing.
-    pub(crate) fn qualified_availability(
-        &self,
-        projection: &CompilerInputProjection,
-        namespace: &ArtifactView,
-        advertised: &BTreeSet<NativeGroupKey>,
-        new_products: &[IssuedNativeOffer],
-    ) -> Result<Vec<QualifiedNativeAvailability>, CompileError> {
-        let DependencyGrantSource::Request(inputs) = &self.0 else {
-            return Err(failure("request qualifications require a request catalog"));
-        };
-        let mut qualifications = Vec::new();
-        for row in inputs.availability_rows() {
-            for offer in row.offers() {
-                let Some(qualification) =
-                    offer.qualified_private_availability(projection, namespace)
-                else {
-                    continue;
-                };
-                if !new_products
-                    .iter()
-                    .any(|product| product.original() == qualification.original())
-                    || !advertised
-                        .iter()
-                        .any(|key| key.artifact == qualification.original())
-                {
-                    continue;
-                }
-                let mut permitted = true;
-                for group in qualification.groups() {
-                    let key = NativeGroupKey {
-                        artifact: group.binding.artifact(),
-                        original_ordinal: group.original_ordinal,
-                    };
-                    let Some(entry) = offer.0.custody.lease.payloads.get(&key.artifact) else {
-                        return Err(failure("qualified native group lacks its issued payload"));
-                    };
-                    let ArtifactPayload::Original(product) = &entry.payload else {
-                        return Err(failure("qualified native group lacks original payload"));
-                    };
-                    if !self.groups(key, product.owner())?.contains(group) {
-                        permitted = false;
-                        break;
-                    }
-                }
-                if permitted && !qualifications.contains(qualification) {
-                    qualifications.push(qualification.clone());
-                }
-            }
-        }
-        Ok(qualifications)
+        self.0.compiler_roles().native_decision(owner)
     }
 
     fn group_supports(
@@ -141,21 +49,7 @@ impl<'a> NativeDependencyCatalog<'a> {
                 }
             }
         }
-        let source = match &self.0 {
-            DependencyGrantSource::Source(source) => {
-                source.native_availability().dependency_support(key, owner)
-            }
-            DependencyGrantSource::Request(_) => None,
-        };
-        let request = match &self.0 {
-            DependencyGrantSource::Request(inputs) => Some(inputs.availability_rows()),
-            DependencyGrantSource::Source(_) => None,
-        };
-        let request = request
-            .into_iter()
-            .flatten()
-            .filter_map(|row| row.dependency_support(key, owner));
-        for support in source.into_iter().chain(request) {
+        if let Some(support) = self.0.native_availability().dependency_support(key, owner) {
             for group in support.groups() {
                 if let Some(offer) = support.offer_for_group(group) {
                     supports.entry(group).or_insert(offer);
@@ -163,18 +57,6 @@ impl<'a> NativeDependencyCatalog<'a> {
             }
         }
         supports.into_iter().collect()
-    }
-
-    fn groups(
-        &self,
-        key: NativeGroupKey,
-        owner: &tidepool_repr::execution_schema::CachedHomeOwner,
-    ) -> Result<imbl::OrdSet<NativeGroupBinding>, CompileError> {
-        Ok(self
-            .group_supports(key, owner)
-            .into_iter()
-            .map(|(group, _)| group)
-            .collect())
     }
 }
 
@@ -799,11 +681,7 @@ pub(super) fn verified_root_choice(
     let ArtifactPayload::Original(product) = &entry.payload else {
         return Err(failure("native root demand lacks original payload"));
     };
-    let canonical = ArtifactEntry::canonical_artifact_id(
-        product
-            .module_interface()
-            .ok_or_else(|| failure("native canonical carrier missing"))?,
-    );
+    let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
     let choices = match support
         .checked_native_input_decision(key.artifact, canonical, native_owner)
         .map_err(|reason| match root_evidence_refusal(&identity, reason) {
@@ -1256,11 +1134,7 @@ impl<'a> NativeSupportRef<'a> {
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(failure("native support is not Original"));
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native support lacks canonical interface"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let (carrier, canonical) = self.carrier_pair(group, canonical)?;
         Ok(IssuedNativeBinding {
             binding: group,
@@ -1505,11 +1379,7 @@ pub(super) fn bind_certified_input_demand(
                 (chosen, support, RootIssuer::Current)
             }
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native canonical carrier missing"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let support = NativeSupportRef::checked(state, parent, chosen, support)?;
         let mut issued = support.describe(chosen)?;
         if let RootIssuer::Historical(selected) = &issuer {
@@ -1565,74 +1435,30 @@ pub(super) fn bind_certified_input_demand(
     })
 }
 
-/// Fresh bodies can depend on an available group without selecting it for
-/// execution. Resolve only their certified imports from the supplied offers;
-/// proof roots remain separate from these dependency choices.
+/// Carried source inputs cannot issue a fresh physical product. New bodies
+/// enter through the completed current-cohort issuer instead.
 pub(super) fn bind_fresh_product_dependencies(
-    state: &mut InventoryState,
-    parent: &ArtifactView,
-    consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
-    entries: &impl ArtifactEntryMap<ArtifactId>,
+    _state: &mut InventoryState,
+    _parent: &ArtifactView,
+    _consumed_namespace: &BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+    _entries: &impl ArtifactEntryMap<ArtifactId>,
     fresh: &BTreeSet<NativeGroupKey>,
-    catalog: &NativeDependencyCatalog<'_>,
+    _catalog: &NativeDependencyCatalog<'_>,
 ) -> Result<CertifiedNativeDemandAcquisition, CompileError> {
-    let mut acquisition = CertifiedNativeDemandAcquisition {
+    if let Some(group) = fresh.iter().next() {
+        return Err(native_admission_failure(
+            *group,
+            NativeAdmissionRefusal::CurrentProductNotCompleted {
+                original: group.artifact,
+                original_ordinal: group.original_ordinal,
+            },
+        ));
+    }
+    Ok(CertifiedNativeDemandAcquisition {
         entries: BTreeMap::new(),
         bindings: BTreeMap::new(),
         offers: Vec::new(),
-    };
-    let mut pending = fresh.iter().copied().collect::<Vec<_>>();
-    while let Some(group) = pending.pop() {
-        if acquisition.bindings.contains_key(&group) {
-            continue;
-        }
-        let entry = entries
-            .get(&group.artifact)
-            .ok_or_else(|| failure("fresh native product lacks physical payload"))?;
-        let current = catalog.current_product(group, entry)?.ok_or_else(|| {
-            native_admission_failure(
-                group,
-                NativeAdmissionRefusal::CurrentProductNotCompleted {
-                    original: group.artifact,
-                    original_ordinal: group.original_ordinal,
-                },
-            )
-        })?;
-        let resolved = if let Some(binding) = verified_current_product(&current)? {
-            let support = current.own_group_support(binding).ok_or_else(|| {
-                native_admission_failure(
-                    group,
-                    NativeAdmissionRefusal::InputIssuedSupportMissing { candidate: binding },
-                )
-            })?;
-            let support = NativeSupportRef::checked(state, parent, binding, support)?;
-            let issued = support.describe(binding)?;
-            support.acquire(state, entries, &mut acquisition.entries, &issued)?;
-            if let Some(offer) = support.offer {
-                acquisition.offers.push(offer.clone());
-            }
-            VerifiedNativeBinding::CurrentIssued(issued)
-        } else {
-            let dependencies = current_product_dependencies(
-                state,
-                parent,
-                entries,
-                &mut acquisition.entries,
-                &mut acquisition.offers,
-                &current,
-            )?;
-            pending.extend(dependencies.iter().filter_map(
-                |dependency| match dependency.target() {
-                    NativeGroupTarget::NewGroup(group) => Some(*group),
-                    NativeGroupTarget::ExactGroup(_) | NativeGroupTarget::CurrentIssued(_) => None,
-                },
-            ));
-            VerifiedNativeBinding::NewCurrent { dependencies }
-        };
-        acquisition.bindings.insert(group, resolved);
-    }
-    acquisition.validate_dependency_namespace(entries, consumed_namespace)?;
-    Ok(acquisition)
+    })
 }
 
 impl CertifiedNativeDemandAcquisition {
@@ -1686,10 +1512,10 @@ pub(crate) fn validate_consumed_native_namespace(
     };
     let canonical = match &selected.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Original(product) => product.module_interface(),
+        ArtifactPayload::Original(product) => Some(product.module_interface()),
         ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
     };
-    if canonical != product.module_interface()
+    if canonical != Some(product.module_interface())
         || (matches!(selected.payload, ArtifactPayload::Original(_))
             && selected.descriptor.id != dependency.descriptor.id)
     {
@@ -1699,7 +1525,7 @@ pub(crate) fn validate_consumed_native_namespace(
             dependency = ?dependency.descriptor.id,
             selected = ?selected.descriptor.id,
             selected_kind = ?selected.descriptor.kind,
-            interfaces_match = canonical == product.module_interface(),
+            interfaces_match = canonical == Some(product.module_interface()),
             caller = %std::panic::Location::caller(),
             "issued native dependency conflicts with request interface"
         );
@@ -2303,6 +2129,7 @@ impl NativeOfferContribution {
 
 #[derive(Debug)]
 struct NativeOfferFacts {
+    original_acquisition: Arc<ArtifactEntry>,
     original: ArtifactId,
     interface: ArtifactId,
     owner: ExactModuleIdentity,
@@ -2386,7 +2213,6 @@ impl CheckedNativeAvailability {
                         .map_err(|error| evidence(error.into()))?;
                     product
                         .original_native()
-                        .ok_or_else(|| failure("cohort native proof lacks authenticated witness"))?
                         .validate_package_interfaces(validation)
                         .map_err(evidence)?;
                     available.insert(*id, product);
@@ -2444,123 +2270,6 @@ impl CheckedNativeAvailability {
             offers: IssuedNativeOffer::issue_custody(admitted, originals)?,
             entries,
             roots: originals.iter().copied().collect(),
-        })
-    }
-
-    pub(crate) fn validate_request(
-        self,
-        baseline_groups: &BTreeSet<NativeGroupKey>,
-        catalog: &NativeDependencyCatalog<'_>,
-        projection: &CompilerInputProjection,
-        namespace: &ArtifactView,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let advertised = self.advertised_groups(baseline_groups)?;
-        let preferred =
-            catalog.qualified_availability(projection, namespace, &advertised, &self.offers)?;
-        self.validate_advertised(advertised, &preferred, projection, validation)
-    }
-
-    fn advertised_groups(
-        &self,
-        baseline: &BTreeSet<NativeGroupKey>,
-    ) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
-        let mut advertised = baseline.clone();
-        for offer in &self.offers {
-            let entry = self
-                .entries
-                .get(&offer.original())
-                .ok_or_else(|| failure("private original is outside retained custody"))?;
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(failure("private original lacks original payload"));
-            };
-            advertised.extend(
-                crate::certified_products::original_available_groups(product)
-                    .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?
-                    .map(|group| NativeGroupKey {
-                        artifact: offer.original(),
-                        original_ordinal: group.original_ordinal(),
-                    }),
-            );
-        }
-        Ok(advertised)
-    }
-
-    fn validate_advertised(
-        self,
-        advertised: BTreeSet<NativeGroupKey>,
-        preferred: &[QualifiedNativeAvailability],
-        projection: &CompilerInputProjection,
-        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
-    ) -> Result<ValidatedFreshNativeAvailability, CompileError> {
-        let mut qualifications = BTreeMap::new();
-        for qualification in preferred {
-            if qualifications
-                .insert(qualification.original(), qualification.clone())
-                .is_some_and(|prior| prior != *qualification)
-            {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::BindingAmbiguity {
-                        artifact: qualification.original(),
-                    },
-                ));
-            }
-        }
-        for offer in &self.offers {
-            if let Some(qualification) = offer.full_qualification() {
-                if qualifications
-                    .insert(qualification.original(), qualification.clone())
-                    .is_some_and(|prior| prior != *qualification)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::BindingAmbiguity {
-                            artifact: qualification.original(),
-                        },
-                    ));
-                }
-            }
-        }
-        // Full validation covers the advertised products and their issued
-        // dependency closures. Other retained bodies are byte custody, not
-        // competing members of this request's original namespace.
-        let mut required_originals = self.roots.clone();
-        required_originals.extend(advertised.iter().map(|key| key.artifact));
-        required_originals.extend(projection.roles().iter().filter_map(|role| role.original()));
-        for qualification in qualifications.values() {
-            required_originals.insert(qualification.original());
-            required_originals.extend(
-                qualification
-                    .groups()
-                    .iter()
-                    .map(|group| group.binding.artifact()),
-            );
-        }
-        let mut originals = BTreeMap::new();
-        for id in required_originals {
-            let entry = self.entries.get(&id).ok_or_else(|| {
-                CompileError::CompilerEvidence(Box::new(
-                    crate::certified_products::CertificationError::MissingRetainedCustody {
-                        artifact: id,
-                    },
-                ))
-            })?;
-            let ArtifactPayload::Original(product) = &entry.payload else {
-                return Err(admission_failure(
-                    ArtifactInventoryFailure::NativeRootNotOriginal { artifact: id },
-                ));
-            };
-            originals.insert(id, product);
-        }
-        crate::certified_products::validate_available_originals_with_validation(
-            &originals,
-            &advertised,
-            &qualifications.into_values().collect::<Vec<_>>(),
-            validation,
-        )
-        .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        Ok(ValidatedFreshNativeAvailability {
-            roots: self.roots,
-            offers: self.offers,
         })
     }
 }
@@ -2666,11 +2375,7 @@ impl IssuedNativeOffer {
                     ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
                 ));
             };
-            let interface = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("complete availability lacks canonical interface"))?,
-            );
+            let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let carrier = outcome.binding;
             let mut canonical = state
                 .outgoing(ArtifactBindingNode::Artifact(carrier))
@@ -2807,6 +2512,7 @@ impl IssuedNativeOffer {
                 original,
                 interface,
                 entry.descriptor.owner.clone(),
+                Arc::clone(entry),
                 body,
                 lease,
                 nodes,
@@ -2816,22 +2522,25 @@ impl IssuedNativeOffer {
         drop(state);
         offers
             .into_iter()
-            .map(|(original, interface, owner, body, lease, nodes, roots)| {
-                Ok(Self(Arc::new(NativeOfferFacts {
-                    original,
-                    interface,
-                    owner,
-                    body,
-                    custody: NativeOfferCustody::from_checked_nodes(
-                        lease,
-                        nodes,
-                        &source_receipt,
-                        &roots,
-                    )?,
-                    snapshot: OnceLock::new(),
-                    identity: OnceLock::new(),
-                })))
-            })
+            .map(
+                |(original, interface, owner, original_acquisition, body, lease, nodes, roots)| {
+                    Ok(Self(Arc::new(NativeOfferFacts {
+                        original_acquisition,
+                        original,
+                        interface,
+                        owner,
+                        body,
+                        custody: NativeOfferCustody::from_checked_nodes(
+                            lease,
+                            nodes,
+                            &source_receipt,
+                            &roots,
+                        )?,
+                        snapshot: OnceLock::new(),
+                        identity: OnceLock::new(),
+                    })))
+                },
+            )
             .collect()
     }
 
@@ -2848,91 +2557,30 @@ impl IssuedNativeOffer {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    /// The immutable declaration context is an issuance ingress. Capture its
-    /// own roles and graph before merging any private input. Protected roles
-    /// whose carrier is not present here wait for their exact private offer.
-    pub(crate) fn issue_context_offers(
-        projection: &CompilerInputProjection,
-        source: &ArtifactView,
-        preferred: &[NativeOriginalRequirement],
-    ) -> Result<Vec<Self>, CompileError> {
-        let mut offers = Vec::new();
-        for role in projection.roles() {
-            let Some(original) = role.original() else {
-                continue;
-            };
-            if !source.lease.payloads.contains_key(&original) {
-                continue;
-            }
-            let mut proofs = match NativeOriginalRequirement::from_role(role.clone()) {
-                Some(proof) => vec![proof],
-                None => preferred
-                    .iter()
-                    .filter(|proof| proof.original == original)
-                    .cloned()
-                    .collect(),
-            };
-            if proofs.is_empty() {
-                proofs.extend(NativeOriginalRequirement::from_selected_view(
-                    original, source,
-                )?);
-            }
-            if proofs.is_empty() {
-                let complete = match NativeOriginalRequirement::from_issued_group_custody(
-                    original,
-                    role.interface(),
-                    source,
-                ) {
-                    Ok(proof) => proof,
-                    // Optional baseline discovery has no issued group choice.
-                    // Competing custody cannot issue Full or prevent a separate
-                    // exact private offer from supplying its own authority.
-                    Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == original) => {
-                        None
-                    }
-                    Err(error) => return Err(error),
-                };
-                proofs.extend(complete);
-            }
-            if proofs.is_empty() {
-                offers.push(Self::issue(original, source, None)?);
-            } else {
-                for proof in proofs {
-                    offers.push(Self::issue(original, source, Some(proof))?);
-                }
-            }
-        }
-        Ok(offers)
-    }
-
     /// Issuance is restricted to an input owner's view before independent
     /// inputs merge. `None` issues empty availability rather than discovery.
-    pub(crate) fn issue(
-        original: ArtifactId,
-        source: &ArtifactView,
+    pub(super) fn issue(
+        input: CompilerPrimaryInput<'_>,
         proof: Option<NativeOriginalRequirement>,
     ) -> Result<Self, CompileError> {
-        let entry = source
-            .lease
-            .payloads
-            .get(&original)
-            .ok_or_else(|| failure("native offer original is outside issuer custody"))?;
-        let ArtifactPayload::Original(product) = &entry.payload else {
+        let original_binding = input.original().ok_or_else(|| {
+            admission_failure(ArtifactInventoryFailure::MissingOriginal {
+                owner: input.owner().clone(),
+            })
+        })?;
+        let canonical_binding = input.interface();
+        let entry = input.entry();
+        let source = input.artifacts();
+        let original = original_binding.artifact;
+        let ArtifactPayload::Original(_) = &entry.payload else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
             ));
         };
-        let interface = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native offer lacks its canonical interface"))?,
-        );
+        let interface = canonical_binding.artifact;
         let (body, custody) = match proof {
             None => {
-                let state = source.lease.inventory.0.lock().expect("inventory lock");
-                let binding =
-                    source.resolve_binding(original, &source.read_projection(&state).nodes)?;
-                drop(state);
+                let binding = original_binding;
                 let custody = source.inventory().retain(
                     Vec::new(),
                     vec![ArtifactBindingNode::Artifact(binding)],
@@ -2944,8 +2592,42 @@ impl IssuedNativeOffer {
                 (NativeOfferBody::Empty, custody)
             }
             Some(proof) => {
-                if proof.original != original {
-                    return Err(failure("native offer proof names another original"));
+                // Group-root proofs deliberately omit a compiler namespace.
+                // Their authenticated root/carrier/canonical edges still name
+                // the exact acquired row; namespace presence is not required.
+                let pair_matches = {
+                    let state = source.lease.inventory.0.lock().expect("inventory lock");
+                    let graph = proof.selection.graph_selection();
+                    proof.namespace_pair_in(&state, graph, canonical_binding.artifact)
+                        == Some((original_binding, canonical_binding))
+                        && graph.roots.iter().all(|root| match root {
+                            InventoryNodeKey::Group(group)
+                                if group.binding.artifact() == original =>
+                            {
+                                state
+                                    .outgoing(*root)
+                                    .filter(|(_, edge)| **edge == ArtifactDependency::Interface)
+                                    .filter_map(|(target, _)| match target {
+                                        InventoryNodeKey::Artifact(binding)
+                                            if binding.artifact == original =>
+                                        {
+                                            Some(binding)
+                                        }
+                                        _ => None,
+                                    })
+                                    .all(|binding| binding == original_binding)
+                            }
+                            _ => true,
+                        })
+                };
+                if proof.original != original || !pair_matches {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeOfferBindingMismatch {
+                            owner: input.owner().clone(),
+                            original: original_binding,
+                            interface: canonical_binding,
+                        },
+                    ));
                 }
                 let qualification = proof.qualify_availability(source)?;
                 let graph = proof.selection.graph_selection();
@@ -2986,6 +2668,7 @@ impl IssuedNativeOffer {
             &BTreeMap::new(),
         )?;
         Ok(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(entry),
             original,
             interface,
             owner: entry.descriptor.owner.clone(),
@@ -3137,11 +2820,7 @@ impl IssuedNativeOffer {
                 },
             ));
         };
-        let interface = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("recovered native offer lacks its canonical interface"))?,
-        );
+        let interface = ArtifactEntry::canonical_artifact_id(product.module_interface());
         if interface != facts.interface || entry.descriptor.owner != facts.owner {
             return Err(failure(
                 "recovered native offer differs from its original interface or owner",
@@ -3201,6 +2880,7 @@ impl IssuedNativeOffer {
             &BTreeMap::new(),
         )?;
         Ok(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(entry),
             original: facts.original,
             interface,
             owner: facts.owner.clone(),
@@ -3213,6 +2893,10 @@ impl IssuedNativeOffer {
 
     pub(crate) fn original(&self) -> ArtifactId {
         self.0.original
+    }
+
+    pub(super) fn original_acquisition(&self) -> &Arc<ArtifactEntry> {
+        &self.0.original_acquisition
     }
 
     /// Reopen this producer's exact offered subset as future input choices.
@@ -3349,13 +3033,32 @@ impl IssuedNativeOffer {
     /// Body availability does not select an original or executable roots.
     pub(crate) fn qualified_private_availability(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
+        namespace: &ArtifactView,
+    ) -> Option<&QualifiedNativeAvailability> {
+        self.qualification_for_role(roles.get(&self.0.owner), namespace)
+    }
+
+    /// Assembly may observe the qualification of this already-issued offer;
+    /// this does not acquire a compiler row or grant an alternative body.
+    pub(crate) fn qualifies_assembly(
+        &self,
+        roles: AssemblyRoleView<'_>,
+        namespace: &ArtifactView,
+    ) -> bool {
+        self.qualification_for_role(roles.get(&self.0.owner), namespace)
+            .is_some()
+    }
+
+    fn qualification_for_role(
+        &self,
+        role: Option<CompilerRoleFacts<'_>>,
         namespace: &ArtifactView,
     ) -> Option<&QualifiedNativeAvailability> {
         let NativeOfferBody::Full { qualification, .. } = &self.0.body else {
             return None;
         };
-        let role = projection.snapshot_roles().get(&self.0.owner)?;
+        let role = role?;
         (role.interface() == self.0.interface
             && role
                 .original()
@@ -3481,8 +3184,8 @@ impl IssuedNativeOffer {
         }
         let lease = &self.0.custody.lease;
         if !matches!(&lease.payloads[&self.original()].payload, ArtifactPayload::Original(product)
-            if product.module_interface().is_some_and(|interface| matches!(interface.origin(),
-                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+            if matches!(product.module_interface().origin(),
+                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }))
         {
             return Ok(Vec::new());
         }
@@ -3610,19 +3313,17 @@ impl IssuedNativeOffer {
     /// offers related to its canonical roles or exact native dependencies.
     pub(crate) fn is_relevant_to_support(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
     ) -> Result<bool, CompileError> {
-        if projection
-            .snapshot_roles()
+        if roles
             .get(&self.0.owner)
             .is_some_and(|role| role.interface() == self.0.interface)
         {
             return Ok(true);
         }
-        let originals = projection
-            .roles()
-            .into_iter()
-            .filter_map(|role| role.original())
+        let originals = roles
+            .iter()
+            .filter_map(|(_, role)| role.original())
             .collect::<BTreeSet<_>>();
         Ok(self
             .0
@@ -3637,37 +3338,52 @@ impl IssuedNativeOffer {
     #[track_caller]
     pub(crate) fn within_projection(
         &self,
-        projection: &CompilerInputProjection,
+        roles: AdmittedCompilerRoles<'_>,
         namespace: &ArtifactView,
     ) -> Result<Option<Self>, CompileError> {
-        if self
-            .qualified_private_availability(projection, namespace)
-            .is_some()
-        {
+        self.narrow_issued_offer(
+            roles.get(&self.0.owner),
+            roles.iter().filter_map(|(_, role)| role.original()),
+            namespace,
+        )
+    }
+
+    /// Narrow an existing issuance while a compiler namespace is assembled.
+    /// Permission still comes solely from this offer's acquired custody.
+    pub(crate) fn within_assembly(
+        &self,
+        roles: AssemblyRoleView<'_>,
+        namespace: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        self.narrow_issued_offer(
+            roles.get(&self.0.owner),
+            roles.iter().filter_map(|(_, role)| role.original()),
+            namespace,
+        )
+    }
+
+    fn narrow_issued_offer(
+        &self,
+        role: Option<CompilerRoleFacts<'_>>,
+        originals: impl Iterator<Item = ArtifactId>,
+        namespace: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        if self.qualification_for_role(role, namespace).is_some() {
             return Ok(Some(self.clone()));
         }
-        // Matching roles propagate the existing opaque issuance directly.
-        // Only a different or absent role needs dependency relevance.
-        let contributes = || -> Result<bool, CompileError> {
-            let originals = projection
-                .roles()
-                .into_iter()
-                .filter_map(|role| role.original())
-                .collect::<BTreeSet<_>>();
-            Ok(self
-                .0
-                .custody
-                .native_originals
-                .iter()
-                .any(|original| originals.contains(original)))
-        };
-        let role = projection.snapshot_roles().get(&self.0.owner);
-        let Some(original) = role.and_then(CompilerInputRole::original) else {
-            return Ok(contributes()?.then(|| self.clone()));
+        let originals = originals.collect::<BTreeSet<_>>();
+        let contributes = self
+            .0
+            .custody
+            .native_originals
+            .iter()
+            .any(|original| originals.contains(original));
+        let Some(original) = role.and_then(CompilerRoleFacts::original) else {
+            return Ok(contributes.then(|| self.clone()));
         };
         let role = role.expect("native role");
         if original != self.0.original || role.interface() != self.0.interface {
-            if contributes()? {
+            if contributes {
                 return Ok(Some(self.clone()));
             }
             return Err(admission_failure(
@@ -3691,6 +3407,7 @@ impl IssuedNativeOffer {
             return Ok(Some(self.clone()));
         }
         Ok(Some(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(&self.0.original_acquisition),
             original: self.0.original,
             interface: self.0.interface,
             owner: self.0.owner.clone(),
@@ -3790,7 +3507,7 @@ mod normalized_dependency_tests {
                 .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
                 .unwrap();
             let graph_only =
-                IssuedNativeOffer::issue(offer.original(), &graph, offer.proof().cloned()).unwrap();
+                IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
@@ -3903,7 +3620,7 @@ mod normalized_dependency_tests {
             .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
             .unwrap();
         let graph_only =
-            IssuedNativeOffer::issue(offer.original(), &graph, offer.proof().cloned()).unwrap();
+            IssuedNativeOffer::restore_snapshot(&offer.snapshot_facts(), &graph).unwrap();
         assert!(
             matches!(
                 graph_only.source_causes_at(left, child).unwrap().as_ref(),
@@ -4079,7 +3796,7 @@ mod normalized_dependency_tests {
             ),
             producer.sha256(),
         );
-        let sibling = ArtifactEntry::canonical(sibling.module_interface().unwrap().clone());
+        let sibling = ArtifactEntry::canonical(sibling.module_interface().clone());
         let sibling_id = sibling.descriptor.id;
         let custody = ArtifactView::from_custody(Arc::clone(offer.custody_lease()));
         let issuer = custody
@@ -4093,7 +3810,13 @@ mod normalized_dependency_tests {
             original,
             selection: ExactArtifactSelection::capture(&broad),
         };
-        let broad_offer = IssuedNativeOffer::issue(original, &broad, Some(proof)).unwrap();
+        let broad_offer = stage
+            .compiler_inputs()
+            .compiler_source_support()
+            .retain_custody(&broad)
+            .unwrap()
+            .issue_native_offer(&entries[0].descriptor.owner, Some(proof))
+            .unwrap();
         assert!(broad_offer.is_full());
         let mixed = Arc::new(
             broad_offer
@@ -4249,12 +3972,11 @@ mod normalized_dependency_tests {
             .support_for_owners(vec![root_owner.clone()])
             .unwrap();
         let retained = types.retain_template_availability(&complete).unwrap();
-        assert_eq!(retained.projection().snapshot_roles().len(), 1);
+        assert_eq!(retained.compiler_roles().len(), 1);
         assert!(retained
-            .projection()
-            .roles()
+            .compiler_roles()
             .iter()
-            .all(|role| role.original().is_none()));
+            .all(|(_, role)| role.original().is_none()));
         let hidden_id = ArtifactEntry::original(producer.sha256(), products[0].clone())
             .unwrap()
             .descriptor
@@ -4271,15 +3993,23 @@ mod normalized_dependency_tests {
             .chain(complete.native_offers())
             .cloned()
             .collect::<Vec<_>>();
+        let metadata = ExactDeclarationContext::new(&[], &[], vec![])
+            .unwrap()
+            .extend_issued_compiler_support(&complete)
+            .unwrap()
+            .compiler_metadata_snapshot()
+            .unwrap();
         let repeated = crate::declaration_context::RequestNativeAvailability::issue_checked(
-            complete.projection(),
+            complete.compiler_roles(),
+            &metadata,
             complete.artifacts(),
             &repeated_offers,
         )
         .unwrap();
         let repeated = complete.retain_normalized_availability(&repeated).unwrap();
         let empty = crate::declaration_context::RequestNativeAvailability::issue_checked(
-            complete.projection(),
+            complete.compiler_roles(),
+            &metadata,
             complete.artifacts(),
             &[],
         )
@@ -4477,11 +4207,8 @@ mod normalized_dependency_tests {
             .unwrap()
             .source_support(&BTreeSet::from([root_owner.clone()]))
             .unwrap();
-        assert_eq!(root_source.projection().snapshot_roles().len(), 1);
-        assert!(root_source
-            .projection()
-            .snapshot_roles()
-            .contains_key(&root_owner));
+        assert_eq!(root_source.compiler_roles().len(), 1);
+        assert!(root_source.compiler_roles().get(&root_owner).is_some());
         let root_context = ExactDeclarationContext::new(&[], &[], vec![])
             .unwrap()
             .extend_issued_compiler_support(&root_source)
@@ -4502,7 +4229,7 @@ mod normalized_dependency_tests {
         )
         .unwrap();
         let canonical = Arc::new(ArtifactEntry::canonical(
-            products[0].module_interface().unwrap().clone(),
+            products[0].module_interface().clone(),
         ));
         let canonical_id = canonical.descriptor.id;
         let receiving = inventory
@@ -4848,9 +4575,7 @@ mod normalized_dependency_tests {
             .admit_role(
                 entry.descriptor.owner.clone(),
                 CompilerInputRole::PublishedSourceOriginal {
-                    interface: ArtifactEntry::canonical_artifact_id(
-                        original.module_interface().unwrap(),
-                    ),
+                    interface: ArtifactEntry::canonical_artifact_id(original.module_interface()),
                     original: entry.descriptor.id,
                     source_revision: "pending fixture revision".into(),
                     original_input_identity: "pending fixture input".into(),
@@ -4970,9 +4695,8 @@ mod normalized_dependency_tests {
             ),
             producer.sha256(),
         );
-        let hidden_interface = Arc::new(ArtifactEntry::canonical(
-            hidden.module_interface().unwrap().clone(),
-        ));
+        let hidden_interface =
+            Arc::new(ArtifactEntry::canonical(hidden.module_interface().clone()));
         let root_entry = Arc::new(ArtifactEntry::original(producer.sha256(), root).unwrap());
         let inventory = ArtifactInventory::default();
         let inherited = inventory

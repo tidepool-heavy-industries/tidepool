@@ -16,7 +16,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::artifact_inventory::{
     ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,
-    CompilerInputRole, ScopeProofV3,
+    ScopeProofV3,
 };
 use crate::declaration_context::{
     NativeAvailabilitySnapshotFacts, NativeContributionSnapshotFacts, NativeTransportMode,
@@ -128,7 +128,7 @@ pub(crate) struct FrontierProjectionWork {
 }
 
 /// Count borrowed scalar/key wire bytes before allocating their encoding or copy.
-/// The four publication codecs use scalar CID wires; this never serializes facts.
+/// The publication codecs use scalar CID wires; this never serializes facts.
 fn projection_wire_bound<T: Serialize>(
     value: &T,
     operation: &tidepool_repr::execution_schema::InventoryOperation,
@@ -1781,12 +1781,26 @@ impl SnapshotValueCodec<ImmutableLexicalFactRef> for LexicalFactCodec {
 }
 
 /// Availability is an issuance fact independent of compiler roles and execution.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) enum NativeOfferSnapshotBody {
     Empty(crate::artifact_inventory::ExactArtifactSelection),
     Partial(crate::artifact_inventory::ExactArtifactSelection),
     Full(crate::artifact_inventory::ExactArtifactSelection),
 }
+impl PartialEq for NativeOfferSnapshotBody {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Empty(left), Self::Empty(right))
+            | (Self::Partial(left), Self::Partial(right))
+            | (Self::Full(left), Self::Full(right)) => {
+                Arc::ptr_eq(left.snapshot(), right.snapshot())
+                    || left.snapshot() == right.snapshot()
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for NativeOfferSnapshotBody {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeOfferSnapshotFacts {
@@ -1796,6 +1810,8 @@ pub(crate) struct NativeOfferSnapshotFacts {
     pub(crate) body: NativeOfferSnapshotBody,
 }
 impl NativeOfferSnapshotFacts {
+    /// Offer identity describes selected semantics. Record equality separately
+    /// includes every stored proof fact so Merkle updates preserve exact bytes.
     pub(crate) fn identity(&self) -> Result<[u8; 32], crate::CompileError> {
         use sha2::{Digest, Sha256};
         let (mode, selection) = match &self.body {
@@ -2090,14 +2106,11 @@ impl SnapshotValueCodec<NativeAvailabilitySnapshotFacts> for NativeAvailabilityC
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublicationNativeMaps {
     #[serde(with = "serde_ord_map")]
-    pub(crate) roles: OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
+    pub(crate) roles: OrdMap<ExactModuleIdentity, RecordedCompilerRow>,
     #[serde(with = "serde_ord_map")]
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
     #[serde(with = "serde_ord_map")]
     pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
-    #[serde(with = "serde_ord_map")]
-    pub(crate) input_decisions:
-        OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
 }
 pub(crate) struct PublicationNativeFacts {
     maps: PublicationNativeMaps,
@@ -2174,7 +2187,6 @@ pub(crate) struct PublicationNativeMapKeys {
     pub(crate) roles: std::collections::BTreeSet<ExactModuleIdentity>,
     pub(crate) offers: std::collections::BTreeSet<[u8; 32]>,
     pub(crate) native_availability: std::collections::BTreeSet<ArtifactId>,
-    pub(crate) input_decisions: std::collections::BTreeSet<ExactModuleIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2194,17 +2206,12 @@ impl PublicationNativeFacts {
         operation: &tidepool_repr::execution_schema::InventoryOperation,
     ) -> Result<(Arc<Self>, NativeFactProjectionWork), SnapshotProjectionError> {
         fn role_strings(
-            role: &crate::artifact_inventory::RecordedCompilerRole,
+            role: &RecordedCompilerRow,
             operation: &tidepool_repr::execution_schema::InventoryOperation,
         ) -> Result<(), SnapshotProjectionError> {
-            if let crate::artifact_inventory::RecordedCompilerRole::PublishedSourceOriginal {
-                source_revision,
-                original_input_identity,
-                ..
-            } = role
-            {
-                operation.charge(source_revision.len())?;
-                operation.charge(original_input_identity.len())?;
+            if let Some(birth) = role.publication() {
+                operation.charge(birth.source_revision.len())?;
+                operation.charge(birth.original_input_identity.len())?;
             }
             Ok(())
         }
@@ -2220,7 +2227,6 @@ impl PublicationNativeFacts {
             roles: OrdMap::new(),
             offers: OrdMap::new(),
             native_availability: OrdMap::new(),
-            input_decisions: OrdMap::new(),
         };
         // Only these concrete immutable fact types are copied: their variable
         // owned strings are charged first; proof and persistent maps share roots.
@@ -2233,10 +2239,7 @@ impl PublicationNativeFacts {
                 .facts
                 .get(key)
                 .ok_or(SnapshotProjectionError::MissingFact)?;
-            operation.reserve::<(
-                ExactModuleIdentity,
-                crate::artifact_inventory::RecordedCompilerRole,
-            )>(4)?;
+            operation.reserve::<(ExactModuleIdentity, RecordedCompilerRow)>(4)?;
             role_strings(value, operation)?;
             maps.roles.insert(key.clone(), value.clone());
         }
@@ -2265,22 +2268,6 @@ impl PublicationNativeFacts {
             operation.charge(value.owner.module.len())?;
             maps.native_availability.insert(*key, value.clone());
         }
-        for key in &keys.input_decisions {
-            crate::host_work::checkpoint()?;
-            owner_strings(key, operation)?;
-            let value = self
-                .receipt
-                .input_decisions
-                .facts
-                .get(key)
-                .ok_or(SnapshotProjectionError::MissingFact)?;
-            operation.reserve::<(
-                ExactModuleIdentity,
-                crate::artifact_inventory::RecordedInputNativeDecision,
-            )>(4)?;
-            role_strings(&value.role, operation)?;
-            maps.input_decisions.insert(key.clone(), value.clone());
-        }
         let mut writer = Materializer::new(&self.receipt.frontier);
         let (root, rw) = writer.project_map_with(&self.receipt.roles, &keys.roles, operation)?;
         let roles = MaterializedMap {
@@ -2304,22 +2291,11 @@ impl PublicationNativeFacts {
             facts: maps.native_availability.clone(),
             codec: PhantomData,
         };
-        let (root, iw) = writer.project_map_with(
-            &self.receipt.input_decisions,
-            &keys.input_decisions,
-            operation,
-        )?;
-        let input_decisions = MaterializedMap {
-            root,
-            facts: maps.input_decisions.clone(),
-            codec: PhantomData,
-        };
         let descriptor = PublicationNativeDescriptor {
-            version: 2,
+            version: 3,
             roles: roles.root.clone(),
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
-            input_decisions: input_decisions.root.clone(),
         };
         projection_wire_bound(&descriptor, operation)?;
         let root = writer.materialize_value(&descriptor)?;
@@ -2332,13 +2308,10 @@ impl PublicationNativeFacts {
             .project_roots(&staged, vec![root], operation)?;
         let work = NativeFactProjectionWork {
             maps: MapProjectionWork {
-                key_lookups: rw.key_lookups + ow.key_lookups + nw.key_lookups + iw.key_lookups,
-                reused_values: rw.reused_values
-                    + ow.reused_values
-                    + nw.reused_values
-                    + iw.reused_values,
-                route_blocks: rw.route_blocks + ow.route_blocks + nw.route_blocks + iw.route_blocks,
-                route_bytes: rw.route_bytes + ow.route_bytes + nw.route_bytes + iw.route_bytes,
+                key_lookups: rw.key_lookups + ow.key_lookups + nw.key_lookups,
+                reused_values: rw.reused_values + ow.reused_values + nw.reused_values,
+                route_blocks: rw.route_blocks + ow.route_blocks + nw.route_blocks,
+                route_bytes: rw.route_bytes + ow.route_bytes + nw.route_bytes,
             },
             frontier: fw,
             materialization,
@@ -2351,7 +2324,6 @@ impl PublicationNativeFacts {
                     roles,
                     offers,
                     native_availability,
-                    input_decisions,
                     frontier,
                 },
             }),
@@ -2374,11 +2346,6 @@ impl PublicationNativeFacts {
                     .diff(&maps.native_availability)
                     .next()
                     .is_none()
-                && prior
-                    .input_decisions
-                    .diff(&maps.input_decisions)
-                    .next()
-                    .is_none()
             {
                 return Ok(Arc::clone(prior));
             }
@@ -2388,7 +2355,7 @@ impl PublicationNativeFacts {
         let mut writer = Materializer::new(frontier);
         writer.publication_native_base = prior.cloned();
         writer.native_availability_base = prior.map(|p| p.receipt.native_availability.clone());
-        let roles = writer.materialize_map_with::<_, _, CompilerRoleCodec>(
+        let roles = writer.materialize_map_with::<_, _, CompilerRowCodec>(
             prior.map(|p| &p.receipt.roles),
             &maps.roles,
         )?;
@@ -2400,16 +2367,11 @@ impl PublicationNativeFacts {
             prior.map(|p| &p.receipt.native_availability),
             &maps.native_availability,
         )?;
-        let input_decisions = writer.materialize_map_with::<_, _, InputNativeDecisionCodec>(
-            prior.map(|p| &p.receipt.input_decisions),
-            &maps.input_decisions,
-        )?;
         let root = writer.materialize_value(&PublicationNativeDescriptor {
-            version: 2,
+            version: 3,
             roles: roles.root.clone(),
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
-            input_decisions: input_decisions.root.clone(),
         })?;
         let staged = writer.finish()?;
         let frontier = frontier.replace_roots(&staged, vec![root])?;
@@ -2434,7 +2396,6 @@ impl PublicationNativeFacts {
                 roles,
                 offers,
                 native_availability,
-                input_decisions,
                 frontier,
             },
         }))
@@ -2448,13 +2409,11 @@ pub struct ExactContextSnapshot {
     pub(crate) native_fact_owner: Option<Arc<PublicationNativeFacts>>,
     pub(crate) producer: [u8; 32],
     pub(crate) selection: Arc<ExactSelectionSnapshot>,
-    pub(crate) roles: OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedCompilerRole>,
+    pub(crate) roles: OrdMap<ExactModuleIdentity, RecordedCompilerRow>,
     pub(crate) lexical: ExactLexicalSnapshot,
     pub(crate) source_scope: ExactLexicalSnapshot,
     pub(crate) offers: OrdMap<[u8; 32], NativeOfferSnapshotFacts>,
     pub(crate) native_availability: OrdMap<ArtifactId, NativeAvailabilitySnapshotFacts>,
-    pub(crate) input_decisions:
-        OrdMap<ExactModuleIdentity, crate::artifact_inventory::RecordedInputNativeDecision>,
     pub(crate) native_components: NativeComponentRecords,
     pub(crate) native_closures: NativeAcquiredClosureRecords,
 }
@@ -2507,224 +2466,228 @@ impl ExactContextSnapshot {
     > {
         self.selection.binding_dependencies()
     }
-    pub fn compiler_roles(&self) -> Vec<CompilerInputRole> {
-        self.roles
-            .values()
-            .map(|role| role.to_recorded_role())
-            .collect()
+    pub(crate) fn recorded_rows(&self) -> &OrdMap<ExactModuleIdentity, RecordedCompilerRow> {
+        &self.roles
     }
     pub fn lexical(&self) -> Vec<ExactLexicalNode> {
         self.lexical.to_vec()
     }
 }
 
+/// Durable row facts never contain acquired input owners or source authority.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CompilerRoleFact {
+pub(crate) enum RecordedCompilerRow {
     InterfaceOnly {
         interface: ArtifactId,
     },
-    ReusableOriginal {
+    Original {
         interface: ArtifactId,
         original: ArtifactId,
+        provenance: RecordedOriginalProvenance,
+        native_choices: RecordedNativeChoices,
     },
-    PublishedSourceOriginal {
-        interface: ArtifactId,
-        original: ArtifactId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "birth",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum RecordedOriginalProvenance {
+    Reusable,
+    Published(RecordedPublicationBirth),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordedPublicationBirth {
+    pub(crate) source_revision: String,
+    pub(crate) original_input_identity: String,
+    pub(crate) selection: crate::artifact_inventory::ExactArtifactSelection,
+    pub(crate) selection_sha256: [u8; 32],
+    pub(crate) native_facts: Arc<PublicationNativeFacts>,
+}
+impl PartialEq for RecordedPublicationBirth {
+    fn eq(&self, other: &Self) -> bool {
+        self.source_revision == other.source_revision
+            && self.original_input_identity == other.original_input_identity
+            && self.selection_sha256 == other.selection_sha256
+            && self.native_facts == other.native_facts
+            && (Arc::ptr_eq(self.selection.snapshot(), other.selection.snapshot())
+                || self.selection.snapshot() == other.selection.snapshot())
+    }
+}
+impl Eq for RecordedPublicationBirth {}
+
+/// An absent choice and an issued empty choice are different recorded facts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RecordedNativeChoices {
+    Unissued,
+    Issued {
+        #[serde(with = "serde_ord_map")]
+        groups: OrdMap<u32, crate::artifact_inventory::NativeGroupBinding>,
+    },
+}
+
+impl RecordedCompilerRow {
+    pub(crate) fn interface(&self) -> ArtifactId {
+        match self {
+            Self::InterfaceOnly { interface } | Self::Original { interface, .. } => *interface,
+        }
+    }
+    pub(crate) fn original(&self) -> Option<ArtifactId> {
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::Original { original, .. } => Some(*original),
+        }
+    }
+    pub(crate) fn publication(&self) -> Option<&RecordedPublicationBirth> {
+        match self {
+            Self::Original {
+                provenance: RecordedOriginalProvenance::Published(birth),
+                ..
+            } => Some(birth),
+            _ => None,
+        }
+    }
+    pub(crate) fn native_choices(&self) -> Option<&RecordedNativeChoices> {
+        match self {
+            Self::InterfaceOnly { .. } => None,
+            Self::Original { native_choices, .. } => Some(native_choices),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "birth",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum OriginalProvenanceWire {
+    Reusable,
+    Published {
         source_revision: String,
         original_input_identity: String,
         selection: SelectionRoot,
         selection_sha256: [u8; 32],
-        native_authority: Cid,
+        native_facts: Cid,
     },
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CompilerRowWire {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    Original {
+        interface: ArtifactId,
+        original: ArtifactId,
+        provenance: OriginalProvenanceWire,
+        native_choices: RecordedNativeChoices,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
-pub struct CompilerRoleCodec;
-impl SnapshotValueCodec<CompilerInputRole> for CompilerRoleCodec {
+pub(crate) struct CompilerRowCodec;
+impl SnapshotValueCodec<RecordedCompilerRow> for CompilerRowCodec {
     type Wire = Cid;
     fn encode<BS: Blockstore>(
         store: &mut Materializer<'_, BS>,
-        role: &CompilerInputRole,
+        row: &RecordedCompilerRow,
     ) -> Result<Cid, SnapshotError> {
-        let fact = match role {
-            CompilerInputRole::InterfaceOnly { interface } => CompilerRoleFact::InterfaceOnly {
+        let wire = match row {
+            RecordedCompilerRow::InterfaceOnly { interface } => CompilerRowWire::InterfaceOnly {
                 interface: *interface,
             },
-            CompilerInputRole::ReusableOriginal {
+            RecordedCompilerRow::Original {
                 interface,
                 original,
-            } => CompilerRoleFact::ReusableOriginal {
-                interface: *interface,
-                original: *original,
-            },
-            CompilerInputRole::PublishedSourceOriginal {
-                interface,
-                original,
-                source_revision,
-                original_input_identity,
-                selection,
-                selection_sha256,
-                native_authority,
+                provenance,
+                native_choices,
             } => {
-                let authority = store.materialize_publication_native(native_authority.facts())?;
-                let base = store.selection_base.clone();
-                let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
-                CompilerRoleFact::PublishedSourceOriginal {
+                let provenance = match provenance {
+                    RecordedOriginalProvenance::Reusable => OriginalProvenanceWire::Reusable,
+                    RecordedOriginalProvenance::Published(birth) => {
+                        let native_facts =
+                            store.materialize_publication_native(&birth.native_facts)?;
+                        let base = store.selection_base.clone();
+                        let selection = store
+                            .materialize_selection(base.as_ref(), birth.selection.snapshot())?;
+                        OriginalProvenanceWire::Published {
+                            source_revision: birth.source_revision.clone(),
+                            original_input_identity: birth.original_input_identity.clone(),
+                            selection: selection.root,
+                            selection_sha256: birth.selection_sha256,
+                            native_facts,
+                        }
+                    }
+                };
+                CompilerRowWire::Original {
                     interface: *interface,
                     original: *original,
-                    source_revision: source_revision.clone(),
-                    original_input_identity: original_input_identity.clone(),
-                    selection: selection.root,
-                    selection_sha256: *selection_sha256,
-                    native_authority: authority,
+                    provenance,
+                    native_choices: native_choices.clone(),
                 }
             }
         };
-        store.materialize_value(&fact)
+        store.materialize_value(&wire)
     }
     fn decode<BS: Blockstore>(
         store: &SnapshotHydrator<'_, BS>,
         cid: Cid,
-    ) -> Result<CompilerInputRole, SnapshotError> {
-        Ok(match read_value::<CompilerRoleFact, _>(store, &cid)? {
-            CompilerRoleFact::InterfaceOnly { interface } => {
-                CompilerInputRole::InterfaceOnly { interface }
+    ) -> Result<RecordedCompilerRow, SnapshotError> {
+        Ok(match read_value::<CompilerRowWire, _>(store, &cid)? {
+            CompilerRowWire::InterfaceOnly { interface } => {
+                RecordedCompilerRow::InterfaceOnly { interface }
             }
-            CompilerRoleFact::ReusableOriginal {
+            CompilerRowWire::Original {
                 interface,
                 original,
-            } => CompilerInputRole::ReusableOriginal {
-                interface,
-                original,
-            },
-            CompilerRoleFact::PublishedSourceOriginal {
-                interface,
-                original,
-                source_revision,
-                original_input_identity,
-                selection,
-                selection_sha256,
-                native_authority,
+                provenance,
+                native_choices,
             } => {
-                let native_authority = hydrate_publication_native(store, &native_authority)?;
-                let selection = store.selection(&selection)?;
-                CompilerInputRole::PublishedSourceOriginal {
+                if let RecordedNativeChoices::Issued { groups } = &native_choices {
+                    if groups.iter().any(|(ordinal, group)| {
+                        *ordinal != group.original_ordinal || group.binding.artifact() != original
+                    }) {
+                        return Err(malformed(
+                            "native choice differs from its recorded original row",
+                        ));
+                    }
+                }
+                let provenance = match provenance {
+                    OriginalProvenanceWire::Reusable => RecordedOriginalProvenance::Reusable,
+                    OriginalProvenanceWire::Published {
+                        source_revision,
+                        original_input_identity,
+                        selection,
+                        selection_sha256,
+                        native_facts,
+                    } => RecordedOriginalProvenance::Published(RecordedPublicationBirth {
+                        source_revision,
+                        original_input_identity,
+                        selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                            store.selection(&selection)?.snapshot,
+                        ),
+                        selection_sha256,
+                        native_facts: hydrate_publication_native(store, &native_facts)?,
+                    }),
+                };
+                RecordedCompilerRow::Original {
                     interface,
                     original,
-                    source_revision,
-                    original_input_identity,
-                    selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
-                        selection.snapshot,
-                    ),
-                    selection_sha256,
-                    native_authority:
-                        crate::artifact_inventory::PublicationNativeAuthority::recorded(
-                            native_authority,
-                        ),
+                    provenance,
+                    native_choices,
                 }
             }
         })
-    }
-}
-
-impl SnapshotValueCodec<crate::artifact_inventory::RecordedCompilerRole> for CompilerRoleCodec {
-    type Wire = Cid;
-    fn encode<BS: Blockstore>(
-        store: &mut Materializer<'_, BS>,
-        value: &crate::artifact_inventory::RecordedCompilerRole,
-    ) -> Result<Cid, SnapshotError> {
-        use crate::artifact_inventory::RecordedCompilerRole;
-        let fact = match value {
-            RecordedCompilerRole::InterfaceOnly { interface } => CompilerRoleFact::InterfaceOnly {
-                interface: *interface,
-            },
-            RecordedCompilerRole::ReusableOriginal {
-                interface,
-                original,
-            } => CompilerRoleFact::ReusableOriginal {
-                interface: *interface,
-                original: *original,
-            },
-            RecordedCompilerRole::PublishedSourceOriginal {
-                interface,
-                original,
-                source_revision,
-                original_input_identity,
-                selection,
-                selection_sha256,
-                native_authority,
-            } => {
-                let authority = store.materialize_publication_native(native_authority)?;
-                let base = store.selection_base.clone();
-                let selection = store.materialize_selection(base.as_ref(), selection.snapshot())?;
-                CompilerRoleFact::PublishedSourceOriginal {
-                    interface: *interface,
-                    original: *original,
-                    source_revision: source_revision.clone(),
-                    original_input_identity: original_input_identity.clone(),
-                    selection: selection.root,
-                    selection_sha256: *selection_sha256,
-                    native_authority: authority,
-                }
-            }
-        };
-        store.materialize_value(&fact)
-    }
-    fn decode<BS: Blockstore>(
-        store: &SnapshotHydrator<'_, BS>,
-        wire: Cid,
-    ) -> Result<crate::artifact_inventory::RecordedCompilerRole, SnapshotError> {
-        <Self as SnapshotValueCodec<CompilerInputRole>>::decode(store, wire)
-            .map(|role| role.recorded_fact())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InputNativeDecisionWire {
-    role: Cid,
-    groups: Vec<crate::artifact_inventory::NativeGroupBinding>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct InputNativeDecisionCodec;
-impl SnapshotValueCodec<crate::artifact_inventory::RecordedInputNativeDecision>
-    for InputNativeDecisionCodec
-{
-    type Wire = Cid;
-    fn encode<BS: Blockstore>(
-        store: &mut Materializer<'_, BS>,
-        value: &crate::artifact_inventory::RecordedInputNativeDecision,
-    ) -> Result<Cid, SnapshotError> {
-        let role = CompilerRoleCodec::encode(store, &value.role)?;
-        store.materialize_value(&InputNativeDecisionWire {
-            role,
-            groups: value.groups.values().copied().collect(),
-        })
-    }
-    fn decode<BS: Blockstore>(
-        store: &SnapshotHydrator<'_, BS>,
-        cid: Cid,
-    ) -> Result<crate::artifact_inventory::RecordedInputNativeDecision, SnapshotError> {
-        let wire: InputNativeDecisionWire = read_value(store, &cid)?;
-        let mut groups = OrdMap::new();
-        for group in wire.groups {
-            if groups.insert(group.original_ordinal, group).is_some() {
-                return Err(malformed("input decision repeats an ordinal"));
-            }
-        }
-        let role: crate::artifact_inventory::RecordedCompilerRole =
-            CompilerRoleCodec::decode(store, wire.role)?;
-        let original = role
-            .original()
-            .ok_or_else(|| malformed("input decision has no original role"))?;
-        if groups
-            .values()
-            .any(|group| group.binding.artifact() != original)
-        {
-            return Err(malformed("input decision group differs from its original"));
-        }
-        Ok(crate::artifact_inventory::RecordedInputNativeDecision { role, groups })
     }
 }
 
@@ -2735,23 +2698,13 @@ struct PublicationNativeDescriptor {
     roles: SnapshotMapRoot,
     offers: SnapshotMapRoot,
     native_availability: SnapshotMapRoot,
-    input_decisions: SnapshotMapRoot,
 }
 struct NativeFactReceipt {
     root: Cid,
-    roles: MaterializedMap<
-        ExactModuleIdentity,
-        crate::artifact_inventory::RecordedCompilerRole,
-        CompilerRoleCodec,
-    >,
+    roles: MaterializedMap<ExactModuleIdentity, RecordedCompilerRow, CompilerRowCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
     native_availability:
         MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
-    input_decisions: MaterializedMap<
-        ExactModuleIdentity,
-        crate::artifact_inventory::RecordedInputNativeDecision,
-        InputNativeDecisionCodec,
-    >,
     frontier: ReachableBlocks,
 }
 impl<BS: Blockstore> Materializer<'_, BS> {
@@ -2777,7 +2730,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 self.put_keyed(cid, &block.bytes).map_err(storage_error)?;
             }
         }
-        // A context references the four map roots directly, so its native-domain
+        // A context references the three map roots directly, so its native-domain
         // descriptor itself need not have been present in the base store.
         let descriptor = facts
             .receipt
@@ -2800,19 +2753,17 @@ fn hydrate_publication_native<BS: Blockstore>(
         return Ok(Arc::clone(facts));
     }
     let descriptor: PublicationNativeDescriptor = read_value(store, cid)?;
-    if descriptor.version != 2 {
+    if descriptor.version != 3 {
         return Err(malformed(
-            "publication native authority requires version 2 with born roles",
+            "publication native facts require version 3 recorded rows",
         ));
     }
-    let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
+    let roles = hydrate_map_owned::<_, _, CompilerRowCodec, _>(store, &descriptor.roles)?;
     let offers = hydrate_map_owned::<_, _, NativeOfferCodec, _>(store, &descriptor.offers)?;
     let native_availability = hydrate_map_owned::<_, _, NativeAvailabilityCodec, _>(
         store,
         &descriptor.native_availability,
     )?;
-    let input_decisions =
-        hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(store, &descriptor.input_decisions)?;
     for (key, offer) in &offers.facts {
         if *key != offer.identity().map_err(malformed)? {
             return Err(malformed("publication native offer key differs"));
@@ -2836,7 +2787,6 @@ fn hydrate_publication_native<BS: Blockstore>(
             roles: roles.facts,
             offers: offers.facts,
             native_availability: native_availability.facts,
-            input_decisions: input_decisions.facts,
         },
     )?;
     if facts.commitment() != *cid {
@@ -2849,7 +2799,7 @@ fn hydrate_publication_native<BS: Blockstore>(
     Ok(facts)
 }
 
-const CONTEXT_ENCODING_VERSION: u32 = 9;
+const CONTEXT_ENCODING_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2862,30 +2812,20 @@ struct ContextDescriptor {
     source_scope: SnapshotMapRoot,
     offers: SnapshotMapRoot,
     native_availability: SnapshotMapRoot,
-    input_decisions: SnapshotMapRoot,
     native_components: SnapshotMapRoot,
     native_closures: SnapshotMapRoot,
 }
 #[derive(Clone, Debug)]
-pub struct MaterializedContext {
+pub struct DecodedContext {
     root: ContextRoot,
     snapshot: ExactContextSnapshot,
     selection: MaterializedSelection,
-    roles: MaterializedMap<
-        ExactModuleIdentity,
-        crate::artifact_inventory::RecordedCompilerRole,
-        CompilerRoleCodec,
-    >,
+    roles: MaterializedMap<ExactModuleIdentity, RecordedCompilerRow, CompilerRowCodec>,
     lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     source_scope: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec>,
     offers: MaterializedMap<[u8; 32], NativeOfferSnapshotFacts, NativeOfferCodec>,
     native_availability:
         MaterializedMap<ArtifactId, NativeAvailabilitySnapshotFacts, NativeAvailabilityCodec>,
-    input_decisions: MaterializedMap<
-        ExactModuleIdentity,
-        crate::artifact_inventory::RecordedInputNativeDecision,
-        InputNativeDecisionCodec,
-    >,
     native_components:
         MaterializedMap<[u8; 32], ImmutableNativeComponentRecordRef, NativeComponentRecordCodec>,
     native_closures: MaterializedMap<
@@ -2894,27 +2834,30 @@ pub struct MaterializedContext {
         NativeAcquiredClosureRecordCodec,
     >,
 }
-impl MaterializedContext {
+impl DecodedContext {
     pub fn root(&self) -> &ContextRoot {
         &self.root
     }
     pub fn snapshot(&self) -> &ExactContextSnapshot {
         &self.snapshot
     }
+    pub(crate) fn recorded_rows(&self) -> &OrdMap<ExactModuleIdentity, RecordedCompilerRow> {
+        self.snapshot.recorded_rows()
+    }
 }
 impl<BS: Blockstore> Materializer<'_, BS> {
     pub fn materialize_context(
         &mut self,
-        base: Option<&MaterializedContext>,
+        base: Option<&DecodedContext>,
         next: &ExactContextSnapshot,
-    ) -> Result<MaterializedContext, SnapshotError> {
+    ) -> Result<DecodedContext, SnapshotError> {
         self.publication_native_base =
             base.and_then(|base| base.snapshot.native_fact_owner.clone());
         self.selection_base = base.map(|base| base.selection.clone());
         self.native_availability_base = base.map(|base| base.native_availability.clone());
         let selection =
             self.materialize_selection(base.map(|base| &base.selection), &next.selection)?;
-        let roles = self.materialize_map_with::<_, _, CompilerRoleCodec>(
+        let roles = self.materialize_map_with::<_, _, CompilerRowCodec>(
             base.map(|base| &base.roles),
             &next.roles,
         )?;
@@ -2934,10 +2877,6 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             base.map(|base| &base.native_availability),
             &next.native_availability,
         )?;
-        let input_decisions = self.materialize_map_with::<_, _, InputNativeDecisionCodec>(
-            base.map(|base| &base.input_decisions),
-            &next.input_decisions,
-        )?;
         let native_components = self.materialize_map_with::<_, _, NativeComponentRecordCodec>(
             base.map(|base| &base.native_components),
             &next.native_components,
@@ -2955,7 +2894,6 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             source_scope: source_scope.root.clone(),
             offers: offers.root.clone(),
             native_availability: native_availability.root.clone(),
-            input_decisions: input_decisions.root.clone(),
             native_components: native_components.root.clone(),
             native_closures: native_closures.root.clone(),
         };
@@ -2967,7 +2905,6 @@ impl<BS: Blockstore> Materializer<'_, BS> {
                 && base.source_scope.root == source_scope.root
                 && base.offers.root == offers.root
                 && base.native_availability.root == native_availability.root
-                && base.input_decisions.root == input_decisions.root
                 && base.native_components.root == native_components.root
                 && base.native_closures.root == native_closures.root
         }) {
@@ -2975,7 +2912,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
         } else {
             ContextRoot(self.materialize_value(&descriptor)?)
         };
-        Ok(MaterializedContext {
+        Ok(DecodedContext {
             root,
             snapshot: next.clone(),
             selection,
@@ -2984,7 +2921,6 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             source_scope,
             offers,
             native_availability,
-            input_decisions,
             native_components,
             native_closures,
         })
@@ -2993,7 +2929,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
 pub fn hydrate_context<BS: Blockstore>(
     store: &BS,
     root: &ContextRoot,
-) -> Result<MaterializedContext, SnapshotError> {
+) -> Result<DecodedContext, SnapshotError> {
     let hydrator = SnapshotHydrator::new(store);
     hydrate_context_with(&hydrator, root)
 }
@@ -3003,7 +2939,7 @@ pub fn hydrate_context<BS: Blockstore>(
 pub fn hydrate_contexts<BS: Blockstore>(
     store: &BS,
     roots: &[ContextRoot],
-) -> Result<Vec<MaterializedContext>, SnapshotError> {
+) -> Result<Vec<DecodedContext>, SnapshotError> {
     let hydrator = SnapshotHydrator::new(store);
     roots
         .iter()
@@ -3014,7 +2950,7 @@ pub fn hydrate_contexts<BS: Blockstore>(
 fn hydrate_context_with<BS: Blockstore>(
     store: &SnapshotHydrator<'_, BS>,
     root: &ContextRoot,
-) -> Result<MaterializedContext, SnapshotError> {
+) -> Result<DecodedContext, SnapshotError> {
     let bytes = read_checked_bytes(store, root.cid())?;
     // Refuse an old schema before decoding its layout or following any links.
     #[derive(Deserialize)]
@@ -3030,7 +2966,7 @@ fn hydrate_context_with<BS: Blockstore>(
     }
     let descriptor: ContextDescriptor = fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)?;
     let selection = store.selection(&descriptor.selection)?;
-    let roles = hydrate_map_owned::<_, _, CompilerRoleCodec, _>(store, &descriptor.roles)?;
+    let roles = hydrate_map_owned::<_, _, CompilerRowCodec, _>(store, &descriptor.roles)?;
     let lexical: MaterializedMap<ExactModuleIdentity, ImmutableLexicalFactRef, LexicalFactCodec> =
         hydrate_map_owned::<_, _, LexicalFactCodec, _>(store, &descriptor.lexical)?;
     if lexical
@@ -3072,8 +3008,6 @@ fn hydrate_context_with<BS: Blockstore>(
             }
         }
     }
-    let input_decisions =
-        hydrate_map_owned::<_, _, InputNativeDecisionCodec, _>(store, &descriptor.input_decisions)?;
     let native_components = hydrate_map_owned::<_, _, NativeComponentRecordCodec, _>(
         store,
         &descriptor.native_components,
@@ -3088,7 +3022,6 @@ fn hydrate_context_with<BS: Blockstore>(
             roles: roles.facts.clone(),
             offers: offers.facts.clone(),
             native_availability: native_availability.facts.clone(),
-            input_decisions: input_decisions.facts.clone(),
         },
     )?);
     let snapshot = ExactContextSnapshot {
@@ -3098,7 +3031,6 @@ fn hydrate_context_with<BS: Blockstore>(
         roles: roles.facts.clone(),
         offers: offers.facts.clone(),
         native_availability: native_availability.facts.clone(),
-        input_decisions: input_decisions.facts.clone(),
         native_components: native_components.facts.clone(),
         native_closures: native_closures.facts.clone(),
         lexical: ExactLexicalSnapshot {
@@ -3110,7 +3042,7 @@ fn hydrate_context_with<BS: Blockstore>(
             rows: Arc::new(OnceLock::new()),
         },
     };
-    Ok(MaterializedContext {
+    Ok(DecodedContext {
         root: root.clone(),
         snapshot,
         selection,
@@ -3119,7 +3051,6 @@ fn hydrate_context_with<BS: Blockstore>(
         source_scope,
         offers,
         native_availability,
-        input_decisions,
         native_components,
         native_closures,
     })
@@ -3362,10 +3293,9 @@ mod projection_tests {
                             unit: "unit".into(),
                             module: format!("M{index}"),
                         },
-                        CompilerInputRole::InterfaceOnly {
+                        RecordedCompilerRow::InterfaceOnly {
                             interface: ArtifactId([index as u8; 32]),
-                        }
-                        .recorded_fact(),
+                        },
                     )
                 })
                 .collect::<OrdMap<_, _>>();
@@ -3379,7 +3309,6 @@ mod projection_tests {
                     roles: roles.clone(),
                     offers: Default::default(),
                     native_availability: Default::default(),
-                    input_decisions: Default::default(),
                 },
             )
             .unwrap();
@@ -3387,7 +3316,6 @@ mod projection_tests {
                 roles: [(key.clone(), roles[&key].clone())].into_iter().collect(),
                 offers: Default::default(),
                 native_availability: Default::default(),
-                input_decisions: Default::default(),
             };
             let operation = InventoryOperation::new(Default::default());
             let keys = PublicationNativeMapKeys {
@@ -3449,58 +3377,108 @@ mod projection_tests {
         assert!(base.get(&nodes[0]).unwrap().is_some());
     }
 
+    fn proof_only_native_offer(extra_unselected_node: bool) -> NativeOfferSnapshotFacts {
+        let scope = ArtifactSelectionId([1; 32]);
+        let binding = ArtifactBinding {
+            artifact: ArtifactId([2; 32]),
+            selection: scope,
+        };
+        let node = ArtifactBindingNode::Artifact(binding);
+        let mut nodes = vec![node];
+        if extra_unselected_node {
+            nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: scope,
+            }));
+        }
+        let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+            selection: scope,
+            nodes,
+            dependencies: vec![],
+        }));
+        let snapshot = Arc::new(ExactSelectionSnapshot {
+            scopes: [(scope, proof)].into_iter().collect(),
+            roots: [(node, ())].into_iter().collect(),
+            namespace: [(binding.artifact, binding)].into_iter().collect(),
+            custody_roots: Default::default(),
+        });
+        NativeOfferSnapshotFacts {
+            original: binding.artifact,
+            interface: ArtifactId([4; 32]),
+            owner: ExactModuleIdentity {
+                unit: "unit".into(),
+                module: "Data".into(),
+            },
+            body: NativeOfferSnapshotBody::Full(
+                crate::artifact_inventory::ExactArtifactSelection::from_snapshot(snapshot),
+            ),
+        }
+    }
+
+    #[test]
+    fn native_offer_full_proof_change_matches_cold_incremental_encoding() {
+        let before = proof_only_native_offer(false);
+        let after = proof_only_native_offer(true);
+        let (NativeOfferSnapshotBody::Full(left), NativeOfferSnapshotBody::Full(right)) =
+            (&before.body, &after.body)
+        else {
+            unreachable!()
+        };
+        assert_eq!(left, right, "selected semantics stay equal");
+        assert_ne!(before, after, "full durable records change");
+        let key = before.identity().unwrap();
+        assert_eq!(key, after.identity().unwrap());
+        let maps = |fact| PublicationNativeMaps {
+            roles: Default::default(),
+            offers: [(key, fact)].into_iter().collect(),
+            native_availability: Default::default(),
+        };
+        let base = PublicationNativeFacts::maintain(None, maps(before.clone())).unwrap();
+        let incremental =
+            PublicationNativeFacts::maintain(Some(&base), maps(after.clone())).unwrap();
+        let cold = PublicationNativeFacts::maintain(None, maps(after.clone())).unwrap();
+        assert_ne!(incremental.commitment(), base.commitment());
+        assert_eq!(incremental.commitment(), cold.commitment());
+        assert_eq!(incremental.offers[&key], after);
+
+        let store = fvm_ipld_blockstore::MemoryBlockstore::default();
+        let install = |packet: StagedBlocks| {
+            for (cid, bytes) in packet.into_blocks() {
+                store.put_keyed(&cid, &bytes).unwrap();
+            }
+        };
+        let mut snapshot = ExactContextSnapshot::empty();
+        snapshot.offers.insert(key, before);
+        let mut writer = Materializer::new(&store);
+        let base = writer.materialize_context(None, &snapshot).unwrap();
+        install(writer.finish().unwrap());
+        snapshot.offers.insert(key, after);
+        let mut writer = Materializer::new(&store);
+        let incremental = writer.materialize_context(Some(&base), &snapshot).unwrap();
+        install(writer.finish().unwrap());
+        let mut writer = Materializer::new(&store);
+        let cold = writer.materialize_context(None, &snapshot).unwrap();
+        assert_ne!(incremental.root(), base.root());
+        assert_eq!(incremental.root(), cold.root());
+        let decoded = hydrate_context(&store, incremental.root()).unwrap();
+        assert_eq!(decoded.snapshot().offers, snapshot.offers);
+    }
+
     #[test]
     fn key_projection_keeps_full_proof_bytes_when_observations_are_equal() {
-        fn data(extra_unselected_node: bool) -> NativeOfferSnapshotFacts {
-            let scope = ArtifactSelectionId([1; 32]);
-            let binding = ArtifactBinding {
-                artifact: ArtifactId([2; 32]),
-                selection: scope,
-            };
-            let node = ArtifactBindingNode::Artifact(binding);
-            let mut nodes = vec![node];
-            if extra_unselected_node {
-                nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
-                    artifact: ArtifactId([3; 32]),
-                    selection: scope,
-                }));
-            }
-            let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
-                selection: scope,
-                nodes,
-                dependencies: vec![],
-            }));
-            let snapshot = Arc::new(ExactSelectionSnapshot {
-                scopes: [(scope, proof)].into_iter().collect(),
-                roots: [(node, ())].into_iter().collect(),
-                namespace: [(binding.artifact, binding)].into_iter().collect(),
-                custody_roots: Default::default(),
-            });
-            NativeOfferSnapshotFacts {
-                original: binding.artifact,
-                interface: ArtifactId([4; 32]),
-                owner: ExactModuleIdentity {
-                    unit: "unit".into(),
-                    module: "Data".into(),
-                },
-                body: NativeOfferSnapshotBody::Full(
-                    crate::artifact_inventory::ExactArtifactSelection::from_snapshot(snapshot),
-                ),
-            }
-        }
         // Passive decoded DATA may claim the same scope identity with different
         // atomic proof bytes. This is not a pair of authenticated live issuers.
-        let a = data(false);
+        let a = proof_only_native_offer(false);
         let b: NativeOfferSnapshotFacts =
-            serde_json::from_slice(&serde_json::to_vec(&data(true)).unwrap()).unwrap();
-        assert_eq!(a, b, "selected observations omit the unselected proof node");
+            serde_json::from_slice(&serde_json::to_vec(&proof_only_native_offer(true)).unwrap())
+                .unwrap();
+        assert_ne!(a, b, "durable records preserve the unselected proof node");
         let key = a.identity().unwrap();
         assert_eq!(key, b.identity().unwrap());
         let maps = |fact| PublicationNativeMaps {
             roles: Default::default(),
             offers: [(key, fact)].into_iter().collect(),
             native_availability: Default::default(),
-            input_decisions: Default::default(),
         };
         let cold_a = PublicationNativeFacts::maintain(None, maps(a)).unwrap();
         let cold_b = PublicationNativeFacts::maintain(None, maps(b)).unwrap();
@@ -3524,7 +3502,7 @@ mod projection_tests {
                 &serde_json::to_vec(&mismatched).unwrap()
             )
             .is_err(),
-            "semantic Eq cannot associate foreign full facts with another owner's encoded root"
+            "foreign full facts cannot borrow another owner's encoded root"
         );
         let keys = PublicationNativeMapKeys {
             offers: std::collections::BTreeSet::from([key]),

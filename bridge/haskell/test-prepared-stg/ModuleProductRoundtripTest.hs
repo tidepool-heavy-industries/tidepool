@@ -5,7 +5,7 @@ module ModuleProductRoundtripTest
   ( verifyModuleProductInterfaceRoundtrip, verifyOriginalProductCatalogue ) where
 
 import Tidepool.PreparedStg.Internal (PreparedModule(..))
-import Control.Monad (unless)
+import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -15,11 +15,11 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word32)
 import GHC
-  ( backend, getSession, getSessionDynFlags, ms_mod, ms_textual_imps, unLoc
+  ( backend, ms_location, getSession, getSessionDynFlags, ms_mod, ms_textual_imps, unLoc
   , noBackend
   , parseModule, runGhc, setSession, setSessionDynFlags, typecheckModule )
 import GHC.Driver.Env
-  ( hsc_HPT, hsc_dflags, hsc_mod_graph )
+  ( hsc_HPT, hsc_FC, hsc_home_unit, hsc_dflags, hsc_mod_graph )
 import GHC.Driver.Session (GhcLink(..), ghcLink, importPaths, targetProfile)
 import GHC.Iface.Binary (CompressionIFace(..), TraceBinIFace(..), writeBinIface)
 import GHC.Iface.Recomp.Flags (fingerprintDynFlags, fingerprintOptFlags)
@@ -28,11 +28,12 @@ import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), lookupHpt)
 import GHC.Unit.Module (mkModuleName, moduleNameString, moduleUnit)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries', mkModuleGraph)
 import GHC.Unit.Module.ModIface (mi_extra_decls, mi_final_exts, mi_flag_hash, mi_opt_hash)
-import GHC.Unit.Types (moduleName, unitString)
+import GHC.Unit.Types (moduleName, unitString, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import System.Directory (copyFile, createDirectoryIfMissing, getFileSize, renameFile)
 import System.FilePath ((</>), takeDirectory)
@@ -46,7 +47,7 @@ import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), freshExactState, readExactIfaceArtifacts, hydrateExactScope, newOriginalInterfaceArtifacts
-  , noCheckedValueImports, installExactLexicalGraph )
+  , noCheckedValueImports, noGeneratedScaffoldImports, projectExactLexicalGraph, exactInterfaceSummary )
 import Tidepool.GhcPipeline
   ( prHscEnv, PipelineSelection(..), pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
   , pprAcceptedCandidates, runPipelineSelected )
@@ -258,15 +259,24 @@ verifyModuleProductInterfaceRoundtrip work = do
     let sourceGraph = mkModuleGraph
           [node | node@(ModuleNode _ summary) <- mgModSummaries' (hsc_mod_graph producer)
                 , moduleNameString (moduleName (ms_mod summary)) == "ModuleProductB"]
-    duplicateLexical <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, []), (otherUnit, [])] noCheckedValueImports hydrated
+    let duplicateLexical = projectExactLexicalGraph sourceGraph [(artifact, []), (otherUnit, [])]
+          noCheckedValueImports noGeneratedScaffoldImports hydrated
     unless (case duplicateLexical of Left "duplicate virtual lexical owner" -> True; _ -> False) $
       liftIO $ ioError (userError "virtual lexical module names were not unique across units")
-    hidden <- liftIO $ installExactLexicalGraph sourceGraph [] noCheckedValueImports hydrated
+    let hidden = projectExactLexicalGraph sourceGraph [] noCheckedValueImports noGeneratedScaffoldImports hydrated
     unless (case hidden of Left _ -> True; Right _ -> False) $
       liftIO $ ioError (userError "implementation-only module became lexically importable")
-    lexicalResult <- liftIO $ installExactLexicalGraph sourceGraph [(artifact, [])] noCheckedValueImports hydrated
+    let lexicalResult = projectExactLexicalGraph sourceGraph [(artifact, [])]
+          noCheckedValueImports noGeneratedScaffoldImports hydrated
     lexical <- case lexicalResult of
-      Right env -> pure env
+      Right (env,rows) -> do
+        -- Independent GHC oracle for the authenticated serialized product.
+        -- Production lexical installation is exercised by the World tests.
+        liftIO $ forM_ rows $ \(selected,_) ->
+          addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
+            (GWIB (mkModuleName (exactModule selected)) NotBoot)
+            (ms_location (exactInterfaceSummary env selected))
+        pure env
       Left reason -> liftIO $ ioError (userError reason)
     setSession lexical
     summary <- case consumerSummaries of

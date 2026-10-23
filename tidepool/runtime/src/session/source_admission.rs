@@ -554,6 +554,20 @@ pub enum SourceFenceTransitionFailure<E> {
     Unconfirmed { fence: RuntimeSourceFence, error: E },
 }
 
+impl<E: std::fmt::Debug> std::fmt::Debug for SourceFenceTransitionFailure<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => f.debug_tuple("Refused").field(error).finish(),
+            Self::Unconfirmed { fence, error } => f
+                .debug_struct("Unconfirmed")
+                .field("scope", &fence.owner.0.scope)
+                .field("attempt", &fence.attempt)
+                .field("error", error)
+                .finish(),
+        }
+    }
+}
+
 /// Borrowed transition of the existing gate. No independent phase flag can
 /// claim a cutoff that the owning gate did not commit.
 pub struct RuntimeSourceFenceTransition<'a> {

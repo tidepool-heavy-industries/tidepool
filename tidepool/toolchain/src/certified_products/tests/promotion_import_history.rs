@@ -482,9 +482,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(initial_a.original_native().unwrap().groups.len(), 2);
-    assert_eq!(initial_b.original_native().unwrap().groups.len(), 2);
-    assert!(initial_a.original_native().unwrap().groups.iter().all(|g| {
+    assert_eq!(initial_a.original_native().groups.len(), 2);
+    assert_eq!(initial_b.original_native().groups.len(), 2);
+    assert!(initial_a.original_native().groups.iter().all(|g| {
         matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
     assert!(initial.compiler_inputs().is_none());
@@ -813,7 +813,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .iter()
         .find(|p| selected_owners.contains(p.owner()) && p.owner().module == B)
         .unwrap();
-    assert_eq!(current_a.original_native().unwrap().groups.len(), 2);
+    assert_eq!(current_a.original_native().groups.len(), 2);
     assert_eq!(
         current_a
             .original_native()
@@ -837,7 +837,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
     let expected_versions = expected_promoted_versions(&promoted, &canonical);
     assert_eq!(current_a.owner().module_version, expected_versions[A]);
     assert_eq!(current_b.owner().module_version, expected_versions[B]);
-    assert!(current_a.original_native().unwrap().groups.iter().all(|g| {
+    assert!(current_a.original_native().groups.iter().all(|g| {
         matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &current_b.owner().unit && module == &current_b.owner().module && module_version.as_ref() == Some(&current_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
     }));
 
@@ -1202,10 +1202,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .unwrap();
     assert_eq!(independent_a, current_a);
     assert!(
-        !Arc::ptr_eq(
-            independent_a.original_native().unwrap(),
-            current_a.original_native().unwrap()
-        ),
+        !Arc::ptr_eq(independent_a.original_native(), current_a.original_native()),
         "another admission issues its own proof"
     );
 
@@ -1270,17 +1267,39 @@ fn check_retained_core_promotion_history(item_count: usize) {
         assert!(repeated_work < original_entry_work,
             "item {item} avoids rebuilding native requirement maps: first={original_entry_work} repeated={repeated_work}");
     }
-    let changed_source_product = current_a.clone().with_source_sha256([99; 32]);
+    let mut changed_source = promoted_packet.clone();
+    changed_source
+        .modules
+        .iter_mut()
+        .find(|module| module.module == A)
+        .unwrap()
+        .source_sha256 = [99; 32];
     assert!(
-        original_view
-            .retained_original_entry_with_validation(
-                canonical_producer,
-                &changed_source_product,
-                &mut PackageInterfaceValidation::default()
-            )
-            .unwrap()
-            .is_none(),
-        "changed source admission does not share artifact-entry proof custody"
+        matches!(
+            certify_products(
+                None,
+                &changed_source,
+                &independent,
+                &crate::artifacts::SourceEvidenceAdmission::from_exact(
+                    exact
+                        .source()
+                        .match_product(
+                            exact.physical_request().unwrap(),
+                            &input,
+                            target_source,
+                            &evidence_bytes,
+                            independent.operation(),
+                        )
+                        .unwrap(),
+                ),
+                root.path(),
+                &producer,
+                &include,
+                None,
+            ),
+            Err(CertificationError::Mismatch(_))
+        ),
+        "a mismatched raw source receipt cannot become a reusable completed Original"
     );
     assert!(
         crate::declaration_context::certified_product_artifact_view_with_validation(
@@ -1550,7 +1569,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
             assert_ne!(current_a.owner(), &first_a_owner);
             assert_ne!(current_b.owner(), &first_b_owner);
         }
-        assert!(current_a.original_native().unwrap().groups.iter().all(|g| {
+        assert!(current_a.original_native().groups.iter().all(|g| {
             matches!(&g.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, original_ordinal, binder: imported }] if unit == &current_b.owner().unit && module == &current_b.owner().module && module_version.as_ref() == Some(&current_b.owner().module_version) && *original_ordinal == B_ORDINAL && imported == &binder(B, B_ORDINAL))
         }));
         if let Some(previous) = historical_a_imports.get(current_a.owner()) {
@@ -1674,9 +1693,9 @@ fn check_retained_core_promotion_history(item_count: usize) {
             historical_a_imports.get(product.owner()),
             Some(&native_import_facts(product))
         );
-        for group in product.original_native().unwrap().groups.iter() {
+        for group in product.original_native().groups.iter() {
             assert!(matches!(
-                &group.source_imports(product.original_native().unwrap()).unwrap()[..],
+                &group.source_imports(product.original_native()).unwrap()[..],
                 [PendingImportOwner::Source { owner, original_ordinal, binder: imported }]
                     if owner.module == B
                         && retained_owners.contains(owner)
@@ -1700,7 +1719,7 @@ fn check_retained_core_promotion_history(item_count: usize) {
         .iter()
         .find(|product| product.owner() == initial_a.owner())
         .unwrap();
-    assert!(retained_initial_a.original_native().unwrap().groups.iter().all(|group| {
+    assert!(retained_initial_a.original_native().groups.iter().all(|group| {
         matches!(&group.imports[..], [ReceiptImportOwner::Source { unit, module, module_version, .. }] if unit == &initial_b.owner().unit && module == &initial_b.owner().module && module_version.as_ref() == Some(&initial_b.owner().module_version))
     }));
 }

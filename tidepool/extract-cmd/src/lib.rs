@@ -423,6 +423,20 @@ impl SpawnError {
             .completion_failure()
     }
 
+    /// Assess an accepted-response refusal without discarding its original cause
+    /// or changing the submission and settlement facts held by this error.
+    pub fn response_rejection(&self) -> Option<CompilerResponseRejection> {
+        let cause = self.source.get_ref()?;
+        cause
+            .downcast_ref::<CompilerResponseRejection>()
+            .copied()
+            .or_else(|| {
+                cause
+                    .downcast_ref::<CompilerResponseFailure>()
+                    .map(CompilerResponseFailure::reason)
+            })
+    }
+
     /// The binary genuinely wasn't there.
     pub fn is_not_found(&self) -> bool {
         self.source.kind() == std::io::ErrorKind::NotFound

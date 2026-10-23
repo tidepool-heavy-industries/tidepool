@@ -1239,24 +1239,7 @@ fn late_private_native_literals_and_graphs_survive_detached_capture() {
             )
             .unwrap();
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
-        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            &projection,
-            &artifacts,
-            &[],
-        )
-        .unwrap();
-        let native_offers = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-            &projection,
-            &artifacts,
-            &requirements,
-        )
-        .unwrap();
-        let support = native_availability_tests::fixture_support_with_issued_offers(
-            projection,
-            artifacts,
-            native_offers,
-        )
-        .unwrap();
+        let support = issue_fixture_compiler_support(projection, artifacts).unwrap();
         let private = OriginalCompilerInputs::from_issued_support(&support);
 
         let inputs = ProtectedScaffoldRequirements::default()

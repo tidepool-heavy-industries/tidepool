@@ -7622,8 +7622,7 @@ mod tests {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
-            CompilerInputProjection, IssuedNativeOffer, NativeBindingRequirement,
-            NativeOriginalRequirement,
+            CompilerInputProjection, NativeBindingRequirement, NativeOriginalRequirement,
         };
         use crate::certified_products::PendingImportOwner;
         use crate::declaration_join::ExactModuleIdentity;
@@ -7759,10 +7758,20 @@ mod tests {
             NativeOriginalRequirement::from_issued_group_custody(authored_id, canonical, &full)
                 .unwrap()
                 .expect("the owner issued all authored groups");
-        let full_offer = IssuedNativeOffer::issue(authored_id, &full, Some(proof)).unwrap();
+        let full_issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&entries).unwrap(),
+            full.clone(),
+        )
+        .unwrap();
+        let full_offer = full_issuer
+            .issue_native_offer(&authored.descriptor.owner, Some(proof))
+            .unwrap();
         assert!(full_offer.is_full());
-        let empty_offer = IssuedNativeOffer::issue(authored_id, &full, None).unwrap();
-        let authored_role = CompilerInputProjection::from_issued_entries(&[authored]).unwrap();
+        let empty_offer = full_issuer
+            .issue_native_offer(&authored.descriptor.owner, None)
+            .unwrap();
+        let authored_role =
+            CompilerInputProjection::from_issued_entries(&[authored.clone()]).unwrap();
         let partial_offer = full_offer
             .within_projection(&authored_role, context.artifact_view())
             .unwrap()
@@ -7786,8 +7795,14 @@ mod tests {
         let sparse_proof = NativeOriginalRequirement::from_selected_view(authored_id, &sparse)
             .unwrap()
             .expect("the owner issued the actual sparse initial group");
-        let sparse_offer =
-            IssuedNativeOffer::issue(authored_id, &sparse, Some(sparse_proof)).unwrap();
+        let sparse_issuer = crate::declaration_context::issue_fixture_compiler_support(
+            full_issuer.projection().clone(),
+            sparse.clone(),
+        )
+        .unwrap();
+        let sparse_offer = sparse_issuer
+            .issue_native_offer(&authored.descriptor.owner, Some(sparse_proof))
+            .unwrap();
         assert!(matches!(
             sparse_offer.snapshot_facts().body,
             crate::exact_context::NativeOfferSnapshotBody::Partial(_)
@@ -8010,8 +8025,7 @@ mod tests {
         use super::*;
         use crate::artifact_inventory::{
             ArtifactBindingNode, ArtifactDependency, ArtifactEntry, ArtifactInventory,
-            ArtifactInventoryFailure, CompilerInputProjection, IssuedNativeOffer,
-            NativeOriginalRequirement,
+            ArtifactInventoryFailure, CompilerInputProjection, NativeOriginalRequirement,
         };
         use crate::declaration_context::{ExactDeclarationContext, PreparedValueSourceSupport};
         use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
@@ -8176,9 +8190,19 @@ mod tests {
                     .find(|binding| binding.artifact == children[selected].descriptor.id)
                     .unwrap();
                 // Historical byte custody grants no competing Group choice.
-                let old =
-                    IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
-                        .unwrap();
+                let historical = crate::declaration_context::issue_fixture_compiler_support(
+                    CompilerInputProjection::from_issued_entries(&[
+                        native.clone(),
+                        children[1 - selected].clone(),
+                        template_only.clone(),
+                    ])
+                    .unwrap(),
+                    views[1 - selected].clone(),
+                )
+                .unwrap();
+                let old = historical
+                    .issue_native_offer(&native.descriptor.owner, None)
+                    .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
                     views[selected].clone(),
@@ -8633,14 +8657,17 @@ mod tests {
                     .copied()
                     .collect::<Vec<_>>();
                 assert_eq!(child_bindings, vec![selected_child]);
+                let issuer = crate::declaration_context::issue_fixture_compiler_support(
+                    projection.clone(),
+                    available.clone(),
+                )
+                .unwrap();
                 let offers = requirements
                     .iter()
                     .map(|requirement| {
-                        crate::artifact_inventory::IssuedNativeOffer::issue(
-                            requirement.original,
-                            available,
-                            Some(requirement.clone()),
-                        )
+                        assert_eq!(requirement.original, native_id);
+                        issuer
+                            .issue_native_offer(&native.descriptor.owner, Some(requirement.clone()))
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();

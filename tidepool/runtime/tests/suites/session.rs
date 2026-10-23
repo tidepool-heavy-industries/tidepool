@@ -1,3 +1,6 @@
+// Match the runtime library auto-trait proof budget for nested immutable
+// publication maps crossing a thread boundary; this does not change runtime limits.
+#![recursion_limit = "192"]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

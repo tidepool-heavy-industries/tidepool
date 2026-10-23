@@ -7783,9 +7783,53 @@ fn frozen_world_unchanged_and_declaration_controls_preserve_source_refusals() {
             }
             History::SourceFenced => {
                 let original = resident.public_source.original_source().clone();
-                let fence = original.source_admission().fence().unwrap();
+                let (held_tx, held_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let source = original.clone();
+                let (refused, fence, started) = std::thread::scope(|threads| {
+                    let fencer = threads.spawn(move || {
+                        source
+                            .source_admission()
+                            .fence_with(&source, |cutoff| {
+                                held_tx.send(()).unwrap();
+                                release_rx
+                                    .recv_timeout(std::time::Duration::from_secs(30))
+                                    .unwrap();
+                                cutoff.commit();
+                                Ok::<_, ()>(())
+                            })
+                            .unwrap()
+                            .unwrap()
+                    });
+                    held_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    let freezer = threads.spawn(|| resident.freeze_private_execution(&execution));
+                    // Wait for the actual freeze exclusion, not a scheduling
+                    // delay. The fence owns the source gate throughout this
+                    // observation and commits only after freezing has entered.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let started = loop {
+                        if execution.ensure_open().is_err() {
+                            break true;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break false;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    };
+                    assert!(execution.final_intent.get().is_none());
+                    release_tx.send(()).unwrap();
+                    let fence = fencer.join().unwrap();
+                    let refused = freezer.join().unwrap();
+                    (refused, fence, started)
+                });
+                assert!(
+                    started,
+                    "the competing freeze entered before source cutoff committed"
+                );
                 assert!(matches!(
-                    resident.freeze_private_execution(&execution),
+                    refused,
                     Err(SessionError::SourceAdmission(
                         crate::session::SourceAdmissionError::Closed {
                             phase: crate::session::SourceAdmissionPhase::Fenced { .. },
@@ -7827,11 +7871,11 @@ fn frozen_world_unchanged_and_declaration_controls_preserve_source_refusals() {
         match history {
             History::Declaration => assert!(matches!(
                 intent.world().progress,
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Checked(_)
+                tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress::Checked(_)
             )),
             _ => assert!(matches!(
                 intent.world().progress,
-                tidepool_toolchain::compiler_world::PrivateCompilerProgress::Unchanged
+                tidepool_toolchain::compiler_world::CompletedPrivateCompilerProgress::Unchanged
             )),
         }
         publish_checked_fixture(&mut resident, &execution, 0);

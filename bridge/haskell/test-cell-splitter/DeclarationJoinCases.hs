@@ -33,11 +33,12 @@ import GHC.Core.Unify (tcMatchTys, tcUnifyTys)
 import GHC.Tc.Instance.FunDeps (checkFunDeps)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import GHC.Unit.Env (unitEnv_hpts)
+import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Unit.Module.Env (mkModuleSet, emptyModuleSet)
 import GHC.Core.FamInstEnv
 import GHC.Core.Coercion.Axiom (coAxiomName)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Driver.Env (hsc_HPT, hsc_HUG, hscUpdateHPT, hscEPS, hptInstancesBelow)
+import GHC.Driver.Env (HscEnv, hsc_FC, hsc_HPT, hsc_HUG, hscUpdateHPT, hscEPS, hptInstancesBelow)
 import GHC.Driver.Env.Types (hsc_mod_graph)
 import GHC.Driver.Pipeline (compileOne)
 import GHC.Iface.Syntax (IfaceClsInst(..), IfaceFamInst(..))
@@ -268,7 +269,7 @@ recoveredConsumer root = do
           setTargets [target]
           graph <- depanal (map (mkModuleName . exactModule) artifacts) False
           env <- getSession
-          installed <- liftIO (installExactLexicalGraph graph [(joinedArtifact, []) | joinedArtifact <- joinedArtifacts] noCheckedValueImports env)
+          installed <- liftIO (ghcOracleLexicalEnvironment graph [(joinedArtifact, []) | joinedArtifact <- joinedArtifacts] noCheckedValueImports env)
           lexical <- either (liftIO . fail) pure installed
           setSession lexical
           summary <- getModSummary (if file == "Consumer" then mkModuleName "Main" else mkModuleName file)
@@ -351,7 +352,7 @@ recoveredNextConsumer root = do
           setTargets [target]
           graph <- depanal (map (mkModuleName . exactModule) artifacts) False
           env <- getSession
-          installed <- liftIO (installExactLexicalGraph graph lexical noCheckedValueImports env >>= either fail pure)
+          installed <- liftIO (ghcOracleLexicalEnvironment graph lexical noCheckedValueImports env >>= either fail pure)
           setSession installed
           getModSummary (if name == "NextConsumer" then mkModuleName "Main" else mkModuleName name)
     setSession hydrated
@@ -854,3 +855,18 @@ declarationIndexHistories = withDeclarationIndexOracle $ \classCount familyCount
     (fail ("index histories missed decision categories: " ++ show categories))
   putStrLn ("declaration index: " ++ show (sum (map length outcomes))
     ++ " bounded history states agree with exhaustive checking; all original inventories agree")
+
+-- Independent GHC oracle for emitted interfaces. This deliberately configures
+-- GHC directly; it does not exercise or issue a production installed-input owner.
+-- Callers have authenticated and hydrated these exact artifact bytes above.
+ghcOracleLexicalEnvironment :: ModuleGraph -> [(ExactIfaceArtifact, [(String,String)])]
+  -> CheckedValueImportAuthority -> HscEnv -> IO (Either String HscEnv)
+ghcOracleLexicalEnvironment graph lexical checked environment =
+  case projectExactLexicalGraph graph lexical checked noGeneratedScaffoldImports environment of
+    Left failure -> pure (Left failure)
+    Right (projected,rows) -> do
+      forM_ rows $ \(artifact,_) ->
+        addHomeModuleToFinder (hsc_FC projected) (hsc_home_unit projected)
+          (GWIB (mkModuleName (exactModule artifact)) NotBoot)
+          (ms_location (exactInterfaceSummary projected artifact))
+      pure (Right projected)

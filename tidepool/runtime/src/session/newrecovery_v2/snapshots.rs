@@ -11,7 +11,7 @@ use imbl::OrdMap;
 use parking_lot::Mutex;
 use tidepool_toolchain::declaration_join::ExactDeclarationContext;
 use tidepool_toolchain::exact_context::{
-    hydrate_contexts, hydrate_map, lookup_map, read_value, MaterializedContext, MaterializedMap,
+    hydrate_contexts, hydrate_map, lookup_map, read_value, DecodedContext, MaterializedMap,
     Materializer, SnapshotMapRoot, StagedBlocks,
 };
 
@@ -251,7 +251,7 @@ struct Acquired {
     nodes: BTreeMap<(Generation, Cid), Arc<RecoveryNode>>,
     artifacts: BTreeMap<(ArtifactId, Cid), Arc<RecoveryArtifactClosure>>,
     surfaces: BTreeMap<(RecoveryPublicOwner, u64, Cid), Arc<RecoveryPublicSurface>>,
-    contexts: BTreeMap<ContextRoot, Arc<MaterializedContext>>,
+    contexts: BTreeMap<ContextRoot, Arc<DecodedContext>>,
 }
 
 /// Compiler authority and its committed representation travel together when
@@ -264,7 +264,7 @@ pub(crate) enum ScopedCompilerContext {
 
 pub(crate) struct StoredCompilerContext {
     exact: Arc<ExactDeclarationContext>,
-    materialized: Arc<MaterializedContext>,
+    materialized: Arc<DecodedContext>,
     origin: ContextStoreOrigin,
 }
 
@@ -292,7 +292,7 @@ impl ScopedCompilerContext {
 /// cloneable stored context before its own publication is installed.
 pub(crate) struct PreparedCompilerContext {
     exact: Arc<ExactDeclarationContext>,
-    materialized: Arc<MaterializedContext>,
+    materialized: Arc<DecodedContext>,
     origin: ContextStoreOrigin,
 }
 
@@ -388,7 +388,7 @@ pub(crate) struct RecoveryGraph {
     work: crate::session::RecoveryPublicationWork,
     /// Coupled receipts created by this graph's materializer. Cancelled
     /// candidates cannot contribute receipts without their owned block packet.
-    materialized_contexts: OrdMap<ContextRoot, Arc<MaterializedContext>>,
+    materialized_contexts: OrdMap<ContextRoot, Arc<DecodedContext>>,
     acquired: Arc<Mutex<Acquired>>,
 }
 impl std::fmt::Debug for RecoveryGraph {
@@ -425,7 +425,7 @@ impl RecoveryGraph {
     fn owns_context_receipt(
         &self,
         origin: &ContextStoreOrigin,
-        context: &Arc<MaterializedContext>,
+        context: &Arc<DecodedContext>,
     ) -> bool {
         if !self.store.shares_owner(&origin.store)
             || self.domain != origin.domain
@@ -652,10 +652,7 @@ impl RecoveryGraph {
             .insert((id, *cid), artifact.clone());
         Ok(Some(artifact))
     }
-    pub(crate) fn context(
-        &self,
-        root: &ContextRoot,
-    ) -> Result<Arc<MaterializedContext>, RecoveryError> {
+    pub(crate) fn context(&self, root: &ContextRoot) -> Result<Arc<DecodedContext>, RecoveryError> {
         self.store.ensure_ready()?;
         if let Some(context) = self.materialized_contexts.get(root) {
             return Ok(context.clone());
@@ -668,7 +665,7 @@ impl RecoveryGraph {
     pub(crate) fn acquire_context(
         &self,
         root: &ContextRoot,
-    ) -> Result<Arc<MaterializedContext>, RecoveryError> {
+    ) -> Result<Arc<DecodedContext>, RecoveryError> {
         Ok(self
             .acquire_contexts(std::slice::from_ref(root))?
             .pop()
@@ -678,7 +675,7 @@ impl RecoveryGraph {
     pub(crate) fn acquire_contexts(
         &self,
         roots: &[ContextRoot],
-    ) -> Result<Vec<Arc<MaterializedContext>>, RecoveryError> {
+    ) -> Result<Vec<Arc<DecodedContext>>, RecoveryError> {
         self.store.ensure_ready()?;
         let missing = {
             let acquired = self.acquired.lock();
@@ -708,7 +705,7 @@ impl RecoveryGraph {
         &self,
         inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
         root: &ContextRoot,
-        receipt: Arc<MaterializedContext>,
+        receipt: Arc<DecodedContext>,
     ) -> Result<ScopedCompilerContext, crate::session::SessionError> {
         Ok(self
             .recover_compiler_contexts(inventory, &[(root.clone(), receipt)])?
@@ -719,7 +716,7 @@ impl RecoveryGraph {
     pub(crate) fn recover_compiler_contexts(
         &self,
         inventory: &tidepool_toolchain::declaration_join::RecoveredArtifactInventory,
-        receipts: &[(ContextRoot, Arc<MaterializedContext>)],
+        receipts: &[(ContextRoot, Arc<DecodedContext>)],
     ) -> Result<Vec<ScopedCompilerContext>, crate::session::SessionError> {
         let contexts = inventory.contexts_for_expected_snapshots(receipts)?;
         contexts
@@ -974,7 +971,7 @@ impl RecoveryGraphCandidate {
         &mut self,
         context: &ExactDeclarationContext,
         previous: Option<&ContextRoot>,
-    ) -> Result<Arc<MaterializedContext>, RecoveryError> {
+    ) -> Result<Arc<DecodedContext>, RecoveryError> {
         let base = previous.map(|root| self.graph.context(root)).transpose()?;
         let mut materializer = Materializer::new(&self.graph);
         #[cfg(test)]

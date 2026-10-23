@@ -10,7 +10,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::execution_schema::SymbolIdentity;
 use tidepool_repr::Generation;
 use tidepool_toolchain::compiler_world::{
-    PrivateCheckedItemProgress, PrivateCompilerProgress, PrivateHostBindingProgress,
+    CompletedPrivateCompilerProgress, PrivateCheckedItemProgress, PrivateHostBindingProgress,
     PrivateSettledFrontier,
 };
 
@@ -229,7 +229,7 @@ impl<'a> CompletedPrivateFrontier<'a> {
         self.admission
     }
 
-    pub(super) fn publication(&self) -> PrivateCompilerProgress {
+    pub(super) fn publication(&self) -> CompletedPrivateCompilerProgress {
         self.frontier.publication()
     }
 
@@ -1403,7 +1403,9 @@ impl PrivateExecutionAdmission {
     pub fn checked_progress(&self) -> PrivateCheckedItemProgress {
         match &self.state.lock().authored {
             PrivateAuthoredProgram::Ready(frontier) => match frontier.publication() {
-                PrivateCompilerProgress::Checked(_) => PrivateCheckedItemProgress::Completed,
+                CompletedPrivateCompilerProgress::Checked(_) => {
+                    PrivateCheckedItemProgress::Completed
+                }
                 _ => PrivateCheckedItemProgress::NotStarted,
             },
             PrivateAuthoredProgram::Active { .. } | PrivateAuthoredProgram::Failed => {
@@ -2546,6 +2548,87 @@ pub struct RuntimeCheckedPrefix {
 struct RuntimeCheckedState {
     phase: CellPhase,
     interface_index: std::collections::BTreeMap<u64, [u8; 32]>,
+}
+
+#[derive(Debug)]
+enum CellPhase {
+    Ready(Arc<RuntimeCheckedPrefixSnapshot>),
+    Reserved(Arc<CheckedItemReservation>),
+    Running(Arc<RunningCheckedItem>),
+    Parked(Arc<RunningCheckedItem>),
+    Capturing(Arc<RunningCheckedItem>),
+    Complete(Arc<RuntimeCheckedPrefixSnapshot>),
+    HostConstructorConsumed(Arc<RuntimeCheckedPrefixSnapshot>),
+    Failed(Arc<RuntimeCheckedPrefixSnapshot>),
+}
+
+#[derive(Debug)]
+struct RunningCheckedItem {
+    reservation: Arc<CheckedItemReservation>,
+    execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+}
+
+impl RuntimeCheckedState {
+    fn snapshot(&self) -> &Arc<RuntimeCheckedPrefixSnapshot> {
+        match &self.phase {
+            CellPhase::Ready(snapshot)
+            | CellPhase::Complete(snapshot)
+            | CellPhase::HostConstructorConsumed(snapshot)
+            | CellPhase::Failed(snapshot) => snapshot,
+            CellPhase::Reserved(ticket) => &ticket.snapshot,
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => &ticket.reservation.snapshot,
+        }
+    }
+
+    fn reservation(&self) -> Option<&Arc<CheckedItemReservation>> {
+        match &self.phase {
+            CellPhase::Reserved(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn running(&self) -> Option<&Arc<RunningCheckedItem>> {
+        match &self.phase {
+            CellPhase::Running(ticket)
+            | CellPhase::Parked(ticket)
+            | CellPhase::Capturing(ticket) => Some(ticket),
+            _ => None,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.phase, CellPhase::Ready(_))
+    }
+
+    fn begin_running(
+        &mut self,
+        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
+    ) -> Result<Arc<RunningCheckedItem>, SessionError> {
+        let ticket = self
+            .reservation()
+            .cloned()
+            .ok_or(super::SessionTransitionReason::WrongPhase)?;
+        let running = Arc::new(RunningCheckedItem {
+            reservation: ticket,
+            execution,
+        });
+        self.phase = CellPhase::Running(Arc::clone(&running));
+        Ok(running)
+    }
+
+    fn commit(
+        &mut self,
+        snapshot: Arc<RuntimeCheckedPrefixSnapshot>,
+        program: &tidepool_toolchain::checked_cell::CellProgram,
+    ) {
+        self.phase = if snapshot.compiler_prefix.next_item() == program.items().len() {
+            CellPhase::Complete(snapshot)
+        } else {
+            CellPhase::Ready(snapshot)
+        };
+    }
 }
 
 #[derive(Debug)]

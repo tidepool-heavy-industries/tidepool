@@ -895,93 +895,18 @@ mod lazy_tests {
         let mut lib = library(run.path(), &effects);
         tidepool_testing::with_settlement(|settlement| fixture.attach_root(&mut lib, settlement))
             .unwrap();
-        let mut producer = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = producer.mint_isolated_scope();
-        producer
-            .initialize_durable_public_scope(owner(), public)
-            .unwrap();
-        let execution = Arc::new(producer.begin_private_execution(public).unwrap());
-        let private = execution.private_scope();
-        tidepool_testing::with_settlement(|settlement| {
-            producer.define_scoped_in(
-                private,
-                &[include_str!("fixtures/recovery-original.hs")],
-                settlement,
-            )
-        })
-        .unwrap();
-        let old_tip = producer.lib().scope_tip(private);
-        let old_node = producer
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .node(old_tip)
-            .unwrap()
-            .unwrap();
-        let old_root = old_node.context_root.clone();
-        let old_lexical_root = old_node.lexical_roots[0].clone();
-        let old_selection = producer
-            .compile_view_in(private)
-            .unwrap()
-            .exact_declaration_context()
-            .unwrap()
-            .artifact_view()
-            .capture_graph_selection();
-        tidepool_testing::with_settlement(|settlement| {
-            producer.define_scoped_in(
-                private,
-                &["answer :: Int -> Int\nanswer value = value + 100"],
-                settlement,
-            )
-        })
-        .unwrap();
-        let intent = producer.freeze_private_execution(&execution).unwrap();
-        let CertifiedDeclarationPublication::Accepted(accepted) =
-            tidepool_testing::with_settlement(|settlement| {
-                producer
-                    .restage_declaration_publication(owner(), intent)
-                    .unwrap()
-                    .certify(settlement)
-            })
-            .unwrap()
-        else {
-            panic!("shadowed public declaration must be accepted");
-        };
-        assert!(matches!(
-            producer
-                .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        let current_tip = producer.lib().scope_tip(public);
-        let current_node = producer
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .node(current_tip)
-            .unwrap()
-            .unwrap();
-        let current_lexical_root = current_node.lexical_roots[0].clone();
-        let current_root = producer
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .surface(&owner())
-            .unwrap()
-            .unwrap()
-            .context_root
-            .clone()
-            .unwrap();
-        assert_ne!(old_root, current_root);
+        let crate::session::exact_recovery_acceptance_tests::PublishedShadowRecovery {
+            old_root,
+            old_lexical_root,
+            old_selection,
+            current_root,
+            current_lexical_root,
+        } = crate::session::exact_recovery_acceptance_tests::published_shadow_recovery(
+            lib,
+            &effects,
+            owner(),
+        );
         let authority = Arc::clone(&fixture.owner);
-        drop(producer);
         drop(fixture);
         let authored_tree = run.path().join("haskell-session/Tidepool/Session");
         assert!(

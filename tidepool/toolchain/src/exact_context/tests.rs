@@ -878,12 +878,11 @@ fn publication_native_descriptor_refuses_old_version_and_missing_map_roots() {
         verify_block(cid, bytes).unwrap();
     }
     let descriptor: PublicationNativeDescriptor = read_value(&store, &valid_root).unwrap();
-    assert_eq!(descriptor.version, 2);
+    assert_eq!(descriptor.version, 3);
     for root in [
         &descriptor.roles,
         &descriptor.offers,
         &descriptor.native_availability,
-        &descriptor.input_decisions,
     ] {
         let bytes = store.get(root.cid()).unwrap().unwrap();
         verify_block(root.cid(), &bytes).unwrap();
@@ -893,7 +892,6 @@ fn publication_native_descriptor_refuses_old_version_and_missing_map_roots() {
     assert_eq!(restored.roles, facts.roles);
     assert_eq!(restored.offers, facts.offers);
     assert_eq!(restored.native_availability, facts.native_availability);
-    assert_eq!(restored.input_decisions, facts.input_decisions);
 
     #[derive(Clone, Serialize)]
     struct DescriptorData {
@@ -904,15 +902,12 @@ fn publication_native_descriptor_refuses_old_version_and_missing_map_roots() {
         offers: Option<SnapshotMapRoot>,
         #[serde(skip_serializing_if = "Option::is_none")]
         native_availability: Option<SnapshotMapRoot>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        input_decisions: Option<SnapshotMapRoot>,
     }
     let valid = DescriptorData {
-        version: 2,
+        version: 3,
         roles: Some(descriptor.roles),
         offers: Some(descriptor.offers),
         native_availability: Some(descriptor.native_availability),
-        input_decisions: Some(descriptor.input_decisions),
     };
     let mut writer = Materializer::new(&store);
     assert_eq!(writer.materialize_value(&valid).unwrap(), valid_root);
@@ -943,13 +938,6 @@ fn publication_native_descriptor_refuses_old_version_and_missing_map_roots() {
             "native_availability",
             DescriptorData {
                 native_availability: None,
-                ..valid.clone()
-            },
-        ),
-        (
-            "input_decisions",
-            DescriptorData {
-                input_decisions: None,
                 ..valid.clone()
             },
         ),
@@ -999,7 +987,7 @@ fn old_selection_and_context_versions_are_rejected() {
         .materialize_map::<String, u64>(None, &OrdMap::new())
         .unwrap();
     install(&store, materializer.finish().unwrap());
-    for version in [2, 3, 4, 5, 6, 7, 8] {
+    for version in [2, 3, 4, 5, 6, 7, 8, 9] {
         let mut materializer = Materializer::new(&store);
         let descriptor = ContextDescriptor {
             version,
@@ -1010,7 +998,6 @@ fn old_selection_and_context_versions_are_rejected() {
             source_scope: lexical.root().clone(),
             offers: lexical.root().clone(),
             native_availability: lexical.root().clone(),
-            input_decisions: lexical.root().clone(),
             native_components: lexical.root().clone(),
             native_closures: lexical.root().clone(),
         };
@@ -1020,6 +1007,210 @@ fn old_selection_and_context_versions_are_rejected() {
                 Err(SnapshotError::UnsupportedContextVersion { found, expected })
                     if found == version && expected == CONTEXT_ENCODING_VERSION));
     }
+}
+
+#[test]
+fn recorded_compiler_row_codec_preserves_unissued_and_issued_empty_choices() {
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let row = |native_choices| RecordedCompilerRow::Original {
+        interface: ArtifactId([1; 32]),
+        original: ArtifactId([2; 32]),
+        provenance: RecordedOriginalProvenance::Reusable,
+        native_choices,
+    };
+    let unissued = row(RecordedNativeChoices::Unissued);
+    let empty = row(RecordedNativeChoices::Issued {
+        groups: OrdMap::new(),
+    });
+    let unissued_cid = CompilerRowCodec::encode(&mut writer, &unissued).unwrap();
+    let empty_cid = CompilerRowCodec::encode(&mut writer, &empty).unwrap();
+    assert_ne!(unissued_cid, empty_cid);
+    install(&store, writer.finish().unwrap());
+    let reader = SnapshotHydrator::new(&store);
+    for (cid, expected) in [(unissued_cid, unissued), (empty_cid, empty)] {
+        let decoded = CompilerRowCodec::decode(&reader, cid).unwrap();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.interface(), ArtifactId([1; 32]));
+        assert_eq!(decoded.original(), Some(ArtifactId([2; 32])));
+        assert!(decoded.publication().is_none());
+        assert_eq!(decoded.native_choices(), expected.native_choices());
+    }
+}
+
+#[test]
+fn recorded_compiler_row_codec_refuses_foreign_group_and_ordinal() {
+    let store = MemoryBlockstore::new();
+    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(
+        serde_json::json!({"binding": {"artifact": vec![2u8; 32], "selection": vec![3u8; 32]}, "original_ordinal": 7}),
+    ).unwrap();
+    for (original, ordinal) in [(ArtifactId([4; 32]), 7), (ArtifactId([2; 32]), 8)] {
+        let row = RecordedCompilerRow::Original {
+            interface: ArtifactId([1; 32]),
+            original,
+            provenance: RecordedOriginalProvenance::Reusable,
+            native_choices: RecordedNativeChoices::Issued {
+                groups: std::iter::once((ordinal, group)).collect(),
+            },
+        };
+        let mut writer = Materializer::new(&store);
+        let cid = CompilerRowCodec::encode(&mut writer, &row).unwrap();
+        install(&store, writer.finish().unwrap());
+        assert!(
+            matches!(CompilerRowCodec::decode(&SnapshotHydrator::new(&store), cid),
+            Err(SnapshotError::Malformed(message)) if message == "native choice differs from its recorded original row")
+        );
+    }
+}
+
+#[test]
+fn context10_decodes_shared_publication_records_without_acquired_owners() {
+    let store = MemoryBlockstore::new();
+    let native_facts = PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: OrdMap::new(),
+            offers: OrdMap::new(),
+            native_availability: OrdMap::new(),
+        },
+    )
+    .unwrap();
+    let owner = ExactModuleIdentity {
+        unit: "record".into(),
+        module: "Owner".into(),
+    };
+    let mut first = ExactContextSnapshot::empty();
+    first.roles.insert(
+        owner.clone(),
+        RecordedCompilerRow::Original {
+            interface: ArtifactId([1; 32]),
+            original: ArtifactId([2; 32]),
+            provenance: RecordedOriginalProvenance::Published(RecordedPublicationBirth {
+                source_revision: "recorded revision".into(),
+                original_input_identity: "recorded input".into(),
+                selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    Arc::new(ExactSelectionSnapshot::default()),
+                ),
+                selection_sha256: [3; 32],
+                native_facts,
+            }),
+            native_choices: RecordedNativeChoices::Unissued,
+        },
+    );
+    let mut second = first.clone();
+    second.producer = [4; 32];
+    let mut writer = Materializer::new(&store);
+    let first_record = writer.materialize_context(None, &first).unwrap();
+    let second_record = writer
+        .materialize_context(Some(&first_record), &second)
+        .unwrap();
+    install(&store, writer.finish().unwrap());
+    assert_ne!(first_record.root(), second_record.root());
+    let decoded = hydrate_contexts(
+        &store,
+        &[first_record.root().clone(), second_record.root().clone()],
+    )
+    .unwrap();
+    let left = decoded[0].recorded_rows()[&owner].publication().unwrap();
+    let right = decoded[1].recorded_rows()[&owner].publication().unwrap();
+    assert!(Arc::ptr_eq(&left.native_facts, &right.native_facts));
+    assert!(Arc::ptr_eq(
+        left.selection.snapshot(),
+        right.selection.snapshot()
+    ));
+    assert_eq!(decoded[0].recorded_rows(), first.recorded_rows());
+    assert_eq!(decoded[1].recorded_rows(), second.recorded_rows());
+}
+
+#[test]
+fn recorded_publication_full_proof_changes_incremental_row_leaf() {
+    let native_facts = PublicationNativeFacts::maintain(
+        None,
+        PublicationNativeMaps {
+            roles: OrdMap::new(),
+            offers: OrdMap::new(),
+            native_availability: OrdMap::new(),
+        },
+    )
+    .unwrap();
+    let owner = ExactModuleIdentity {
+        unit: "record".into(),
+        module: "Owner".into(),
+    };
+    let row = |extra_unselected_node| {
+        let scope = ArtifactSelectionId([1; 32]);
+        let binding = ArtifactBinding {
+            artifact: ArtifactId([2; 32]),
+            selection: scope,
+        };
+        let node = ArtifactBindingNode::Artifact(binding);
+        let mut nodes = vec![node];
+        if extra_unselected_node {
+            nodes.push(ArtifactBindingNode::Artifact(ArtifactBinding {
+                artifact: ArtifactId([3; 32]),
+                selection: scope,
+            }));
+        }
+        // These are contradictory untrusted DATA records, not live issuers.
+        let proof = ImmutableScopeProofRef::from_issued(Arc::new(ScopeProofV3 {
+            selection: scope,
+            nodes,
+            dependencies: vec![],
+        }));
+        let selection = Arc::new(ExactSelectionSnapshot {
+            scopes: std::iter::once((scope, proof)).collect(),
+            roots: std::iter::once((node, ())).collect(),
+            namespace: std::iter::once((binding.artifact, binding)).collect(),
+            custody_roots: OrdMap::new(),
+        });
+        RecordedCompilerRow::Original {
+            interface: ArtifactId([4; 32]),
+            original: binding.artifact,
+            provenance: RecordedOriginalProvenance::Published(RecordedPublicationBirth {
+                source_revision: "recorded revision".into(),
+                original_input_identity: "recorded input".into(),
+                selection: crate::artifact_inventory::ExactArtifactSelection::from_snapshot(
+                    selection,
+                ),
+                selection_sha256: [5; 32],
+                native_facts: Arc::clone(&native_facts),
+            }),
+            native_choices: RecordedNativeChoices::Unissued,
+        }
+    };
+    let first_row = row(false);
+    let second_row = row(true);
+    assert_eq!(
+        first_row.publication().unwrap().selection,
+        second_row.publication().unwrap().selection
+    );
+    assert_ne!(
+        first_row, second_row,
+        "record equality includes complete encoded proof facts"
+    );
+    let mut first = ExactContextSnapshot::empty();
+    first.roles.insert(owner.clone(), first_row);
+    let mut second = first.clone();
+    second.roles.insert(owner, second_row);
+    let store = MemoryBlockstore::new();
+    let mut writer = Materializer::new(&store);
+    let base = writer.materialize_context(None, &first).unwrap();
+    install(&store, writer.finish().unwrap());
+    let mut writer = Materializer::new(&store);
+    let incremental = writer.materialize_context(Some(&base), &second).unwrap();
+    let packet = writer.finish().unwrap();
+    assert_ne!(incremental.roles.root(), base.roles.root());
+    install(&store, packet);
+    let mut writer = Materializer::new(&store);
+    let cold = writer.materialize_context(None, &second).unwrap();
+    assert_eq!(incremental.root(), cold.root());
+    assert_ne!(incremental.root(), base.root());
+    assert_eq!(
+        hydrate_context(&store, incremental.root())
+            .unwrap()
+            .recorded_rows(),
+        second.recorded_rows()
+    );
 }
 
 #[test]
@@ -1192,140 +1383,80 @@ fn native_offer_classes_round_trip_and_change_context_identity() {
 }
 
 #[test]
-fn recorded_input_domain_distinguishes_empty_from_absent_without_issuing_authority() {
+fn recorded_original_choices_distinguish_empty_from_unissued_without_authority() {
     let store = MemoryBlockstore::new();
     let owner = ExactModuleIdentity {
         unit: "home".into(),
         module: "RecordedOnly".into(),
     };
-    // These are untrusted wire facts. Hydration is deliberately not a compiler
-    // admission and this test never constructs an issued decision owner.
+    let row = |native_choices| RecordedCompilerRow::Original {
+        interface: ArtifactId([1; 32]),
+        original: ArtifactId([2; 32]),
+        provenance: RecordedOriginalProvenance::Reusable,
+        native_choices,
+    };
     let mut snapshot = ExactContextSnapshot::empty();
+    snapshot
+        .roles
+        .insert(owner.clone(), row(RecordedNativeChoices::Unissued));
     let mut writer = Materializer::new(&store);
-    let absent = writer.materialize_context(None, &snapshot).unwrap();
+    let unissued = writer.materialize_context(None, &snapshot).unwrap();
     install(&store, writer.finish().unwrap());
-    snapshot.input_decisions.insert(
+    snapshot.roles.insert(
         owner.clone(),
-        crate::artifact_inventory::RecordedInputNativeDecision {
-            role: CompilerInputRole::ReusableOriginal {
-                interface: ArtifactId([1; 32]),
-                original: ArtifactId([2; 32]),
-            }
-            .recorded_fact(),
+        row(RecordedNativeChoices::Issued {
             groups: OrdMap::new(),
-        },
+        }),
     );
     let mut writer = Materializer::new(&store);
     let empty = writer
-        .materialize_context(Some(&absent), &snapshot)
+        .materialize_context(Some(&unissued), &snapshot)
         .unwrap();
-    install(&store, writer.finish().unwrap());
-    assert_ne!(absent.root(), empty.root());
-    let reopened = hydrate_context(&store, empty.root()).unwrap();
+    let packet = writer.finish().unwrap();
     assert_eq!(
-        reopened.snapshot().input_decisions,
-        snapshot.input_decisions
+        packet.metrics().changed_entries,
+        1,
+        "native choices change only their owning row leaf"
     );
-    assert!(reopened.snapshot().input_decisions[&owner]
-        .groups
-        .is_empty());
-    assert!(hydrate_context(&store, absent.root())
-        .unwrap()
-        .snapshot()
-        .input_decisions
-        .is_empty());
+    install(&store, packet);
+    assert_ne!(unissued.root(), empty.root());
+    let reopened = hydrate_context(&store, empty.root()).unwrap();
+    assert_eq!(reopened.recorded_rows(), snapshot.recorded_rows());
+    assert!(matches!(reopened.recorded_rows()[&owner].native_choices(),
+        Some(RecordedNativeChoices::Issued { groups }) if groups.is_empty()));
+    assert!(matches!(
+        hydrate_context(&store, unissued.root())
+            .unwrap()
+            .recorded_rows()[&owner]
+            .native_choices(),
+        Some(RecordedNativeChoices::Unissued)
+    ));
 }
 
 #[test]
-fn input_decision_codec_refuses_non_original_roles_and_duplicate_ordinals() {
+fn recorded_row_codec_refuses_type_choices_and_duplicate_ordinals() {
     let store = MemoryBlockstore::new();
-    let mut writer = Materializer::new(&store);
-    let no_original = CompilerRoleCodec::encode(
-        &mut writer,
-        &CompilerInputRole::InterfaceOnly {
-            interface: ArtifactId([1; 32]),
-        },
-    )
-    .unwrap();
-    let original = CompilerRoleCodec::encode(
-        &mut writer,
-        &CompilerInputRole::ReusableOriginal {
-            interface: ArtifactId([1; 32]),
-            original: ArtifactId([2; 32]),
-        },
-    )
-    .unwrap();
-    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(serde_json::json!({
-        "binding": { "artifact": vec![2u8; 32], "selection": vec![3u8; 32] }, "original_ordinal": 7
-    })).unwrap();
-    let interface_fact = writer
-        .materialize_value(&InputNativeDecisionWire {
-            role: no_original,
-            groups: vec![],
-        })
-        .unwrap();
-    let duplicate_fact = writer
-        .materialize_value(&InputNativeDecisionWire {
-            role: original,
-            groups: vec![group, group],
-        })
-        .unwrap();
-    install(&store, writer.finish().unwrap());
-    let reader = SnapshotHydrator::new(&store);
-    assert!(
-        matches!(InputNativeDecisionCodec::decode(&reader, interface_fact), Err(SnapshotError::Malformed(message)) if message == "input decision has no original role")
-    );
-    assert!(
-        matches!(InputNativeDecisionCodec::decode(&reader, duplicate_fact), Err(SnapshotError::Malformed(message)) if message == "input decision repeats an ordinal")
-    );
-}
-
-// Serializer fixtures are untrusted facts; they never enter a native issuer.
-fn availability_wire_snapshot(
-    mode: NativeTransportMode,
-    reachable: Option<Vec<ArtifactBindingNode>>,
-) -> ExactContextSnapshot {
-    let original = ArtifactId([1; 32]);
-    let offer = NativeOfferSnapshotFacts {
-        original,
-        interface: ArtifactId([2; 32]),
-        owner: ExactModuleIdentity {
-            unit: "home".into(),
-            module: "Availability".into(),
-        },
-        body: NativeOfferSnapshotBody::Full(
-            crate::artifact_inventory::ExactArtifactSelection::from_snapshot(Arc::new(
-                ExactSelectionSnapshot::default(),
-            )),
-        ),
-    };
-    let offer_id = offer.identity().unwrap();
-    let mut snapshot = ExactContextSnapshot::empty();
-    snapshot.offers.insert(offer_id, offer);
-    let mut contributions = OrdMap::new();
-    if let Some(reachable) = reachable {
-        let fact = NativeContributionSnapshotFacts {
-            offer: offer_id,
-            reachable: reachable.into_iter().collect(),
-        };
-        contributions.insert(fact.identity().unwrap(), fact);
+    let group: crate::artifact_inventory::NativeGroupBinding = serde_json::from_value(
+        serde_json::json!({"binding": {"artifact": vec![2u8; 32], "selection": vec![3u8; 32]}, "original_ordinal": 7}),
+    ).unwrap();
+    let malformed = [
+        serde_json::json!({"kind":"interface_only", "interface": vec![1u8;32],
+            "native_choices":{"kind":"unissued"}}),
+        serde_json::json!({"kind":"original", "interface": vec![1u8;32], "original":vec![2u8;32],
+            "provenance":{"kind":"reusable"},
+            "native_choices":{"kind":"issued", "groups":[[7, group], [7, group]]}}),
+        serde_json::json!({"kind":"original", "interface": vec![1u8;32], "original":vec![2u8;32],
+            "provenance":{"kind":"reusable"}}),
+    ];
+    for record in malformed {
+        let mut writer = Materializer::new(&store);
+        let cid = writer.materialize_value(&record).unwrap();
+        install(&store, writer.finish().unwrap());
+        assert!(matches!(
+            CompilerRowCodec::decode(&SnapshotHydrator::new(&store), cid),
+            Err(SnapshotError::Malformed(_))
+        ));
     }
-    snapshot.native_availability.insert(
-        original,
-        NativeAvailabilitySnapshotFacts {
-            original,
-            owner: tidepool_repr::execution_schema::CachedHomeOwner {
-                unit: "home".into(),
-                module: "Availability".into(),
-                module_version: tidepool_repr::execution_schema::ModuleVersion([3; 32]),
-                skinny_iface_sha256: [4; 32],
-                product_sha256: [5; 32],
-            },
-            mode,
-            contributions,
-        },
-    );
-    snapshot
 }
 
 #[test]
@@ -1458,7 +1589,7 @@ fn normalized_availability_hydration_refuses_broken_structural_references() {
 }
 
 #[test]
-fn context_v9_requires_normalized_availability_root() {
+fn context_v10_requires_normalized_availability_root() {
     #[derive(Serialize)]
     struct MissingAvailability {
         version: u32,
@@ -1468,7 +1599,6 @@ fn context_v9_requires_normalized_availability_root() {
         lexical: SnapshotMapRoot,
         source_scope: SnapshotMapRoot,
         offers: SnapshotMapRoot,
-        input_decisions: Option<SnapshotMapRoot>,
         native_components: SnapshotMapRoot,
         native_closures: SnapshotMapRoot,
     }
@@ -1487,7 +1617,6 @@ fn context_v9_requires_normalized_availability_root() {
                 lexical: valid.lexical.root.clone(),
                 source_scope: valid.source_scope.root.clone(),
                 offers: valid.offers.root.clone(),
-                input_decisions: Some(valid.input_decisions.root.clone()),
                 native_components: valid.native_components.root.clone(),
                 native_closures: valid.native_closures.root.clone(),
             })
@@ -1503,7 +1632,7 @@ fn context_v9_requires_normalized_availability_root() {
 #[test]
 fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
     use crate::artifact_inventory::{
-        ArtifactEntry, ArtifactInventory, IssuedNativeOffer, NativeGroupKey,
+        ArtifactEntry, ArtifactInventory, CompilerInputProjection, NativeGroupKey,
         NativeOriginalRequirement,
     };
     use crate::certified_products::tests::{
@@ -1575,7 +1704,14 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let proof = NativeOriginalRequirement::from_selected_view(root.descriptor.id, &view)
             .unwrap()
             .unwrap();
-        let offer = IssuedNativeOffer::issue(root.descriptor.id, &view, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[root.clone()]).unwrap(),
+            view.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&root.descriptor.owner, Some(proof))
+            .unwrap();
         let facts = offer.snapshot_facts();
         let offer_id = facts.identity().unwrap();
         assert_ne!(facts.original, hidden_entry.descriptor.id);
@@ -1883,7 +2019,7 @@ proptest! {
 }
 
 #[test]
-fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage() {
+fn context_v10_requires_linked_and_source_roots_and_distinguishes_missing_storage() {
     let store = MemoryBlockstore::new();
     let mut writer = Materializer::new(&store);
     let valid = writer
@@ -1891,7 +2027,7 @@ fn context_v9_requires_linked_and_source_roots_and_distinguishes_missing_storage
         .unwrap();
     install(&store, writer.finish().unwrap());
     let descriptor: ContextDescriptor = read_value(&store, valid.root().cid()).unwrap();
-    assert_eq!(descriptor.version, 9);
+    assert_eq!(descriptor.version, 10);
     let bytes = store.get(valid.root().cid()).unwrap().unwrap();
     let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
     let encode = |value: &ciborium::Value| {

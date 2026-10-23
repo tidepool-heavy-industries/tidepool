@@ -43,7 +43,7 @@ module Tidepool.ExactScope
   , worldBindingInterfaceArtifact, readWorldBindingInputs, worldHasSelectedSource, worldHasSelectedPrimary, readWorldSourceInputs
   , WorldCellOperandInputs, WorldCellOperandExposure(..), readWorldCellOperandWithOwner
   , worldCellOperandExposure, worldCellOperandBinding, worldCellOperandInterface
-  , worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes
+  , worldCellOperandBody, worldCellOperandPackages, worldCellOperandTypes, worldCellOperandCapturedInputs
   , worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsCompilerIdentityBytes, worldInputsProducer, worldInputsProfile, worldInputsSources
   , WorldOriginalReference, worldOriginalReferenceFor, worldOriginalReferenceOwner, worldOriginalReferenceBindings
   , worldInputsSourceModuleHints, worldInputsSamePrimary, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty
@@ -93,7 +93,7 @@ import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(.
 import System.IO.Error (isUserError)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
-import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, hydrateExactScope)
+import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, CapturedInterfaceInputs, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues, selectVerifiedExactInterfaces, selectVerifiedExactInterfaceProducts, VerifiedExactInterface, verifiedExactInterface, verifiedExactInterfaceBody, capturedInterfaceInputs, hydrateInterfaceInputs, hydratedExactEnvironment)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ExtractRequest (PlannedCellSlot(..))
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, checkArtifactSeal)
@@ -1148,7 +1148,7 @@ readScopedInterfaces env scope artifacts = do
   readCapturedExactIfaceArtifacts decoder (scopeInterfaceToken scope) env artifacts
 
 readScopedInterfaceClosure :: HscEnv -> ExactScope -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
-  -> IO (Either String VerifiedExactIfaceClosure)
+  -> IO (Either String CapturedInterfaceInputs)
 readScopedInterfaceClosure env scope originals values = do
   decoder <- scopeIfaceDecoder scope
   readCapturedExactIfaceClosureWithCheckedValues decoder (scopeInterfaceToken scope) env originals values
@@ -2399,25 +2399,28 @@ data WorldCellOperandExposure = WorldInputOperand | WorldSessionInputOperand
   deriving (Eq,Show)
 
 data WorldCellOperandInputs = WorldCellOperandInputs WorldCellOperandExposure WorldBinding
-  ArtifactBytes ArtifactBytes (Map.Map InterfaceOwner WorldTypeClosureEntry)
+  VerifiedExactInterface ArtifactBytes (Map.Map InterfaceOwner WorldTypeClosureEntry) CapturedInterfaceInputs
 
 worldCellOperandExposure :: WorldCellOperandInputs -> WorldCellOperandExposure
-worldCellOperandExposure (WorldCellOperandInputs exposure _ _ _ _) = exposure
+worldCellOperandExposure (WorldCellOperandInputs exposure _ _ _ _ _) = exposure
 
 worldCellOperandBinding :: WorldCellOperandInputs -> WorldBinding
-worldCellOperandBinding (WorldCellOperandInputs _ binding _ _ _) = binding
+worldCellOperandBinding (WorldCellOperandInputs _ binding _ _ _ _) = binding
 
 worldCellOperandInterface :: WorldCellOperandInputs -> ExactIfaceArtifact
 worldCellOperandInterface = worldBindingInterfaceArtifact . worldCellOperandBinding
 
 worldCellOperandBody :: WorldCellOperandInputs -> ArtifactBytes
-worldCellOperandBody (WorldCellOperandInputs _ _ body _ _) = body
+worldCellOperandBody (WorldCellOperandInputs _ _ iface _ _ _) = verifiedExactInterfaceBody iface
 
 worldCellOperandPackages :: WorldCellOperandInputs -> ArtifactBytes
-worldCellOperandPackages (WorldCellOperandInputs _ _ _ packages _) = packages
+worldCellOperandPackages (WorldCellOperandInputs _ _ _ packages _ _) = packages
 
 worldCellOperandTypes :: WorldCellOperandInputs -> Map.Map InterfaceOwner WorldTypeClosureEntry
-worldCellOperandTypes (WorldCellOperandInputs _ _ _ _ types) = types
+worldCellOperandTypes (WorldCellOperandInputs _ _ _ _ types _) = types
+
+worldCellOperandCapturedInputs :: WorldCellOperandInputs -> CapturedInterfaceInputs
+worldCellOperandCapturedInputs (WorldCellOperandInputs _ _ _ _ _ inputs) = inputs
 
 readWorldCellOperandWithOwner :: ExactInputOwner -> HscEnv -> WorldInputFacts -> FilePath -> BS.ByteString
   -> IO WorldCellOperandInputs
@@ -2447,8 +2450,21 @@ readWorldCellOperandWithOwner owner@(ExactInputOwner _ state) env facts path exp
       case inputs of
         Left reason -> worldCorrupt reason
         Right ([(artifact,body,packages)],types)
-          | artifact == worldBindingInterfaceArtifact binding ->
-              pure (WorldCellOperandInputs exposure binding body packages types)
+          | artifact == worldBindingInterfaceArtifact binding -> do
+              let ExactInputOwner _ retained = owner
+              RetainedOriginalInputs _ decoder _ _ <- readMVar retained
+              let dependencies = map worldTypeEntryArtifact (Map.elems types)
+                  readBody requested
+                    | requested == artifact = pure body
+                    | otherwise = case Map.lookup (exactUnit requested,exactModule requested) types of
+                        Just entry | worldTypeEntryArtifact entry == requested -> pure (worldTypeEntryInterfaceBody entry)
+                        _ -> worldCorrupt "operand TYPE input lacks its captured owner"
+              capturedInputs <- readCapturedExactIfaceClosureWithCheckedValues decoder readBody env dependencies [artifact]
+                >>= either worldCorrupt pure
+              selected <- either worldCorrupt pure (selectVerifiedExactInterfaceProducts capturedInputs [artifact])
+              case selected of
+                [verified] -> pure (WorldCellOperandInputs exposure binding verified packages types capturedInputs)
+                _ -> worldCorrupt "operand lost its one decoded checked interface"
         Right _ -> worldCorrupt "world operand lost its one selected checked interface"
 
 decodeWorldCellOperand :: Int -> Decoder s (WorldCellOperandExposure,
@@ -2608,8 +2624,9 @@ hydrateWorldDeclarationInputs owner env facts = case worldLexicalDeclaration (wo
         Just entry | worldTypeEntryArtifact entry /= artifact ->
           pure (Left "world declaration facade differs from its selected exact interface")
         Just entry -> do
-          hydrated <- hydrateExactScope env
-            [(worldTypeEntryArtifact value,worldTypeEntryInterface value) | value <- Map.elems entries]
+          inputs <- either throwIO pure (capturedInterfaceInputs
+            [worldTypeEntryVerifiedInterface value | value <- Map.elems entries])
+          hydrated <- hydratedExactEnvironment <$> hydrateInterfaceInputs env inputs
           actual <- interfaceExports hydrated (worldTypeEntryInterface entry)
           let exports = normalizeDeclarationExports actual
           pure $ if exports == normalizeDeclarationExports (worldDeclarationExports offered)

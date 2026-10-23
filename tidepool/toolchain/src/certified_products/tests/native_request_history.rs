@@ -47,13 +47,8 @@ fn source_import(
     product: &CertifiedRecoveryProduct,
     ordinal: u32,
 ) -> crate::certified_products::PendingImportOwner {
-    let product = crate::certified_products::finalize_original_for_inventory(
-        product.clone(),
-        &mut PackageInterfaceValidation::default(),
-    )
-    .expect("fixture native import has authenticated original groups");
     let definitions =
-        crate::certified_products::original_native_group_definitions(&product, ordinal)
+        crate::certified_products::original_native_group_definitions(product, ordinal)
             .expect("fixture native import names an issued original group");
     let binding = match &definitions.bindings()[0] {
         tidepool_repr::execution_schema::Group::NonRecursive(binding) => binding,
@@ -491,12 +486,16 @@ fn replay_native_transport_history(
                 ])
                 .unwrap();
                 let supplied = [proofs[index].clone(), partial[index].clone()];
-                let before = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-                    &capture_projection,
-                    &sources[index],
-                    &supplied,
-                )
-                .unwrap();
+                let issuer =
+                    issue_fixture_compiler_support(capture_projection, sources[index].clone())
+                        .unwrap();
+                let before = supplied
+                    .iter()
+                    .map(|proof| {
+                        issuer.issue_native_offer(&entries[0].descriptor.owner, Some(proof.clone()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
                 // Restore this source's complete selected namespace, including
                 // its marker payload, before comparing custody-only additions.
                 let receiving = sources[index].retain_custody(&expanded).unwrap();
@@ -504,12 +503,15 @@ fn replay_native_transport_history(
                     receiving.capture_graph_selection().namespace,
                     sources[index].capture_graph_selection().namespace
                 );
-                let after = crate::artifact_inventory::IssuedNativeOffer::issue_context_offers(
-                    &capture_projection,
-                    &receiving,
-                    &supplied,
-                )
-                .unwrap();
+                let receiving_issuer = issuer.retain_custody(&receiving).unwrap();
+                let after = supplied
+                    .iter()
+                    .map(|proof| {
+                        receiving_issuer
+                            .issue_native_offer(&entries[0].descriptor.owner, Some(proof.clone()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
                 assert_eq!(
                     after, before,
                     "custody expansion cannot change supplied evidence with fixed canonical bindings"

@@ -16,17 +16,20 @@ module Tidepool.ExactHydration
   , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
-  , HydratedExactInterfaces, hydrateExactScopeWithProducts, hydratedExactInterfaces
+  , HydratedExactInterfaces, hydrateInterfaceInputs, hydratedExactEnvironment, hydratedExactInputs, hydratedExactInterfaces, restoreHydratedInterfaceEnvironment, hydratedInterfaceProduct
   , exactHomeInstancesFor, withExactHomeInstances
   , CheckedValueImportAuthority
   , checkedValueOwner, noCheckedValueImports
   , checkedValueImportAuthorityFromCaptures, unionCheckedValueImports, admitsCheckedValueImport
   , readCheckedValueImportAuthority
-  , VerifiedExactIfaceClosure
+  , CapturedInterfaceInputs, capturedInterfaceInputs, captureCompletedInterfaceInputs
+  , selectCapturedInterfaceInputs, selectCapturedInterfaceOwners, mergeCapturedInterfaceInputs
+  , capturedSessionInterfaceFor, checkCapturedSessionInterface
+  , InterfaceInputFailure(..)
   , readVerifiedExactIfaceClosure
   , readVerifiedExactIfaceClosureWithCheckedValues, readVerifiedExactIfaceClosureWithCheckedValuesReader
   , selectVerifiedExactInterfaces
-  , VerifiedExactInterface, selectVerifiedExactInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody
+  , VerifiedExactInterface, verifiedInterfaceProducts, selectVerifiedExactInterfaceProducts, verifiedExactInterface, verifiedExactInterfaceBody
   , selectVerifiedValueInterfaces
   , checkedValueImportAuthorityFromVerified
   , CheckedTemplateInterface(..)
@@ -48,14 +51,13 @@ module Tidepool.ExactHydration
   , capturedGeneratedImportOccurrenceSyntax, capturedGeneratedImportOccurrenceOrigin
   , permitsGeneratedScaffoldImport
   , GeneratedScaffoldImportAuthority, noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority
-  , installExactLexicalGraphWithScaffold
-  , installExactLexicalGraph
+  , projectExactLexicalGraph
   ) where
 
 import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence)
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceEvidenceBodies, capturedSessionCompilerProduct, sameCapturedSessionInterfaceOwner)
 import Control.Monad (forM, forM_, unless, foldM)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar, modifyMVarMasked)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
@@ -65,7 +67,7 @@ import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, toLower)
 import Data.Maybe (isJust, isNothing)
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import GHC.Data.Strict qualified as Strict
 import qualified Data.ByteString as BS
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -81,7 +83,6 @@ import GHC.Unit.External (ExternalUnitCache(..), initExternalUnitCache, External
 import GHC.Unit.Module.Env (lookupModuleEnv, moduleEnvToList, filterModuleEnv)
 import GHC.Unit.Finder (initFinderCache)
 import GHC.Unit.Finder.Types (FinderCache(..))
-import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Driver.Env.KnotVars (emptyKnotVars)
 import GHC.Unit.Home.ModInfo
   ( HomeModInfo(..), emptyHomeModInfoLinkable, emptyHomePackageTable, addToHpt
@@ -138,7 +139,7 @@ import Tidepool.FatIface (readPackageInterface)
 import Tidepool.FatIface.Internal (withCapturedIface)
 import Tidepool.ResumePackage (resolveResumeInterface)
 import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenUnit(RealUnit), Definite(Definite))
-import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, captureFinalizedInterface, homeInterfaceUsageOwners)
+import Tidepool.FinalizedModule (FinalizedModule, finalizedHomeModInfo, CompletedModuleInterface, completedModuleInterfaceFinalized, completedModuleInterfaceHome, sameCompletedModuleInterfaceOwner, captureFinalizedInterface, finalizedInterfaceNameCache, homeInterfaceUsageOwners)
 import Tidepool.FinalizedModule.Internal (serializeOriginalInterface)
 import qualified GHC.Data.Maybe as MErr
 import GHC.Utils.Outputable (text, ppr, showSDocOneLine, defaultSDocContext)
@@ -198,37 +199,189 @@ runExactInterfaceOperation (ExactInterfaceOperations run) = run
 -- that earlier boundary without exposing implementation-only originals.
 newtype CheckedValueImportAuthority = CheckedValueImportAuthority (Set.Set (String, String))
 
-newtype VerifiedExactIfaceClosure = VerifiedExactIfaceClosure
+newtype CapturedInterfaceInputs = CapturedInterfaceInputs
   (Map.Map (String, String) (VerifiedExactInterface, [ExactIfaceArtifact]))
 
+data InterfaceInputFailure
+  = InterfaceInputConflict (String,String)
+  | InterfaceInputMissing (String,String)
+  | InterfaceInputSelectionMismatch (String,String)
+  | InterfaceInputDependenciesMissing (String,String) [(String,String)]
+  | InterfaceSessionAliasMismatch (String,String)
+  | InterfaceNameCacheMismatch
+  | InterfaceHydratedHomeMissing (String,String)
+  | InterfaceHydratedHomeMismatch (String,String)
+  | InterfacePhaseHomeConflict (String,String)
+  | InterfaceCompletedOwnerConflict (String,String)
+  deriving (Eq,Show)
+instance Exception InterfaceInputFailure
+
+-- Assembly selects already admitted products, rather than decoding another
+-- inventory or reconstructing ownership from a digest. Conflicts apply to this
+-- selected namespace; unrelated retained alternatives are not arguments here.
+capturedInterfaceInputs :: [VerifiedExactInterface] -> Either InterfaceInputFailure CapturedInterfaceInputs
+capturedInterfaceInputs selected = do
+  case selected of
+    [] -> pure ()
+    VerifiedExactInterface _ _ _ issuer:rest ->
+      unless (all (\(VerifiedExactInterface _ _ _ actual) -> actual == issuer) rest)
+        (Left InterfaceNameCacheMismatch)
+  let groups = Map.fromListWith (++)
+        [((exactUnit artifact,exactModule artifact),[verified]) | verified <- selected
+          , let (artifact,_) = verifiedExactInterface verified]
+      owners = Map.keysSet groups
+  rows <- forM (Map.toAscList groups) $ \(key,products) -> case products of
+    [] -> Left (InterfaceInputMissing key)
+    first:rest -> do
+      let (artifact,_) = verifiedExactInterface first
+      unless (all (\other -> sameExactInterfaceIdentity artifact (fst (verifiedExactInterface other))) rest)
+        (Left (InterfaceInputConflict key))
+      let missing = filter (`Set.notMember` owners) (exactRequirements artifact)
+      unless (null missing) (Left (InterfaceInputDependenciesMissing key missing))
+      chosen <- foldM (preferCompilerProduct key) first rest
+      pure (key,(chosen,nub (map (fst . verifiedExactInterface) products)))
+  pure (CapturedInterfaceInputs (Map.fromList rows))
+
+preferCompilerProduct :: (String,String) -> VerifiedExactInterface -> VerifiedExactInterface
+  -> Either InterfaceInputFailure VerifiedExactInterface
+preferCompilerProduct key left@(VerifiedExactInterface _ leftProduct _ leftIssuer)
+    right@(VerifiedExactInterface _ rightProduct _ rightIssuer) = do
+  unless (leftIssuer == rightIssuer) (Left InterfaceNameCacheMismatch)
+  case (leftProduct,rightProduct) of
+    (DecodedTypeInterface _,DecodedTypeInterface _) -> Right left
+    (CompletedHomeInterface _,DecodedTypeInterface _) -> Right left
+    (DecodedTypeInterface _,CompletedHomeInterface _) -> Right right
+    (CompletedHomeInterface first,CompletedHomeInterface second)
+      | sameCompletedInterfaceOwner first second -> Right left
+      | otherwise -> Left (InterfaceCompletedOwnerConflict key)
+
+-- The session injection owner carries authenticated bytes and its actual
+-- decoded HMI/NameCache together. A receiving alias can change no identity.
+capturedSessionProducts :: [(ExactIfaceArtifact,CapturedSessionInterface)] -> Either InterfaceInputFailure [VerifiedExactInterface]
+capturedSessionProducts captures = forM captures (\(artifact,capture) -> do
+    let (owner,body) = capturedSessionInterfaceBody capture
+        (issuer,home) = capturedSessionCompilerProduct capture
+    unless (owner == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+        && artifactSha256 body == exactSha256 artifact && mi_module (hm_iface home) == owner)
+      (Left (InterfaceSessionAliasMismatch (exactUnit artifact,exactModule artifact)))
+    pure (VerifiedExactInterface artifact (CompletedHomeInterface (SessionHomeInterface capture)) body issuer))
+
+captureCompletedInterfaceInputs :: HscEnv -> CapturedInterfaceInputs
+  -> [(ExactIfaceArtifact,CapturedSessionInterface)] -> [CompletedModuleInterface]
+  -> IO CapturedInterfaceInputs
+captureCompletedInterfaceInputs environment previous captures finalized = do
+  sessions <- either throwIO pure (capturedSessionProducts captures)
+  produced <- forM finalized $ \completed -> do
+    let original = completedModuleInterfaceFinalized completed
+        home = completedModuleInterfaceHome completed
+        owner = mi_module (hm_iface home)
+        issuer = finalizedInterfaceNameCache original
+    unless (issuer == (nsUniqChar (hsc_NC environment),nsNames (hsc_NC environment)))
+      (throwIO InterfaceNameCacheMismatch)
+    body <- captureFinalizedInterface original
+    let artifact = ExactIfaceArtifact (unitString (moduleUnit owner)) (moduleNameString (moduleName owner))
+          ("<completed-type>/" ++ moduleNameString (moduleName owner)) (artifactSha256 body)
+          (homeInterfaceUsageOwners environment (hm_iface home))
+    pure (VerifiedExactInterface artifact (CompletedHomeInterface (FinalizedHomeInterface completed)) body issuer)
+  -- Preserve every authenticated receiving alias while choosing the compiler
+  -- product once. Reassembly from just the primary rows would lose aliases
+  -- admitted by earlier operations.
+  CapturedInterfaceInputs selected <- either throwIO pure
+    (capturedInterfaceInputs (verifiedInterfaceProducts previous ++ sessions ++ produced))
+  let CapturedInterfaceInputs retained = previous
+  pure (CapturedInterfaceInputs (Map.mapWithKey
+    (\key (verified,known) -> (verified,nub (known ++ maybe [] snd (Map.lookup key retained)))) selected))
+
+selectCapturedInterfaceInputs :: CapturedInterfaceInputs -> [ExactIfaceArtifact]
+  -> Either InterfaceInputFailure CapturedInterfaceInputs
+selectCapturedInterfaceInputs allInputs@(CapturedInterfaceInputs captured) roots = do
+  forM_ roots $ \artifact -> do
+    if checkedValueOwner artifact
+      then either (const (Left (InterfaceInputSelectionMismatch (exactUnit artifact,exactModule artifact))))
+        (const (Right ())) (selectVerifiedValueInterfaces allInputs [artifact])
+      else either (const (Left (InterfaceInputSelectionMismatch (exactUnit artifact,exactModule artifact))))
+        (const (Right ())) (selectVerifiedExactInterfaceProducts allInputs [artifact])
+  selected <- close Map.empty [(exactUnit root,exactModule root) | root <- roots]
+  pure (CapturedInterfaceInputs selected)
+  where
+    close selected [] = Right selected
+    close selected (key:pending)
+      | Map.member key selected = close selected pending
+      | otherwise = case Map.lookup key captured of
+          Nothing -> Left (InterfaceInputMissing key)
+          Just row@(verified,_) -> let (artifact,_) = verifiedExactInterface verified
+            in close (Map.insert key row selected) (exactRequirements artifact ++ pending)
+
+selectCapturedInterfaceOwners :: CapturedInterfaceInputs -> [(String,String)]
+  -> Either InterfaceInputFailure CapturedInterfaceInputs
+selectCapturedInterfaceOwners inputs@(CapturedInterfaceInputs captured) owners = do
+  roots <- forM owners $ \owner -> case Map.lookup owner captured of
+    Just (verified,_) -> Right (fst (verifiedExactInterface verified))
+    Nothing -> Left (InterfaceInputMissing owner)
+  selectCapturedInterfaceInputs inputs roots
+
+-- Borrow the actual successful session issuer when another selected role
+-- refers to the same value. A decoded copy cannot issue this association.
+capturedSessionInterfaceFor :: CapturedInterfaceInputs -> ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
+  -> Either InterfaceInputFailure (Maybe CapturedSessionInterface)
+capturedSessionInterfaceFor inputs artifact body packages = do
+  CapturedInterfaceInputs selected <- selectCapturedInterfaceInputs inputs [artifact]
+  case Map.lookup (exactUnit artifact,exactModule artifact) selected of
+    Just (VerifiedExactInterface _ (CompletedHomeInterface (SessionHomeInterface capture)) _ _,_) ->
+      Just <$> checkCapturedSessionInterface artifact body packages capture
+    Just _ -> Right Nothing
+    Nothing -> Left (InterfaceInputMissing (exactUnit artifact,exactModule artifact))
+
+-- Borrowing preserves the actual issuer while checking every selected value
+-- input fact. Equal interface bytes cannot replace another package obligation.
+checkCapturedSessionInterface :: ExactIfaceArtifact -> ArtifactBytes -> ArtifactBytes
+  -> CapturedSessionInterface -> Either InterfaceInputFailure CapturedSessionInterface
+checkCapturedSessionInterface artifact body packages capture = do
+  let key = (exactUnit artifact,exactModule artifact)
+      (owner,actualBody) = capturedSessionInterfaceBody capture
+  unless (owner == mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+      && actualBody == body && artifactSha256 body == exactSha256 artifact)
+    (Left (InterfaceSessionAliasMismatch key))
+  case capturedSessionInterfaceEvidenceBodies capture of
+    Just (actualPackages,_,required)
+      | actualPackages == packages, required == exactRequirements artifact -> Right capture
+    _ -> Left (InterfaceSessionAliasMismatch key)
+
+mergeCapturedInterfaceInputs :: [CapturedInterfaceInputs] -> Either InterfaceInputFailure CapturedInterfaceInputs
+mergeCapturedInterfaceInputs inputs = do
+  CapturedInterfaceInputs selected <- capturedInterfaceInputs (concatMap verifiedInterfaceProducts inputs)
+  let aliases = Map.unionsWith (++) [Map.map snd rows | CapturedInterfaceInputs rows <- inputs]
+  pure (CapturedInterfaceInputs (Map.mapWithKey
+    (\key (verified,known) -> (verified,nub (known ++ Map.findWithDefault [] key aliases))) selected))
+
 readVerifiedExactIfaceClosure
-  :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+  :: HscEnv -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs)
 readVerifiedExactIfaceClosure = readVerifiedExactIfaceClosureWith (BS.readFile . exactPath)
 
 readVerifiedExactIfaceClosureWith :: (ExactIfaceArtifact -> IO BS.ByteString)
-  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs)
 readVerifiedExactIfaceClosureWith readInput = readVerifiedExactIfaceClosureUsing (readVerifiedOneWith readInput)
 
 readVerifiedExactIfaceClosureUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String VerifiedExactInterface))
-  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
-readVerifiedExactIfaceClosureUsing readInterface env artifacts = fmap (VerifiedExactIfaceClosure . Map.fromList
+  -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs)
+readVerifiedExactIfaceClosureUsing readInterface env artifacts = fmap (CapturedInterfaceInputs . Map.fromList
   . map (\verified -> let (artifact,_) = verifiedExactInterface verified
       in ((exactUnit artifact,exactModule artifact),(verified,[artifact]))))
   <$> readExactIfaceArtifactsUsing readInterface env artifacts
 
 readVerifiedExactIfaceClosureWithCheckedValues
   :: HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
-  -> IO (Either String VerifiedExactIfaceClosure)
+  -> IO (Either String CapturedInterfaceInputs)
 readVerifiedExactIfaceClosureWithCheckedValues = readVerifiedExactIfaceClosureWithCheckedValuesReader (BS.readFile . exactPath)
 
 readVerifiedExactIfaceClosureWithCheckedValuesReader :: (ExactIfaceArtifact -> IO BS.ByteString)
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
-  -> IO (Either String VerifiedExactIfaceClosure)
+  -> IO (Either String CapturedInterfaceInputs)
 readVerifiedExactIfaceClosureWithCheckedValuesReader readInput = readVerifiedExactIfaceClosureWithCheckedValuesUsing (readVerifiedOneWith readInput)
 
 readVerifiedExactIfaceClosureWithCheckedValuesUsing :: (HscEnv -> ExactIfaceArtifact -> IO (Either String VerifiedExactInterface))
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact]
-  -> IO (Either String VerifiedExactIfaceClosure)
+  -> IO (Either String CapturedInterfaceInputs)
 readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals values
   | any (not . checkedValueOwner) values = pure (Left "checked value import has another owner")
   | length (map key values) /= Set.size (Set.fromList (map key values)) =
@@ -239,7 +392,7 @@ readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals 
       verified <- readVerifiedExactIfaceClosureUsing readInterface env inputs
       case verified of
         Left reason -> pure (Left reason)
-        Right (VerifiedExactIfaceClosure captured) -> do
+        Right (CapturedInterfaceInputs captured) -> do
           aliases <- forM values $ \value -> case Map.lookup (key value) captured of
             Just (verified,known)
               | value `elem` known -> pure (Right (key value,(verified,known)))
@@ -254,48 +407,69 @@ readVerifiedExactIfaceClosureWithCheckedValuesUsing readInterface env originals 
             _ -> pure (Left "checked value alias conflicts with its captured original")
           pure $ do
             additions <- sequence aliases
-            Right (VerifiedExactIfaceClosure (Map.union (Map.fromList additions) captured))
+            Right (CapturedInterfaceInputs (Map.union (Map.fromList additions) captured))
   where key artifact = (exactUnit artifact,exactModule artifact)
 
 -- Requirements are validated in the complete captured closure. A later
 -- dependency-ordered injection may select one value whose type mentions
 -- another original without rereading or weakening that original proof.
 selectVerifiedExactInterfaces
-  :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
+  :: CapturedInterfaceInputs -> [ExactIfaceArtifact]
   -> Either String [(ExactIfaceArtifact, ModIface)]
-selectVerifiedExactInterfaces (VerifiedExactIfaceClosure captured) artifacts =
+selectVerifiedExactInterfaces (CapturedInterfaceInputs captured) artifacts =
   mapM select artifacts
   where
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
-      Just (verified,_) | fst (verifiedExactInterface verified) == artifact -> Right (verifiedExactInterface verified)
+      Just (verified,aliases) | artifact `elem` aliases -> Right (artifact,snd (verifiedExactInterface verified))
       _ -> Left "requested exact interface differs from its verified closure"
 
 -- The admitted TYPE product keeps authenticated bytes and decoded Names with
 -- their actual issuer. Its logical input alias is never a filesystem grant.
-data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact ModIface !ArtifactBytes
+data CompletedInterfaceOwner = SessionHomeInterface CapturedSessionInterface | FinalizedHomeInterface CompletedModuleInterface
+
+completedInterfaceHome :: CompletedInterfaceOwner -> HomeModInfo
+completedInterfaceHome (SessionHomeInterface capture) = snd (capturedSessionCompilerProduct capture)
+completedInterfaceHome (FinalizedHomeInterface original) = completedModuleInterfaceHome original
+
+sameCompletedInterfaceOwner :: CompletedInterfaceOwner -> CompletedInterfaceOwner -> Bool
+sameCompletedInterfaceOwner (SessionHomeInterface left) (SessionHomeInterface right) =
+  sameCapturedSessionInterfaceOwner left right
+sameCompletedInterfaceOwner (FinalizedHomeInterface left) (FinalizedHomeInterface right) =
+  sameCompletedModuleInterfaceOwner left right
+sameCompletedInterfaceOwner _ _ = False
+
+data CapturedCompilerInterface = DecodedTypeInterface ModIface | CompletedHomeInterface CompletedInterfaceOwner
+
+data VerifiedExactInterface = VerifiedExactInterface !ExactIfaceArtifact CapturedCompilerInterface !ArtifactBytes
   !(Char,MVar OrigNameCache)
 
 verifiedExactInterface :: VerifiedExactInterface -> (ExactIfaceArtifact,ModIface)
-verifiedExactInterface (VerifiedExactInterface artifact iface _ _) = (artifact,iface)
+verifiedExactInterface (VerifiedExactInterface artifact product' _ _) = (artifact,case product' of
+  DecodedTypeInterface iface -> iface
+  CompletedHomeInterface owner -> hm_iface (completedInterfaceHome owner))
+
+verifiedInterfaceProducts :: CapturedInterfaceInputs -> [VerifiedExactInterface]
+verifiedInterfaceProducts (CapturedInterfaceInputs captured) = map fst (Map.elems captured)
 
 verifiedExactInterfaceBody :: VerifiedExactInterface -> ArtifactBytes
 verifiedExactInterfaceBody (VerifiedExactInterface _ _ body _) = body
 
-selectVerifiedExactInterfaceProducts :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
+selectVerifiedExactInterfaceProducts :: CapturedInterfaceInputs -> [ExactIfaceArtifact]
   -> Either String [VerifiedExactInterface]
-selectVerifiedExactInterfaceProducts (VerifiedExactIfaceClosure captured) = mapM select
+selectVerifiedExactInterfaceProducts (CapturedInterfaceInputs captured) = mapM select
   where
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
-      Just (verified,_) | fst (verifiedExactInterface verified) == artifact -> Right verified
+      Just (VerifiedExactInterface _ product' body issuer,aliases) | artifact `elem` aliases ->
+        Right (VerifiedExactInterface artifact product' body issuer)
       _ -> Left "requested exact interface differs from its verified closure"
 
 -- Completed-value wire inputs bind bytes and selected exported Names. Their
 -- type requirements come from this complete verified closure, including
 -- worker-issued values created earlier in the same compiled cell.
 selectVerifiedValueInterfaces
-  :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
+  :: CapturedInterfaceInputs -> [ExactIfaceArtifact]
   -> Either String [(ExactIfaceArtifact, ModIface)]
-selectVerifiedValueInterfaces (VerifiedExactIfaceClosure captured) artifacts = mapM select artifacts
+selectVerifiedValueInterfaces (CapturedInterfaceInputs captured) artifacts = mapM select artifacts
   where
     select artifact = case Map.lookup (exactUnit artifact,exactModule artifact) captured of
       Just (verified,aliases)
@@ -308,7 +482,7 @@ selectVerifiedValueInterfaces (VerifiedExactIfaceClosure captured) artifacts = m
       _ -> Left "completed value input differs from its verified closure"
 
 checkedValueImportAuthorityFromVerified
-  :: VerifiedExactIfaceClosure -> [ExactIfaceArtifact]
+  :: CapturedInterfaceInputs -> [ExactIfaceArtifact]
   -> Either String CheckedValueImportAuthority
 checkedValueImportAuthorityFromVerified closure artifacts
   | any (not . checkedValueOwner) artifacts = Left "checked value import has another owner"
@@ -727,11 +901,11 @@ sameImportOccurrenceSpan left right = left == right && case (getBufSpan left,get
   (Strict.Just before,Strict.Just after) -> before == after
   _ -> False
 
-readGeneratedScaffoldImportAuthority :: VerifiedExactIfaceClosure -> [ExecutionSourceIdentity]
+readGeneratedScaffoldImportAuthority :: CapturedInterfaceInputs -> [ExecutionSourceIdentity]
   -> Maybe ((String,String),String) -> GeneratedScaffoldRecipe
   -> CapturedGeneratedImports -> DriverImportSyntax -> ModuleGraph -> HscEnv
   -> IO (Either String GeneratedScaffoldImportAuthority)
-readGeneratedScaffoldImportAuthority (VerifiedExactIfaceClosure captured) nativeOwners planned
+readGeneratedScaffoldImportAuthority (CapturedInterfaceInputs captured) nativeOwners planned
     recipe@(GeneratedScaffoldRecipe path target expected _ templateInterfaces templateGraph instanceScope purpose census)
     (CapturedGeneratedImports (CapturedGeneratedScaffoldSource capturedPath capturedBytes capturedCensus) _ syntax classified)
     driver sourceGraph env = do
@@ -1112,7 +1286,7 @@ readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact ->
 readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing (readCapturedOne decoder readInput)
 
 readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
-  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
+  -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String CapturedInterfaceInputs)
 readCapturedExactIfaceClosureWithCheckedValues decoder readInput =
   readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedVerifiedOne decoder readInput)
 
@@ -1199,7 +1373,7 @@ readVerifiedOneTokenWith readInput env artifact = do
                 Left ("interface owner mismatch: " ++ exactModule artifact)
             | isJust (mi_extra_decls iface) ->
                 Left ("interface contains defining Core: " ++ exactModule artifact)
-            | otherwise -> Right (VerifiedExactInterface artifact iface body
+            | otherwise -> Right (VerifiedExactInterface artifact (DecodedTypeInterface iface) body
                 (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)))
 
 data OriginalInterfaceCaptureFailure
@@ -1285,6 +1459,7 @@ newOriginalInterfaceArtifactsWithLookup readInput borrow env finalized retained 
   unless (all (\(origin,snapshot) -> let (owner,bytes) = capturedSessionInterface snapshot
           in case Map.lookup owner snapshots of
             Just (selectedOrigin,selectedSnapshot) -> selectedOrigin == origin
+              && sameCapturedSessionInterfaceOwner selectedSnapshot snapshot
               && capturedSessionInterface selectedSnapshot == (owner,bytes)
               && capturedSessionInterfaceEvidence selectedSnapshot == capturedSessionInterfaceEvidence snapshot
             Nothing -> False) snapshotsWithOrigin) $ throwIO ConflictingOriginalInterfaces
@@ -1410,33 +1585,73 @@ hydrateExactScope env loaded = do
       fail "exact hydration interface owner differs from its selected artifact"
   hydrateOriginalInterfaces env (map snd loaded)
 
--- The interface reader and this hydration operation own the association.
--- This is a compiler TYPE product, never native execution authority.
-newtype HydratedExactInterfaces = HydratedExactInterfaces [(ExactIfaceArtifact,HomeModInfo)]
+-- The selected HPT, captured inputs and actual environment are one issued
+-- owner. A later installer cannot substitute another environment for its homes.
+data HydratedExactInterfaces = HydratedExactInterfaces HscEnv CapturedInterfaceInputs
+  [(ExactIfaceArtifact,HomeModInfo)]
+
+hydratedExactEnvironment :: HydratedExactInterfaces -> HscEnv
+hydratedExactEnvironment (HydratedExactInterfaces environment _ _) = environment
+
+hydratedExactInputs :: HydratedExactInterfaces -> CapturedInterfaceInputs
+hydratedExactInputs (HydratedExactInterfaces _ inputs _) = inputs
 
 hydratedExactInterfaces :: HydratedExactInterfaces -> [(ExactIfaceArtifact,HomeModInfo)]
-hydratedExactInterfaces (HydratedExactInterfaces homes) = homes
+hydratedExactInterfaces (HydratedExactInterfaces _ _ homes) = homes
 
-hydrateExactScopeWithProducts :: HscEnv -> [VerifiedExactInterface]
-  -> [(ExactIfaceArtifact,ModIface)] -> IO (HscEnv,HydratedExactInterfaces)
-hydrateExactScopeWithProducts env verified additional = do
+hydrateInterfaceInputs :: HscEnv -> CapturedInterfaceInputs -> IO HydratedExactInterfaces
+hydrateInterfaceInputs env inputs = do
+  let verified = verifiedInterfaceProducts inputs
   forM_ verified $ \(VerifiedExactInterface _ _ _ issuer) ->
     unless (issuer == (nsUniqChar (hsc_NC env),nsNames (hsc_NC env)))
-      (fail "verified interface belongs to another NameCache")
-  let inputs = map verifiedExactInterface verified
-      keys = Set.fromList [(exactUnit artifact,exactModule artifact) | (artifact,_) <- inputs]
-  unless (all (\(artifact,_) -> (exactUnit artifact,exactModule artifact) `Set.notMember` keys) additional)
-    (fail "unverified hydration rows overlap the exact selected product")
-  completed <- hydrateExactScope env (inputs ++ additional)
-  homes <- forM inputs $ \(artifact,iface) -> do
-    home <- maybe (fail "hydrated interface lost its actual home") pure
+      (throwIO InterfaceNameCacheMismatch)
+  let actualHomes = [completedInterfaceHome owner | VerifiedExactInterface _ (CompletedHomeInterface owner) _ _ <- verified]
+      initial = hscUpdateHPT_lazy (\table -> foldr
+        (\home current -> addToHpt current (moduleName (mi_module (hm_iface home))) home) table actualHomes) env
+      pending = [iface | VerifiedExactInterface _ (DecodedTypeInterface iface) _ _ <- verified]
+  completed <- hydrateOriginalInterfaces initial pending
+  homes <- forM verified $ \selected -> do
+    let (artifact,iface) = verifiedExactInterface selected
+    home <- maybe (throwIO (InterfaceHydratedHomeMissing (exactUnit artifact,exactModule artifact))) pure
       (lookupHpt (hsc_HPT completed) (moduleName (mi_module iface)))
     unless (mi_module (hm_iface home) == mi_module iface
         && mi_hsc_src (hm_iface home) == mi_hsc_src iface
         && mi_iface_hash (mi_final_exts (hm_iface home)) == mi_iface_hash (mi_final_exts iface))
-      (fail "hydrated interface differs from its admitted input")
+      (throwIO (InterfaceHydratedHomeMismatch (exactUnit artifact,exactModule artifact)))
     pure (artifact,home)
-  pure (completed,HydratedExactInterfaces homes)
+  pure (HydratedExactInterfaces completed inputs homes)
+
+-- Make constructs a phase environment. Borrowing the same selected owner
+-- restores its actual HMI knots after checking the phase's issuer and any
+-- existing same-owner entries; equal fingerprints cannot replace those knots.
+restoreHydratedInterfaceEnvironment :: HydratedExactInterfaces -> HscEnv -> IO HydratedExactInterfaces
+restoreHydratedInterfaceEnvironment (HydratedExactInterfaces original inputs homes) phase = do
+  unless ((nsUniqChar (hsc_NC original),nsNames (hsc_NC original))
+      == (nsUniqChar (hsc_NC phase),nsNames (hsc_NC phase)))
+    (throwIO InterfaceNameCacheMismatch)
+  forM_ homes $ \(_,home) -> forM_ (lookupHpt (hsc_HPT phase) (moduleName (mi_module (hm_iface home)))) $ \present ->
+    unless (mi_module (hm_iface present) == mi_module (hm_iface home)
+        && mi_hsc_src (hm_iface present) == mi_hsc_src (hm_iface home)
+        && mi_iface_hash (mi_final_exts (hm_iface present)) == mi_iface_hash (mi_final_exts (hm_iface home)))
+      (throwIO (InterfacePhaseHomeConflict
+        (unitString (moduleUnit (mi_module (hm_iface home))),moduleNameString (moduleName (mi_module (hm_iface home))))))
+  let restored = hscUpdateHPT_lazy (\table -> foldr
+        (\(_,home) current -> addToHpt current (moduleName (mi_module (hm_iface home))) home) table homes) phase
+  pure (HydratedExactInterfaces restored inputs homes)
+
+hydratedInterfaceProduct :: HydratedExactInterfaces -> ExactIfaceArtifact
+  -> Either String (VerifiedExactInterface,HomeModInfo)
+hydratedInterfaceProduct (HydratedExactInterfaces _ inputs@(CapturedInterfaceInputs captured) homes) artifact = do
+  if checkedValueOwner artifact
+    then do _ <- selectVerifiedValueInterfaces inputs [artifact]; pure ()
+    else do _ <- selectVerifiedExactInterfaceProducts inputs [artifact]; pure ()
+  (verified,_) <- maybe (Left "hydrated selection lacks its captured interface") Right
+    (Map.lookup (exactUnit artifact,exactModule artifact) captured)
+  home <- case [selected | (actual,selected) <- homes
+      , (exactUnit actual,exactModule actual) == (exactUnit artifact,exactModule artifact)] of
+    [selected] -> Right selected
+    _ -> Left "hydrated selection lacks its actual HOME association"
+  pure (verified,home)
 
 -- Typechecking original compiler interfaces is shared by exact hydration and
 -- producer semantic checks. This issues GHC details, not admitted authority.
@@ -1559,55 +1774,43 @@ withOriginalPreviewOrphans scopes original = env
 -- GHC's graph traversal. Implementation-only HMIs remain installed but never
 -- appear in this graph; their original Names can still resolve through HPT.
 -- The caller supplies virtual-to-virtual edges, never implementation edges.
-installExactLexicalGraph
-  :: ModuleGraph -> [(ExactIfaceArtifact, [(String, String)])]
-  -> CheckedValueImportAuthority -> HscEnv
-  -> IO (Either String HscEnv)
-installExactLexicalGraph sourceGraph lexical checkedValues =
-  installExactLexicalGraphWithScaffold sourceGraph lexical checkedValues noGeneratedScaffoldImports
-
-installExactLexicalGraphWithScaffold
+projectExactLexicalGraph
   :: ModuleGraph -> [(ExactIfaceArtifact, [(String,String)])]
   -> CheckedValueImportAuthority -> GeneratedScaffoldImportAuthority -> HscEnv
-  -> IO (Either String HscEnv)
-installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuthority checkedValues)
+  -> Either String (HscEnv,[(ExactIfaceArtifact,[(String,String)])])
+projectExactLexicalGraph sourceGraph lexical (CheckedValueImportAuthority checkedValues)
     authority@(GeneratedScaffoldImportAuthority _ scaffoldGraph instanceEdges orphanScopes) env
-  | not (null conflictingRows) = pure (Left "checked template graph conflicts with current exact lexical graph")
-  | Set.size lexicalModuleNames /= length lexical = pure (Left "duplicate virtual lexical owner")
-  | Set.size virtualModuleNames /= length virtualRows = pure (Left "duplicate virtual graph module name")
+  | not (null conflictingRows) = (Left "checked template graph conflicts with current exact lexical graph")
+  | Set.size lexicalModuleNames /= length lexical = (Left "duplicate virtual lexical owner")
+  | Set.size virtualModuleNames /= length virtualRows = (Left "duplicate virtual graph module name")
   | any (\(artifact, _) -> exactUnit artifact /= unitString home) virtualRows =
-      pure (Left "virtual graph owner is outside active home unit")
+      (Left "virtual graph owner is outside active home unit")
   | any (\(_, deps) -> any (`Set.notMember` virtualOwners) deps) virtualRows =
-      pure (Left "virtual lexical edge leaves admitted graph")
+      (Left "virtual lexical edge leaves admitted graph")
   | any (\(_,_,deps) -> any (`Set.notMember` virtualOwners) deps) instanceEdges =
-      pure (Left "activation preview instance edge leaves admitted graph")
+      (Left "activation preview instance edge leaves admitted graph")
   | any (\(target,fingerprint,_) -> length [() | ModuleNode _ summary <- mgModSummaries' sourceGraph
       , ms_mod summary == target && ms_hs_hash summary == fingerprint] /= 1) instanceEdges =
-      pure (Left "activation preview instance target differs from its protected recipe")
+      (Left "activation preview instance target differs from its protected recipe")
   | any (\(OriginalPreviewOrphans target fingerprint _) ->
       not (any (\(owner,seal,_) -> owner == target && seal == fingerprint) instanceEdges)) orphanScopes =
-      pure (Left "activation preview orphan scope differs from its protected instance target")
+      (Left "activation preview orphan scope differs from its protected instance target")
   | any (\node -> case node of
       ModuleNode _ summary -> keyOf summary `Set.member` Set.union virtualOwners checkedValues
       _ -> False) (mgModSummaries' sourceGraph) =
-      pure (Left "virtual lexical owner collides with source graph")
+      (Left "virtual lexical owner collides with source graph")
   | any (\(artifact, _) -> case lookupHpt (hsc_HPT env)
         (mkModuleName (exactModule artifact)) of
       Nothing -> True
       Just hmi -> mi_module (hm_iface hmi) /=
         mkModule (stringToUnit (exactUnit artifact))
           (mkModuleName (exactModule artifact))) virtualRows =
-      pure (Left "virtual lexical interface missing from exact HPT")
+      (Left "virtual lexical interface missing from exact HPT")
   | not (null unadmittedHomeEdges) =
-      pure (Left ("source graph imports unadmitted home implementation: "
+      (Left ("source graph imports unadmitted home implementation: "
         ++ show unadmittedHomeEdges))
-  | otherwise = do
-      forM_ virtualRows $ \(artifact, _) ->
-        addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
-          (GWIB (mkModuleName (exactModule artifact)) NotBoot)
-          (ms_location (exactInterfaceSummary env artifact))
-      pure (Right (withOriginalPreviewOrphans orphanScopes env)
-        { hsc_mod_graph = mkModuleGraph (sourceNodes ++ virtualNodes) })
+  | otherwise = Right ((withOriginalPreviewOrphans orphanScopes env)
+      {hsc_mod_graph=mkModuleGraph (sourceNodes ++ virtualNodes)},virtualRows)
   where
     keyOfArtifact artifact = (exactUnit artifact,exactModule artifact)
     graphRows = lexical ++ scaffoldGraph
@@ -1678,8 +1881,7 @@ installExactLexicalGraphWithScaffold sourceGraph lexical (CheckedValueImportAuth
       other -> other
       | node <- mgModSummaries' sourceGraph]
     virtualNodes =
-      [ ModuleNode (map nodeKey deps) (exactInterfaceSummary env artifact)
-      | (artifact, deps) <- virtualRows ]
+      [ModuleNode (map nodeKey deps) (exactInterfaceSummary env artifact) | (artifact,deps) <- virtualRows]
 
 -- GHC downsweep indexes every retained summary by its source path. Exact
 -- lexical/linker nodes have no source and belong only to their admitted graph.

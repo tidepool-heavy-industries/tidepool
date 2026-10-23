@@ -1078,6 +1078,9 @@ def render_rule(rule, name, target, package, deps, named, extra="", features=(),
 def compile_fail_cases(package, library):
     directory = pathlib.Path(package["manifest_path"]).parent
     extra_dependencies = {
+        'recovery_record_is_not_certified_product': (),
+        'certified_product_has_no_digest_admission': (),
+        'original_draft_is_private': (),
         "checked_cell_request_digest_is_issued": (),
         "retained_context_is_not_completed_execution": (),
         "original_execution_census_is_private": (),
@@ -1335,14 +1338,56 @@ def actor_notebook_contract_test_cases(binary):
     return "\n".join(rules)
 
 
+# These actual World/capture cases need a resident compiler both in their
+# maintained cohorts and when selected directly through `just test-lib`.
+RUNTIME_CHECKED_CAPTURE_CASES = ["session::resident::authored_publication_tests::" + name for name in (
+    "checked_interface_publication_conflict_preserves_private_prefix",
+    "checked_interface_publication_write_failure_preserves_private_prefix",
+    "checked_capture_completes_issued_binding_through_resident",
+    "checked_capture_stage_requires_its_actual_issued_ticket_and_session",
+    "checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair",
+)]
+RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+    "checked_resume_uses_the_parked_owner_and_refuses_revocation_before_effects",
+    "historical_source_captures_bind_the_original_value_after_shadowing",
+    "same_cell_source_capture_requeries_only_the_referenced_prior_output",
+    "compiler_issued_binding_survives_capture_and_releases_interface_and_root",
+)]
+
+
 def runtime_world_publication_test_cases(binary):
     tests = ["session::resident::paired_publication_tests::" + name for name in (
         "paired_independent_authored_rebase_preserves_originals_and_current_winners",
         "paired_first_authored_publication_preserves_atomic_visibility",
         "paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners",
+        "paired_reused_projection_keeps_nominal_owner_and_atomic_arbitration",
+        "paired_reused_projection_restores_detached_summary_under_original_interface",
+        "paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix",
+        "paired_ephemeral_completion_order_rebases_without_replaying_native_writes",
+        "paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode",
+        "paired_ephemeral_foreign_runtime_ticket_never_claims",
+        "paired_foreign_staged_ticket_never_claims_publication",
+        "paired_materialized_value_retracts_only_admitted_value_namespace",
+        "paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace",
+        "paired_rich_projection_reuses_exact_members_and_instance_graph",
+        "paired_projection_history_matches_forced_ghc_join",
     )]
     tests.append("session::resident::world_cell_test_support::source_hidden_join::"
                  "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")
+    tests.extend("session::resident::world_cell_test_support::publication_linearization::" + name for name in (
+        "paired_guarded_cancellation_before_publication_preserves_public_winner",
+        "paired_publication_before_guarded_cancellation_preserves_committed_winner",
+        "fixed_sibling_intents_restage_after_observation_and_domain_changes_without_reexecution",
+    ))
+    tests.extend("session::resident::world_cell_test_support::publication_semantic_currency::" + name for name in (
+        "reservations_refill_and_unrelated_private_facts_preserve_certificate_through_reopen",
+        "semantic_change_between_metadata_retry_and_refresh_retains_execution_intent",
+        "raw_visibility_mutation_does_not_issue_a_current_compiler_world",
+        "declaration_rejection_baseline_refuses_retired_public_owner",
+        "library_replacement_under_same_runtime_owner_refuses_held_publication_and_intent",
+        "bounded_interference_then_fair_drain_preserves_public_owners",
+    ))
+    tests.extend(RUNTIME_CHECKED_CAPTURE_CASES)
     env, resources, worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_world_publication_histories"
     )
@@ -1433,6 +1478,7 @@ def runtime_test_cases(binary):
         "zero_capture_action_runs_once_before_the_next_item",
         "strict_let_group_forces_before_retaining_its_closure_capture",
     )]
+    semantic_tests.extend(RUNTIME_PARKED_CAPTURE_CASES)
     semantic_env, semantic_resources, semantic_worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_typed_segment_semantic_tests"
     )
@@ -1963,6 +2009,7 @@ tidepool_buildscript_run(
             ]
             toolchain_output_evidence_cases = [
                 'declaration_context::published_source::tests::published_source_composition_preserves_sealed_selection_across_repeated_imports',
+                'declaration_context::published_source::tests::nested_publication_digest_cannot_change_recovered_source_or_native_selection',
                 'declaration_context::published_source::tests::authored_certifier_preserves_published_policy_with_complete_demand',
                 'declaration_context::published_source::tests::published_native_custody_does_not_require_dependency_namespace_originals',
                 'declaration_context::published_source::history_properties::publication_reopening_keeps_birth_when_current_roles_change',
@@ -1973,6 +2020,14 @@ tidepool_buildscript_run(
             toolchain_retained_proof_cases = [
                 'artifact_inventory::tests::ordinary_publication_and_display_preserve_the_actual_sealed_issuer',
                 'certified_products::tests::publication_request_history::generated_publication_support_and_recovery_preserve_issuer_selection',
+            ]
+            toolchain_source_admission_cases = [
+                'artifact_inventory::compiler_projection::acquisition_tests::authored_promotion_preserves_actual_offered_acquisition',
+                'artifact_inventory::tests::bound_projection_rebinding_preserves_issuing_none_override',
+                'artifact_inventory::tests::independent_native_admission_does_not_inherit_global_source_witness',
+                'artifact_inventory::tests::source_witness_histories_follow_selected_issuer',
+                'artifact_inventory::tests::native_inventory_reuse_preserves_each_owners_source_admission_witness',
+                'artifact_inventory::tests::artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads',
             ]
             toolchain_existing_resident_cases = [
                 'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground',
@@ -1986,6 +2041,7 @@ tidepool_buildscript_run(
             toolchain_resident_cases = (
                 toolchain_existing_resident_cases + toolchain_output_context_cases
                 + toolchain_output_evidence_cases + toolchain_retained_proof_cases
+                + toolchain_source_admission_cases
             )
             unit_extra += '\n    case_compiler_modes = {' + ", ".join(
                 json.dumps(case) + ': "owned-resident"' for case in toolchain_resident_cases
@@ -2008,7 +2064,15 @@ tidepool_buildscript_run(
             if package_name == "tidepool-runtime":
                 env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
-                *(['    case_compiler_modes = {"session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation": "owned-resident"},'] if package_name == "tidepool-runtime" else []),
+                *(['    case_compiler_modes = {' + ", ".join(
+                    json.dumps(name) + ': "owned-resident"'
+                    for name in [
+                        "session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation",
+                        "session::turn::scaling_tests::typed_segment_tests::bare_observation_retains_lazy_thunk_before_later_demand",
+                        "session::turn::scaling_tests::typed_segment_tests::effectful_observation_runs_once_and_retains_its_lazy_result",
+                        *RUNTIME_CHECKED_CAPTURE_CASES,
+                        *RUNTIME_PARKED_CAPTURE_CASES,
+                    ]) + "},"] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(
                     json.dumps(name) + ": \"owned-resident\""
                     for name in [

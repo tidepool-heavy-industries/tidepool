@@ -24,7 +24,8 @@ pub(crate) use compiler_projection::{
     RecordedInputNativeDecision,
 };
 pub use compiler_projection::{
-    CompilerInputProjection, CompilerInputRole, PublicationNativeAuthority,
+    AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
+    CompilerRoleFacts, PublicationFactsRef, PublicationNativeAuthority,
 };
 pub(crate) use native_availability::{
     validate_consumed_native_namespace, IssuedNativeOffer, NativeDependencyCatalog,
@@ -1104,11 +1105,7 @@ impl NativeOriginalRequirement {
                 },
             ));
         };
-        let canonical = ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("private original lacks canonical carrier"))?,
-        );
+        let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
         let Some((carrier, canonical_binding)) = self.namespace_pair_in(state, graph, canonical)
         else {
             return Ok(None);
@@ -1350,6 +1347,17 @@ impl NativeOriginalRequirement {
         Ok(requirements)
     }
 
+    pub(crate) fn from_publication(
+        roles: AdmittedCompilerRoles<'_>,
+        owner: &ExactModuleIdentity,
+    ) -> Option<Self> {
+        let role = roles.get(owner)?;
+        Some(Self {
+            original: role.original()?,
+            selection: role.publication()?.selection().clone(),
+        })
+    }
+
     pub(crate) fn from_role(role: CompilerInputRole) -> Option<Self> {
         match role {
             CompilerInputRole::PublishedSourceOriginal {
@@ -1390,6 +1398,12 @@ fn checked_input_group_choices(
         }
     }
     Ok(selected)
+}
+
+struct AdmittedCompilerRowMerge<'a> {
+    receiving: AdmittedCompilerRoles<'a>,
+    incoming: AdmittedCompilerRoles<'a>,
+    selected: &'a mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
 }
 
 enum CompilerNativeDemand<'a> {
@@ -1658,6 +1672,14 @@ pub enum ArtifactInventoryFailure {
     AuthoredNativeRoot { generation: u64, found: usize },
     #[error("native root {artifact:?} is outside its retained view")]
     NativeRootOutsideView { artifact: ArtifactId },
+    #[error("compiler owner {owner:?} has no selected Original")]
+    MissingOriginal { owner: ExactModuleIdentity },
+    #[error("native offer for {owner:?} differs from selected Original {original:?} and interface {interface:?}")]
+    NativeOfferBindingMismatch {
+        owner: ExactModuleIdentity,
+        original: ArtifactBinding,
+        interface: ArtifactBinding,
+    },
     #[error("native root {artifact:?} has no original native proof")]
     NativeRootNotOriginal { artifact: ArtifactId },
     #[error("artifact {artifact:?} has no certified native group {original_ordinal}")]
@@ -2393,7 +2415,7 @@ impl ArtifactEntry {
     fn adopt_facts(&self, facts: ArtifactFactsHandle) -> Self {
         let payload = match (&self.payload, &facts) {
             (ArtifactPayload::Original(product), ArtifactFactsHandle::Original(owner)) => {
-                ArtifactPayload::Original(product.clone().with_facts(Arc::clone(owner)))
+                ArtifactPayload::Original(product.clone().adopt_fact_owner(Arc::clone(owner)))
             }
             (ArtifactPayload::Canonical(interface), ArtifactFactsHandle::Canonical(owner)) => {
                 ArtifactPayload::Canonical(interface.clone().with_facts(Arc::clone(owner)))
@@ -2408,7 +2430,7 @@ impl ArtifactEntry {
         };
         let mut adopted = self.clone();
         adopted.native = match &payload {
-            ArtifactPayload::Original(product) => product.original_native().cloned(),
+            ArtifactPayload::Original(product) => Some(Arc::clone(product.original_native())),
             _ => None,
         };
         adopted.payload = payload;
@@ -2420,27 +2442,24 @@ impl ArtifactEntry {
     ) -> Option<Arc<crate::module_candidates::deployment::CapturedCatalogInputs>> {
         match &self.payload {
             ArtifactPayload::Canonical(interface) => interface.catalog_input_custody(),
-            ArtifactPayload::Original(product) => product
-                .module_interface()
-                .and_then(|interface| interface.catalog_input_custody()),
+            ArtifactPayload::Original(product) => {
+                product.module_interface().catalog_input_custody()
+            }
             ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         }
     }
 
-    fn source_admission_witness(&self) -> Option<[u8; 32]> {
-        match &self.payload {
-            ArtifactPayload::Original(product) => product.source_sha256(),
-            _ => None,
-        }
-    }
-
     fn same_issuing_authority(&self, other: &Self) -> bool {
-        self.source_admission_witness() == other.source_admission_witness()
-            && match (self.catalog_input_custody(), other.catalog_input_custody()) {
-                (None, None) => true,
-                (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
-                _ => false,
-            }
+        if let (ArtifactPayload::Original(left), ArtifactPayload::Original(right)) =
+            (&self.payload, &other.payload)
+        {
+            return left.same_admission_and_transport(right);
+        }
+        match (self.catalog_input_custody(), other.catalog_input_custody()) {
+            (None, None) => true,
+            (Some(first), Some(second)) => Arc::ptr_eq(&first, &second),
+            _ => false,
+        }
     }
 
     pub(crate) fn merge_catalog_input_custody(
@@ -2540,12 +2559,7 @@ impl ArtifactEntry {
     ) -> Result<Self, CompileError> {
         #[cfg(test)]
         ORIGINAL_ENTRY_CONSTRUCTION_CALLS.with(|calls| calls.set(calls.get() + 1));
-        let product =
-            crate::certified_products::finalize_original_for_inventory(product, validation)
-                .map_err(|error| failure(&format!("original facts: {error}")))?;
-        let canonical = product
-            .module_interface()
-            .ok_or_else(|| failure("native product lacks its canonical finalized module"))?;
+        let canonical = product.module_interface();
         if canonical.producer_sha256() != producer {
             return Err(failure("native product has another canonical producer"));
         }
@@ -2564,13 +2578,11 @@ impl ArtifactEntry {
         let descriptor = Self::original_descriptor(producer, &product);
         Ok(Self {
             descriptor,
-            facts: ArtifactFactsHandle::Original(Arc::clone(
-                product.facts().expect("finalized original"),
-            )),
+            facts: ArtifactFactsHandle::Original(Arc::clone(product.facts())),
             payload: ArtifactPayload::Original(product.clone()),
             requirements,
             interface_seals,
-            native: product.original_native().cloned(),
+            native: Some(Arc::clone(product.original_native())),
         })
     }
     fn original_descriptor(
@@ -2754,11 +2766,7 @@ pub(crate) fn restore_recovery_interface_dependencies(
     }
     for entry in entries.iter_mut() {
         if let ArtifactPayload::Original(product) = &entry.payload {
-            let canonical = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("recovered native lacks canonical carrier"))?,
-            );
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let direct = edges
                 .iter()
                 .filter(|(from, _, _)| *from == entry.descriptor.id)
@@ -2993,9 +3001,7 @@ impl InventoryState {
             return Ok(entry);
         }
         let entry = if let ArtifactPayload::Original(product) = &entry.payload {
-            let interface = product
-                .module_interface()
-                .expect("complete canonical companion");
+            let interface = product.module_interface();
             let normalized =
                 self.canonicalize(Arc::new(ArtifactEntry::canonical(interface.clone())))?;
             let ArtifactFactsHandle::Canonical(canonical) = &normalized.facts else {
@@ -3004,10 +3010,12 @@ impl InventoryState {
             if Arc::ptr_eq(interface.facts(), canonical) {
                 entry
             } else {
-                let product = product.clone().with_canonical_facts(Arc::clone(canonical));
-                Arc::new(entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(
-                    product.facts().unwrap(),
-                ))))
+                let product = product
+                    .clone()
+                    .adopt_fact_owner(product.facts().adopt_canonical_owner(Arc::clone(canonical)));
+                Arc::new(
+                    entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(product.facts()))),
+                )
             }
         } else {
             entry
@@ -3521,11 +3529,7 @@ impl SelectedOwners {
     ) -> Result<BTreeSet<(ArtifactId, ArtifactDependency)>, CompileError> {
         let canonical = match &entry.payload {
             ArtifactPayload::Canonical(interface) => Some(interface),
-            ArtifactPayload::Original(product) => Some(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?,
-            ),
+            ArtifactPayload::Original(product) => Some(product.module_interface()),
             ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
         };
         if let Some(canonical) = canonical {
@@ -3587,12 +3591,7 @@ impl SelectedOwners {
             }
         }
         if let ArtifactPayload::Original(product) = &entry.payload {
-            let carrier = ArtifactEntry::canonical(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?
-                    .clone(),
-            );
+            let carrier = ArtifactEntry::canonical(product.module_interface().clone());
             let id = resolve(&entry.descriptor.owner, &ArtifactDependency::Interface)?;
             if id != carrier.descriptor.id {
                 return Err(ArtifactInventoryError {
@@ -4607,9 +4606,7 @@ impl ArtifactInventory {
         let mut implicit = Vec::new();
         for entry in &expanded {
             if let ArtifactPayload::Original(product) = &entry.payload {
-                let canonical = product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?;
+                let canonical = product.module_interface();
                 // An explicitly supplied canonical carrier can replace this
                 // implicit carrier only when it also preserves its custody.
                 if !expanded.iter().any(|available| {
@@ -4760,11 +4757,7 @@ impl ArtifactInventory {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 return Err(failure("native namespace proof lacks original payload"));
             };
-            let canonical = ArtifactEntry::canonical_artifact_id(
-                product
-                    .module_interface()
-                    .ok_or_else(|| failure("native canonical carrier missing"))?,
-            );
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let (carrier, canonical) = requirement
                 .namespace_pair_in(&state, graph, canonical)
                 .ok_or_else(|| {
@@ -4910,8 +4903,7 @@ impl ArtifactInventory {
                         || current_artifacts.contains(id)
                         || (supplied.contains_key(id)
                             && matches!(&entry.payload, ArtifactPayload::Original(product)
-                            if product.module_interface().is_some_and(|canonical|
-                                ids.contains(&ArtifactEntry::canonical_artifact_id(canonical)))))
+                            if ids.contains(&ArtifactEntry::canonical_artifact_id(product.module_interface()))))
                 })
             })
             .map(|(id, entry)| (*id, Arc::clone(entry)))
@@ -6911,7 +6903,7 @@ impl ArtifactView {
             .iter()
             .filter(|entry| entry.descriptor.id == id)
             .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Original(product) => Some(product.module_interface()),
                 ArtifactPayload::Canonical(interface) => Some(interface),
                 ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
             })
@@ -7410,8 +7402,7 @@ impl ArtifactView {
             .filter(|(_, entry)| {
                 accepted_owners.contains(&entry.descriptor.owner)
                     && matches!(&entry.payload, ArtifactPayload::Original(product)
-                        if product.module_interface().is_some_and(|interface|
-                            matches!(interface.origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. })))
+                        if matches!(product.module_interface().origin(), crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }))
             })
             .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>();
@@ -8132,7 +8123,7 @@ impl ArtifactView {
                 };
                 Some((
                     id,
-                    ArtifactEntry::canonical_artifact_id(product.module_interface()?),
+                    ArtifactEntry::canonical_artifact_id(product.module_interface()),
                 ))
             })
             .collect::<BTreeMap<_, _>>();
@@ -8997,6 +8988,21 @@ impl ArtifactView {
         left: &CompilerSourceSupport,
         right: &CompilerSourceSupport,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::Closed)
+    }
+
+    fn merge_admitted_output_fragments(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
+        Self::merge_acquired_compiler_rows(left, right, CompilerInputValidation::FragmentPair)
+    }
+
+    fn merge_acquired_compiler_rows(
+        left: &CompilerSourceSupport,
+        right: &CompilerSourceSupport,
+        validation: CompilerInputValidation,
+    ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
         let mut selected = BTreeMap::new();
         let (artifacts, projection, input_decisions) =
             left.artifacts().merge_compiler_inputs_inner(
@@ -9007,8 +9013,12 @@ impl ArtifactView {
                     left: Some(left.input_decisions()),
                     right: Some(right.input_decisions()),
                 },
-                CompilerInputValidation::Closed,
-                Some(&mut selected),
+                validation,
+                Some(AdmittedCompilerRowMerge {
+                    receiving: left.compiler_roles(),
+                    incoming: right.compiler_roles(),
+                    selected: &mut selected,
+                }),
             )?;
         Ok(compiler_projection::ResolvedCompilerInputs {
             artifacts,
@@ -9032,9 +9042,7 @@ impl ArtifactView {
         incoming: &CompilerInputProjection,
         demand: CompilerNativeDemand<'_>,
         validation: CompilerInputValidation,
-        mut selected_rows: Option<
-            &mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
-        >,
+        mut selected_rows: Option<AdmittedCompilerRowMerge<'_>>,
     ) -> Result<
         (
             Self,
@@ -9047,18 +9055,22 @@ impl ArtifactView {
             "exact.compiler_input_merge",
             "validate_inputs",
         );
-        match validation {
-            CompilerInputValidation::Closed => {
-                projection.validate(self)?;
-                incoming.validate(other)?;
-            }
-            CompilerInputValidation::ReceivedFragment => {
-                projection.validate(self)?;
-                incoming.validate_associations(other)?;
-            }
-            CompilerInputValidation::FragmentPair => {
-                projection.validate_associations(self)?;
-                incoming.validate_associations(other)?;
+        // Closed owners supply already authenticated rows and the solver carries
+        // its chosen row whole. Raw projections still require admission here.
+        if selected_rows.is_none() {
+            match validation {
+                CompilerInputValidation::Closed => {
+                    projection.validate(self)?;
+                    incoming.validate(other)?;
+                }
+                CompilerInputValidation::ReceivedFragment => {
+                    projection.validate(self)?;
+                    incoming.validate_associations(other)?;
+                }
+                CompilerInputValidation::FragmentPair => {
+                    projection.validate_associations(self)?;
+                    incoming.validate_associations(other)?;
+                }
             }
         }
         timing.advance("merge_projection");
@@ -9080,36 +9092,23 @@ impl ArtifactView {
                 compiler_projection::CompilerRoleIssuer::Receiving => self,
                 compiler_projection::CompilerRoleIssuer::Incoming => other,
             };
-            {
+            if let Some(rows) = selected_rows.as_mut() {
+                let selected_source = match issuer {
+                    compiler_projection::CompilerRoleIssuer::Receiving => rows.receiving,
+                    compiler_projection::CompilerRoleIssuer::Incoming => rows.incoming,
+                };
+                let row = selected_source
+                    .selected_row(owner)
+                    .ok_or_else(|| failure("chosen compiler issuer lacks its admitted row"))?;
+                for binding in row.selected_bindings() {
+                    namespace.insert(binding.artifact, binding);
+                }
+                rows.selected.insert(owner.clone(), row.clone());
+            } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
-                let canonical = source.resolve_binding(role.interface(), owned)?;
-                namespace.insert(role.interface(), canonical);
-                let original = role
-                    .original()
-                    .map(|id| {
-                        source.resolve_binding(id, owned).map(|binding| {
-                            namespace.insert(id, binding);
-                            binding
-                        })
-                    })
-                    .transpose()?;
-                if let Some(rows) = selected_rows.as_deref_mut() {
-                    rows.insert(
-                        owner.clone(),
-                        compiler_projection::ResolvedCompilerRole::from_issued_bindings(
-                            (
-                                canonical,
-                                Arc::clone(&source.lease.payloads[&role.interface()]),
-                            ),
-                            original.map(|binding| {
-                                (
-                                    binding,
-                                    Arc::clone(&source.lease.payloads[&binding.artifact]),
-                                )
-                            }),
-                        ),
-                    );
+                for id in std::iter::once(role.interface()).chain(role.original()) {
+                    namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
             }
             if matches!(demand, CompilerNativeDemand::ExtendInterfaces) {
@@ -9762,9 +9761,7 @@ impl ArtifactView {
         product: &CertifiedRecoveryProduct,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<Option<Arc<ArtifactEntry>>, CompileError> {
-        let Some(native) = product.original_native() else {
-            return Ok(None);
-        };
+        let native = product.original_native();
         if !native.matches_original(product) {
             return Ok(None);
         }
@@ -9798,21 +9795,10 @@ impl ArtifactView {
                 ArtifactMetadataInvariant::OriginalDurableFacts,
             ));
         }
-        // Inventory equality deliberately excludes the fresh source witness.
-        // A different source admission follows ordinary construction instead.
-        if previous.source_sha256() != product.source_sha256() {
+        if !previous.same_admission_and_transport(product) {
             return Ok(None);
         }
-        let Some(previous_native) = previous.original_native() else {
-            return Ok(None);
-        };
-        if !Arc::ptr_eq(native, previous_native) || !previous_native.matches_original(previous) {
-            return Ok(None);
-        }
-        if product
-            .module_interface()
-            .is_none_or(|interface| interface.producer_sha256() != producer)
-        {
+        if product.module_interface().producer_sha256() != producer {
             return Err(failure("native product has another canonical producer"));
         }
         crate::certified_products::original_execution_source_digest_with_validation(
@@ -10181,7 +10167,7 @@ mod tests {
         let owner = native.descriptor.owner.clone();
         let canonical = match &native.payload {
             ArtifactPayload::Original(product) => {
-                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap())
+                ArtifactEntry::canonical_artifact_id(product.module_interface())
             }
             _ => unreachable!(),
         };
@@ -11171,7 +11157,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &native.payload else {
             unreachable!()
         };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone())
             .descriptor
             .id;
         let proof = NativeOriginalRequirement::from_issued_group_custody(
@@ -11181,7 +11167,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let offer = IssuedNativeOffer::issue(native.descriptor.id, &selected, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
+            selected.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .unwrap();
         let held = carrier
             .retain_issued_offer_custody([offer.clone()])
             .unwrap();
@@ -11264,7 +11257,9 @@ mod tests {
             .unwrap();
         assert!(!partial.is_full());
         assert!(partial.proof().is_some());
-        let empty = IssuedNativeOffer::issue(native.descriptor.id, &selected, None).unwrap();
+        let empty = issuer
+            .issue_native_offer(&native.descriptor.owner, None)
+            .unwrap();
         for original in [&offer, &partial, &empty] {
             use crate::exact_context::NativeOfferSnapshotBody;
             let mut facts = original.snapshot_facts();
@@ -11368,7 +11363,7 @@ mod tests {
                     (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
                 let id = original.descriptor.id;
                 let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let canonical = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
                 let owner = ExactModuleIdentity { unit: product.owner().unit.clone(), module: product.owner().module.clone() };
                 let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
                 let mut view = inventory.admit_shared(&inventory.empty_view(), vec![original]).unwrap();
@@ -11405,9 +11400,9 @@ mod tests {
                     (0..count).map(|ordinal| (ordinal, Vec::new())).collect(), &[], &BTreeMap::new()));
                 let id = original.descriptor.id;
                 let ArtifactPayload::Original(product) = &original.payload else { unreachable!() };
-                let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+                let canonical = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
                 let roles = CompilerInputProjection::from_issued_entries(&[original.clone()]).unwrap().interface_only();
-                let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().unwrap().clone()));
+                let canonical_entry = Arc::new(ArtifactEntry::canonical(product.module_interface().clone()));
                 let base = inventory.admit_shared(&inventory.empty_view(), vec![canonical_entry]).unwrap();
                 let canonical_binding = base.namespace()[&canonical];
                 let capture = |range: std::ops::Range<u32>, name: &str| inventory.admit_recovery_selection(
@@ -11463,7 +11458,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let base = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical])
@@ -12453,7 +12448,7 @@ mod tests {
             assert_eq!(left_child.artifact, old_child_id);
             assert_eq!(right_child.artifact, new_child_id);
             let canonical = ArtifactEntry::canonical(match &native.payload {
-                ArtifactPayload::Original(product) => product.module_interface().unwrap().clone(),
+                ArtifactPayload::Original(product) => product.module_interface().clone(),
                 _ => unreachable!(),
             })
             .descriptor
@@ -12708,7 +12703,7 @@ mod tests {
                 CertifiedSourceSelection::from_compiler_inputs(&inputs, &operation.inventory)
                     .unwrap();
             let canonical =
-                ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap());
+                ArtifactEntry::canonical_artifact_id(product.module_interface());
             let InputNativeDecision::IssuedChoices(choices) = inputs
                 .compiler_source_support()
                 .checked_native_input_decision(key.artifact, canonical, product.owner())
@@ -12989,7 +12984,7 @@ mod tests {
                 unreachable!()
             };
             let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             ));
             let canonical_id = canonical.descriptor.id;
             let base = inventory
@@ -13093,7 +13088,7 @@ mod tests {
             unreachable!()
         };
         let native_canonical_id =
-            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(product.module_interface().clone())
                 .descriptor
                 .id;
         let child_id = child.descriptor.id;
@@ -13156,7 +13151,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let canonical_id = canonical.descriptor.id;
         let base = inventory
@@ -14147,7 +14142,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            first_product.module_interface().unwrap().clone(),
+            first_product.module_interface().clone(),
         ));
         let standalone = inventory
             .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
@@ -14165,10 +14160,10 @@ mod tests {
             unreachable!()
         };
         assert!(Arc::ptr_eq(
-            product.module_interface().unwrap().facts(),
+            product.module_interface().facts(),
             facts
         ));
-        assert!(product.original_native().unwrap().matches_original(product));
+        assert!(product.original_native().matches_original(product));
         let before = inventory.metrics();
         inventory.admit_shared(&view, vec![owner]).unwrap();
         let after = inventory.metrics();
@@ -14277,17 +14272,22 @@ mod tests {
 
     #[test]
     fn bound_projection_rebinding_preserves_issuing_none_override() {
-        let cold = Arc::new(issued_native_groups(
-            "Original",
-            vec![(0, Vec::new())],
-            &[],
-            &BTreeMap::new(),
-        ));
-        let ArtifactPayload::Original(product) = &cold.payload else {
-            unreachable!()
-        };
-        let mut fresh = (*cold).clone();
-        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let ordinal = *cold
+            .native_group_ordinals
+            .iter()
+            .find(|ordinal| {
+                let ArtifactPayload::Original(product) = &cold.payload else {
+                    unreachable!()
+                };
+                let definitions =
+                    crate::certified_products::original_native_group_definitions(product, **ordinal)
+                        .unwrap();
+                let mut exports = definitions.export_contracts();
+                exports.next().is_some_and(|contract| contract.is_ok()) && exports.next().is_none()
+            })
+            .expect("actual single-export native group");
+        let cold = Arc::new(cold);
         let inventory = ArtifactInventory::default();
         let cursor = inventory
             .admit_shared_with_demand(
@@ -14297,7 +14297,13 @@ mod tests {
             )
             .unwrap();
         let independent = ArtifactInventory::default();
-        let physical_entries = vec![cold.clone(), Arc::new(entry("Other", &[]))];
+        let other = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            cold.descriptor.producer_sha256,
+            "fixture",
+            "Other",
+            BTreeMap::new(),
+        ));
+        let physical_entries = vec![cold.clone(), Arc::new(other)];
         let physical = independent
             .admit_shared_with_demand(
                 &independent.empty_view(),
@@ -14329,7 +14335,7 @@ mod tests {
 
         let admitted = {
             let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
-            let (prepared, accepted) = source_target_data(&[(&cold, 0)]);
+            let (prepared, accepted) = source_target_data(&[(&cold, ordinal)]);
             let observed = crate::certified_products::AuthenticatedTargetImports::issue(
                 &prepared,
                 &accepted,
@@ -14545,7 +14551,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &owner.payload else {
             panic!("original owner");
         };
-        let witness = product.original_native().unwrap();
+        let witness = product.original_native();
         assert!(witness.matches_original(product));
         let before = inventory.metrics();
         inventory.admit_shared(&adopted, vec![owner]).unwrap();
@@ -14901,6 +14907,32 @@ mod tests {
         );
     }
 
+    fn issued_source_admission_pair() -> (
+        crate::artifacts::test_support::SourcePublicationEntryFixture,
+        ArtifactEntry,
+        ArtifactEntry,
+    ) {
+        let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
+            .expect("the matched compiler issues checked source observations");
+        let fresh = (*fixture.helper).clone();
+        let ArtifactPayload::Original(product) = &fresh.payload else {
+            unreachable!()
+        };
+        assert!(product.source_admission().is_some());
+        let recovered =
+            crate::certified_products::tests::recovered_witness_fixtures(&[product.clone()])
+                .remove(0)
+                .product;
+        assert!(
+            recovered.source_admission().is_none(),
+            "durable equal bytes cannot recover a current source observation"
+        );
+        assert!(recovered.same_durable_artifact(product));
+        let cold = ArtifactEntry::original(fresh.descriptor.producer_sha256, recovered).unwrap();
+        assert_eq!(cold.descriptor.id, fresh.descriptor.id);
+        (fixture, cold, fresh)
+    }
+
     fn native_entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
         let interface = crate::certified_products::fixture_module_interface(
             [2; 32],
@@ -14935,7 +14967,7 @@ mod tests {
             digest(interface.certificate_bytes()),
         )
         .unwrap();
-        let product = CertifiedRecoveryProduct::from_certification(
+        let product = crate::recovery_artifacts::OriginalDraft::from_certification(
             owner,
             interface.interface_bytes().to_vec(),
             raw.product_bytes().to_vec(),
@@ -14943,6 +14975,11 @@ mod tests {
             certification,
         )
         .with_module_interface(interface)
+        .unwrap();
+        let product = crate::certified_products::certify_original_draft_with_validation(
+            product,
+            &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+        )
         .unwrap();
         ArtifactEntry::original([2; 32], product).unwrap()
     }
@@ -14962,7 +14999,7 @@ mod tests {
         let custody = inventory
             .issue_selected_custody(
                 &base,
-                vec![native],
+                vec![native.clone()],
                 BTreeSet::from([NativeGroupKey {
                     artifact: id,
                     original_ordinal: 7,
@@ -14997,7 +15034,16 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
         assert_eq!(issued.len(), 1);
-        let offer = IssuedNativeOffer::issue(id, &view, Some(proof)).unwrap();
+        let issuer = crate::declaration_context::issue_fixture_compiler_support(
+            CompilerInputProjection::from_issued_entries(&[native.clone()]).unwrap(),
+            view.clone(),
+        )
+        .unwrap();
+        let offer = issuer
+            .issue_native_offer(&native.descriptor.owner, Some(proof))
+            .unwrap();
+        drop(issuer);
+        drop(native);
         drop(view);
         assert_eq!(inventory.node_count(), 0);
         assert!(
@@ -15227,7 +15273,7 @@ mod tests {
         };
         let projection = CompilerInputProjection::from_issued_entries(&[
             Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             )),
             Arc::new(next.clone()),
         ])
@@ -17413,7 +17459,7 @@ mod tests {
             let old_values_id = values.descriptor.id;
             let new_child_id = next.descriptor.id;
             let ArtifactPayload::Original(product) = &native.payload else { unreachable!() };
-            let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            let canonical_id = ArtifactEntry::canonical(product.module_interface().clone()).descriptor.id;
             proptest::prop_assert_ne!(old_values_id, new_child_id);
             let old = inventory.admit(&inventory.empty_view(), vec![native.clone(), values]).unwrap();
             let old_graph = old.capture_graph_selection();
@@ -17667,7 +17713,7 @@ mod tests {
                     unreachable!()
                 };
                 let canonical =
-                    ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+                    ArtifactEntry::canonical(product.module_interface().clone());
                 let carrier = ArtifactBindingNode::Artifact(namespace[&original.descriptor.id]);
                 let canonical = ArtifactBindingNode::Artifact(namespace[&canonical.descriptor.id]);
                 model
@@ -18573,7 +18619,7 @@ mod tests {
                             unreachable!()
                         };
                         let canonical = ArtifactEntry::canonical_artifact_id(
-                            product.module_interface().unwrap(),
+                            product.module_interface(),
                         );
                         let expected_canonical = model
                             .rows
@@ -19318,9 +19364,9 @@ mod tests {
         let ArtifactPayload::Original(product) = &old_native.payload else {
             unreachable!()
         };
-        let old_carrier = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let old_carrier = ArtifactEntry::canonical(product.module_interface().clone());
         let new_carrier = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
-            product.module_interface().unwrap(),
+            product.module_interface(),
             b"fresh Epoch Core".to_vec(),
         ));
         let old_id = old_carrier.descriptor.id;
@@ -19491,7 +19537,7 @@ mod tests {
                 unreachable!()
             };
             let canonical_id =
-                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(product.module_interface().clone())
                     .descriptor
                     .id;
             let proof =
@@ -19735,7 +19781,7 @@ mod tests {
                 inspection.clone(),
                 Arc::new(ArtifactEntry::canonical(match &wire.payload {
                     ArtifactPayload::Original(product) => {
-                        product.module_interface().unwrap().clone()
+                        product.module_interface().clone()
                     }
                     _ => unreachable!(),
                 })),
@@ -20130,7 +20176,7 @@ mod tests {
             unreachable!()
         };
         let canonical = Arc::new(ArtifactEntry::canonical(
-            product.module_interface().unwrap().clone(),
+            product.module_interface().clone(),
         ));
         let mut issuers = (0..branches)
             .map(|index| {
@@ -20300,7 +20346,7 @@ mod tests {
                 unreachable!()
             };
             let canonical = Arc::new(ArtifactEntry::canonical(
-                product.module_interface().unwrap().clone(),
+                product.module_interface().clone(),
             ));
             let original = inventory
                 .admit_recovery_selection(
@@ -20406,7 +20452,7 @@ mod tests {
         let ArtifactPayload::Original(product) = &original.payload else {
             unreachable!()
         };
-        let canonical = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let canonical = ArtifactEntry::canonical(product.module_interface().clone());
         let issue = |label: &str| {
             inventory
                 .admit_recovery_selection(
@@ -20788,21 +20834,20 @@ mod tests {
 
     #[test]
     fn independent_native_admission_does_not_inherit_global_source_witness() {
-        let cold = native_entry("Original", &[]);
-        let mut fresh = cold.clone();
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let source = fresh
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let ArtifactPayload::Original(cold_product) = &cold.payload else {
             unreachable!()
         };
-        fresh.payload = ArtifactPayload::Original(cold_product.clone().with_source_sha256([1; 32]));
         let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
             unreachable!()
         };
         assert_eq!(cold, fresh);
         assert_ne!(cold_product, fresh_product);
         let mut observations = Vec::new();
-        for (existing, incoming, expected) in
-            [(&fresh, &cold, None), (&cold, &fresh, Some([1; 32]))]
-        {
+        for (existing, incoming, expected) in [(&fresh, &cold, None), (&cold, &fresh, Some(source))] {
             let inventory = ArtifactInventory::default();
             let old = inventory
                 .admit(&inventory.empty_view(), vec![existing.clone()])
@@ -20871,35 +20916,84 @@ mod tests {
         );
     }
 
-    proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config {
+    #[test]
+    fn source_witness_histories_follow_selected_issuer() {
+        // Compile the two actual observations once, outside generated/shrunk histories.
+        let (fixture, cold, fresh) = issued_source_admission_pair();
+        let frozen = crate::artifacts::FrozenEntrySources::capture(
+            &fixture.includes,
+            &fixture.includes[0].join("PublicationTarget.hs"),
+        )
+        .unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let second_entry = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &frozen,
+            second_directory.path(),
+            &second_directory.path().join("entry"),
+        )
+        .unwrap();
+        let id = fresh.descriptor.id;
+        let independently_checked = second_entry
+            .products()
+            .original_execution_context()
+            .unwrap()
+            .artifact_view()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.descriptor.id == id)
+            .expect("the same frozen source emits the same immutable native facts");
+        let observations = [&fresh, independently_checked.as_ref()].map(|entry| {
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            Arc::clone(
+                product
+                    .source_admission()
+                    .expect("actual checked source observation"),
+            )
+        });
+        assert!(
+            !Arc::ptr_eq(&observations[0], &observations[1]),
+            "independent completed compiler requests retain distinct source observations"
+        );
+        let entries = [cold, fresh, (*independently_checked).clone()];
+        assert_eq!(entries[0], entries[1]);
+        assert_eq!(entries[1], entries[2]);
+        let witness = |view: &ArtifactView| {
+            let entries = view.entries();
+            let entry = entries
+                .iter()
+                .find(|entry| entry.descriptor.id == id)
+                .unwrap();
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                unreachable!()
+            };
+            product.source_admission().map(|actual| {
+                observations
+                    .iter()
+                    .position(|expected| Arc::ptr_eq(actual, expected))
+                    .expect("selection carries an actual issuing source observation")
+                    + 1
+            })
+        };
+        let config = proptest::test_runner::Config {
             cases: 64,
             max_shrink_iters: 4096,
-            failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| Box::new(proptest::test_runner::FileFailurePersistence::Direct(path)) as Box<dyn proptest::test_runner::FailurePersistence>),
+            source_file: Some(file!()),
+            test_name: Some(concat!(
+                module_path!(),
+                "::source_witness_histories_follow_selected_issuer"
+            )),
+            failure_persistence: option_env!("TIDEPOOL_PROPTEST_REGRESSIONS").map(|path| {
+                Box::new(proptest::test_runner::FileFailurePersistence::Direct(path))
+                    as Box<dyn proptest::test_runner::FailurePersistence>
+            }),
             ..proptest::test_runner::Config::default()
-        })]
-        #[test]
-        fn source_witness_histories_follow_selected_issuer(
-            operations in proptest::collection::vec((0u8..5, 0u8..3, proptest::bool::ANY), 1..40)
-        ) {
-            let base = native_entry("Original", &[]);
-            let id = base.descriptor.id;
-            let issue = |choice| {
-                let mut entry = base.clone();
-                if choice != 0 {
-                    let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
-                    entry.payload = ArtifactPayload::Original(product.clone().with_source_sha256([choice; 32]));
-                }
-                entry
-            };
-            let witness = |view: &ArtifactView| {
-                let entries = view.entries();
-                let entry = entries.iter().find(|entry| entry.descriptor.id == id).unwrap();
-                let ArtifactPayload::Original(product) = &entry.payload else { unreachable!() };
-                product.source_sha256()
-            };
+        };
+        let strategy = proptest::collection::vec((0u8..5, 0usize..3, proptest::bool::ANY), 1..40);
+        proptest::test_runner::TestRunner::new(config).run(&strategy, |operations| {
             let inventory = ArtifactInventory::default();
-            let mut current = inventory.admit(&inventory.empty_view(), vec![issue(0)]).unwrap();
+            let mut current = inventory.admit(&inventory.empty_view(), vec![entries[0].clone()]).unwrap();
             let mut expected = None;
             let mut old_views = Vec::new();
             let mut operation_counts = [0usize; 5];
@@ -20909,16 +21003,16 @@ mod tests {
                 operation_counts[operation as usize] += 1;
                 if warm { proptest::prop_assert_eq!(witness(&current), expected); }
                 old_views.push((current.clone(), expected));
-                let incoming_expected = if choice == 0 { None } else { Some([choice; 32]) };
+                let incoming_expected = (choice != 0).then_some(choice);
                 match operation {
                     0 => {
-                        current = inventory.admit(&inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        current = inventory.admit(&inventory.empty_view(), vec![entries[choice].clone()]).unwrap();
                         expected = incoming_expected;
                     }
-                    1 => { current = inventory.admit(&current, vec![issue(choice)]).unwrap(); }
+                    1 => { current = inventory.admit(&current, vec![entries[choice].clone()]).unwrap(); }
                     2 | 3 => {
                         let other_inventory = if operation == 2 { inventory.clone() } else { ArtifactInventory::default() };
-                        let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![issue(choice)]).unwrap();
+                        let incoming = other_inventory.admit(&other_inventory.empty_view(), vec![entries[choice].clone()]).unwrap();
                         proptest::prop_assert_eq!(witness(&incoming), incoming_expected);
                         current = current.merge_fixture_selections(&incoming).unwrap();
                     }
@@ -20927,9 +21021,8 @@ mod tests {
                 if warm {
                     warm_reads += 1;
                     proptest::prop_assert_eq!(witness(&current), expected);
-                    let (old, proof) = &old_views[choice as usize % old_views.len()];
+                    let (old, proof) = &old_views[choice % old_views.len()];
                     proptest::prop_assert_eq!(witness(old), *proof);
-                    // Unchanged issuing authority does not copy a map per append.
                     let appended = inventory.admit_shared(&current, current.entries()).unwrap();
                     proptest::prop_assert_eq!(appended.retained_payload_handles(), current.retained_payload_handles());
                     current = appended;
@@ -20940,17 +21033,19 @@ mod tests {
             proptest::prop_assert_eq!(witness(&current), expected);
             for (old, proof) in &old_views { proptest::prop_assert_eq!(witness(old), *proof); }
             eprintln!("source_witness_history operations={operation_counts:?} warm_reads={warm_reads} delayed_reads={delayed_reads}");
-        }
+            Ok(())
+        }).unwrap();
     }
 
     #[test]
     fn native_inventory_reuse_preserves_each_owners_source_admission_witness() {
-        let cold = native_entry("Original", &[]);
-        let mut fresh = cold.clone();
+        let (_fixture, cold, fresh) = issued_source_admission_pair();
+        let source = fresh
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let ArtifactPayload::Original(product) = &cold.payload else {
             unreachable!()
         };
-        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
         let ArtifactPayload::Original(fresh_product) = &fresh.payload else {
             unreachable!()
         };
@@ -20967,7 +21062,7 @@ mod tests {
             .unwrap();
         for (retained, incoming, expected_source) in [
             (&cold_view, &fresh_view, None),
-            (&fresh_view, &cold_view, Some([1; 32])),
+            (&fresh_view, &cold_view, Some(source)),
         ] {
             let merged = retained.merge_fixture_selections(incoming).unwrap();
             let selected = merged
@@ -20981,23 +21076,25 @@ mod tests {
             assert_eq!(product.source_sha256(), expected_source);
         }
 
-        let altered = CertifiedRecoveryProduct::from_certification(
+        let altered = crate::recovery_artifacts::OriginalDraft::from_certification(
             product.owner().clone(),
             product.interface_bytes().to_vec(),
             b"changed original payload".to_vec(),
             product.package_imports_bytes().to_vec(),
             product.certification_bytes().to_vec(),
         )
-        .with_module_interface(product.module_interface().unwrap().clone())
+        .with_module_interface(product.module_interface().clone())
         .unwrap();
-        let mut conflicting_bytes = cold.clone();
-        conflicting_bytes.payload = ArtifactPayload::Original(altered);
-        assert!(matches!(
-            cold_inventory.admit(&cold_view, vec![conflicting_bytes]),
-            Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
-                    if artifact == cold.descriptor.id)
-        ));
+        assert!(
+            matches!(
+                crate::certified_products::certify_original_draft_with_validation(
+                    altered,
+                    &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                ),
+                Err(crate::certified_products::CertificationError::Mismatch(_))
+            ),
+            "altered original bytes refuse before a complete product can enter inventory"
+        );
         assert_eq!(cold_view.artifact_ids(), fresh_view.artifact_ids());
     }
 
@@ -21139,7 +21236,7 @@ mod tests {
             .contains(&original_owner));
         let carrier = match &first.payload {
             ArtifactPayload::Original(product) => {
-                ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+                ArtifactEntry::canonical(product.module_interface().clone())
                     .descriptor
                     .id
             }
@@ -21465,7 +21562,7 @@ mod tests {
             .admit(
                 &empty,
                 vec![ArtifactEntry::canonical(
-                    product.module_interface().unwrap().clone(),
+                    product.module_interface().clone(),
                 )],
             )
             .unwrap();
@@ -22277,11 +22374,10 @@ mod tests {
     #[test]
     fn artifact_subset_materialization_preserves_selected_custody_and_bounded_warm_reads() {
         let inventory = ArtifactInventory::default();
-        let mut native = issued_native_groups("Root", vec![(7, vec![])], &[], &BTreeMap::new());
-        let ArtifactPayload::Original(product) = &native.payload else {
-            unreachable!()
-        };
-        native.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let (_fixture, _cold, native) = issued_source_admission_pair();
+        let source = native
+            .source_admission_witness()
+            .expect("actual checked source digest");
         let id = native.descriptor.id;
         assert!(native.source_admission_witness().is_some());
         let unused = entry_in_unit("fixture", "Unused", vec![]);
@@ -22324,7 +22420,7 @@ mod tests {
         assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 2);
         assert_eq!(
             selected.lease.payloads[&id].source_admission_witness(),
-            Some([1; 32])
+            Some(source)
         );
         assert!(selected
             .selection_snapshot()
@@ -22830,7 +22926,7 @@ mod tests {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 panic!("native fixture")
             };
-            ArtifactEntry::canonical(product.module_interface().unwrap().clone())
+            ArtifactEntry::canonical(product.module_interface().clone())
         };
         let original_interface = canonical(&original);
         let consumer_interface = canonical(&consumer);

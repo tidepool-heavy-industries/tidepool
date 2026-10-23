@@ -11135,6 +11135,58 @@ mod authored_publication_tests {
     }
 
     #[test]
+    fn checked_capture_completes_issued_binding_through_resident() {
+        let mut fixture = checked_capture_fixture(SessionId(1000));
+        let binder = &fixture.bound[0];
+        let id = SessionVarId::from_extract(binder.var_id);
+        let outcome = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_bind_with_sites(
+                    &binder.name,
+                    fixture.compiled.code(),
+                    binder,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+        assert_eq!(fixture.prefix.snapshot().compiler_prefix().next_item(), 1);
+        let scope = fixture.execution.private_scope();
+        assert_eq!(
+            fixture
+                .resident
+                .state
+                .resolve_in(scope, &binder.name)
+                .unwrap()
+                .id,
+            id
+        );
+        let custody = fixture
+            .resident
+            .retain_binding_custody_in(scope, &binder.name, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixture.resident.render_retained_preview(&custody, 64),
+            Some("41".into())
+        );
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(SessionModule::val(fixture.reservation.generation()))
+            .is_some());
+        let frozen = fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
+        assert_eq!(frozen.native_write_ids(), [id]);
+    }
+
+    #[test]
     fn checked_capture_stage_requires_its_actual_issued_ticket_and_session() {
         fn stage(
             fixture: &mut CheckedCaptureFixture,
@@ -14695,6 +14747,10 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 #[cfg(test)]
 #[path = "world_cell_test_support.rs"]
 pub(in crate::session) mod world_cell_test_support;
+
+#[cfg(test)]
+#[path = "exact_recovery_acceptance_tests.rs"]
+pub(in crate::session) mod exact_recovery_acceptance_tests;
 
 #[cfg(test)]
 #[path = "resident_paired_publication_tests.rs"]

@@ -510,8 +510,15 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
         selected
     );
     assert_eq!(
-        CompilerInputProjection::acquire_recorded(&view, selected.recorded_roles()).unwrap(),
-        selected
+        CompilerSourceSupport::authenticate_recorded_rows(
+            view.clone(),
+            selected.recorded_roles(),
+            &Default::default(),
+            &Default::default()
+        )
+        .unwrap()
+        .recorded_rows(),
+        selected.recorded_roles()
     );
     let mut misowned = selected.recorded_roles().clone();
     let (selected_owner, role) = misowned
@@ -528,7 +535,13 @@ fn recovered_roles_require_exact_authenticated_original_and_type_closure() {
         role,
     );
     assert!(
-        CompilerInputProjection::acquire_recorded(&view, &misowned).is_err(),
+        CompilerSourceSupport::authenticate_recorded_rows(
+            view.clone(),
+            &misowned,
+            &Default::default(),
+            &Default::default()
+        )
+        .is_err(),
         "recorded roles are authenticated by their retained owner key"
     );
     for role in selected.roles() {

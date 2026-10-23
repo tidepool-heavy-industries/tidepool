@@ -1098,7 +1098,8 @@ fn prepare_world_cell_program_inner(
         let native = match admission.output {
             None => None,
             Some(output) => {
-                let (generation, observation) = match &program.reservation().items()[index].slot() {
+                let slot = program.reservation().items()[index].slot();
+                let (generation, observation) = match &slot {
                     CheckedPlannedCellSlot::Bind { value } => (*value, None),
                     CheckedPlannedCellSlot::Expression {
                         capture,
@@ -5286,7 +5287,7 @@ pub(crate) struct SourceEvidenceAdmission<'a> {
 }
 
 enum SourceEvidenceCompletion<'a> {
-    Ordinary(cache::CompletedSourceEvidence),
+    Ordinary(Arc<cache::CompletedSourceEvidence>),
     Exact(crate::declaration_context::ExactProductAdmission<'a>),
 }
 
@@ -5311,6 +5312,13 @@ impl<'a> SourceEvidenceAdmission<'a> {
         match &self.completion {
             SourceEvidenceCompletion::Ordinary(completed) => completed,
             SourceEvidenceCompletion::Exact(exact) => exact.source().evidence().as_ref(),
+        }
+    }
+
+    pub(crate) fn shared_completed(&self) -> Arc<cache::CompletedSourceEvidence> {
+        match &self.completion {
+            SourceEvidenceCompletion::Ordinary(completed) => Arc::clone(completed),
+            SourceEvidenceCompletion::Exact(exact) => Arc::clone(exact.source().evidence()),
         }
     }
 
@@ -5416,7 +5424,7 @@ impl<'a> ParsedSourceEvidence<'a> {
             input_path: input,
             target_source: source,
             inventory: self.2,
-            completion: SourceEvidenceCompletion::Ordinary(completed),
+            completion: SourceEvidenceCompletion::Ordinary(Arc::new(completed)),
         })
     }
 
@@ -5433,7 +5441,7 @@ impl<'a> ParsedSourceEvidence<'a> {
             input_path: input,
             target_source: source,
             inventory,
-            completion: SourceEvidenceCompletion::Ordinary(completed),
+            completion: SourceEvidenceCompletion::Ordinary(Arc::new(completed)),
         })
     }
 
@@ -9763,60 +9771,27 @@ mod module_product_tests {
                         1,
                         [b"compiler-only shadow lifetime control".to_vec()],
                     )?;
-                    let slots = (1..=item_count)
-                        .map(|generation| CheckedPlannedCellSlot::Bind {
-                            value: generation as u64,
-                        })
-                        .collect();
-                    let binders = (1..=item_count)
-                        .map(|generation| {
-                            vec![(
-                                "answer".into(),
-                                tidepool_repr::SessionVarId::from_extract(
-                                    tidepool_codegen::prepared_program::session_var_id(
-                                        &tidepool_repr::SessionModule::val(
-                                            tidepool_repr::Generation(generation as u64),
-                                        )
-                                        .module_name(),
-                                        "answer",
+                    let requests = (1..=item_count)
+                        .map(
+                            |generation| crate::cell_plan::WorldCellReservationRequest::Bind {
+                                value: generation as u64,
+                                bindings: vec![(
+                                    "answer".into(),
+                                    tidepool_repr::SessionVarId::from_extract(
+                                        tidepool_codegen::prepared_program::session_var_id(
+                                            &tidepool_repr::SessionModule::val(
+                                                tidepool_repr::Generation(generation as u64),
+                                            )
+                                            .module_name(),
+                                            "answer",
+                                        ),
                                     ),
-                                ),
-                            )]
-                        })
+                                )],
+                            },
+                        )
                         .collect();
-                    let reservation = plan.reserve(
-                        plan.issue_admission_token(
-                            subject,
-                            slots
-                                .into_iter()
-                                .zip(binders)
-                                .map(|(slot, bindings)| {
-                                    use crate::cell_plan::WorldCellReservationRequest as Request;
-                                    use crate::checked_cell::CheckedPlannedCellSlot as Slot;
-                                    match slot {
-                                        Slot::Prologue { declaration } => {
-                                            assert!(bindings.is_empty());
-                                            Request::Prologue { declaration }
-                                        }
-                                        Slot::Declaration { declaration } => {
-                                            assert!(bindings.is_empty());
-                                            Request::Declaration { declaration }
-                                        }
-                                        Slot::Bind { value } => Request::Bind { value, bindings },
-                                        Slot::Expression {
-                                            capture,
-                                            observation_name,
-                                        } => {
-                                            assert_eq!(bindings.len(), 1);
-                                            let binding = bindings.into_iter().next().unwrap();
-                                            assert_eq!(binding.0, observation_name);
-                                            Request::Expression { capture, binding }
-                                        }
-                                    }
-                                })
-                                .collect(),
-                        )?,
-                    )?;
+                    let reservation =
+                        plan.reserve(plan.issue_admission_token(subject, requests)?)?;
                     let checked = crate::compiler_world::admit_world_cell_program(
                         &endpoint,
                         reservation,
