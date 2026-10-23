@@ -6858,6 +6858,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
         }],
     )
     .unwrap();
+    // Compiler roles and the declaration's issued SOURCE/lexical scope are
+    // independent. This demotion changes only the former.
     let support = native_context
         .compiler_source_support()
         .for_source_owners(&BTreeSet::new())
@@ -6871,7 +6873,9 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .compiler_support
         .artifacts()
         .selected_native_groups();
-    let assert_exact_offer = |context: &ExactDeclarationContext, name: &str, expected: bool| {
+    let assert_exact_offer = |context: &ExactDeclarationContext,
+                              name: &str,
+                              expected: Option<Value>| {
         let before = context.clone();
         let offer = crate::artifacts::ModuleCandidateOffer::select_in_context(
             producer_bytes,
@@ -6893,10 +6897,11 @@ pub(crate) fn assert_selected_authored_private_inputs(
             .map(|row| row.as_array().unwrap())
             .filter(|row| row[0] == text(&owner.unit) && row[1] == text(&owner.module))
             .collect::<Vec<_>>();
-        if expected {
+        if let Some(mode) = expected {
             let [row] = offered.as_slice() else {
-                panic!("complete selected authored original must have one private offer");
+                panic!("the selected authored original must have one advertised native row: {offered:?}");
             };
+            assert_eq!(row[8], mode);
             assert_eq!(
                 &row[..5],
                 &[
@@ -6910,7 +6915,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
         } else {
             assert!(
                 offered.is_empty(),
-                "custody or partial demand grants no full original offer"
+                "TYPE evidence alone cannot advertise an Original"
             );
         }
         assert_eq!(context, &before);
@@ -7002,10 +7007,13 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .unwrap()
         .bindings()
         .is_empty());
-    assert_exact_offer(&native_context, "full-authored-exact-offer", true);
-    // Source-role demotion preserves the issuer's complete native group graph
-    // as custody. A later private offer must keep that graph without restoring
-    // lexical visibility or selecting executable groups in the captured context.
+    assert_exact_offer(
+        &native_context,
+        "full-authored-exact-offer",
+        Some(full_mode()),
+    );
+    // Projecting compiler support keeps issued native availability while
+    // dropping current executable roots. The captured source scope is unchanged.
     let mut captured = native_context.clone();
     let permissions = captured
         .compiler_source_support()
@@ -7063,7 +7071,11 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .retained
         .selected_native_groups
         .is_empty());
-    assert_exact_offer(&captured, "custodied-authored-exact-offer", true);
+    assert_exact_offer(
+        &captured,
+        "custodied-authored-exact-offer",
+        Some(full_mode()),
+    );
     assert_eq!(captured, before_custody);
     // A fresh receiver gains TYPE evidence without the source's native owner.
     let fresh = ExactDeclarationContext::new(&[], &[], Vec::new())
@@ -7085,6 +7097,8 @@ pub(crate) fn assert_selected_authored_private_inputs(
         fresh.compiler_input_projection(),
         native_context.compiler_input_projection()
     );
+    assert!(fresh.source_scope().rows().is_empty());
+    assert!(fresh.lexical_graph().is_empty());
     assert!(fresh.compiler_source_support().native_offers().is_empty());
     assert!(fresh
         .compiler_source_support()
@@ -7095,7 +7109,7 @@ pub(crate) fn assert_selected_authored_private_inputs(
     assert!(OriginalCompilerInputs::reuse_selected_authored(&fresh)
         .unwrap()
         .is_none());
-    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", false);
+    assert_exact_offer(&fresh, "fresh-request-type-authored-offer", None);
 
     // The same TYPE extension preserves availability already issued to its
     // receiver without selecting any executable group.
@@ -7118,11 +7132,31 @@ pub(crate) fn assert_selected_authored_private_inputs(
     assert!(retained.artifact_view().selected_native_groups().is_empty());
     assert_eq!(retained.lexical_graph(), captured.lexical_graph());
     assert_eq!(retained.source_scope(), captured.source_scope());
-    assert_exact_offer(&retained, "retained-request-type-authored-offer", true);
-    // Reuse the genuine certificate and independently remove execution
-    // roots. Neither type custody nor an incomplete group selection can
-    // supply the complete authored original to another compiler request.
-    let mut valid_sparse_refusals = 0;
+    assert_exact_offer(
+        &retained,
+        "retained-request-type-authored-offer",
+        Some(full_mode()),
+    );
+    let full_data = ExactDeclarationContext::new(&[], &[], Vec::new())
+        .unwrap()
+        .extend_issued_compiler_support(captured.compiler_source_support())
+        .unwrap();
+    assert!(full_data.source_scope().rows().is_empty());
+    assert!(full_data.lexical_graph().is_empty());
+    assert!(full_data
+        .artifact_view()
+        .selected_native_groups()
+        .is_empty());
+    assert_exact_offer(
+        &full_data,
+        "full-data-authored-exact-offer",
+        Some(full_mode()),
+    );
+
+    // Recovered DATA fixtures issue only the literal selected group subset.
+    // Their Original role identifies bytes; their normalized row bounds which
+    // bodies can be offered. They carry no authored SOURCE or lexical grant.
+    let mut valid_sparse_permissions = 0;
     for (selection_index, omitted) in std::iter::once(None)
         .chain(authored_groups.iter().map(Some))
         .enumerate()
@@ -7135,41 +7169,43 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 .copied()
                 .collect(),
         };
-        let mut partial = native_context.clone();
-        let view = partial
+        let view = native_context
             .owner
             .facts
             .compiler_support
             .artifacts()
             .inventory()
             .admit_recovery_selection(
-                &partial
-                    .owner
-                    .facts
-                    .compiler_support
-                    .artifacts()
-                    .inventory()
-                    .empty_view(),
-                partial.owner.facts.compiler_support.artifacts().entries(),
+                &native_context.artifact_view().inventory().empty_view(),
+                native_context.artifact_view().entries(),
                 &selected,
             );
-        let Ok(view) = view else {
-            assert!(
-                omitted.is_some(),
-                "removing every native root must retain valid type custody"
-            );
-            // Removing a required dependency is refused by exact closure
-            // admission before private compiler input can be constructed.
-            continue;
+        let view = match view {
+            Ok(view) => view,
+            Err(error) => {
+                assert!(
+                    omitted.is_some(),
+                    "empty DATA selection must remain valid: {error:?}"
+                );
+                assert!(
+                    matches!(&error, CompileError::ExtractFailed(detail)
+                        if detail == "artifact inventory: recovered native group closure differs from certified demand"),
+                    "only a required omitted group may refuse the narrowed DATA closure: {error:?}"
+                );
+                continue;
+            }
         };
-        {
-            let native_roles =
-                CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
-            let support = fixture_compiler_support(native_roles, view)
-                .for_source_owners(&BTreeSet::new())
-                .unwrap();
-            partial = partial.rebuild(|facts| facts.compiler_support = support);
-        }
+        let native_roles = CompilerInputProjection::from_issued_entries(&view.entries()).unwrap();
+        let support = fixture_compiler_support(native_roles, view)
+            .for_source_owners(&BTreeSet::new())
+            .unwrap();
+        let partial = ExactDeclarationContext::new(&[], &[], Vec::new())
+            .unwrap()
+            .extend_issued_compiler_support(&support)
+            .unwrap();
+        assert!(partial.source_scope().rows().is_empty());
+        assert!(partial.lexical_graph().is_empty());
+        assert!(partial.owner.facts.template_imports.is_none());
         assert_eq!(
             partial
                 .owner
@@ -7179,35 +7215,85 @@ pub(crate) fn assert_selected_authored_private_inputs(
                 .selected_native_groups(),
             selected
         );
-        let private = OriginalCompilerInputs::reuse_selected_authored(&partial).unwrap();
-        assert!(private.as_ref().is_none_or(|private| {
-            private
-                .projection
-                .roles()
-                .iter()
-                .all(|role| role.original() != Some(authored_root))
-        }));
+        let expected_ordinals = selected
+            .iter()
+            .filter(|group| group.artifact == authored_root)
+            .map(|group| group.original_ordinal)
+            .collect::<BTreeSet<_>>();
+        let private = OriginalCompilerInputs::reuse_selected_authored(&partial)
+            .unwrap()
+            .expect("bounded native availability retains its exact Original identity");
+        assert_eq!(
+            private.projection.snapshot_roles()[&identity(&owner.unit, &owner.module)].original(),
+            Some(authored_root)
+        );
+        let before = partial.clone();
+        let request = ExactCompileContext::new(Arc::new(partial.clone()))
+            .prepare_compilation_with_private_input(
+                &root.join(format!("partial-authored-input-{selection_index}")),
+                producer_bytes,
+                None,
+                Some(private),
+            )
+            .unwrap();
+        let inputs = request.compiler_inputs();
+        let row = inputs.native_availability(authored_root).unwrap();
+        assert_eq!(row.original_owner(), certificate.product().owner());
+        assert_eq!(row.mode, NativeTransportMode::IssuedGroups);
+        assert_eq!(row.issued_ordinals(), expected_ordinals);
+        assert!(inputs.artifacts().selected_native_groups().is_empty());
+        assert!(request.groups.is_empty());
+        assert_eq!(request.context().as_ref(), &before);
+        let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+            inputs, &operation,
+        )
+        .unwrap();
+        for group in &authored_groups {
+            let permitted = expected_ordinals.contains(&group.original_ordinal);
+            assert_eq!(row.permits(group.original_ordinal), permitted);
+            assert_eq!(
+                selection.permits_native_group(
+                    authored_root,
+                    certificate.product().owner(),
+                    group.original_ordinal,
+                ),
+                permitted
+            );
+            assert!(
+                crate::certified_products::original_native_group_definitions(
+                    certificate.product(),
+                    group.original_ordinal,
+                )
+                .is_some()
+            );
+            if !permitted {
+                assert!(selection
+                    .native_group_candidates(
+                        crate::artifact_inventory::NativeGroupKey {
+                            artifact: authored_root,
+                            original_ordinal: group.original_ordinal,
+                        },
+                        certificate.product().owner(),
+                    )
+                    .unwrap()
+                    .bindings()
+                    .is_empty());
+            }
+        }
         assert_exact_offer(
             &partial,
             &format!("partial-authored-exact-offer-{selection_index}"),
-            false,
+            Some(issued_mode(
+                &expected_ordinals.iter().copied().collect::<Vec<_>>(),
+            )),
         );
-        if omitted.is_some()
-            && partial
-                .owner
-                .facts
-                .compiler_support
-                .artifacts()
-                .selected_native_groups()
-                .iter()
-                .any(|group| group.artifact == authored_root)
-        {
-            valid_sparse_refusals += 1;
+        if !expected_ordinals.is_empty() {
+            valid_sparse_permissions += 1;
         }
     }
     assert!(
-        valid_sparse_refusals > 0,
-        "a valid nonempty sparse selection must reach private offer refusal"
+        valid_sparse_permissions > 0,
+        "a valid nonempty sparse selection must retain bounded permission without Full"
     );
 
     let dependent_native = ArtifactEntry::original(producer.sha256(), dependent.product().clone())
