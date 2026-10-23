@@ -194,12 +194,86 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
         assert!(checked.runtime_binding_demand().existing().is_empty());
         assert!(checked.runtime_binding_demand().prior_stage().is_empty());
         assert_physical_selection(&checked, None)?;
+        let checked = prepare_checked(
+            &endpoint,
+            &world,
+            &source,
+            "let currentSelection = (1 :: Int)\nlet laterSelection = (2 :: Int)\nlet dependentSelection = laterSelection + 1\n",
+            None,
+            &[
+                (51, "currentSelection"),
+                (52, "laterSelection"),
+                (53, "dependentSelection"),
+            ],
+        )?;
+        assert_private_future_dependency(&checked)?;
         prepare_world_cell_program(checked)
     });
     let program = prepared
         .seal(&admission)
         .expect("independent produced-value prefix reaches actual compiler END");
-    assert_eq!(program.items().len(), 2);
+    assert_eq!(program.items().len(), 3);
+}
+
+fn assert_private_future_dependency(
+    checked: &Arc<CheckedWorldCellProgram>,
+) -> Result<(), CompileError> {
+    use crate::artifact_inventory::{ArtifactBindingNode, ArtifactDependency};
+    assert_eq!(checked.stages().len(), 1);
+    assert_eq!(checked.stages()[0].ordinals(), &[0, 1, 2]);
+    let mut validation =
+        PackageInterfaceValidation::with_inventory(checked.validation().inventory.clone());
+    let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
+        checked,
+        &mut validation,
+    )?;
+    let physical = produced.for_segment(0..3)?;
+    let later = physical.current_interface(52)?.artifact_id();
+    let pending = crate::declaration_context::WorldProgramContinuation::begin(checked).open_next(
+        checked,
+        &physical,
+        &mut validation,
+        &mut |_| {},
+    )?;
+    let stage = pending.segment().originals.captured_stage();
+    let mut future_edges = BTreeSet::new();
+    for availability in stage.source_selection().issued_native_availability() {
+        for offer in availability.offers().filter(|offer| offer.is_full()) {
+            let graph = offer
+                .proof()
+                .expect("Full has its issued proof")
+                .selection
+                .graph_selection();
+            for scope in &graph.selections {
+                for (source, target, edge) in &scope.dependencies {
+                    if let (
+                        ArtifactBindingNode::Group(group),
+                        ArtifactBindingNode::Artifact(value),
+                        ArtifactDependency::NativeBinding {
+                            generation: 52,
+                            namespace,
+                            occurrence,
+                            record_parent: None,
+                            ..
+                        },
+                    ) = (source, target, edge)
+                    {
+                        if value.artifact == later
+                            && namespace == "value"
+                            && occurrence == "laterSelection"
+                        {
+                            future_edges.insert((*group, *value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(!future_edges.is_empty(),
+        "the actual physical Full offer must retain a native body edge to the second produced VALUE");
+    assert!(stage.issued_artifacts().selected_native_groups().is_empty());
+    eprintln!("actual private future VALUE dependency: {future_edges:?}");
+    Ok(())
 }
 
 #[test]
