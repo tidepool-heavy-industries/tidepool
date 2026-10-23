@@ -3416,7 +3416,13 @@ impl DemandCertifiedGroups {
     fn rows_for_use(
         &self,
         reference: &crate::certified_products::ReceiptImportOwner,
-    ) -> Result<Vec<(crate::artifact_inventory::NativeGroupBinding, &SelectedNativeGroupRow)>, CompileError> {
+    ) -> Result<
+        Vec<(
+            crate::artifact_inventory::NativeGroupBinding,
+            &SelectedNativeGroupRow,
+        )>,
+        CompileError,
+    > {
         if !self.contains_original_use(reference) {
             return Err(failure(
                 "native package query exceeds its resolved use owner",
@@ -3437,7 +3443,10 @@ impl DemandCertifiedGroups {
                 .rows
                 .get(&binding)
                 .ok_or_else(|| failure("native package query lost an issued dependency row"))?;
-            budget.reserve::<(crate::artifact_inventory::NativeGroupBinding, &SelectedNativeGroupRow)>(1)?;
+            budget.reserve::<(
+                crate::artifact_inventory::NativeGroupBinding,
+                &SelectedNativeGroupRow,
+            )>(1)?;
             rows.push((binding, row));
             for dependency in &row.dependencies {
                 if !queued.contains(dependency) {
@@ -3459,7 +3468,9 @@ impl DemandCertifiedGroups {
         let budget = NativeDemandBudget(Some(&self.operation));
         let mut obligations = Vec::new();
         for (binding, _) in self.rows_for_use(reference)? {
-            let start = self.package_obligations.partition_point(|obligation| obligation.demander < binding);
+            let start = self
+                .package_obligations
+                .partition_point(|obligation| obligation.demander < binding);
             let tail = &self.package_obligations[start..];
             let end = tail.partition_point(|obligation| obligation.demander == binding);
             budget.reserve::<&NativePackageObligation>(end)?;
@@ -3479,8 +3490,11 @@ impl DemandCertifiedGroups {
             for (index, import) in row.imports().iter().enumerate() {
                 budget.checkpoint()?;
                 if let crate::certified_products::SelectedNativeImport::Retained {
-                    binding, identity, generation,
-                } = import {
+                    binding,
+                    identity,
+                    generation,
+                } = import
+                {
                     budget.reserve::<NativeRetainedOccurrence<'_>>(1)?;
                     occurrences.push(NativeRetainedOccurrence {
                         demander,
@@ -24072,7 +24086,11 @@ mod tests {
         }
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(
-            &Value::Array(vec![text("TPNATIVEDEMAND1"), Value::Array(uses)]),
+            &Value::Array(vec![
+                text("TPDEPENDENCYQUERY1"),
+                Value::Integer(1u64.into()),
+                Value::Array(uses),
+            ]),
             &mut bytes,
         )
         .unwrap();
@@ -24141,6 +24159,7 @@ mod tests {
             .collect::<Vec<_>>();
         let encode = |rows: &[Vec<&NativePackageObligation>]| {
             crate::certified_products::native_demand::encode_reply(
+                crate::certified_products::native_demand::DependencyQueryKind::NativeOriginal,
                 &packet
                     .originals()
                     .iter()
@@ -24149,6 +24168,7 @@ mod tests {
                         crate::certified_products::native_demand::NativeDemandUseReply {
                             original,
                             obligations,
+                            retained: &[],
                         }
                     })
                     .collect::<Vec<_>>(),
@@ -24226,7 +24246,11 @@ mod tests {
         }
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(
-            &Value::Array(vec![text("TPNATIVEDEMAND1"), Value::Array(uses)]),
+            &Value::Array(vec![
+                text("TPDEPENDENCYQUERY1"),
+                Value::Integer(1u64.into()),
+                Value::Array(uses),
+            ]),
             &mut bytes,
         )
         .unwrap();
@@ -24347,7 +24371,8 @@ mod tests {
             };
             let symbol = &receipt.targets["target"][0].identity;
             let wire = Value::Array(vec![
-                text("TPNATIVEDEMAND1"),
+                text("TPDEPENDENCYQUERY1"),
+                Value::Integer(1u64.into()),
                 Value::Array(vec![Value::Array(vec![
                     text(&root.unit),
                     text(&root.module),

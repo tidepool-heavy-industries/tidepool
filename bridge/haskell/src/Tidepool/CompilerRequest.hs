@@ -18,7 +18,7 @@ module Tidepool.CompilerRequest
   ) where
 
 import Control.Exception (Exception, evaluate, throw, throwIO, fromException)
-import Control.Monad (replicateM, foldM, forM, forM_, unless, when)
+import Control.Monad ( foldM, forM, forM_, unless, when)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -75,7 +75,8 @@ import qualified Tidepool.EffectSchema
 import Tidepool.CheckedCell (sealCheckedTypeWitness, CheckedSignature, captureCheckedSignature, encodeCheckedSignature)
 import Tidepool.CertifiedProducts (resolvePackageGlobal, encodeReceiptIdentity)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
-import Tidepool.WorkerServer (NativeDemandExchange, NativeDemandReply(..))
+import Tidepool.WorkerServer (NativeDemandExchange)
+import Tidepool.DependencyPlan
 import Tidepool.OriginalProductRoots
   ( PriorOriginalExternalDemand(..), originalExternalPackageGlobals
   , emptyOriginalExternalDemand, requiredOriginalExternalDemandForSeeds
@@ -106,14 +107,11 @@ import Tidepool.RequestCompletion (Completion, CleanupStage(CapabilitiesRestore)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Text.Encoding as TE
 import Data.Char (digitToInt)
-import Data.List (intercalate, sortOn)
+import Data.List (intercalate)
 import System.Directory (createDirectoryIfMissing, canonicalizePath)
 import System.FilePath ((</>), makeRelative, isAbsolute, splitDirectories)
 import Codec.CBOR.Encoding (Encoding, encodeBytes, encodeListLen, encodeString, encodeWord64, encodeBool, encodeInt)
 import Codec.CBOR.Write (toStrictByteString)
-import qualified Codec.CBOR.Decoding as D
-import Codec.CBOR.Read (deserialiseFromBytes)
-import qualified Data.ByteString.Lazy as BL
 import GHC.Core (Bind(..), CoreBind)
 import GHC.Types.Id (idName)
 import GHC.Types.Name (nameOccName)
@@ -474,7 +472,7 @@ compilePreparedSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _ _
 compilePreparedWorldRequest :: BoundCompilerRequest -> PipelineSelection PreparedPipelineResult -> IO PreparedCompilation
 compilePreparedWorldRequest request@(BoundCompilerRequest _ _ _ _ executor _ native) selection = do
   authority <- acquirePreparedOutputAuthority request
-  completed <- compileBoundWorldCompleted request selection
+  completed <- compileBoundWorldCompleted request (maybe selection (\exchange -> WithCompilerDependencyExchange exchange selection) native)
   route <- preparedCompletionFor native completed
   pure (PreparedCompilation (completedCompilerResult completed) (completedCompilerRecovery completed)
     executor (completedCompilerGuard completed) Nothing route authority)
@@ -483,7 +481,7 @@ compilePreparedWorldSegmentRequest :: BoundCompilerRequest -> PipelineSelection 
   -> IO (PreparedCompilation,TypedSegment)
 compilePreparedWorldSegmentRequest request@(BoundCompilerRequest _ _ _ _ executor _ native) selection = do
   authority <- acquirePreparedOutputAuthority request
-  completed <- compileBoundWorldCompleted request selection
+  completed <- compileBoundWorldCompleted request (maybe selection (\exchange -> WithCompilerDependencyExchange exchange selection) native)
   let result = completedCompilerResult completed
   route <- preparedCompletionFor native completed
   pure (PreparedCompilation (preparedSegmentProducts result) (completedCompilerRecovery completed)
@@ -556,127 +554,9 @@ data PreparedArtifact = PreparedArtifact
   , paConstructors :: [IssuedConstructor]
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
   , paPackageTarget :: Maybe PreparedPackageTarget
+  , paDependencyTerminals :: [DependencyTerminal]
   }
 
--- These replies are obligations from the held Rust input owner, not new
--- source or execution authority. Final issuance checks their captured bytes.
-data NativeDemandRefusalReason
-  = InvalidNativeWitness | OriginalUnavailable | NativeGroupUnavailable
-  | PackageProductUnavailable | NativeInputConflict | NativeAdmissionLimit
-  deriving (Show)
-
-data NativePreparationFailure
-  = NativeDemandRejected NativeDemandRefusalReason T.Text
-  | NativeReplyCorrupt String
-  | NativePackageSealConflict SymbolIdentity
-  deriving (Show)
-instance Exception NativePreparationFailure
-
-encodeNativeUses :: [(SymbolIdentity,WorldOriginalReference)] -> BS.ByteString
-encodeNativeUses uses = toStrictByteString $ array
-  [encodeString "TPNATIVEDEMAND1",list use (sortOn (\(symbol,reference) -> (reference,symbol)) uses)]
-  where
-    array fields = encodeListLen (fromIntegral (length fields)) <> mconcat fields
-    list encode values = encodeListLen (fromIntegral (length values)) <> foldMap encode values
-    use (symbol,reference) =
-      let (unit,name) = worldOriginalReferenceOwner reference
-          ((interface,interfaceScope),(original,originalScope)) = worldOriginalReferenceBindings reference
-      in array [encodeString unit,encodeString name
-        ,array [encodeBytes interface,encodeBytes interfaceScope]
-        ,array [encodeBytes original,encodeBytes originalScope],encodeReceiptIdentity symbol]
-
-type NativeOriginalUse = (SymbolIdentity,WorldOriginalReference)
-type NativeUseCoordinate = (T.Text,T.Text,(BS.ByteString,BS.ByteString),(BS.ByteString,BS.ByteString),SymbolIdentity)
-
-nativeUseCoordinate :: NativeOriginalUse -> NativeUseCoordinate
-nativeUseCoordinate (identity,reference) =
-  let (unit,name) = worldOriginalReferenceOwner reference
-      (interface,original) = worldOriginalReferenceBindings reference
-  in (unit,name,interface,original,identity)
-
-readNativeReply :: [NativeOriginalUse] -> NativeDemandReply
-  -> IO (Map.Map NativeOriginalUse (Map.Map SymbolIdentity BS.ByteString))
-readNativeReply expected reply = case reply of
-  NativeRefused bytes -> decode bytes refusal >>= \(reason,diagnostic) ->
-    throwIO (NativeDemandRejected reason diagnostic)
-  NativeResolved bytes -> decode bytes (resolved (BS.length bytes))
-  where
-    decode :: BS.ByteString -> (forall s. D.Decoder s a) -> IO a
-    decode bytes parser = case deserialiseFromBytes parser (BL.fromStrict bytes) of
-      Left failure -> throwIO (NativeReplyCorrupt (show failure))
-      Right (remaining,value) | BL.null remaining -> pure value
-      Right _ -> throwIO (NativeReplyCorrupt "trailing native reply bytes")
-    require :: Int -> D.Decoder s ()
-    require fields = D.decodeListLen >>= \actual -> unless (actual == fields) (fail "native reply field count")
-    magic :: T.Text -> D.Decoder s ()
-    magic expected = D.decodeString >>= \actual -> unless (actual == expected) (fail "native reply tag")
-    symbol :: D.Decoder s SymbolIdentity
-    symbol = do
-      require 5
-      unit <- D.decodeString
-      name <- D.decodeString
-      namespace <- D.decodeString
-      occurrence <- D.decodeString
-      kind <- D.peekTokenType
-      parent <- if kind == D.TypeNull then D.decodeNull >> pure Nothing else Just <$> D.decodeString
-      unless (all (not . T.null) [unit,name,namespace,occurrence]) (fail "empty native symbol")
-      pure (SymbolIdentity unit name namespace occurrence parent)
-    digest :: D.Decoder s BS.ByteString
-    digest = do
-      bytes <- D.decodeBytes
-      unless (BS.length bytes == 32 && BS.any (/= 0) bytes) (fail "native reply digest")
-      pure bytes
-    binding :: D.Decoder s (BS.ByteString,BS.ByteString)
-    binding = require 2 >> ((,) <$> digest <*> digest)
-    use :: D.Decoder s NativeUseCoordinate
-    use = do
-      require 5
-      unit <- D.decodeString
-      name <- D.decodeString
-      interface <- binding
-      original <- binding
-      identity <- symbol
-      pure (unit,name,interface,original,identity)
-    resolved :: Int -> D.Decoder s (Map.Map NativeOriginalUse (Map.Map SymbolIdentity BS.ByteString))
-    resolved bound = do
-      require 2
-      magic "TPNATIVEREPLY2"
-      let expectedRows = Map.toAscList (Map.fromList [(nativeUseCoordinate entry,entry) | entry <- expected])
-      count <- D.decodeListLen
-      unless (count == length expectedRows && count == length expected && count <= bound)
-        (fail "native reply use count")
-      rows <- replicateM count $ do
-        require 2
-        coordinate <- use
-        obligations <- D.decodeListLen
-        unless (obligations <= bound) (fail "native reply obligation count")
-        roots <- replicateM obligations $ do
-          require 2
-          identity <- symbol
-          seal <- digest
-          pure (identity,seal)
-        unless (roots == Set.toAscList (Set.fromList roots)
-            && Map.size (Map.fromList roots) == length roots)
-          (fail "native reply obligation order or conflict")
-        pure (coordinate,Map.fromList roots)
-      unless (map fst rows == map fst expectedRows)
-        (fail "native reply missing, foreign, duplicate or reordered use")
-      pure (Map.fromList [(entry,roots) | ((_,entry),(_,roots)) <- zip expectedRows rows])
-    refusal :: D.Decoder s (NativeDemandRefusalReason,T.Text)
-    refusal = do
-      require 3
-      magic "TPNATIVEREFUSAL1"
-      tag <- D.decodeWord
-      reason <- case tag of
-        0 -> pure InvalidNativeWitness
-        1 -> pure OriginalUnavailable
-        2 -> pure NativeGroupUnavailable
-        3 -> pure PackageProductUnavailable
-        4 -> pure NativeInputConflict
-        5 -> pure NativeAdmissionLimit
-        _ -> fail "native refusal reason"
-      diagnostic <- D.decodeString
-      pure (reason,diagnostic)
 
 data FinalProjection
   = NativeFinal !PreparedPackageTarget !(Map.Map Module ArtifactBytes) ![SymbolIdentity]
@@ -803,6 +683,7 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           originalConstructors,originalSites,originalPackageGlobals,homeProductGroups)
     let withOriginals context = context {projectionCurrentOriginals = originalBindings}
     finalProjections <- newIORef Map.empty
+    finalDependencySelections <- newIORef Map.empty
     nativeUseObligations <- newIORef Map.empty
     nativePackageObligations <- newIORef Map.empty
     let originalReference identity = case Map.lookup identity (pprOriginalReferences prepared) of
@@ -834,9 +715,9 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           let pendingUses = Set.toAscList (uses `Set.difference` Map.keysSet answered)
           unless (null pendingUses) $ do
             inputs <- maybe (throwIO WorldCellUnsupported) pure prior
-            received <- exchangeWorldNativeDemand inputs (encodeNativeUses pendingUses) >>= readNativeReply pendingUses
+            received <- exchangeWorldNativeDemand inputs (encodeDependencyUses NativeOriginal pendingUses) >>= readDependencyReply NativeOriginal pendingUses
             known <- readIORef nativePackageObligations
-            combined <- foldM mergePackageObligations known (map Map.toAscList (Map.elems received))
+            combined <- foldM mergePackageObligations known (map (Map.toAscList . dependencyPackages) (Map.elems received))
             writeIORef nativePackageObligations combined
             -- Acquisition is stage-wide; each final projection below selects
             -- only the entries reached from this target's actual native roots.
@@ -844,10 +725,10 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
           acquired <- readIORef nativeUseObligations
           obligations <- foldM (\selected use -> do
             rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
-            mergePackageObligations selected (Map.toAscList rows)) Map.empty (Set.toAscList uses)
+            mergePackageObligations selected (Map.toAscList (dependencyPackages rows))) Map.empty (Set.toAscList uses)
           originalImports <- Map.fromList <$> forM (Set.toAscList uses) (\use@(identity,reference) -> do
             rows <- maybe (throwIO (NativeReplyCorrupt "missing acquired native use")) pure (Map.lookup use acquired)
-            pure ((reference,identity),Map.keys rows))
+            pure ((reference,identity),Map.keys (dependencyPackages rows)))
           let additions = Set.toAscList ((packages `Set.union` Map.keysSet obligations)
                 `Set.difference` Set.fromList roots)
           if null additions then do
@@ -900,6 +781,8 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
                     unless (seals == Set.singleton (artifactSha256 body))
                       (fail "captured package interface differs from the actual source dependency")
                 pure (NativeFinal paired captures roots)
+            terminals <- nativeDependencyTerminals acquired uses
+            modifyIORef' finalDependencySelections (Map.insert entry terminals)
             modifyIORef' finalProjections (Map.insert entry final)
             pure []
           else forM additions $ \identity -> do
@@ -955,8 +838,10 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
         witnesses <- forM (Tidepool.EffectSchema.ysInputTypeWitnesses site) $ \witness ->
           maybe (pure Nothing) (sealCheckedTypeWitness originalInterfaces) witness
         pure site { Tidepool.EffectSchema.ysInputTypeWitnesses = witnesses }
+      terminals <- readIORef finalDependencySelections >>= maybe
+        (fail "closed recovery lacks its dependency selection") pure . Map.lookup (projectionEntry context)
       pure (PreparedArtifact target program bytes (constructors ++ originalConstructors) sealedSites
-        packageTarget)
+        packageTarget terminals)
     finalResults <- forM targets $ \target -> do
       let entry = projectionEntry (contextFor target)
       final <- readIORef finalProjections >>= maybe
@@ -1093,6 +978,7 @@ data PreparedWorldCellStage = PreparedWorldCellStage
   , preparedWorldStageCompilerInputs :: [WorldCellInputReference]
   , preparedWorldStageExecutionInputs :: Set.Set (SymbolIdentity,Word64)
   , preparedWorldStageRuntimeReferences :: [WorldCellInputReference]
+  , preparedWorldStageDependencyReferences :: [DependencyTerminal]
   , preparedWorldStageFiles :: [(FilePath,BS.ByteString)]
   , preparedWorldStageTypedPlans :: [TypedSegmentPlan]
   , preparedWorldStageReceiptFields :: Encoding
@@ -1206,9 +1092,15 @@ prepareWorldCellQuestion bound question = do
           transitive <- either throwIO pure (selectWorldCellExecutionInputReferences
             (needed `Set.difference` currentKeys) inherited)
           let selected = Set.fromList (direct ++ transitive)
-          unless (needed `Set.isSubsetOf` Set.fromList (map worldCellInputReferenceBinding (Set.toAscList selected)))
+          inputs <- maybe (throwIO WorldCellCorrupt) pure
+            (preparedCompilationWorldInputs (preparedWorldStageCompletion output))
+          sourceDependencies <- maybe (pure []) (selectDependencyTerminals needed) (worldCellDependencyBasis inputs)
+          let dependencies = Set.toAscList (Set.fromList (sourceDependencies ++ preparedWorldStageDependencyReferences output))
+          unless (needed `Set.isSubsetOf` Set.fromList
+              (map worldCellInputReferenceBinding (Set.toAscList selected) ++ map terminalBinding dependencies))
             (throwIO WorldCellCorrupt)
-          let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected}
+          let finalizedOutput = output {preparedWorldStageRuntimeReferences=Set.toAscList selected
+                ,preparedWorldStageDependencyReferences=dependencies}
           prepareStages preparation (Just (preparedWorldStageProducts output))
             (Set.union earlierSelected selected) (finalizedOutput:reversed)
     -- Parsed demand sees the current source, but a retained Original's
@@ -1220,10 +1112,15 @@ prepareWorldCellQuestion bound question = do
       let references = worldCellCompilerInputReferences inputs ++ Set.toAscList earlierSelected
           bindings = Set.fromList (map worldCellInputReferenceBinding references)
       _ <- either throwIO pure (selectWorldCellExecutionInputReferences bindings references)
+      sourceGenerations <- maybe (pure Map.empty) frozenDependencyGenerations (worldCellDependencyBasis inputs)
+      initialGenerations <- foldM (\known (symbol,generation) -> case Map.lookup symbol known of
+        Nothing -> pure (Map.insert symbol generation known)
+        Just old | old == generation -> pure known
+        Just _ -> throwIO WorldCellCorrupt) (worldCellRetainedGenerations inputs) (Map.toAscList sourceGenerations)
       foldM (\generations (symbol,generation) -> case Map.lookup symbol generations of
         Nothing -> pure (Map.insert symbol generation generations)
         Just existing | existing == generation -> pure generations
-        Just _ -> throwIO WorldCellCorrupt) (worldCellRetainedGenerations inputs) (Set.toAscList bindings)
+        Just _ -> throwIO WorldCellCorrupt) initialGenerations (Set.toAscList bindings)
     nextStage preparation = case bound of
       BoundCompilerRequest scope _ _ _ _ _ _ -> scopedPrepareWorldCellStage scope preparation
     requireStage preparation = nextStage preparation >>= maybe (throwIO WorldCellCorrupt) pure
@@ -1235,11 +1132,13 @@ prepareWorldCellQuestion bound question = do
     refusalTag WorldCellUnsupported = 0
     refusalTag WorldCellUnavailable = 1
     refusalTag WorldCellCorrupt = 2
-    encodeStageReceipt stage = encodeListLen 4 <> preparedWorldStageReceiptFields stage
+    encodeStageReceipt stage = encodeListLen 5 <> preparedWorldStageReceiptFields stage
       <> encodeListLen (fromIntegral (length (preparedWorldStageRuntimeReferences stage)))
       <> foldMap encodeWorldCellInputReference (preparedWorldStageRuntimeReferences stage)
+      <> encodeListLen (fromIntegral (length (preparedWorldStageDependencyReferences stage)))
+      <> foldMap encodeDependencyTerminal (preparedWorldStageDependencyReferences stage)
     writeResult outcome observations common plans stages = BS.writeFile (worldCellPrepareOutput question) $
-      toStrictByteString (encodeListLen 9 <> text "TPCWPREP5" <> encodeBytes base
+      toStrictByteString (encodeListLen 9 <> text "TPCWPREP6" <> encodeBytes base
         <> encodeBytes planDigest <> encodeBytes admission
         <> (case outcome of
           Left refusal -> encodeListLen 2 <> text "rejected" <> encodeWord64 (refusalTag refusal)
@@ -1365,6 +1264,7 @@ prepareWorldCellQuestion bound question = do
         let identity = encodeListLen 2 <> text "exec" <> text (typedSegmentPlanDigest typedPlan)
         finishStage stageDirectory identity (map (plannedItemOrdinal . typedItemPlan) items)
           rendered (map fst preparedItemsWithInputs) [typedPlan] completion prepared completedProducts
+          (concatMap (paDependencyTerminals . worldCellItemArtifact) correlated)
           (Set.unions (map snd preparedItemsWithInputs) `Set.difference`
             Set.fromList (Map.toList producedGenerations))
     prepareDeclaration preparation prior earlierSelected stageDirectory stage = do
@@ -1394,7 +1294,7 @@ prepareWorldCellQuestion bound question = do
         generations <- projectionInputGenerations completion earlierSelected
         -- The existing original writer uses its real checking root to obtain
         -- the native inventory. No executable item or target packet is emitted.
-        (_,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
+        (artifacts,context) <- prepareArtifactsWithProjectionIntent (Just inputs) requireProjection
           interfaces stageDirectory completion [scaffoldTargetName] [] generations []
         products <- maybe (fail "world declaration has no actual original inventory") pure context
         completedProducts <- completeWorldProducts interfaces stageDirectory inputs products
@@ -1429,8 +1329,8 @@ prepareWorldCellQuestion bound question = do
         BS.writeFile (child </> "world-item.cbor") description
         let item = PreparedWorldCellItem (ordinal,generation,SHA256.hash description) Nothing
         finishStage stageDirectory identity [fromIntegral ordinal] (plannedSource original)
-          [item] [] completion prepared completedProducts publicationInputs
-    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared completedProducts executionInputs = do
+          [item] [] completion prepared completedProducts (concatMap paDependencyTerminals artifacts) publicationInputs
+    finishStage stageDirectory identity ordinals rendered preparedItems plans completion prepared completedProducts terminals executionInputs = do
         let staged = completedWorldNative completedProducts
         validateDependencyEvidence (preparedFreshDependencies prepared)
         inputFacts <- maybe (fail "world cell completion lost its actual input basis") pure
@@ -1485,6 +1385,7 @@ prepareWorldCellQuestion bound question = do
           , preparedWorldStageCompilerInputs = worldCellCompilerInputReferences inputFacts
           , preparedWorldStageExecutionInputs = executionInputs
           , preparedWorldStageRuntimeReferences = []
+          , preparedWorldStageDependencyReferences = terminals
           , preparedWorldStageFiles = (sourceReceiptName,SHA256.hash sourceEnvelope):common
           , preparedWorldStageTypedPlans = plans
           , preparedWorldStageReceiptFields = stageReceiptFields

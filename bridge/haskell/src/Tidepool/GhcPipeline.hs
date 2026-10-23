@@ -49,7 +49,7 @@ module Tidepool.GhcPipeline
   , worldMaterializationOwners, emitWorldAcquisitionRejection
   , CompletedCompilerResult, completedCompilerResult, completedCompilerRecovery, completedCompilerGuard
   , completedCompilerWorldCompletion, completedCompilerWorldStage, CompiledWorldStage, withCompiledWorldStage, withCompiledWorldStageRecovery, withCompiledWorldInputs, withCompiledWorldNativeCoordinates, inheritCompiledWorldCanonicalRecovery, requireSameCompiledWorldStage, finishCompiledWorldStage, compiledWorldStageCompletion, WorldCompilerCompletion, worldCompilerCompletionInputs, worldCompilerCompletionDependencies, worldCompilerCompletionPlannedDeclaration, requireWorldProductPredecessor, requireWorldProductInputs
-  , WorldCellInputs, worldCellRetainedGenerations, worldCellCompilerInputReferences, worldCellSourceSnapshot, worldCellSourceImportRoles, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases, worldCellTypeInterfaces
+  , WorldCellInputs, worldCellDependencyBasis, worldCellRetainedGenerations, worldCellCompilerInputReferences, worldCellSourceSnapshot, worldCellSourceImportRoles, worldCellExactImports, worldCellSourceSelection, worldCellSourceRootAliases, worldCellTypeInterfaces
   , WorldCellInputReference, encodeWorldCellInputReference, worldCellInputReferenceBinding, selectWorldCellExecutionInputReferences
   , PendingWorldDependencies
   , CompilerScopeRunner, withResidentCompilerScopes
@@ -386,6 +386,8 @@ import Tidepool.ModuleCandidates
   , readCapturedModuleCandidatesWithGraphs, readModuleCandidatesWithGraphs
   , candidateExecutionSources, candidateOriginalIdentity )
 import Tidepool.OriginalProductRoots (candidateOriginalGlobalDemand)
+import Tidepool.DependencyPlan
+import Tidepool.WorkerServer (NativeDemandExchange, requireNativeDemandOwner)
 
 -- | Selects the compiler representation produced at the internal GHC API
 -- boundary. Metadata consumers stop at the checked environment.
@@ -399,6 +401,7 @@ data PipelineSelection result where
   CheckedEnvironmentProducts :: FilePath -> PipelineSelection CheckedEnvironmentResult
   WithCompilerExecution :: CompilerExecutionGrant -> CompilerExecutor -> PipelineSelection result -> PipelineSelection result
   WithPreparedModuleCompletion :: PreparedModuleCompletion -> PipelineSelection result -> PipelineSelection result
+  WithCompilerDependencyExchange :: NativeDemandExchange -> PipelineSelection result -> PipelineSelection result
 
 -- The Session owner emits and hydrates all captures as one private batch. The
 -- returned actual globals replace earlier capture parameters before simplify.
@@ -878,6 +881,7 @@ selectionKind CheckedPublicModule = CheckOnly
 selectionKind (CheckedEnvironmentProducts _) = CheckOnly
 selectionKind (WithCompilerExecution _ _ selection) = selectionKind selection
 selectionKind (WithPreparedModuleCompletion _ selection) = selectionKind selection
+selectionKind (WithCompilerDependencyExchange _ selection) = selectionKind selection
 
 capturesProductInterfaces :: PipelineSelection result -> Bool
 capturesProductInterfaces (PreparedProducts _) = True
@@ -885,14 +889,23 @@ capturesProductInterfaces (PreparedSegmentProducts _ _) = True
 capturesProductInterfaces (WithTypedSegmentPreparation _ inner) = capturesProductInterfaces inner
 capturesProductInterfaces (WithCompilerExecution _ _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces (WithPreparedModuleCompletion _ selection) = capturesProductInterfaces selection
+capturesProductInterfaces (WithCompilerDependencyExchange _ selection) = capturesProductInterfaces selection
 capturesProductInterfaces _ = False
 
 checksPublicModule :: PipelineSelection result -> Bool
 checksPublicModule CheckedPublicModule = True
 checksPublicModule (WithCompilerExecution _ _ inner) = checksPublicModule inner
 checksPublicModule (WithPreparedModuleCompletion _ inner) = checksPublicModule inner
+checksPublicModule (WithCompilerDependencyExchange _ inner) = checksPublicModule inner
 checksPublicModule (WithTypedSegmentPreparation _ inner) = checksPublicModule inner
 checksPublicModule _ = False
+
+dependencyExchangeFor :: PipelineSelection result -> Maybe NativeDemandExchange
+dependencyExchangeFor (WithCompilerDependencyExchange exchange _) = Just exchange
+dependencyExchangeFor (WithPreparedModuleCompletion _ inner) = dependencyExchangeFor inner
+dependencyExchangeFor (WithTypedSegmentPreparation _ inner) = dependencyExchangeFor inner
+dependencyExchangeFor (WithCompilerExecution _ _ inner) = dependencyExchangeFor inner
+dependencyExchangeFor _ = Nothing
 
 data PipelineResult = PipelineResult
   { ownedPrBinds  :: [CoreBind]
@@ -1379,6 +1392,7 @@ data PipelineVariant = PipelineVariant
   , pvWorldOnly :: Bool
   , pvWorldOriginalBindings :: Map.Map Name SymbolIdentity
   , pvWorldCompletedDependencies :: Maybe WorldPrivateCompletion
+  , pvDependencyBasis :: Maybe CompilerDependencyBasis
   , pvWorldSources :: Maybe WorldSourceInputBasis
     -- ^ Admitted immutable declaration owners, independent of live values.
   , pvHostBindingTypeInputs :: IO [WorldTypeClosureEntry]
@@ -1682,23 +1696,27 @@ candidateManifestFor (WithTypedSegmentPreparation _ inner) = candidateManifestFo
 candidateManifestFor (CheckedEnvironmentProducts path) = Just path
 candidateManifestFor (WithCompilerExecution _ _ selection) = candidateManifestFor selection
 candidateManifestFor (WithPreparedModuleCompletion _ selection) = candidateManifestFor selection
+candidateManifestFor (WithCompilerDependencyExchange _ selection) = candidateManifestFor selection
 candidateManifestFor _ = Nothing
 
 executionGrantFor :: PipelineSelection result -> CompilerExecutionGrant
 executionGrantFor (WithCompilerExecution grant _ _) = grant
 executionGrantFor (WithPreparedModuleCompletion _ selection) = executionGrantFor selection
+executionGrantFor (WithCompilerDependencyExchange _ selection) = executionGrantFor selection
 executionGrantFor (WithTypedSegmentPreparation _ selection) = executionGrantFor selection
 executionGrantFor _ = serialCompilerExecutionGrant
 
 executorFor :: PipelineSelection result -> Maybe CompilerExecutor
 executorFor (WithCompilerExecution _ executor _) = Just executor
 executorFor (WithPreparedModuleCompletion _ selection) = executorFor selection
+executorFor (WithCompilerDependencyExchange _ selection) = executorFor selection
 executorFor (WithTypedSegmentPreparation _ selection) = executorFor selection
 executorFor _ = Nothing
 
 completionFactoryFor :: PipelineSelection result -> Maybe PreparedModuleCompletion
 completionFactoryFor (WithCompilerExecution _ _ selection) = completionFactoryFor selection
 completionFactoryFor (WithPreparedModuleCompletion factory _) = Just factory
+completionFactoryFor (WithCompilerDependencyExchange _ inner) = completionFactoryFor inner
 completionFactoryFor (WithTypedSegmentPreparation _ selection) = completionFactoryFor selection
 completionFactoryFor _ = Nothing
 
@@ -1706,6 +1724,7 @@ typedPreparationFor :: PipelineSelection result -> Maybe TypedSegmentPreparation
 typedPreparationFor (WithTypedSegmentPreparation prepare _) = Just prepare
 typedPreparationFor (WithCompilerExecution _ _ inner) = typedPreparationFor inner
 typedPreparationFor (WithPreparedModuleCompletion _ inner) = typedPreparationFor inner
+typedPreparationFor (WithCompilerDependencyExchange _ inner) = typedPreparationFor inner
 typedPreparationFor _ = Nothing
 
 typedPlanFor :: PipelineSelection result -> Maybe TypedSegmentPlan
@@ -1713,6 +1732,7 @@ typedPlanFor (PreparedSegmentProducts plan _) = Just plan
 typedPlanFor (WithTypedSegmentPreparation _ inner) = typedPlanFor inner
 typedPlanFor (WithCompilerExecution _ _ inner) = typedPlanFor inner
 typedPlanFor (WithPreparedModuleCompletion _ inner) = typedPlanFor inner
+typedPlanFor (WithCompilerDependencyExchange _ inner) = typedPlanFor inner
 typedPlanFor _ = Nothing
 
 -- Body demand is a property of the request, not of whether its environment
@@ -2877,6 +2897,12 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
         WorldCellSource _ _ (WorldCellPrefix _ _ _ _ values _ _ _) _ _ _ -> values
         WorldObservationSource {} -> []
         WorldCellNameSource {} -> []
+  dependencyBasis <- liftIO $ case operation of
+    WorldCellSource question _ _ _ selection _ -> traverse (\exchange -> do
+      requireNativeDemandOwner exchange (worldCellPrepareAdmission question)
+        (worldInputsIdentityBytes facts) (worldInputsCompilerIdentityBytes facts)
+      newCompilerDependencyBasis exchange (fromIntegral offset)) (dependencyExchangeFor selection)
+    _ -> pure Nothing
   logger <- liftIO (readLogger "tidepool.compiler.world")
   let worldStage = "world.cell.stage"
       traceStageIO stage details = logTrace logger worldStage
@@ -3084,6 +3110,7 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
             (Just (WorldPrivateCompletion previous _),WorldDependencyAttempt _ _ policy _ versions canonicalRecovery _ _ _ _) ->
               Just (WorldPrivateCompletion previous (WorldCompletedDependencies policy versions canonicalRecovery))
             _ -> Nothing
+        , pvDependencyBasis=dependencyBasis
         , pvWorldSources=Just (WorldSourceInputBasis (universeOriginalInputs universe) facts importsRef parsedDemand operandInterfaces importBasis prefixImports)
         , pvHostBindingTypeInputs=do
             resolved <- requireResolved
@@ -3215,11 +3242,12 @@ runHeldWorldSource guard producer universe baseEnv timing attempt
       original <- liftIO $ traverse (\planned -> do
         inventory <- certifyPlannedDeclaration planned final >>= either fail pure
         pure (planned,inventory)) (worldPlannedDeclaration purpose)
+      frozenDependencies <- liftIO (traverse freezeDependencyBasis dependencyBasis)
       pure (CompletedWorldCompilerResult result recovery guard
         (WorldCompilerCompletion
           (WorldCellInputs (worldResolvedGenerations resolved) (worldResolvedReferences resolved)
             sourceImports imports sourceSelection roots
-            selectedTypeBodies)
+            selectedTypeBodies frozenDependencies)
           pending original) Nothing)
     WorldCellNameSource {} -> do
       checked <- runStage CheckedEnvironment
@@ -3557,6 +3585,7 @@ worldPreparedResult (PreparedSegmentProducts _ _) result = Just (preparedSegment
 worldPreparedResult (WithTypedSegmentPreparation _ inner) result = worldPreparedResult inner result
 worldPreparedResult (WithCompilerExecution _ _ inner) result = worldPreparedResult inner result
 worldPreparedResult (WithPreparedModuleCompletion _ inner) result = worldPreparedResult inner result
+worldPreparedResult (WithCompilerDependencyExchange _ inner) result = worldPreparedResult inner result
 worldPreparedResult _ _ = Nothing
 
 -- The private constructor keeps the origin and its seal correlated. A World
@@ -5692,6 +5721,24 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           uniqueReference name
             [reference | (owner,_,reference) <- nativeOriginalInputs
               , nameModule_maybe name == Just owner]
+    let captureSourceDependenciesFor environment guts = case pvDependencyBasis variant of
+          Nothing -> pure environment
+          Just basis -> do
+            let rhs (NonRec _ value) = [value]
+                rhs (Rec pairs) = map snd pairs
+                identifiers = [identifier | binding <- mg_binds guts, value <- rhs binding
+                  , identifier <- nonDetEltsUniqSet (exprSomeFreeVars isId value)]
+                isSource name = case (pvWorldSources variant,nameModule_maybe name) of
+                  (Just (WorldSourceInputBasis _ facts _ _ _ _ _),Just owner) ->
+                    worldHasSelectedSource facts (unitString (moduleUnit owner),moduleNameString (moduleName owner))
+                  _ -> False
+            uses <- fmap catMaybes $ forM identifiers $ \identifier ->
+              if isSource (idName identifier) then do
+                reference <- referenceForName (idName identifier)
+                pure ((\selected -> (preparedRootIdentity identifier,selected)) <$> reference)
+              else pure Nothing
+            captureSourceDependencies basis uses
+            pure environment
     let (freshGraph, exactImports) = case worldSources of
           Nothing -> sourceEvidenceGraph selectedExact modGraphRaw
           Just (WorldSourceSelection selected imports _ _ _) ->
@@ -6294,9 +6341,10 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               desugared <- installSegment typedEnv typedSegment desugared0
               printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
+              dependencyEnv <- captureSourceDependenciesFor typedEnv desugared
               plugins <- readIORef (tcg_th_coreplugins tcg)
               simplified <- timeDetailPhase timing "ghc_load_simplify"
-                (moduleNameString (ms_mod_name summaryC)) (hscSimplify typedEnv plugins desugared)
+                (moduleNameString (ms_mod_name summaryC)) (hscSimplify dependencyEnv plugins desugared)
               (tidy, details) <- hscTidy typedEnv simplified
               roots <- directPackageImports env tcg
               files <- readIORef (tcg_dependent_files tcg)
@@ -6651,8 +6699,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (simplified, coreMs) <- timeSection $
                   timeDetailPhase timing "deferred_simplify" (moduleNameString (ms_mod_name (mfSummary mf))) $
                     liftIO $ do
+                      dependencyEnv <- captureSourceDependenciesFor (mfHscEnv mf) (mfDesugared mf)
                       plugins <- readIORef (tcg_th_coreplugins (mfTcGblEnv mf))
-                      hscSimplify (mfHscEnv mf) plugins (mfDesugared mf)
+                      hscSimplify dependencyEnv plugins (mfDesugared mf)
                 liftIO (modifyIORef' loweringMsRef (+ coreMs))
                 liftIO (modifyIORef' c2cMsRef (+ coreMs))
                 liftIO (modifyIORef' moduleMsRef
@@ -7468,6 +7517,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             pure (CheckedPublicModuleResult home (hsc_HPT environment) evidence (crWarnings checked))
           WithCompilerExecution _ _ inner -> finish inner
           WithPreparedModuleCompletion _ inner -> finish inner
+          WithCompilerDependencyExchange _ inner -> finish inner
           WithTypedSegmentPreparation _ inner -> finish inner
     result <- finish selection
     liftIO $ do
@@ -8367,6 +8417,7 @@ data WorldCellInputs = WorldCellInputs
   -- They retain no lease and grant no source identity or filesystem authority.
   , worldCellSourceRootAliases :: [FilePath]
   , worldCellTypeInterfaces :: [(ExactIfaceArtifact,ArtifactBytes)]
+  , worldCellDependencyBasis :: Maybe FrozenDependencyBasis
   }
 
 worldCellSourceImports :: WorldCellInputs -> IssuedSourceImports
@@ -9493,6 +9544,7 @@ normalVariant purpose = do
    , pvWorldOnly = False
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
+   , pvDependencyBasis = Nothing
    , pvWorldSources = Nothing
    , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing
@@ -10296,6 +10348,7 @@ sessionVariant purpose scope = do
    , pvWorldOnly = False
    , pvWorldOriginalBindings = Map.empty
    , pvWorldCompletedDependencies = Nothing
+   , pvDependencyBasis = Nothing
    , pvWorldSources = Nothing
    , pvHostBindingTypeInputs = pure []
    , pvCompilerProducer = Nothing

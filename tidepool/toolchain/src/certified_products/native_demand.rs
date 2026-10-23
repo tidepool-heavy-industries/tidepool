@@ -3,11 +3,29 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DependencyQueryKind {
+    SourceDefinition,
+    NativeOriginal,
+}
+impl DependencyQueryKind {
+    pub(crate) fn tag(self) -> u64 {
+        match self {
+            Self::SourceDefinition => 0,
+            Self::NativeOriginal => 1,
+        }
+    }
+}
+
 pub(crate) struct NativeDemandPacket {
+    kind: DependencyQueryKind,
     originals: Vec<ReceiptImportOwner>,
 }
 
 impl NativeDemandPacket {
+    pub(crate) fn kind(&self) -> DependencyQueryKind {
+        self.kind
+    }
     pub(crate) fn originals(&self) -> &[ReceiptImportOwner] {
         &self.originals
     }
@@ -40,19 +58,27 @@ impl NativeDemandPacket {
             charge_symbol(operation, binder)?;
             originals.push(original.clone());
         }
-        Ok(Self { originals })
+        Ok(Self {
+            kind: self.kind,
+            originals,
+        })
     }
 
     pub(crate) fn decode(bytes: &[u8], operation: &InventoryOperation) -> CertResult<Self> {
         let limit = COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes);
         let value = operation.decode_value(bytes, limit)?;
         operation.charge_value_copies(&value, 2)?;
-        let packet = sized(&value, 2)?;
-        if string(&packet[0])? != "TPNATIVEDEMAND1" {
+        let packet = sized(&value, 3)?;
+        if string(&packet[0])? != "TPDEPENDENCYQUERY1" {
             return Err(CertificationError::Receipt("native demand version"));
         }
+        let kind = match number(&packet[1])? {
+            0 => DependencyQueryKind::SourceDefinition,
+            1 => DependencyQueryKind::NativeOriginal,
+            _ => return Err(CertificationError::Receipt("dependency query kind")),
+        };
         let mut originals = Vec::new();
-        for value in array(&packet[1])? {
+        for value in array(&packet[2])? {
             crate::host_work::checkpoint().map_err(CertificationError::Interrupted)?;
             let row = sized(value, 5)?;
             let original = ReceiptImportOwner::OriginalBinding {
@@ -73,7 +99,7 @@ impl NativeDemandPacket {
             operation.reserve::<ReceiptImportOwner>(1)?;
             originals.push(original);
         }
-        Ok(Self { originals })
+        Ok(Self { kind, originals })
     }
 }
 
@@ -92,9 +118,11 @@ pub(crate) enum NativeDemandRefusalReason {
 pub(crate) struct NativeDemandUseReply<'a> {
     pub(crate) original: &'a ReceiptImportOwner,
     pub(crate) obligations: &'a [&'a crate::declaration_context::NativePackageObligation],
+    pub(crate) retained: &'a [crate::declaration_context::NativeRetainedOccurrence<'a>],
 }
 
 pub(crate) fn encode_reply(
+    kind: DependencyQueryKind,
     replies: &[NativeDemandUseReply<'_>],
     operation: &InventoryOperation,
 ) -> CertResult<Vec<u8>> {
@@ -135,17 +163,62 @@ pub(crate) fn encode_reply(
             binding(original),
             value_identity(binder),
         ]);
+        if kind == DependencyQueryKind::SourceDefinition && !reply.obligations.is_empty() {
+            return Err(CertificationError::Receipt(
+                "source dependency query acquired packages",
+            ));
+        }
         entries.push(value_array([
             reference,
             encode_obligations(reply.obligations, operation)?,
+            encode_retained(reply.retained, operation)?,
         ]));
     }
     encode_value_with_operation(
-        &value_array([value_text("TPNATIVEREPLY2"), value_array(entries)]),
+        &value_array([
+            value_text("TPDEPENDENCYREPLY1"),
+            Value::Integer(kind.tag().into()),
+            value_array(entries),
+        ]),
         CertificationFormat::ProductReceipt,
         COMPILER_RECEIPT_BYTES_LIMIT.min(operation.limits().max_bytes),
         operation,
     )
+}
+
+fn encode_retained(
+    occurrences: &[crate::declaration_context::NativeRetainedOccurrence<'_>],
+    operation: &InventoryOperation,
+) -> CertResult<Value> {
+    operation.reserve::<Value>(occurrences.len())?;
+    let mut rows = Vec::with_capacity(occurrences.len());
+    let mut previous = None;
+    for occurrence in occurrences {
+        if previous.is_some_and(|prior| prior >= occurrence) {
+            return Err(CertificationError::Receipt(
+                "dependency terminal order or duplicate",
+            ));
+        }
+        previous = Some(occurrence);
+        operation.reserve::<Value>(12)?;
+        operation.charge(128)?;
+        charge_symbol(operation, occurrence.identity)?;
+        rows.push(value_array([
+            value_array([
+                Value::Bytes(occurrence.demander.binding.artifact().0.to_vec()),
+                Value::Bytes(occurrence.demander.binding.selection().0.to_vec()),
+                Value::Integer(occurrence.demander.original_ordinal.into()),
+            ]),
+            Value::Integer(occurrence.global_index.into()),
+            value_array([
+                Value::Bytes(occurrence.binding.artifact.0.to_vec()),
+                Value::Bytes(occurrence.binding.selection.0.to_vec()),
+            ]),
+            value_identity(occurrence.identity),
+            Value::Integer(occurrence.generation.into()),
+        ]));
+    }
+    Ok(value_array(rows))
 }
 
 fn encode_obligations(
@@ -202,7 +275,8 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(
             &Value::Array(vec![
-                Value::Text("TPNATIVEDEMAND1".into()),
+                Value::Text("TPDEPENDENCYQUERY1".into()),
+                Value::Integer(1u64.into()),
                 Value::Array(rows),
             ]),
             &mut bytes,
@@ -310,14 +384,17 @@ mod tests {
             .map(|(index, original)| NativeDemandUseReply {
                 original,
                 obligations: if index == 0 { &borrowed } else { &[] },
+                retained: &[],
             })
             .collect::<Vec<_>>();
-        let bytes = encode_reply(&replies, &operation).unwrap();
+        let bytes =
+            encode_reply(DependencyQueryKind::NativeOriginal, &replies, &operation).unwrap();
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(
             value,
             Value::Array(vec![
-                Value::Text("TPNATIVEREPLY2".into()),
+                Value::Text("TPDEPENDENCYREPLY1".into()),
+                Value::Integer(1u64.into()),
                 Value::Array(
                     originals
                         .into_iter()
@@ -331,7 +408,8 @@ mod tests {
                                 ])])
                             } else {
                                 value_array([])
-                            }
+                            },
+                            value_array([]),
                         ]))
                         .collect()
                 )
@@ -341,14 +419,16 @@ mod tests {
             NativeDemandUseReply {
                 original: replies[0].original,
                 obligations: &[],
+                retained: &[],
             },
             NativeDemandUseReply {
                 original: replies[0].original,
                 obligations: &[],
+                retained: &[],
             },
         ];
         assert!(matches!(
-            encode_reply(&duplicate, &operation),
+            encode_reply(DependencyQueryKind::NativeOriginal, &duplicate, &operation),
             Err(CertificationError::Receipt(
                 "native reply use order or duplicate"
             ))
@@ -357,21 +437,25 @@ mod tests {
             NativeDemandUseReply {
                 original: replies[1].original,
                 obligations: &[],
+                retained: &[],
             },
             NativeDemandUseReply {
                 original: replies[0].original,
                 obligations: &[],
+                retained: &[],
             },
         ];
-        assert!(encode_reply(&reversed, &operation).is_err());
+        assert!(encode_reply(DependencyQueryKind::NativeOriginal, &reversed, &operation).is_err());
         let mut conflicting = obligations[0].clone();
         conflicting.interface_digest = [9; 32];
         let conflicting = [obligations[0].clone(), conflicting];
         assert!(matches!(
             encode_reply(
+                DependencyQueryKind::NativeOriginal,
                 &[NativeDemandUseReply {
                     original: replies[0].original,
                     obligations: &conflicting.iter().collect::<Vec<_>>(),
+                    retained: &[],
                 }],
                 &operation
             ),
@@ -379,6 +463,80 @@ mod tests {
                 "native package obligation seal conflict"
             ))
         ));
+    }
+
+    #[test]
+    fn dependency_reply_preserves_retained_selection_and_occurrence_slots() {
+        use crate::artifact_inventory::{ArtifactBinding, ArtifactId, ArtifactSelectionId};
+        use crate::declaration_context::NativeRetainedOccurrence;
+        let operation = InventoryOperation::new(Default::default());
+        let packet = NativeDemandPacket::decode(&packet(vec![original("A")]), &operation).unwrap();
+        let demander = serde_json::from_value(serde_json::json!({
+            "binding": {"artifact": vec![3u8;32], "selection": vec![4u8;32]},
+            "original_ordinal": 7,
+        }))
+        .unwrap();
+        let identity = SymbolIdentity {
+            unit: "unit".into(),
+            module: "Val.G1".into(),
+            namespace: "value".into(),
+            occurrence: "captured".into(),
+            record_parent: None,
+        };
+        let first = ArtifactBinding {
+            artifact: ArtifactId([9; 32]),
+            selection: ArtifactSelectionId([10; 32]),
+        };
+        let second = ArtifactBinding {
+            selection: ArtifactSelectionId([11; 32]),
+            ..first
+        };
+        let retained = [
+            NativeRetainedOccurrence {
+                demander,
+                global_index: 0,
+                binding: &first,
+                identity: &identity,
+                generation: 1,
+            },
+            NativeRetainedOccurrence {
+                demander,
+                global_index: 1,
+                binding: &second,
+                identity: &identity,
+                generation: 1,
+            },
+        ];
+        let reply = |retained| {
+            encode_reply(
+                DependencyQueryKind::SourceDefinition,
+                &[NativeDemandUseReply {
+                    original: &packet.originals()[0],
+                    obligations: &[],
+                    retained,
+                }],
+                &operation,
+            )
+        };
+        let encoded = reply(&retained).unwrap();
+        let value: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let rows = array(&array(&value).unwrap()[2]).unwrap();
+        let terminals = array(&array(&rows[0]).unwrap()[2]).unwrap();
+        assert_eq!(terminals.len(), 2);
+        assert_eq!(
+            array(&terminals[0]).unwrap()[1],
+            Value::Integer(0u64.into())
+        );
+        assert_eq!(
+            array(&terminals[1]).unwrap()[1],
+            Value::Integer(1u64.into())
+        );
+        assert_ne!(
+            array(&terminals[0]).unwrap()[2],
+            array(&terminals[1]).unwrap()[2]
+        );
+        assert!(reply(&[retained[0], retained[0]]).is_err());
+        assert!(reply(&[retained[1], retained[0]]).is_err());
     }
 
     #[test]

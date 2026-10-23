@@ -120,6 +120,7 @@ library tidepool-extract-internal
     Tidepool.CertifiedProducts
     Tidepool.CompilerProducts
     Tidepool.CompilerRequest
+    Tidepool.DependencyPlan
     Tidepool.CompileInput
     Tidepool.PrimOps
     Tidepool.CompilerExecution
