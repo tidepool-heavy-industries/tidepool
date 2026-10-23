@@ -20,20 +20,18 @@ import GHC
   , ms_mod_name, ms_location, parseModule, getSession, tm_internals_, ParsedModule, pm_parsed_source )
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Driver.Env (HscEnv)
-import GHC.Driver.Env (hsc_HPT, hsc_FC, hsc_home_unit)
+import GHC.Driver.Env (hsc_FC, hsc_home_unit)
 import GHC.Unit.Finder (addHomeModuleToFinder)
 import GHC.Unit.Types (GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Hs (HsModule(..), ImportDecl(..), ImportDeclQualifiedStyle(..))
 import GHC.Types.SrcLoc (unLoc)
-import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
 import GHC.Builtin.Types (intTy, boolTy)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
+import GHC.Types.Name (nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkVarOcc, mkTcOcc, mkDataOcc, mkRecFieldOcc)
 import GHC.Data.FastString (mkFastString)
 import GHC.Types.Name.Reader (RdrName(..), mkRdrUnqual, globalRdrEnvElts, greName, greRdrNames)
 import GHC.Unit.Module (moduleName, mkModuleName)
-import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts, mi_exports)
+import GHC.Unit.Module.ModIface (mi_iface_hash, mi_final_exts)
 import GHC.Utils.Fingerprint (Fingerprint(..))
 import GHC.Types.SourceError (SourceError)
 import GHC.Unit.Module (moduleNameString)
@@ -43,7 +41,7 @@ import Tidepool.Binders
   , analyzeCell, renderCellCheckSource, defaultParserDynFlags, templateParserFlags )
 import Tidepool.CheckedCell
   ( CheckedSignature(..), CheckedSignatureName(..), NativeParsedModule
-  , unannotatedModule, nativeParsedModule, typecheckNativeModule )
+  , unannotatedModule, typecheckNativeModule )
 import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
 import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), ExportIdentity(..))
 import Tidepool.GhcPipeline
@@ -363,22 +361,6 @@ checkCompletedImports file env original completed = do
     current <- getSession
     native <- liftIO (parsedNativeModule parsed)
     transformed <- liftIO (transformPlannedDeclarationImportsWithCompleted original completed current native)
-    let imports = map unLoc (hsmodImports (unLoc (pm_parsed_source (nativeParsedModule transformed))))
-        names owner qualified = do
-          home <- maybe (fail "refinement fixture lost its captured HOME") pure
-            (lookupHpt (hsc_HPT current) (mkModuleName owner))
-          concat <$> mapM (either fail pure . selectedImportNames (mi_exports (hm_iface home)) . ideclImportList)
-            [declaration | declaration <- imports
-              , unLoc (ideclName declaration) == mkModuleName owner
-              , (ideclQualified declaration /= NotQualified) == qualified]
-        has owner qualified occurrence = any ((== mkVarOcc occurrence) . nameOccName) <$> names owner qualified
-    selected <- liftIO (has "Tidepool.Session.Val.G9" False "id")
-    shadowed <- liftIO (has "Tidepool.Session.Lib.G7" False "id")
-    originalQualified <- liftIO (has "Tidepool.Session.Lib.G7" True "id")
-    olderQualified <- liftIO (has "Tidepool.Session.Val.G8" True "older")
-    foreignQualified <- liftIO (has "Foreign" True "hidden")
-    unless (selected && not shadowed && originalQualified && olderQualified && foreignQualified) $
-      fail "completed value refinement lost its selected Names or preserved qualification"
     -- This is the independent GHC oracle over the fixture's real written
     -- interfaces. Tidepool's production installer is exercised by World
     -- source-hidden tests; no public Finder issuer is needed for this oracle.
@@ -391,8 +373,17 @@ checkCompletedImports file env original completed = do
       addHomeModuleToFinder (hsc_FC current) (hsc_home_unit current)
         (GWIB (mkModuleName (sessionModuleString owner)) NotBoot)
         (ms_location (exactInterfaceSummary current artifact))
-    _ <- typecheckNativeModule transformed
-    pure ()
+    typed <- typecheckNativeModule transformed
+    let (tcg, _) = tm_internals_ typed
+        owners spelling = nub [moduleNameString (moduleName owner)
+          | entry <- globalRdrEnvElts (tcg_rdr_env tcg)
+          , spelling `elem` greRdrNames entry
+          , Just owner <- [nameModule_maybe (greName entry)]]
+    unless (owners (mkRdrUnqual (mkVarOcc "id")) == ["Tidepool.Session.Val.G9"]
+        && owners (Qual (mkModuleName "Tidepool.Session.Lib.G7") (mkVarOcc "id")) == ["Tidepool.Session.Lib.G7"]
+        && owners (Qual (mkModuleName "Tidepool.Session.Val.G8") (mkVarOcc "older")) == ["Tidepool.Session.Val.G8"]
+        && owners (Qual (mkModuleName "Foreign") (mkVarOcc "hidden")) == ["Foreign"]) $
+      fail "completed value refinement lost native replacement or preserved qualification"
 
 replaceForeignImport :: String -> String -> String
 replaceForeignImport replacement = unlines . map replace . lines
