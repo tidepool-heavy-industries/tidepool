@@ -8,8 +8,14 @@ impl<'a> NativeDependencyCatalog<'a> {
         Ok(Self(source))
     }
 
-    pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
-        self.0.input_decisions()
+    fn selected_support(
+        &self,
+        owner: &ExactModuleIdentity,
+        group: NativeGroupBinding,
+    ) -> Option<&SelectedNativeSupport> {
+        self.0
+            .compiler_roles()
+            .selected_native_support(owner, group)
     }
 
     pub(super) fn original_namespace_pair(
@@ -38,7 +44,7 @@ impl<'a> NativeDependencyCatalog<'a> {
                 .get(&key.original_ordinal)
                 .filter(|group| group.binding.artifact() == key.artifact)
             {
-                if let Some(selected) = self.input_decisions().selected_support(*group) {
+                if let Some(selected) = self.selected_support(&module_identity(owner), *group) {
                     if let Some(offer) = selected
                         .acquisitions()
                         .iter()
@@ -47,6 +53,7 @@ impl<'a> NativeDependencyCatalog<'a> {
                         supports.insert(*group, offer);
                     }
                 }
+                return supports.into_iter().collect();
             }
         }
         if let Some(support) = self.0.native_availability().dependency_support(key, owner) {
@@ -988,7 +995,8 @@ fn current_product_dependencies(
             crate::certified_products::CertifiedNativeGroupSupport::Issued(offer),
         )?;
         let mut issued = support.describe(binding)?;
-        if let Some(selected) = catalog.input_decisions().selected_support(binding) {
+        if let Some(selected) = catalog.selected_support(&module_identity(required_owner), binding)
+        {
             issued.source = NativeSourceCause::Historical {
                 selected_at: issued.binding,
                 support: selected.clone(),
@@ -1313,13 +1321,14 @@ pub(super) fn bind_certified_input_demand(
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
             if let Some((source, _)) = carried {
                 let chosen = verified_root_choice(selection, *key, owner, &entry)?;
-                let selected = source.input_decisions().selected_support(chosen);
+                let selected = source
+                    .compiler_roles()
+                    .selected_native_support(&module_identity(owner), chosen);
                 let support = selected
                     .into_iter()
                     .flat_map(|selected| selected.acquisitions())
                     .find(|offer| offer.contains_checked_group(chosen))
                     .map(crate::certified_products::CertifiedNativeGroupSupport::Issued)
-                    .or_else(|| selection.native_group_support(*key, owner, chosen))
                     .ok_or_else(|| {
                         native_admission_failure(
                             *key,
@@ -1726,12 +1735,11 @@ impl std::fmt::Debug for NativeOfferCustody {
 #[derive(Clone, Debug)]
 pub(crate) struct IssuedNativeOffer(Arc<NativeOfferFacts>);
 
-impl PartialEq for IssuedNativeOffer {
-    fn eq(&self, other: &Self) -> bool {
+impl IssuedNativeOffer {
+    pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0) || self.snapshot_facts() == other.snapshot_facts()
     }
 }
-impl Eq for IssuedNativeOffer {}
 
 /// The exact portion of an admitted offer consumed by one request. Its
 /// membership remains tied to that offer's proof and acquisition lifetimes.
@@ -1743,14 +1751,13 @@ pub(crate) struct NativeOfferContribution {
     identity: OnceLock<[u8; 32]>,
 }
 
-impl PartialEq for NativeOfferContribution {
-    fn eq(&self, other: &Self) -> bool {
-        self.offer == other.offer
+impl NativeOfferContribution {
+    pub(crate) fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.offer.same_recorded_facts(&other.offer)
             && self.reachable == other.reachable
             && self.originals == other.originals
     }
 }
-impl Eq for NativeOfferContribution {}
 
 #[cfg(test)]
 thread_local! {
@@ -1758,6 +1765,12 @@ thread_local! {
 }
 
 impl NativeOfferContribution {
+    pub(crate) fn same_acquisition(&self, other: &Self) -> bool {
+        self.offer.same_issuance(&other.offer)
+            && self.reachable == other.reachable
+            && self.originals == other.originals
+    }
+
     pub(crate) fn group_carrier_pair(
         &self,
         group: NativeGroupBinding,
@@ -2895,7 +2908,7 @@ impl IssuedNativeOffer {
         self.0.original
     }
 
-    pub(super) fn original_acquisition(&self) -> &Arc<ArtifactEntry> {
+    pub(crate) fn original_acquisition(&self) -> &Arc<ArtifactEntry> {
         &self.0.original_acquisition
     }
 

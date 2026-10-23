@@ -5281,10 +5281,17 @@ pub(crate) struct SelectedOriginalClosure {
     products: Vec<crate::recovery_artifacts::CertifiedRecoveryProduct>,
     selected: Vec<crate::artifact_inventory::ArtifactId>,
     native_closure: crate::artifact_inventory::ArtifactView,
+    support: crate::artifact_inventory::CompilerSourceSupport,
     produced: Option<Arc<crate::declaration_context::CompletedNativeProductAvailability>>,
 }
 
 impl SelectedOriginalClosure {
+    pub(crate) fn compiler_source_support(
+        &self,
+    ) -> &crate::artifact_inventory::CompilerSourceSupport {
+        &self.support
+    }
+
     pub(crate) fn produced_availability(
         &self,
     ) -> Option<&Arc<crate::declaration_context::CompletedNativeProductAvailability>> {
@@ -5766,8 +5773,38 @@ impl CertifiedSourceSelection {
         }))
     }
 
-    /// Encoding bases borrow immutable facts only; native decisions still come
-    /// from this selection's checked continuation and physical output.
+    /// Only input rows retain the actual request's selected compiler owner.
+    /// Equal fresh output identities cannot borrow a historical acquisition.
+    pub(crate) fn compiler_input_support(
+        &self,
+        owner: &crate::declaration_join::ExactModuleIdentity,
+    ) -> Option<&crate::artifact_inventory::CompilerSourceSupport> {
+        let selected = self
+            .modules
+            .get(&(owner.unit.clone(), owner.module.clone()))?;
+        match selected {
+            ReceiptSourceSelection::Native { native, .. }
+                if !matches!(native.origin, ReceiptNativeOrigin::Input) =>
+            {
+                return None
+            }
+            ReceiptSourceSelection::InterfaceOnly { interface }
+                if self
+                    .produced_types
+                    .as_ref()
+                    .is_some_and(|outputs| outputs.owns_artifact(*interface)) =>
+            {
+                return None
+            }
+            _ => {}
+        }
+        match &self.input_origin {
+            CertifiedInputOrigin::Continuation(source) => Some(source),
+            CertifiedInputOrigin::NewProducts => None,
+        }
+    }
+
+    /// Encoding bases borrow immutable facts without acquiring input choices.
     pub(crate) fn native_fact_base(
         &self,
     ) -> Option<&Arc<crate::exact_context::PublicationNativeFacts>> {
@@ -6460,11 +6497,7 @@ impl CertifiedSourceSelection {
                     "authored publication lacks its actual producer",
                 ))?;
         let original = produced.row().original_artifact_id();
-        let entry = view
-            .observed_payload(&original)
-            .ok_or(CertificationError::Mismatch(
-                "authored publication lost its produced body",
-            ))?;
+        let entry = produced.own_offer().original_acquisition();
         let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload else {
             return Err(CertificationError::Mismatch(
                 "authored publication body kind",
@@ -6482,7 +6515,15 @@ impl CertifiedSourceSelection {
                 "authored original closure retains its transient probe",
             ));
         }
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::from_certified_output_fragment(
+                self, view,
+            )
+            .and_then(|support| support.source_support(&BTreeSet::from([owner.clone()])))
+            .and_then(|support| support.with_certified_original_choices(self, &native_closure))
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let closure = SelectedOriginalClosure {
+            support,
             products: vec![product.clone()],
             selected: vec![original],
             native_closure,
@@ -6526,10 +6567,12 @@ impl CertifiedSourceSelection {
         excluded: Option<(&str, &str)>,
         authored_root: Option<(&str, &str)>,
     ) -> CertResult<SelectedOriginalClosure> {
-        let projection = self.compiler_projection(view)?;
-        let mut selected = projection
-            .entries_from_metadata(&view.metadata_snapshot())
+        let support =
+            crate::artifact_inventory::CompilerSourceSupport::from_certified_output_fragment(
+                self, view,
+            )
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
+        let mut selected = support.compiler_metadata().entries;
         if let Some((unit, module)) = authored_root {
             // Interface dependencies belong to the complete issued namespace.
             // Choosing the executable root must follow its validation.
@@ -6588,7 +6631,12 @@ impl CertifiedSourceSelection {
                 "authored original closure retains its transient probe",
             ));
         }
+        let support = support
+            .source_support(&selected.keys().cloned().collect())
+            .and_then(|support| support.with_certified_original_choices(self, &native_closure))
+            .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         let closure = SelectedOriginalClosure {
+            support,
             products: selected
                 .values()
                 .filter_map(|entry| match &entry.payload {

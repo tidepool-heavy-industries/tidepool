@@ -9127,36 +9127,14 @@ impl ArtifactView {
                 _ => None,
             };
             let selected_sources = match &demand {
-                CompilerNativeDemand::SourceSelections { left, right } => {
-                    let mut sources = Vec::new();
-                    let shares_selected_issuer = |candidate: &Self| {
-                        // The chosen source was resolved above. A losing source
-                        // must name that same pair in its own namespace; its
-                        // broader custody cannot supply a substitute binding.
-                        std::ptr::eq(candidate, source)
-                            || [role.interface(), original].into_iter().all(|id| {
-                                candidate.lease.selection.namespace.get(&id) == namespace.get(&id)
-                            })
-                    };
-                    // Equal payload roles can belong to different issuances.
-                    // Choices follow the selected canonical/original pair;
-                    // the other source's immutable graph remains in custody.
-                    if projection.snapshot_roles().get(owner) == Some(role) {
-                        if let Some(left) = left {
-                            if shares_selected_issuer(self) {
-                                sources.push(*left);
-                            }
-                        }
+                CompilerNativeDemand::SourceSelections { left, right } => match issuer {
+                    compiler_projection::CompilerRoleIssuer::Receiving => {
+                        left.iter().copied().collect()
                     }
-                    if incoming.snapshot_roles().get(owner) == Some(role) {
-                        if let Some(right) = right {
-                            if shares_selected_issuer(other) {
-                                sources.push(*right);
-                            }
-                        }
+                    compiler_projection::CompilerRoleIssuer::Incoming => {
+                        right.iter().copied().collect()
                     }
-                    sources
-                }
+                },
                 CompilerNativeDemand::SelectedOriginals {
                     originals,
                     inherited,
@@ -9173,6 +9151,13 @@ impl ArtifactView {
                         .map(|fact| fact.groups.values().copied().collect::<Vec<_>>())
                 })
                 .collect::<Vec<_>>();
+            if selected_rows.as_ref().is_some_and(|rows| {
+                rows.selected.get(owner).is_some_and(|row| {
+                    matches!(row.native_decision(), InputNativeDecision::UnissuedPolicy)
+                })
+            }) {
+                continue;
+            }
             let choices = if !selected_choices.is_empty() {
                 // An explicit empty decision suppresses role policy for this
                 // exact winning role, independently of every other owner.
@@ -9235,9 +9220,6 @@ impl ArtifactView {
                     groups: chosen,
                 },
             );
-            for source in selected_sources {
-                input_decisions.carry_selected_from(source, owner);
-            }
         }
         timing.advance("validate_issued_merge");
         self.validate_issued_merge(other)?;
