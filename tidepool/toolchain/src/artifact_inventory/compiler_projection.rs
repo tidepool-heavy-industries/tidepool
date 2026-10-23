@@ -87,6 +87,30 @@ impl PublicationNativeAuthority {
             )),
         }
     }
+
+    /// Target groups in this publication's native domain require its exact
+    /// issued permission. Birth-time DATA custody grants no such permission.
+    /// Compiler Originals and normalized dependency rows define that domain;
+    /// unrelated target groups do not consume this publication's authority.
+    pub(crate) fn permits_target_native_groups(
+        &self,
+        groups: &BTreeSet<NativeGroupBinding>,
+    ) -> Result<bool, CompileError> {
+        let birth = self.acquired()?;
+        let originals = birth
+            .projection
+            .snapshot_roles()
+            .values()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        Ok(groups.iter().all(|group| {
+            let original = group.binding.artifact();
+            match birth.native_availability.issued_row(original) {
+                Some(row) => row.exact_group_support(*group).is_some(),
+                None => !originals.contains(&original),
+            }
+        }))
+    }
 }
 impl PartialEq for PublicationNativeAuthority {
     fn eq(&self, other: &Self) -> bool {

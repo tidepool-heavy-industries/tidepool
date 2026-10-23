@@ -46,31 +46,13 @@ impl PublishedSourceOriginalSelection {
         {
             return Ok(false);
         }
-        // The receiving context may hold other issuers as DATA. Only the
-        // immutable birth's exact groups grant this publication's permission,
-        // including native children absent from its compiler Original roles.
-        let CompilerInputRole::PublishedSourceOriginal { selection, .. } =
-            &self.context.compiler_input_projection().snapshot_roles()[&self.public_root]
+        let CompilerInputRole::PublishedSourceOriginal {
+            native_authority, ..
+        } = &self.context.compiler_input_projection().snapshot_roles()[&self.public_root]
         else {
             return Err(failure("publication lacks its issued native selection"));
         };
-        let issued = selection.graph_selection();
-        let originals = birth
-            .projection()
-            .snapshot_roles()
-            .values()
-            .filter_map(CompilerInputRole::original)
-            .chain(
-                issued
-                    .native_groups
-                    .iter()
-                    .map(|group| group.binding.artifact()),
-            )
-            .collect::<BTreeSet<_>>();
-        Ok(groups
-            .iter()
-            .filter(|group| originals.contains(&group.binding.artifact()))
-            .all(|group| birth.artifacts().contains_issued_native_group(*group)))
+        native_authority.permits_target_native_groups(groups)
     }
 }
 

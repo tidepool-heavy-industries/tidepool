@@ -247,7 +247,7 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     assert!(
         foreign_groups
             .iter()
-            .all(|group| held.artifact_view().contains_issued_native_group(*group)),
+            .all(|group| held.artifact_view().contains_acquired_native_group(*group)),
         "foreign proofs are held as DATA custody, not absent from acquisition"
     );
     let assert_target_selection = |context: &ExactDeclarationContext| {
@@ -275,6 +275,70 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         );
     };
     assert_target_selection(&held);
+
+    // Attach DATA before the real publication narrowing and endorsement owners
+    // run. The immutable birth may retain those groups without acquiring their
+    // native permission from the actual completed compiler output.
+    let completed = fixture
+        .entry
+        .products()
+        .original_execution_context()
+        .unwrap();
+    let support = completed
+        .compiler_source_support()
+        .retain_custody(&foreign_view)
+        .unwrap();
+    let prebirth = completed
+        .as_ref()
+        .clone()
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
+        .unwrap()
+        .published_context_for_root(&root.descriptor.owner, root.descriptor.id)
+        .unwrap();
+    assert!(foreign_groups.iter().all(|group| prebirth
+        .artifact_view()
+        .contains_acquired_native_group(*group)));
+    let CompilerInputRole::PublishedSourceOriginal {
+        original_input_identity,
+        ..
+    } = &source.compiler_input_projection().snapshot_roles()[&root.descriptor.owner]
+    else {
+        unreachable!()
+    };
+    let endorsement = prebirth
+        .endorse_published_original(
+            &root.descriptor.owner,
+            "prebirth-data-revision",
+            original_input_identity,
+        )
+        .unwrap();
+    let support = prebirth
+        .compiler_source_support()
+        .publish_original(&endorsement)
+        .unwrap();
+    let prebirth = prebirth
+        .rebuild(|facts| facts.compiler_support = support)
+        .finish()
+        .unwrap();
+    let birth = prebirth
+        .compiler_source_support()
+        .publication_birth_support(&root.descriptor.owner)
+        .unwrap();
+    assert!(foreign_groups
+        .iter()
+        .all(|group| birth.artifacts().contains_acquired_native_group(*group)));
+    assert_eq!(
+        birth.native_availability(),
+        source
+            .compiler_source_support()
+            .publication_birth_support(&root.descriptor.owner)
+            .unwrap()
+            .native_availability(),
+        "adding DATA before birth preserves the actual issued permission"
+    );
+    assert_target_selection(&prebirth);
+
     let (_scratch, inventory, _) =
         super::history_properties::restored_graph_roles(&held, &held.compiler_input_roles())
             .unwrap();
@@ -295,7 +359,7 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     );
     assert!(foreign_groups.iter().all(|group| recovered
         .artifact_view()
-        .contains_issued_native_group(*group)));
+        .contains_acquired_native_group(*group)));
     assert_target_selection(&recovered);
 
     let published_role =
@@ -951,7 +1015,7 @@ fn authored_certifier_preserves_published_policy_with_complete_demand() {
     assert!(
         private_groups
             .iter()
-            .all(|group| support.artifacts().contains_issued_native_group(*group)),
+            .all(|group| support.artifacts().contains_acquired_native_group(*group)),
         "unselected completed bodies retain their exact issued custody"
     );
     assert!(originals

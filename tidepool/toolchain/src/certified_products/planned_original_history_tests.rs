@@ -590,7 +590,7 @@ fn selected_planned_original_survives_multiversion_custody_at_consumer_boundary(
             };
             assert!(offer.group_bindings(key).any(|issued| issued == *binding));
             assert!(
-                !rebound.contains_issued_native_group(*binding),
+                !rebound.contains_acquired_native_group(*binding),
                 "equal payloads do not recreate an issued Group binding"
             );
         }

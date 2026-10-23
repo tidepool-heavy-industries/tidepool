@@ -33234,7 +33234,7 @@ None,
                 .unwrap()
                 .contains_key(&candidate));
             assert!(
-                !rebound.contains_issued_native_group(candidate),
+                !rebound.contains_acquired_native_group(candidate),
                 "raw payload and raw graph reconstruction do not recreate this earned group scope"
             );
             unsupported.insert(key);
