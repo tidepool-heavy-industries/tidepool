@@ -194,6 +194,15 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
         assert!(checked.runtime_binding_demand().existing().is_empty());
         assert!(checked.runtime_binding_demand().prior_stage().is_empty());
         assert_physical_selection(&checked, None)?;
+        prepare_world_cell_program(checked)
+    });
+    let program = prepared
+        .seal(&admission)
+        .expect("independent produced-value prefix reaches actual compiler END");
+    assert_eq!(program.items().len(), 2);
+
+    let (prepared, admission) = settle(|| {
+        let (endpoint, world, source) = open_empty_world()?;
         let checked = prepare_checked(
             &endpoint,
             &world,
@@ -211,7 +220,7 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
     });
     let program = prepared
         .seal(&admission)
-        .expect("independent produced-value prefix reaches actual compiler END");
+        .expect("private future-value history reaches actual compiler END");
     assert_eq!(program.items().len(), 3);
 }
 
@@ -272,7 +281,7 @@ fn assert_private_future_dependency(
     assert!(!future_edges.is_empty(),
         "the actual physical Full offer must retain a native body edge to the second produced VALUE");
     assert!(stage.issued_artifacts().selected_native_groups().is_empty());
-    eprintln!("actual private future VALUE dependency: {future_edges:?}");
+    tracing::debug!(?future_edges, "actual private future VALUE dependency");
     Ok(())
 }
 
