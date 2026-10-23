@@ -1006,6 +1006,22 @@ fn assert_physical_selection(
     checked: &Arc<CheckedWorldCellProgram>,
     operand: &CompilerWorldCellOperand,
 ) -> Result<(), CompileError> {
+    let produced_owners = [51, 52].map(|generation| crate::declaration_join::ExactModuleIdentity {
+        unit: "main".into(),
+        module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
+            .module_name(),
+    });
+    for owner in &produced_owners {
+        assert!(
+            checked
+                .primary_inputs()
+                .inputs()
+                .compiler_roles()
+                .get(owner)
+                .is_none(),
+            "the original request cannot supply the newly produced value owner"
+        );
+    }
     let mut validation =
         PackageInterfaceValidation::with_inventory(checked.validation().inventory.clone());
     let produced = crate::checked_cell::CheckedValueInputs::capture_world_produced_types(
@@ -1127,6 +1143,7 @@ fn assert_physical_selection(
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
+    assert_item_prefix_keeps_closed_indexes(&certified, &produced_owners[0])?;
     let receipt = certified_products::decode_segment_item_with_operation(
         crate::checked_cell::world_output_bytes(
             checked,
@@ -1211,6 +1228,7 @@ fn assert_physical_selection(
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
+    assert_item_prefix_keeps_closed_indexes(&second, &produced_owners[1])?;
     let owner = crate::declaration_join::ExactModuleIdentity {
         unit: "main".into(),
         module: tidepool_repr::SessionModule::val(tidepool_repr::Generation(52)).module_name(),
@@ -1229,5 +1247,32 @@ fn assert_physical_selection(
             .map(|role| role.interface()),
         Some(later)
     );
+    Ok(())
+}
+
+fn assert_item_prefix_keeps_closed_indexes(
+    item: &certified_products::CapturedProducts,
+    added_owner: &crate::declaration_join::ExactModuleIdentity,
+) -> Result<(), CompileError> {
+    let expected = item.compiler_inputs().compiler_source_support();
+    assert!(expected.compiler_roles().get(added_owner).is_some());
+    let closed = crate::artifact_inventory::CompilerSourceSupport::from_certified_output_fragment(
+        item.source_selection(),
+        item.compiler_inputs().issued_artifacts(),
+    )?;
+    assert!(
+        closed.same_selected_acquisitions(expected),
+        "closing an actual item prefix preserves its exact acquired rows"
+    );
+    assert_eq!(
+        closed.projection().snapshot_roles(),
+        expected.projection().snapshot_roles(),
+    );
+    assert_eq!(closed.recorded_rows(), expected.recorded_rows());
+    assert!(closed
+        .projection()
+        .snapshot_roles()
+        .contains_key(added_owner));
+    assert!(closed.recorded_rows().contains_key(added_owner));
     Ok(())
 }
