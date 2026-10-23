@@ -1654,6 +1654,28 @@ pub(in crate::session) mod tests {
         }
     }
 
+    pub(in crate::session) fn reused_projection(
+        publication: &AcceptedDeclarationPublication,
+    ) -> &Arc<super::super::CertifiedDeclarationProjection> {
+        match &publication.receipt {
+            PublicationEvidence::ReusedProjection { projection, .. } => projection,
+            PublicationEvidence::NewJoin(_) => {
+                panic!("publication must reuse its exact projection")
+            }
+        }
+    }
+
+    pub(in crate::session) fn assert_allocation_preserves_publication_semantics(
+        publication: &AcceptedDeclarationPublication,
+        lib: &mut SessionLib,
+    ) {
+        let semantic = paired_version(&publication.base.public);
+        let revision = lib.log.publication_revision();
+        lib.log.reserve();
+        assert_eq!(paired_version(&publication.base.public), semantic);
+        assert_eq!(lib.log.publication_revision(), revision);
+    }
+
     #[track_caller]
     pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
@@ -1681,284 +1703,6 @@ pub(in crate::session) mod tests {
             .adopt_staged_declaration_in(staged)
             .expect("adopt staged declaration")
             .generation
-    }
-
-    #[test]
-    fn paired_reused_projection_keeps_nominal_owner_and_atomic_arbitration() {
-        tidepool_testing::eval_harness::require_extract();
-        for durable in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let mut lib = SessionLib::open(
-                SessionId(9831),
-                root.path(),
-                ModuleEnv::standalone_default(),
-            )
-            .unwrap()
-            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            let owner = RecoveryPublicOwner::new(
-                &tidepool_repr::ActorPath::parse("root/reuse").unwrap(),
-                1,
-            )
-            .unwrap();
-            let recovery =
-                crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-            tidepool_testing::with_settlement(|settlement| {
-                recovery.attach_root(&mut lib, settlement)
-            })
-            .unwrap();
-            let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-            let public = session.mint_scope(ScopeId::ROOT).unwrap();
-            if durable {
-                session
-                    .bind_durable_public_scope(owner.clone(), public)
-                    .unwrap();
-            }
-            let execution = session.begin_private_execution(public).unwrap();
-            let original = commit_certified_source(
-                &mut session,
-                execution.private_scope(),
-                "answer :: Int\nanswer = 42",
-            );
-            let projection = session.lib().log.projection_at(original).unwrap().clone();
-            let intent = session.freeze_private_execution(&execution).unwrap();
-            let restage = |session: &mut PersistentSession| {
-                if durable {
-                    session
-                        .restage_execution_publication(owner.clone(), intent.clone())
-                        .unwrap()
-                } else {
-                    session
-                        .restage_ephemeral_execution_publication(intent.clone())
-                        .unwrap()
-                }
-            };
-            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
-                panic!("authored publication")
-            };
-            let publication = accepted(base);
-            assert!(
-                matches!(&publication.receipt, PublicationEvidence::ReusedProjection { projection: selected, .. } if Arc::ptr_eq(selected, &projection))
-            );
-            assert_eq!(
-                publication.receipt.reserved().module,
-                projection.module_name()
-            );
-            let cancelled = PublicationDecision::new();
-            cancelled.request_cancellation();
-            assert!(matches!(
-                session
-                    .attempt_public_manifest(publication.stage().unwrap(), &cancelled)
-                    .map(crate::session::settled_manifest_attempt)
-                    .unwrap(),
-                PublicManifestCommit::Cancelled
-            ));
-            assert_eq!(session.lib().scope_tip(public), Generation(0));
-            if durable {
-                let before = recovery.state();
-                recovery
-                    .store
-                    .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
-                let ExecutionPublication::Declarations(base) = restage(&mut session) else {
-                    panic!("authored publication")
-                };
-                let decision = PublicationDecision::new();
-                assert!(matches!(
-                    session
-                        .attempt_public_manifest(accepted(base).stage().unwrap(), &decision)
-                        .map(crate::session::settled_manifest_attempt)
-                        .unwrap(),
-                    PublicManifestCommit::Refused { .. }
-                ));
-                assert_eq!(decision.phase(), PublicationPhase::Terminated);
-                assert_eq!(session.lib().scope_tip(public), Generation(0));
-                assert_eq!(recovery.state(), before);
-            }
-            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
-                panic!("authored publication")
-            };
-            let publication = accepted(base);
-            let semantic = paired_version(&publication.base.public);
-            let revision = session.lib().log.publication_revision();
-            session.lib_mut().log.reserve();
-            assert_eq!(paired_version(&publication.base.public), semantic);
-            assert_eq!(session.lib().log.publication_revision(), revision);
-            drop(publication);
-            let decision = PublicationDecision::new();
-            let ExecutionPublication::Declarations(base) = restage(&mut session) else {
-                panic!("authored publication")
-            };
-            let publication = accepted(base);
-            assert!(matches!(
-                publication.receipt,
-                PublicationEvidence::ReusedProjection { .. }
-            ));
-            let published_generation = publication.reserved_generation();
-            let commit = session
-                .attempt_public_manifest(publication.stage().unwrap(), &decision)
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap();
-            assert!(matches!(
-                commit,
-                PublicManifestCommit::Ephemeral | PublicManifestCommit::Durable
-            ));
-            assert_eq!(decision.phase(), PublicationPhase::Published);
-            assert_eq!(session.lib().scope_tip(public), published_generation);
-            assert!(Arc::ptr_eq(
-                &session.lib().current_exact_context_in(public).unwrap(),
-                projection.composition().context(),
-            ));
-            assert_eq!(
-                session.lib().import_line_in(public).unwrap(),
-                format!("import {}", projection.module_name())
-            );
-            assert!(Arc::ptr_eq(
-                session
-                    .lib()
-                    .current_declaration_projection_in(public)
-                    .unwrap()
-                    .receipt(),
-                projection.receipt()
-            ));
-            session.retire_scope(execution.private_scope());
-            assert_eq!(
-                session.lib().import_line_in(public).unwrap(),
-                format!("import {}", projection.module_name())
-            );
-            if durable {
-                let retained = recovery
-                    .store
-                    .read_public_owner(
-                        crate::session::recovery_store::RecoveryDomainId::Root,
-                        &owner,
-                    )
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(
-                    retained.epoch,
-                    session.public_visibility_snapshot_in(public).unwrap().epoch
-                );
-                let graph = crate::session::recovery_test_fixture::graph(session.lib());
-                let summary = graph.node(published_generation).unwrap().unwrap();
-                assert_eq!(summary.kind, recovery::RecoveryNodeKind::Join);
-                assert_eq!(summary.parent, None);
-            }
-        }
-    }
-
-    #[test]
-    fn paired_reused_projection_restores_detached_summary_under_original_interface() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        let open = |id| {
-            SessionLib::open(
-                SessionId(id),
-                root.path().join("compiler"),
-                ModuleEnv::standalone_default(),
-            )
-            .unwrap()
-            .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
-        };
-        let mut lib = open(9833);
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_isolated_scope();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/reopened-reuse").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .initialize_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let execution = session.begin_private_execution(public).unwrap();
-        commit_certified_source(
-            &mut session,
-            execution.private_scope(),
-            "answer :: Int\nanswer = 1",
-        );
-        commit_certified_source(
-            &mut session,
-            execution.private_scope(),
-            "answer :: Int\nanswer = 42",
-        );
-        let intent = session.freeze_private_execution(&execution).unwrap();
-        let publication = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), intent.clone())
-                .unwrap(),
-        );
-        assert!(matches!(
-            publication.receipt,
-            PublicationEvidence::ReusedProjection { .. }
-        ));
-        let module = publication.receipt.reserved().module.clone();
-        let published_generation = publication.reserved_generation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        session
-            .validate_durable_public_admission(&owner, public)
-            .unwrap();
-        let retained = recovery.state();
-        drop(session);
-        let reopened_recovery =
-            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
-        assert_eq!(reopened_recovery.state(), retained);
-        let mut lib = open(9834);
-        tidepool_testing::with_settlement(|settlement| {
-            reopened_recovery.attach_root(&mut lib, settlement)
-        })
-        .unwrap();
-        let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = reopened.recover_public_scope(&owner).unwrap();
-        assert_eq!(reopened.lib().scope_tip(public), published_generation);
-        assert_eq!(
-            reopened.lib().import_line_in(public).unwrap(),
-            format!("import {module}")
-        );
-        let exports = reopened
-            .lib()
-            .log
-            .certified_exports_at(published_generation)
-            .unwrap();
-        assert_eq!(
-            exports
-                .iter()
-                .filter(|export| export.head.occurrence == "answer")
-                .count(),
-            1
-        );
-        let continuation = reopened.begin_private_execution(public).unwrap();
-        commit_certified_source(
-            &mut reopened,
-            continuation.private_scope(),
-            "next :: Int\nnext = answer + 1",
-        );
-        let continuation = reopened.freeze_private_execution(&continuation).unwrap();
-        let publication = accepted(
-            reopened
-                .restage_declaration_publication(owner, continuation.clone())
-                .unwrap(),
-        );
-        assert!(matches!(
-            &publication.receipt,
-            PublicationEvidence::ReusedProjection { .. }
-        ));
-        let continuation_generation = publication.reserved_generation();
-        assert!(matches!(
-            reopened
-                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(reopened.lib().scope_tip(public), continuation_generation);
     }
 
     #[test]
