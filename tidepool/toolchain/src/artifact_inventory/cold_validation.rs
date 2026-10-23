@@ -90,11 +90,7 @@ fn validate_artifact_row(
         return validate_package_row(entry.descriptor.id, product, entries, row);
     }
     let canonical = match &entry.payload {
-        ArtifactPayload::Original(product) => Some(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("native canonical carrier missing"))?,
-        ),
+        ArtifactPayload::Original(product) => Some(product.module_interface()),
         ArtifactPayload::Canonical(interface) => Some(interface),
         ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     };
