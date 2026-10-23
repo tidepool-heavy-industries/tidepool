@@ -928,6 +928,6 @@ fn preview_reuses_selected_original_with_issued_group_custody() {
             .any(|offer| offer.original() == fixture.original.descriptor.id
                 && offer.proof().is_some())
     );
-    assert_eq!(context.as_ref(), &before);
+    assert!(context.same_authenticated_context(&before));
     assert!(context.artifact_view().selected_native_groups().is_empty());
 }

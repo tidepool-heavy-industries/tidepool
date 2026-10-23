@@ -11369,7 +11369,12 @@ mod module_product_tests {
             assert_eq!(*evidence, *template_evidence);
             assert_eq!(next.artifacts().capture_graph_selection(), expected_graph);
             assert_eq!(next.projection().roles(), expected_roles);
-            assert_eq!(next.native_offers(), expected_offers);
+            assert_eq!(next.native_offers().len(), expected_offers.len());
+            assert!(next
+                .native_offers()
+                .iter()
+                .zip(&expected_offers)
+                .all(|(retained, issued)| retained.same_issuance(issued)));
             retained = next;
         }
         assert_eq!(original.identity(), original_identity);

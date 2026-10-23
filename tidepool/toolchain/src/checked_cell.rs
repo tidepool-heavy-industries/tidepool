@@ -6508,8 +6508,8 @@ mod tests {
                 captured.compiler_input_projection()
             );
             assert_eq!(prepared.source_lexical(), captured.source_lexical());
-            assert_eq!(
-                prepared, captured,
+            assert!(
+                prepared.same_issued_value_authority(&captured),
                 "ordinary and prepared retain the same issued value authority"
             );
 
@@ -7296,7 +7296,7 @@ mod tests {
             [ordinary.join().unwrap(), typed.join().unwrap()]
         });
         assert!(Arc::ptr_eq(&values[0].row, &values[1].row));
-        assert_eq!(values[0], values[1]);
+        assert!(values[0].same_issued_value_authority(&values[1]));
         assert_eq!(produced.output(owner).unwrap().row.promotion_count(), 1);
     }
 
@@ -7408,8 +7408,8 @@ mod tests {
         let first = capture_test_value(&context, false);
         let second = capture_test_value(&context, false);
         assert_eq!(first.bytes_owned(), second.bytes_owned());
-        assert_ne!(
-            first, second,
+        assert!(
+            !first.same_issued_value_authority(&second),
             "independent physical issuers cannot substitute for a retained value"
         );
         assert!(CheckedValueInputs::capture_checked(
@@ -8775,13 +8775,11 @@ mod tests {
         let ordinary = ExactCompileContext::new(std::sync::Arc::new(
             ExactDeclarationContext::new(&[], &[], Vec::new()).unwrap(),
         ));
-        assert_eq!(
-            ordinary
-                .clone()
-                .with_request_helper_recipe(RequestHelperRecipe::None)
-                .unwrap(),
-            ordinary,
-        );
+        assert!(ordinary
+            .clone()
+            .with_request_helper_recipe(RequestHelperRecipe::None)
+            .unwrap()
+            .same_authenticated_context(&ordinary));
         assert!(ordinary
             .clone()
             .with_request_helper_recipe(RequestHelperRecipe::ActorReply)

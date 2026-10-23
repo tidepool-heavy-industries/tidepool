@@ -504,8 +504,12 @@ fn replay_native_transport_history(
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
-                assert_eq!(
-                    after, before,
+                assert_eq!(after.len(), before.len());
+                assert!(
+                    after.iter().zip(&before).all(|(after, before)| {
+                        after.same_recorded_facts(before)
+                            && Arc::ptr_eq(after.original_acquisition(), before.original_acquisition())
+                    }),
                     "custody expansion cannot change supplied evidence with fixed canonical bindings"
                 );
                 assert!(after

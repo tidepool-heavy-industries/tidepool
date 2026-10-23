@@ -20250,14 +20250,16 @@ pub(crate) mod tests {
                         context.compiler_source_support().projection(),
                         baseline.projection()
                     );
-                    assert_eq!(
-                        context.compiler_source_support().native_availability(),
-                        baseline.native_availability()
-                    );
-                    assert_eq!(
-                        context.compiler_source_support().native_offers(),
-                        baseline.native_offers()
-                    );
+                    assert!(context
+                        .compiler_source_support()
+                        .native_availability()
+                        .same_acquisition(baseline.native_availability()));
+                    let retained_offers = context.compiler_source_support().native_offers();
+                    assert_eq!(retained_offers.len(), baseline.native_offers().len());
+                    assert!(retained_offers
+                        .iter()
+                        .zip(baseline.native_offers())
+                        .all(|(retained, issued)| retained.same_issuance(issued)));
                 }
             }
         }
@@ -20719,8 +20721,10 @@ pub(crate) mod tests {
                             assert_eq!(facts.contains_key(&entries[4].descriptor.id), extra_output);
                         }
                         assert_eq!(context.artifact_view().capture_graph_selection(), before);
-                        assert_eq!(context.as_ref(), &before_context);
-                        assert_eq!(request.context().as_ref(), &before_context);
+                        assert!(context.same_authenticated_context(&before_context));
+                        assert!(request
+                            .context()
+                            .same_authenticated_context(&before_context));
                     }
                 }
             }
@@ -20986,8 +20990,8 @@ pub(crate) mod tests {
             .into_iter()
             .enumerate()
             {
-                let includes_a = extra.iter().any(|offer| offer == &a);
-                let includes_parent = extra.iter().any(|offer| offer == &parent_offer);
+                let includes_a = extra.iter().any(|offer| offer.same_issuance(&a));
+                let includes_parent = extra.iter().any(|offer| offer.same_issuance(&parent_offer));
                 let carried = support.retain_offers(extra).unwrap();
                 let graph = carried.artifacts().capture_graph_selection();
                 assert_eq!(
@@ -21125,10 +21129,10 @@ pub(crate) mod tests {
             let input_b = support
                 .native_offers()
                 .iter()
-                .find(|offer| *offer == &b)
+                .find(|offer| offer.same_recorded_facts(&b))
                 .unwrap()
                 .clone();
-            assert_eq!(input_b, b);
+            assert!(input_b.same_recorded_facts(&b));
             assert_eq!(
                 input_b.issued_group_carriers().unwrap(),
                 b.issued_group_carriers().unwrap()
@@ -25366,7 +25370,7 @@ pub(crate) mod tests {
             "a new output does not narrow an existing Input Full permission"
         );
         assert!(next.context().lexical_graph().is_empty());
-        assert_eq!(next.context(), &context);
+        assert!(next.context().same_authenticated_context(&context));
         // Observe physical row modes with literal writer positions; the opaque
         // C closure above remains restricted to A7 independently of Input Full.
         let bytes = std::fs::read(&next.manifest).unwrap();
