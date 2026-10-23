@@ -9154,6 +9154,7 @@ impl ArtifactView {
                 }
             } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
+                let owned = &source.read_projection(&state).nodes;
                 for id in std::iter::once(role.interface()).chain(role.original()) {
                     namespace.insert(id, source.resolve_binding(id, owned)?);
                 }
@@ -9313,7 +9314,6 @@ impl ArtifactView {
         if matches!(demand, CompilerNativeDemand::SourceSelections { .. }) {
             for source in [self, other] {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
-                let owned = &source.read_projection(&state).nodes;
                 for root in source.roots() {
                     let InventoryNodeKey::Group(group) = root else {
                         continue;
