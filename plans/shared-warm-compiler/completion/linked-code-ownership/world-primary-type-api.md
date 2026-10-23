@@ -40,3 +40,9 @@ uses its actually validated context and never manufactures completed output.
 Runtime worker owns consumers outside tidepool/toolchain; core owner owns all
 files within tidepool/toolchain. Context9 format is unchanged. No cold builds;
 joined compilation and execution use the root warm lane.
+
+The generic-request API refusal control covers public `ExactCompileContext`,
+which already lacked a World advance operation before this change. It preserves
+that public restriction; it does not independently prove removal of the old
+crate-private `RequestCompilerInputs` methods. The private owner migration is
+checked through the changed declarations, production callers and cfg compilation.
