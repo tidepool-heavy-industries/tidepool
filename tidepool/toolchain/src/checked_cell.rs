@@ -2388,14 +2388,12 @@ impl ExactCheckedCell {
             .collect()
     }
     fn checked_item_observation(&self, index: usize) -> Option<&CheckedItem> {
-        self.specification
-            .program
+        self.world
             .item(index)
             .map(|item| item.checked_item_observation())
     }
     fn checked_items(&self) -> impl Iterator<Item = &CheckedItem> {
-        self.specification
-            .program
+        self.world
             .items()
             .iter()
             .map(|item| item.checked_item_observation())
