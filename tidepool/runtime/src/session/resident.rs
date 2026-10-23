@@ -14653,6 +14653,10 @@ fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
 pub(in crate::session) mod world_cell_test_support;
 
 #[cfg(test)]
+#[path = "exact_recovery_acceptance_tests.rs"]
+pub(in crate::session) mod exact_recovery_acceptance_tests;
+
+#[cfg(test)]
 #[path = "resident_paired_publication_tests.rs"]
 mod paired_publication_tests;
 

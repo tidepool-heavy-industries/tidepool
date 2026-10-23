@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::*;
 use std::sync::Arc;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -9,8 +10,8 @@ fn owner(incarnation: u64) -> RecoveryPublicOwner {
     RecoveryPublicOwner::new(&ActorPath::parse("root/recovered").unwrap(), incarnation).unwrap()
 }
 
-use super::recovery_test_fixture::{domain_state, graph, RecoveryFixture};
-pub(super) use super::recovery_test_fixture::{run_owner, TestRunOwner};
+use crate::session::recovery_test_fixture::{domain_state, graph, RecoveryFixture};
+pub(in crate::session) use crate::session::recovery_test_fixture::{run_owner, TestRunOwner};
 
 #[derive(Clone)]
 struct EmptyOutput;
@@ -21,6 +22,78 @@ impl OutputSink for EmptyOutput {
     fn snapshot(&self) -> Vec<String> {
         Vec::new()
     }
+}
+
+struct RecoveryWorld {
+    resident: ResidentSession<frunk::HNil, EmptyOutput>,
+    source: Arc<RuntimeLexicalScopeLease>,
+    recipe: super::world_cell_test_support::InputRecipe,
+}
+
+fn recovery_world(
+    lib: SessionLib,
+    effects: &TestEffectSurface,
+    public_owner: Option<RecoveryPublicOwner>,
+) -> RecoveryWorld {
+    use super::world_cell_test_support::{bootstrap_world_for, InputRecipe};
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut resident = ResidentSession::unbootstrapped(
+        frunk::HNil,
+        EmptyOutput,
+        1024 * 1024,
+        Some(lib.with_validation_include(recipe.include.clone())),
+    );
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    if let Some(owner) = public_owner {
+        assert!(matches!(
+            resident
+                .initialize_durable_public_scope(owner, source.scope())
+                .unwrap(),
+            PublicManifestCommit::Durable
+        ));
+    }
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: source.scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    RecoveryWorld {
+        resident,
+        source,
+        recipe,
+    }
+}
+
+fn begin_recovery_execution(world: &mut RecoveryWorld) -> Arc<PrivateExecutionAdmission> {
+    let public = world.source.scope();
+    Arc::new(
+        super::world_cell_test_support::source_action_with_original(
+            &mut world.resident,
+            world.source.original_source().clone(),
+            |resident, _| resident.begin_private_execution(public),
+        )
+        .unwrap(),
+    )
+}
+
+fn complete_recovery_cell(
+    world: &mut RecoveryWorld,
+    execution: &Arc<PrivateExecutionAdmission>,
+    source: &str,
+) -> (Generation, Vec<Generation>, Arc<RuntimeCheckedPrefix>) {
+    super::world_cell_test_support::execute_fixture_cell_for(
+        &mut world.resident,
+        &world.source,
+        &world.recipe,
+        execution,
+        source,
+    )
 }
 struct TestSuccessor {
     run: Arc<TestRunOwner>,
@@ -178,7 +251,7 @@ fn recovered_owner_validation_retains_and_revalidates_the_actual_run_authority()
     tidepool_testing::with_settlement(|settlement| {
         lib.attach_owned_recovery_domain(
             recovery.store.clone(),
-            super::recovery_store::RecoveryDomainId::Root,
+            crate::session::recovery_store::RecoveryDomainId::Root,
             lib.include_dir().canonicalize().unwrap(),
             retained.clone(),
             settlement,
@@ -199,12 +272,19 @@ fn recovered_owner_validation_retains_and_revalidates_the_actual_run_authority()
 
 #[test]
 fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effects() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
     let durable = tempfile::tempdir().unwrap();
     let recovery = RecoveryFixture::create(durable.path());
-    let mut first = PersistentSession::new(Some(library(4401, &recovery, &[])), 1024);
-    let public = first.mint_isolated_scope();
-    first.bind_durable_public_scope(owner(1), public).unwrap();
-    let admission = first.begin_private_execution(public).unwrap();
+    let mut world = recovery_world(
+        library(4401, &recovery, effects.include_paths()),
+        &effects,
+        Some(owner(1)),
+    );
+    let public = world.source.scope();
+    let admission = begin_recovery_execution(&mut world);
+    complete_recovery_cell(&mut world, &admission, "pure ()");
+    let first = &mut world.resident.state;
     let intent = first.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = first
         .restage_execution_publication(owner(1), intent.clone())
@@ -220,13 +300,17 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
         PublicManifestCommit::Durable
     ));
     let before = recovery.state();
-    drop(first);
+    drop(world);
     // Even identical serialized session/scope counters cannot restore this
     // process's admission owner. No heap bindings are fabricated on restart.
     let mut second = PersistentSession::new(Some(library(4401, &recovery, &[])), 1024);
     assert!(second.recover_public_scope(&owner(2)).is_err());
     assert!(second.lib().durable_public_scopes.is_empty());
     let recovered = second.recover_public_scope(&owner(1)).unwrap();
+    assert_eq!(
+        recovered, public,
+        "equal numeric scope IDs do not transfer the runtime owner"
+    );
     let snapshot = second.public_visibility_snapshot_in(recovered).unwrap();
     assert_eq!(snapshot.epoch, 1);
     assert!(snapshot.bindings.is_empty());
@@ -538,11 +622,14 @@ fn capture_earned_context(
     let selection = original.snapshot().graph_selection().unwrap();
     let child = producer.mint_detached_scope(source).unwrap();
     let before = producer.public_visibility_snapshot_in(child).unwrap();
-    let (outcome, work) = super::recovery::observe_context_materialization(|| {
+    let (outcome, work) = crate::session::recovery::observe_context_materialization(|| {
         producer.initialize_durable_public_scope(public_owner.clone(), child)
     });
     assert!(matches!(outcome.unwrap(), PublicManifestCommit::Durable));
-    assert_eq!(work, super::recovery::ContextMaterializationWork::default());
+    assert_eq!(
+        work,
+        crate::session::recovery::ContextMaterializationWork::default()
+    );
     let after = producer.public_visibility_snapshot_in(child).unwrap();
     assert_eq!(after.bindings, before.bindings);
     assert_eq!(after.source_instances, before.source_instances);
@@ -641,15 +728,18 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .unwrap();
     recovery
         .store
-        .inject_fault(super::recovery_store::StoreFault::BeforeCommit);
-    let (refused, work) = super::recovery::observe_context_materialization(|| {
+        .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+    let (refused, work) = crate::session::recovery::observe_context_materialization(|| {
         producer.initialize_durable_public_scope(owner(44), refused_child)
     });
     assert!(matches!(
         refused.unwrap(),
         PublicManifestCommit::Refused { .. }
     ));
-    assert_eq!(work, super::recovery::ContextMaterializationWork::default());
+    assert_eq!(
+        work,
+        crate::session::recovery::ContextMaterializationWork::default()
+    );
     assert_eq!(
         producer.public_visibility_snapshot_in(refused_child),
         Some(before_refusal)
@@ -663,13 +753,13 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
             .unwrap(),
         &exact_before,
     ));
-    let (retried, retry_work) = super::recovery::observe_context_materialization(|| {
+    let (retried, retry_work) = crate::session::recovery::observe_context_materialization(|| {
         producer.initialize_durable_public_scope(owner(44), refused_child)
     });
     assert!(matches!(retried.unwrap(), PublicManifestCommit::Durable));
     assert_eq!(
         retry_work,
-        super::recovery::ContextMaterializationWork::default()
+        crate::session::recovery::ContextMaterializationWork::default()
     );
     assert_eq!(
         graph(producer.lib())
@@ -790,7 +880,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "session::exact_recovery_acceptance_tests::exact_recovery_fresh_process_child",
+            concat!(module_path!(), "::exact_recovery_fresh_process_child"),
             "--ignored",
             "--nocapture",
         ])
@@ -820,19 +910,28 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     let reopened = RecoveryFixture::reopen(run_owner(&durable_root));
     let successor = reopened
         .store
-        .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(2))
+        .read_public_owner(
+            crate::session::recovery_store::RecoveryDomainId::Root,
+            &owner(2),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(successor.epoch, expected.epoch + 1);
     assert!(reopened
         .store
-        .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(1))
+        .read_public_owner(
+            crate::session::recovery_store::RecoveryDomainId::Root,
+            &owner(1)
+        )
         .unwrap()
         .is_none());
     for child in [child_owner, additional_owner] {
         let surface = reopened
             .store
-            .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &child)
+            .read_public_owner(
+                crate::session::recovery_store::RecoveryDomainId::Root,
+                &child,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(surface.epoch, 1);
@@ -1225,8 +1324,8 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
 fn published_recovery_state(
     recovery: &RecoveryFixture,
 ) -> (
-    super::recovery_store::RecoveryDomainState,
-    Vec<super::recovery_store::RecoveryPublicOwnerState>,
+    crate::session::recovery_store::RecoveryDomainState,
+    Vec<crate::session::recovery_store::RecoveryPublicOwnerState>,
 ) {
     (
         recovery.state(),
@@ -1240,8 +1339,8 @@ fn published_recovery_state(
 fn assert_same_content(
     recovery: &RecoveryFixture,
     before: &(
-        super::recovery_store::RecoveryDomainState,
-        Vec<super::recovery_store::RecoveryPublicOwnerState>,
+        crate::session::recovery_store::RecoveryDomainState,
+        Vec<crate::session::recovery_store::RecoveryPublicOwnerState>,
     ),
 ) {
     let (current, owners) = published_recovery_state(recovery);
@@ -1280,7 +1379,7 @@ fn owned_domain_attachment_refuses_foreign_run_and_artifact_directory() {
     assert!(
         tidepool_testing::with_settlement(|settlement| lib.attach_owned_recovery_domain(
             recovery.store.clone(),
-            super::recovery_store::RecoveryDomainId::Root,
+            crate::session::recovery_store::RecoveryDomainId::Root,
             artifact_root.clone(),
             foreign_recovery.owner.clone(),
             settlement,
@@ -1297,7 +1396,7 @@ fn owned_domain_attachment_refuses_foreign_run_and_artifact_directory() {
     assert!(
         tidepool_testing::with_settlement(|settlement| lib.attach_owned_recovery_domain(
             recovery.store.clone(),
-            super::recovery_store::RecoveryDomainId::Root,
+            crate::session::recovery_store::RecoveryDomainId::Root,
             foreign_artifacts.include_dir().canonicalize().unwrap(),
             recovery.owner.clone(),
             settlement,
@@ -1327,7 +1426,7 @@ fn successor_transfer_fences_old_admissions_after_commit_or_commit_error() {
         if uncertain {
             recovery
                 .store
-                .inject_fault(super::recovery_store::StoreFault::CommitError);
+                .inject_fault(crate::session::recovery_store::StoreFault::CommitError);
         }
         let outcome = session
             .transfer_recovered_public_owner(
@@ -1524,7 +1623,10 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     persist_empty_public(&recovery, 4430);
     let previous = recovery
         .store
-        .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(1))
+        .read_public_owner(
+            crate::session::recovery_store::RecoveryDomainId::Root,
+            &owner(1),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(recovery.state().allocation_ceiling, Generation(0));
@@ -1551,14 +1653,20 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     assert_eq!(reopened.state().allocation_ceiling, Generation(0));
     let successor = reopened
         .store
-        .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(2))
+        .read_public_owner(
+            crate::session::recovery_store::RecoveryDomainId::Root,
+            &owner(2),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(successor.surface_root, previous.surface_root);
     assert_eq!(successor.epoch, previous.epoch + 1);
     assert!(reopened
         .store
-        .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(1))
+        .read_public_owner(
+            crate::session::recovery_store::RecoveryDomainId::Root,
+            &owner(1)
+        )
         .unwrap()
         .is_none());
     assert_eq!(
@@ -1659,7 +1767,7 @@ fn durable_child_commit_error_requires_reopen_without_reinitializing_or_reexecut
             .unwrap();
     recovery
         .store
-        .inject_fault(super::recovery_store::StoreFault::CommitError);
+        .inject_fault(crate::session::recovery_store::StoreFault::CommitError);
     assert!(matches!(
         session
             .initialize_durable_public_scope(child_owner.clone(), child)
