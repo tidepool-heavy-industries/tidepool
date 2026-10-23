@@ -26,7 +26,13 @@ use crate::recovery_artifacts::{
 };
 use crate::CompileError;
 
+mod execution_evidence;
 pub(crate) mod original_inputs;
+use execution_evidence::OriginalExecutionDraft;
+pub use execution_evidence::{
+    CompletedOriginalExecution, IncompleteOriginalExecution, OriginalExecutionEvidence,
+    OriginalExecutionSource,
+};
 mod published_source;
 mod source_admission;
 pub(crate) use published_source::PublishedOriginalEndorsement;
@@ -130,48 +136,50 @@ pub struct ExactDeclarationContext {
 /// Requested type evidence and execution custody from one validated compiler output.
 /// The borrowed source cannot outlive its issuing output proof.
 pub struct ValidatedOriginalSource<'a> {
-    types: OriginalTypeSource<'a>,
-    execution: &'a Arc<ExactDeclarationContext>,
+    execution: OriginalExecutionSourceRef<'a>,
 }
 
-enum OriginalTypeSource<'a> {
-    InputsFrom(&'a ExactDeclarationContext),
-    PurePreview,
+enum OriginalExecutionSourceRef<'a> {
+    Original(&'a Arc<OriginalExecutionEvidence>),
+    PurePreview(&'a Arc<crate::activation_preview::OriginalDisplayContext>),
 }
 
 impl<'a> ValidatedOriginalSource<'a> {
-    pub(crate) fn inputs_from(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+    pub(crate) fn inputs_from(execution: &'a Arc<OriginalExecutionEvidence>) -> Self {
         Self {
-            types: OriginalTypeSource::InputsFrom(execution),
-            execution,
+            execution: OriginalExecutionSourceRef::Original(execution),
         }
     }
-
-    pub(crate) fn pure_preview(execution: &'a Arc<ExactDeclarationContext>) -> Self {
+    pub(crate) fn pure_preview(
+        display: &'a Arc<crate::activation_preview::OriginalDisplayContext>,
+    ) -> Self {
         Self {
-            types: OriginalTypeSource::PurePreview,
-            execution,
+            execution: OriginalExecutionSourceRef::PurePreview(display),
         }
     }
-
     pub fn project_type_interfaces(
         &self,
         witnesses: &[&crate::checked_cell::CanonicalInputTypeWitness],
         signatures: &[&crate::checked_cell::ExactCheckedSignature],
     ) -> Result<ExactDeclarationContext, CompileError> {
-        match self.types {
-            OriginalTypeSource::InputsFrom(context) => {
-                context.select_original_type_interfaces(witnesses, signatures)
-            }
-            OriginalTypeSource::PurePreview => Err(failure(
+        match &self.execution {
+            OriginalExecutionSourceRef::Original(evidence) => evidence
+                .context()
+                .select_original_type_interfaces(witnesses, signatures),
+            OriginalExecutionSourceRef::PurePreview(_) => Err(failure(
                 "pure activation preview cannot supply original input type evidence",
             )),
         }
     }
-
-    /// Execution custody remains separate from the interface-only projection.
-    pub fn execution_context(&self) -> Arc<ExactDeclarationContext> {
-        self.execution.clone()
+    pub fn execution(&self) -> OriginalExecutionSource {
+        match &self.execution {
+            OriginalExecutionSourceRef::Original(evidence) => {
+                OriginalExecutionSource::Original(Arc::clone(evidence))
+            }
+            OriginalExecutionSourceRef::PurePreview(display) => {
+                OriginalExecutionSource::PurePreview(Arc::clone(display))
+            }
+        }
     }
 }
 
@@ -389,7 +397,6 @@ struct DeclarationContextFacts {
     source_scope: SourceLexicalScope,
     lexical: crate::exact_context::ExactLexicalSnapshot,
     template_imports: Option<Arc<TemplateImportEvidence>>,
-    original_instance_environment: OriginalInstanceEnvironment,
 }
 
 /// Derived observations belong to this exact immutable context, never its ancestors.
@@ -422,10 +429,6 @@ impl std::fmt::Debug for ExactDeclarationContext {
             )
             .field("lexical", &self.owner.facts.lexical)
             .field("template_imports", &self.owner.facts.template_imports)
-            .field(
-                "original_instance_environment",
-                &self.owner.facts.original_instance_environment,
-            )
             .finish()
     }
 }
@@ -636,15 +639,6 @@ impl PreparedValueSourceSupport {
 
 /// Only the original compiler output proof can establish complete instance
 /// visibility. Type projections and generic declaration contexts have none.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum OriginalInstanceEnvironment {
-    #[default]
-    Unknown,
-    Complete {
-        target: ExactModuleIdentity,
-    },
-    MissingOriginalOwners(Arc<[ExactModuleIdentity]>),
-}
 
 /// Trusted source recipe associated with request-local native type custody.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -781,6 +775,10 @@ impl<'a> PhysicalCohortInputs<'a> {
             stage,
             selection: products.source_selection(),
         })
+    }
+
+    pub(crate) fn compiler_inputs(&self) -> &'a Arc<OriginalCompilerInputs> {
+        self.stage.compiler_inputs()
     }
 
     pub(crate) fn source_selection(
@@ -993,6 +991,7 @@ impl CapturedCompilerStage {
         let output = IssuedOriginalOutput {
             selection: selection.clone(),
             artifacts: inputs.issued_artifacts().clone(),
+            physical_inputs: Arc::clone(&inputs),
             inputs,
         };
         timing.finish(true);
@@ -1011,6 +1010,7 @@ impl CapturedCompilerStage {
 pub(crate) struct IssuedOriginalOutput {
     selection: crate::certified_products::CertifiedSourceSelection,
     artifacts: ArtifactView,
+    physical_inputs: Arc<OriginalCompilerInputs>,
     inputs: Arc<OriginalCompilerInputs>,
 }
 
@@ -1025,6 +1025,12 @@ impl IssuedOriginalOutput {
             selection: products.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
             inputs: Arc::clone(inputs),
+            physical_inputs: Arc::clone(
+                products
+                    .captured_stage()
+                    .ok_or_else(|| failure("item lacks its physical compiler cohort"))?
+                    .compiler_inputs(),
+            ),
         })
     }
 
@@ -1045,8 +1051,13 @@ impl IssuedOriginalOutput {
         Self {
             selection: originals.source_selection().clone(),
             artifacts: inputs.issued_artifacts().clone(),
+            physical_inputs: Arc::clone(&inputs),
             inputs,
         }
+    }
+
+    pub(crate) fn owns_physical_inputs(&self, inputs: &Arc<OriginalCompilerInputs>) -> bool {
+        Arc::ptr_eq(&self.physical_inputs, inputs)
     }
 
     fn produced_source(
@@ -4822,7 +4833,7 @@ impl RequestCompilerInputs {
         // Publication retains TYPE availability. The consuming stage selects
         // its checked inputs; a value is not an enduring instance-scope root.
         facts.compiler_support = support.clone();
-        facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
         let native_selection = self.native_selection.retain_acquisitions(&support)?;
         Ok(Arc::new(Self {
@@ -6081,7 +6092,7 @@ impl RecoveredArtifactInventory {
             compiler_support,
 
             producer: self.producer,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default().replace(lexical)?,
@@ -6147,7 +6158,7 @@ impl RecoveredArtifactInventory {
             source_scope: SourceLexicalScope::default(),
             compiler_support,
             producer: self.producer,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
                 .replace(snapshot.lexical())?,
@@ -6234,7 +6245,7 @@ impl RecoveredArtifactInventory {
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
 
             producer: [0; 32],
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
@@ -6567,7 +6578,7 @@ impl RecoveredArtifactInventory {
             compiler_support,
 
             producer: self.producer,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default().replace(lexical)?,
@@ -8511,9 +8522,10 @@ impl CapturedTemplateImports {
         level = "debug", skip_all, fields(inclusive = true, template_count = templates.len())
     )]
     pub(crate) fn capture(
-        original: &ExactDeclarationContext,
+        execution: &Arc<OriginalExecutionEvidence>,
         templates: &[String],
     ) -> Result<Option<Self>, CompileError> {
+        let original = execution.context();
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.template_imports.capture",
             "canonical_interfaces",
@@ -8548,20 +8560,10 @@ impl CapturedTemplateImports {
             timing.finish(true);
             return Ok(None);
         }
-        if !matches!(
-            original.owner.facts.original_instance_environment,
-            OriginalInstanceEnvironment::Complete { .. }
-        ) {
-            let missing = match original.original_instance_environment() {
-                OriginalInstanceEnvironment::MissingOriginalOwners(owners) => owners.as_ref(),
-                _ => &[],
-            };
+        if let Err(incomplete) = execution.completed() {
+            let missing = incomplete.missing_owners();
             tracing::warn!(
                 target: "tidepool_toolchain::template_imports",
-                environment_unknown = matches!(
-                    original.original_instance_environment(),
-                    OriginalInstanceEnvironment::Unknown
-                ),
                 missing_owner_count = missing.len(),
                 missing_owners = ?missing.iter().take(16).collect::<Vec<_>>(),
                 missing_owners_omitted = missing.len().saturating_sub(16),
@@ -8570,9 +8572,7 @@ impl CapturedTemplateImports {
                 template_roots_omitted = roots.len().saturating_sub(16),
                 "retained template capture lacks complete original instance evidence"
             );
-            return Err(failure(
-                "retained template imports require complete original compiler execution evidence",
-            ));
+            return Err(incomplete.into());
         }
         timing.advance("template_graph");
         let lexical = original
@@ -10054,10 +10054,19 @@ impl<'a> ExactProductAdmission<'a> {
 
     /// Retain the complete original compiler selection before publication.
     /// The output issuer owns every exact native role, including cached support.
-    pub(crate) fn original_execution_context(
+    pub(crate) fn issue_original_execution(
         &self,
-        inputs: &OriginalCompilerInputs,
-    ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
+        issued: &crate::artifacts::AdmittedNativeTargetProducts,
+    ) -> Result<Arc<OriginalExecutionEvidence>, CompileError> {
+        self.prepare_original_execution(issued.output())?
+            .finalize_native_target(issued)
+    }
+
+    fn prepare_original_execution(
+        &self,
+        output: &IssuedOriginalOutput,
+    ) -> Result<OriginalExecutionDraft, CompileError> {
+        let inputs = output.compiler_inputs();
         let support = crate::artifact_inventory::CompilerSourceSupport::from_original_output(
             self.facts.compiler.compiler_source_support(),
             self.facts.context.compiler_source_support(),
@@ -10202,7 +10211,7 @@ impl<'a> ExactProductAdmission<'a> {
                 .collect::<Vec<_>>()
                 .iter(),
         )?;
-        let mut required = imports
+        let required = imports
             .keys()
             .cloned()
             .chain(scaffold.iter().map(|node| node.owner.clone()))
@@ -10213,22 +10222,18 @@ impl<'a> ExactProductAdmission<'a> {
                     .map(|node| node.owner.clone()),
             )
             .collect::<BTreeSet<_>>();
-        if let OriginalInstanceEnvironment::MissingOriginalOwners(owners) =
-            inherited.original_instance_environment()
-        {
-            required.extend(owners.iter().cloned());
-        }
-        let context = ExactDeclarationContext::from_authenticated_execution_support(
+        let mut draft = ExactDeclarationContext::prepare_execution_from_authenticated_support(
             self.facts.producer,
             support,
             lexical,
             self.source.generated_source_owner(),
             &required.into_iter().collect::<Vec<_>>(),
         )?;
-        let context = context
+        draft.context = draft
+            .context
             .rebuild(|facts| facts.source_scope = source_scope)
             .finish()?;
-        Ok(Arc::new(context))
+        Ok(draft)
     }
 }
 
@@ -12000,7 +12005,7 @@ impl WorldProgramSegment {
             facts.lexical = facts.lexical.append_issued([node.clone()])?;
             facts.source_scope = facts.source_scope.append_admitted([node])?;
         }
-        facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
+
         let projected = Arc::new(ExactDeclarationContext::from_facts(facts));
         let advanced = continuation
             .inputs
@@ -13457,7 +13462,7 @@ impl ExactDeclarationContext {
             compiler_support: crate::artifact_inventory::CompilerSourceSupport::empty(),
             producer: [0; 32],
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
         })
     }
@@ -13545,7 +13550,6 @@ impl ExactDeclarationContext {
             facts.compiler_support = support;
             facts.lexical = lexical;
             facts.source_scope = scope;
-            facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         });
         self.finish()
     }
@@ -13563,7 +13567,7 @@ impl ExactDeclarationContext {
             producer: [0; 32],
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
         })
         .extend(authored, joins, lexical)
@@ -13681,7 +13685,6 @@ impl ExactDeclarationContext {
             self = self.rebuild(|facts| {
                 facts.lexical = updated;
                 facts.source_scope = source_scope;
-                facts.original_instance_environment = OriginalInstanceEnvironment::Unknown;
             });
         }
         self.finish()
@@ -13948,13 +13951,13 @@ impl ExactDeclarationContext {
     }
 
     /// Ordinary source output retains its authenticated source surface.
-    pub(crate) fn from_issued_output(
+    fn prepare_issued_output(
         producer: [u8; 32],
         output: &IssuedOriginalOutput,
         admission: &crate::artifacts::SourceEvidenceAdmission<'_>,
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
-    ) -> Result<Self, CompileError> {
+    ) -> Result<OriginalExecutionDraft, CompileError> {
         if admission.exact().is_some() {
             return Err(failure(
                 "exact source scope requires its checked source admission",
@@ -13986,15 +13989,18 @@ impl ExactDeclarationContext {
         let scope = SourceLexicalScope::default().append_admitted(lexical.iter().cloned())?;
         scope.validate_support(&support)?;
         scope.validate_ordinary_observation(evidence, &support)?;
-        let mut context = Self::from_authenticated_execution_support(
+        let mut draft = Self::prepare_execution_from_authenticated_support(
             producer,
             support,
             lexical,
             target,
             required_instance_owners,
         )?;
-        context = context.rebuild(|facts| facts.source_scope = scope);
-        context.finish()
+        draft.context = draft
+            .context
+            .rebuild(|facts| facts.source_scope = scope)
+            .finish()?;
+        Ok(draft)
     }
 
     #[cfg(test)]
@@ -14016,13 +14022,13 @@ impl ExactDeclarationContext {
         )
     }
 
-    pub(crate) fn from_authenticated_execution_support(
+    fn prepare_execution_from_authenticated_support(
         producer: [u8; 32],
         support: crate::artifact_inventory::CompilerSourceSupport,
         lexical: Vec<ExactLexicalNode>,
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
-    ) -> Result<Self, CompileError> {
+    ) -> Result<OriginalExecutionDraft, CompileError> {
         let mut context = Self::empty();
         context = context.admit_producer(producer)?;
         for descriptor in support.artifacts().descriptors() {
@@ -14089,30 +14095,11 @@ impl ExactDeclarationContext {
             let updated = context.owner.facts.lexical.replace(lexical)?;
             context = context.rebuild(|facts| facts.lexical = updated);
         }
-        {
-            let updated = if !missing.is_empty() {
-                OriginalInstanceEnvironment::MissingOriginalOwners(missing.into())
-            } else {
-                OriginalInstanceEnvironment::Complete { target }
-            };
-            context = context.rebuild(|facts| facts.original_instance_environment = updated);
-        }
-        context.finish()
-    }
-
-    pub(crate) fn original_instance_environment(&self) -> &OriginalInstanceEnvironment {
-        &self.owner.facts.original_instance_environment
-    }
-
-    /// The original compiler target owns the orphan import census in its
-    /// authenticated canonical interface. Retention alone does not grant it.
-    pub(crate) fn original_instance_target(&self) -> Result<&ExactModuleIdentity, CompileError> {
-        match &self.owner.facts.original_instance_environment {
-            OriginalInstanceEnvironment::Complete { target } => Ok(target),
-            _ => Err(failure(
-                "activation preview lacks its original target interface",
-            )),
-        }
+        Ok(OriginalExecutionDraft::new(
+            context.finish()?,
+            target,
+            missing,
+        ))
     }
 
     /// Select original type evidence through the issuing compiler roles. Names
@@ -14161,7 +14148,7 @@ impl ExactDeclarationContext {
             compiler_support: selected.type_interfaces_for_owners(vec![owner])?,
             producer,
             lexical: Default::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
         }))
     }
@@ -14248,7 +14235,7 @@ impl ExactDeclarationContext {
             compiler_support: selected.type_interfaces_for_owners(owners.into_iter().collect())?,
             producer,
             lexical: Default::default(),
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
         }))
     }
@@ -14325,10 +14312,10 @@ impl ExactDeclarationContext {
     /// A pure preview observes every instance visible to the original request,
     /// including orphan instances unrelated to the input's nominal type owner.
     /// This compiler-issued context grants graph edges, never authored imports.
-    pub(crate) fn original_preview_interface_graph(
+    fn preview_interface_graph_for_target(
         &self,
+        target: &ExactModuleIdentity,
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
-        let target = self.original_instance_target()?;
         if self
             .lexical_graph()
             .iter()
@@ -14358,8 +14345,12 @@ impl ExactDeclarationContext {
     /// outside that environment, its input type, and every retained dependency.
     /// Selection follows the issued artifact edges, including historical native
     /// captures; a value dependency is never removed just because it is private.
-    pub(crate) fn original_display_projection(&self, input: &Self) -> Result<Self, CompileError> {
-        let graph = self.original_preview_interface_graph()?;
+    fn display_projection_for_target(
+        &self,
+        input: &Self,
+        target: &ExactModuleIdentity,
+    ) -> Result<Self, CompileError> {
+        let graph = self.preview_interface_graph_for_target(target)?;
         let mut context = self.clone().extend_interface_context(input)?;
         let input_ids = input.artifact_view().artifact_ids();
         let excluded_value_roots =
@@ -14391,7 +14382,7 @@ impl ExactDeclarationContext {
             .without_value_roots(&excluded_value_roots)?;
         context = context.rebuild(|facts| facts.compiler_support = updated);
         let context = context.finish()?;
-        if context.original_preview_interface_graph()? != graph {
+        if context.preview_interface_graph_for_target(target)? != graph {
             return Err(failure(
                 "display projection changed original instance evidence",
             ));
@@ -14821,10 +14812,6 @@ impl ExactDeclarationContext {
             .admit_value_interfaces(values)?;
         timing.advance("update_context_facts");
         self = self.rebuild(|facts| facts.compiler_support = updated);
-        {
-            let updated = OriginalInstanceEnvironment::Unknown;
-            self = self.rebuild(|facts| facts.original_instance_environment = updated);
-        }
         timing.advance("finish_context");
         let result = self.finish();
         timing.finish(result.is_ok());
@@ -14925,10 +14912,6 @@ impl ExactDeclarationContext {
                 .lexical
                 .replace(compose_lexical_nodes(&lexical)?)?;
             self = self.rebuild(|facts| facts.lexical = updated);
-        }
-        {
-            let updated = OriginalInstanceEnvironment::Unknown;
-            self = self.rebuild(|facts| facts.original_instance_environment = updated);
         }
         timing.advance("normalize_context");
         let result = self.finish();
@@ -15083,16 +15066,7 @@ impl ExactDeclarationContext {
         native.sort_by_key(|(descriptor, _)| (&descriptor.owner, descriptor.id));
         let mut fields = vec![
             text("TPEXACTCONTEXT"),
-            text(
-                if matches!(
-                    self.owner.facts.original_instance_environment,
-                    OriginalInstanceEnvironment::Unknown
-                ) {
-                    "14"
-                } else {
-                    "15"
-                },
-            ),
+            text("16"),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
                     self.snapshot()
@@ -15206,19 +15180,6 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
         ];
-        match &self.owner.facts.original_instance_environment {
-            OriginalInstanceEnvironment::Unknown => {}
-            OriginalInstanceEnvironment::Complete { target } => fields.push(Value::Array(vec![
-                text("original-instances-complete"),
-                module_value(target),
-            ])),
-            OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
-                fields.push(Value::Array(vec![
-                    text("original-instances-missing"),
-                    Value::Array(owners.iter().map(module_value).collect()),
-                ]))
-            }
-        }
         if let Some(retained) = &self.owner.facts.template_imports {
             fields.push(Value::Array(vec![
                 text("retained-template-imports1"),
@@ -15277,16 +15238,7 @@ impl ExactDeclarationContext {
         native.sort_by_key(|(descriptor, _)| (&descriptor.owner, descriptor.id));
         let mut fields = vec![
             text("TPEXACTCONTEXT"),
-            text(
-                if matches!(
-                    self.owner.facts.original_instance_environment,
-                    OriginalInstanceEnvironment::Unknown
-                ) {
-                    "14"
-                } else {
-                    "15"
-                },
-            ),
+            text("16"),
             text(hex(&sha2::Sha256::digest(
                 serde_json::to_vec(&(
                     self.owner
@@ -15386,19 +15338,6 @@ impl ExactDeclarationContext {
                     .collect(),
             ),
         ];
-        match &self.owner.facts.original_instance_environment {
-            OriginalInstanceEnvironment::Unknown => {}
-            OriginalInstanceEnvironment::Complete { target } => fields.push(Value::Array(vec![
-                text("original-instances-complete"),
-                module_value(target),
-            ])),
-            OriginalInstanceEnvironment::MissingOriginalOwners(owners) => {
-                fields.push(Value::Array(vec![
-                    text("original-instances-missing"),
-                    Value::Array(owners.iter().map(module_value).collect()),
-                ]))
-            }
-        }
         if let Some(retained) = &self.owner.facts.template_imports {
             fields.push(Value::Array(vec![
                 text("retained-template-imports1"),
@@ -20237,7 +20176,7 @@ mod tests {
             compiler_support: issue_fixture_compiler_support(compiler_projection, view).unwrap(),
 
             producer: producer_sha256,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
 
             lexical: crate::exact_context::ExactLexicalSnapshot::default()
@@ -29098,7 +29037,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             source_scope: SourceLexicalScope::default(),
             compiler_support: support,
             producer: [7; 32],
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
             template_imports: None,
             lexical: crate::exact_context::ExactLexicalSnapshot::default(),
         });
@@ -29870,7 +29809,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 .unwrap(),
 
                 producer: [7; 32],
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
                 template_imports: None,
 
                 lexical: crate::exact_context::ExactLexicalSnapshot::default(),
@@ -33195,7 +33134,6 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 compiler_support: issue_fixture_compiler_support(projection, view).unwrap(),
                 lexical: Default::default(),
                 template_imports: None,
-                original_instance_environment: OriginalInstanceEnvironment::Unknown,
             },
         ));
         let computations = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
@@ -34842,7 +34780,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                     .unwrap(),
 
                     producer: [7; 32],
-                    original_instance_environment: OriginalInstanceEnvironment::Unknown,
+
                     template_imports: None,
 
                     lexical: crate::exact_context::ExactLexicalSnapshot::default()

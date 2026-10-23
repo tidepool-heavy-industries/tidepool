@@ -551,25 +551,27 @@ impl ExactDeclarationContext {
             compiler_support,
             source_scope,
             lexical: self.owner.facts.lexical.replace(lexical)?,
-            original_instance_environment: OriginalInstanceEnvironment::Unknown,
             // Checked values retain their own template custody in the caller's
             // context. A source publication carries its selected source graph.
             template_imports: None,
         })
         .finish()
     }
+}
 
+impl CompletedOriginalExecution<'_> {
     pub(crate) fn issue_published_source_original(
         &self,
         revision: &str,
         input_identity: &str,
         root: &ExactModuleIdentity,
     ) -> Result<Arc<PublishedSourceOriginalSelection>, CompileError> {
-        if !self.source_scope().admits(root) {
+        let original = self.context().as_ref();
+        if !original.source_scope().admits(root) {
             return Err(failure("published root lacks an admitted source scope"));
         }
-        let target = self.original_instance_target()?;
-        if !self
+        let target = self.target();
+        if !original
             .owner
             .facts
             .lexical
@@ -580,7 +582,7 @@ impl ExactDeclarationContext {
                 "published root is not a direct import of the completed source target",
             ));
         }
-        let metadata = self.compiler_metadata_snapshot()?;
+        let metadata = original.compiler_metadata_snapshot()?;
         let entry = metadata
             .entries
             .get(root)
@@ -588,7 +590,7 @@ impl ExactDeclarationContext {
         if !matches!(entry.payload, ArtifactPayload::Original(_)) {
             return Err(failure("published root has only interface custody"));
         }
-        let mut context = self.published_context_for_root(root, entry.descriptor.id)?;
+        let mut context = original.published_context_for_root(root, entry.descriptor.id)?;
         if let Some(CompilerInputRole::PublishedSourceOriginal {
             source_revision,
             original_input_identity,
@@ -626,7 +628,9 @@ impl ExactDeclarationContext {
             public_root: root.clone(),
         }))
     }
+}
 
+impl ExactDeclarationContext {
     /// Compose the exact issuer-owned public graph and native closure. Identical
     /// selections are idempotent; a conflicting original or policy refuses.
     /// Carry this context into compiler World construction to preserve the

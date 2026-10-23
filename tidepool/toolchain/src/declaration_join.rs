@@ -20,8 +20,9 @@ pub(crate) use planned::{
 };
 
 pub use crate::declaration_context::{
-    ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
-    MaterializedExactDeclarationContext, RecoveredArtifactAcquisition, RecoveredArtifactInventory,
+    CompletedOriginalExecution, ExactCompileContext, ExactDeclarationContext, ExactSourceWitness,
+    IncompleteOriginalExecution, MaterializedExactDeclarationContext, OriginalExecutionEvidence,
+    OriginalExecutionSource, RecoveredArtifactAcquisition, RecoveredArtifactInventory,
     RecoveryInventoryError, RecoveryPayloadReference, RequestAnnotations, RequestHelperRecipe,
     ValidatedOriginalSource,
 };
