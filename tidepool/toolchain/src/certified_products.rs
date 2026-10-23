@@ -26631,7 +26631,7 @@ pub(crate) mod tests {
                 crate::declaration_context::certified_product_artifact_view_with_validation(
                     producer.sha256(),
                     std::slice::from_ref(current),
-                    &[],
+                    std::slice::from_ref(current.module_interface()),
                     &[],
                     Some(request.compiler_inputs().artifacts()),
                     NativeArtifactDemand::ScopeInterfaces,
@@ -26683,8 +26683,17 @@ pub(crate) mod tests {
                 "dependency is an input, never another current output"
             );
             let inventory = output.inventory();
+            // Physical output supplies its own canonical and Original acquisitions;
+            // retaining those bytes in an inventory does not issue a current row.
+            let produced = output
+                .entries()
+                .into_iter()
+                .filter(|entry| entry.descriptor.owner == current_entry.descriptor.owner)
+                .collect::<Vec<_>>();
+            assert_eq!(produced.len(), 2);
+            assert!(produced.iter().any(|entry| Arc::ptr_eq(entry, &current_entry)));
             let issued = inventory
-                .bind_segment(&output, vec![], &selection, &mut validation)
+                .bind_segment(&output, produced, &selection, &mut validation)
                 .unwrap();
             assert!(!issued
                 .source_selection()
