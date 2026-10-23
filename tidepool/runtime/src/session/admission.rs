@@ -4440,10 +4440,7 @@ impl PersistentSession {
         let compiler_prefix = state
             .snapshot
             .compiler_prefix
-            .append_declaration_with_projection(
-                item.clone(),
-                prepared.projection.receipt().clone(),
-            )?;
+            .append_declaration_with_projection(item.clone(), prepared.projection.composition())?;
         let final_item = item.index() + 1 == prefix.program.items().len();
         let private = prefix.admission.private_execution();
         let mut lifecycle = private.map(|private| private.state.lock());

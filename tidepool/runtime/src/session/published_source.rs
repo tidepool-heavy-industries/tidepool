@@ -47,7 +47,7 @@ impl PersistentSession {
         let base = self.lib().current_exact_context_in(scope);
         let mut context = match base {
             Some(base) => (*base).clone(),
-            None => ExactDeclarationContext::new(&[], &[], Vec::new())?,
+            None => ExactDeclarationContext::empty(),
         };
         for selection in &selections {
             context = context.with_published_source_originals(selection)?;

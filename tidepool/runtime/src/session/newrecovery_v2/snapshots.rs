@@ -1269,9 +1269,7 @@ mod tests {
     }
 
     fn context(candidate: &mut RecoveryGraphCandidate) -> ContextRoot {
-        let context =
-            tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])
-                .unwrap();
+        let context = tidepool_toolchain::declaration_join::ExactDeclarationContext::empty();
         candidate
             .materialize_compiler_context(&context, None)
             .unwrap()
@@ -1279,9 +1277,7 @@ mod tests {
             .clone()
     }
     fn new_scoped_context() -> ScopedCompilerContext {
-        ScopedCompilerContext::new(Arc::new(
-            ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
-        ))
+        ScopedCompilerContext::new(Arc::new(ExactDeclarationContext::empty()))
     }
 
     fn stage_scoped_context(

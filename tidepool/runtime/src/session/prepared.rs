@@ -1153,11 +1153,7 @@ impl SiteTypeEvidence {
         })?;
         let base = match declarations {
             Some(declarations) => (**declarations).clone(),
-            None => tidepool_toolchain::declaration_join::ExactDeclarationContext::new(
-                &[],
-                &[],
-                Vec::new(),
-            )?,
+            None => tidepool_toolchain::declaration_join::ExactDeclarationContext::empty(),
         };
         let declarations = Arc::new(base.extend_interface_context(request.declarations())?);
         Ok(Arc::new(

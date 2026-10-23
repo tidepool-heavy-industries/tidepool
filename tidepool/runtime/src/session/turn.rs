@@ -8966,26 +8966,26 @@ mod tests {
             Some(tidepool_toolchain::checked_cell::CheckedExpressionLift::Pure)
         );
         let prepared_declaration = admission.prepared_declaration(&declaration).unwrap();
-        let receipt = prepared_declaration.projection.receipt().clone();
+        let composition = prepared_declaration.projection.composition();
         let prologue_projection = admission.prepared_declaration(&prologue).unwrap();
         let prefix = prologue.initial_prefix().unwrap();
         assert!(prefix
-            .append_declaration_with_projection(binding.clone(), receipt.clone())
+            .append_declaration_with_projection(binding.clone(), composition)
             .is_err());
         let prefix = prefix
             .append_declaration_with_projection(
                 prologue.clone(),
-                prologue_projection.projection.receipt().clone(),
+                prologue_projection.projection.composition(),
             )
             .unwrap();
         let prefix = prefix
-            .append_declaration_with_projection(declaration.clone(), receipt.clone())
+            .append_declaration_with_projection(declaration.clone(), composition)
             .unwrap();
         assert_eq!(prefix.next_item(), 2);
         assert_eq!(prefix.completed_declaration(0), Some(&prologue));
         assert_eq!(prefix.completed_declaration(1), Some(&declaration));
         assert!(prefix
-            .append_declaration_with_projection(declaration.clone(), receipt)
+            .append_declaration_with_projection(declaration.clone(), composition)
             .is_err());
         let protected = session.begin_cell_program(program).unwrap().unwrap();
         let prologue_reservation = session
