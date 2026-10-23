@@ -230,7 +230,7 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
   , packageImportRoot, validatePackageImportRoot, withPackageRootObservations
   , packageImportRootWithin, validatePackageImportRootWithin)
 import Tidepool.PreparedStg (pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmYieldSites, pmSiteRejections)
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
 import Tidepool.RetainedUnfoldings (scopeRetainedSummaryHscEnv)
 import Tidepool.SessionArtifacts (mkBoundBinders, parseValModule, emitHostBindingInterface)
@@ -3295,7 +3295,7 @@ verifyOriginalOnlyPackageRefusal work original outcomes certified = do
         Left actual | (reason ++ ": " ++ unit ++ ":" ++ name ++ ".") `isPrefixOf` actual -> pure ()
         Left actual -> fail ("original package fault reached another refusal: " ++ actual)
         Right _ -> fail "original-only package demand sealed without its defining interface"
-  (_,location) <- readExactInterface env owner >>= either (fail . show) pure
+  (_,location) <- readPackageInterface env owner >>= either (fail . show) pure
   unless (ml_hi_file location == path)
     (fail "original package fault does not target its actual defining interface")
   (_,witness) <- resolvePackageGlobal env binder >>= either fail pure
@@ -6672,7 +6672,7 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   mutable <- forM (zip [0 :: Int ..] selected) $ \(index, root) -> do
     let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
         path = work </> ("package-proof-root-" ++ show index ++ ".hi")
-    (_, location) <- readExactInterface producer owner >>= either (fail . show) pure
+    (_, location) <- readPackageInterface producer owner >>= either (fail . show) pure
     bytes <- BS.readFile (packagePath root)
     BS.writeFile path bytes
     addModuleToFinder finder (GWIB owner NotBoot) (location { ml_hi_file = path })
@@ -7143,7 +7143,7 @@ verifyPackageAndRetainedWitnesses prepared = withScratch $ \component -> do
     ++ show ((lookupFinished - lookupStarted) `div` 1000000))
   let baseOwner = mkModule (stringToUnit "ghc-internal") (mkModuleName "GHC.Internal.Base")
       implicit = package { symbolOccurrence = "fmap" }
-  (baseInterface, _) <- readExactInterface producer baseOwner >>= either (fail . show) pure
+  (baseInterface, _) <- readPackageInterface producer baseOwner >>= either (fail . show) pure
   unless (any (\(_, declaration) -> mkVarOcc "fmap" `elem` ifaceDeclImplicitBndrs declaration)
       (mi_decls baseInterface)) $
     fail "package catalog fixture does not demand an implicit class binder"
@@ -7252,7 +7252,7 @@ verifyChangedPackageInterface producer identity encodeIn global = withScratch $ 
   let owner = mkModule (stringToUnit (T.unpack (symbolUnit identity)))
         (mkModuleName (T.unpack (symbolModule identity)))
       path = work </> "mutable-package.hi"
-  (_, location) <- readExactInterface producer owner >>= either (fail . show) pure
+  (_, location) <- readPackageInterface producer owner >>= either (fail . show) pure
   original <- BS.readFile (ml_hi_file location)
   BS.writeFile path original
   finder <- initFinderCache
