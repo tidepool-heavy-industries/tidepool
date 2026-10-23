@@ -469,6 +469,47 @@ impl NativeInstallationSources {
 }
 
 impl NativeInstantiationPlan {
+    fn authorize_retained_imports(
+        owner: &AcquiredNativeCode,
+        retained: &mut impl FnMut(
+            &RetainedNativeRequirement,
+        ) -> Result<
+            Arc<super::super::admission::ScopedResolvedValue>,
+            PreparedRuntimeError,
+        >,
+    ) -> Result<(), PreparedRuntimeError> {
+        let definitions = owner.code().body().definitions();
+        if definitions.globals().len() != owner.imports().len() {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners);
+        }
+        for (global_index, (declaration, import)) in definitions
+            .globals()
+            .iter()
+            .zip(owner.imports())
+            .enumerate()
+        {
+            if let AcquiredNativeImport::Retained {
+                requirement: leaf,
+                binding,
+            } = import
+            {
+                let requirement = RetainedNativeRequirement::from_declaration(
+                    declaration,
+                    definitions.signatures(),
+                    leaf,
+                    RetainedNativeOrigin::Acquired {
+                        owner: owner.clone(),
+                        global_index: u32::try_from(global_index)
+                            .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?,
+                        binding,
+                    },
+                )?;
+                retained(&requirement)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(in crate::session) fn target_constructors(
         &self,
     ) -> impl Iterator<Item = &tidepool_repr::execution_schema::ConstructorDecl> + Clone {
@@ -647,6 +688,9 @@ impl NativeInstantiationPlan {
             if let Some(anchor) = anchor {
                 anchors.insert(occurrence, anchor.clone());
             }
+            if anchored {
+                continue;
+            }
             let imports = Self::scoped_slots(
                 occurrence.domain,
                 program.code().body().definitions(),
@@ -662,11 +706,6 @@ impl NativeInstantiationPlan {
                 } => Some((*occurrence, acquired.clone(), *value)),
                 ScopedNativeSlot::Retained { .. } => None,
             }));
-            // Every acquisition is authorized before executable sharing,
-            // including a new acquisition of an already installed image.
-            if anchored {
-                continue;
-            }
             fresh_acquisitions
                 .entry(occurrence)
                 .or_default()
@@ -681,6 +720,22 @@ impl NativeInstantiationPlan {
                     }
                 }
             }
+        }
+        // Existing physical code keeps its installed child destinations.
+        // Authorizing another acquisition must not instantiate those children
+        // again. The actual linked owner still supplies every retained import
+        // obligation, including descendants behind an anchored parent.
+        let bound = fresh_acquisitions
+            .values()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for acquired in self
+            .linked
+            .acquired()
+            .filter(|acquired| !bound.contains(&acquired.occurrence()))
+        {
+            Self::authorize_retained_imports(&acquired, &mut retained)?;
         }
         let requested = programs
             .values()
