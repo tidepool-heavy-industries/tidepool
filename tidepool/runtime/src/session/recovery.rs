@@ -68,7 +68,7 @@ impl DeclarationDomainObservation {
     pub fn declaration_context(
         &self,
         generation: tidepool_repr::Generation,
-    ) -> Result<tidepool_toolchain::exact_context::MaterializedContext, SessionError> {
+    ) -> Result<tidepool_toolchain::exact_context::DecodedContext, SessionError> {
         let path = self.reader.store.path();
         let node = self
             .reader

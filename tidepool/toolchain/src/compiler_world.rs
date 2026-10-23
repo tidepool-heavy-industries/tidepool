@@ -18,7 +18,7 @@ use crate::cache::SourceRootManifest;
 use crate::checked_cell::CheckedValueArtifact;
 use crate::declaration_context::ExactDeclarationContext;
 use crate::exact_context::{
-    MaterializedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
+    DecodedContext, MaterializedMap, Materializer, ReachableBlocks, SemanticRoots,
 };
 use crate::CompileError;
 
@@ -1409,7 +1409,7 @@ pub struct CompilerWorldRestoration {
     inputs: WorldInputResources,
     product: Arc<[u8]>,
     compiler_input_identity: [u8; 32],
-    primary_root: MaterializedContext,
+    primary_root: DecodedContext,
     runtime_context_blocks: ReachableBlocks,
     primary_blocks: ReachableBlocks,
     primary_associations: MaterializedMap<crate::declaration_join::ExactModuleIdentity, cid::Cid>,
@@ -3893,7 +3893,7 @@ impl CompilerWorldOpenInputs {
 impl WorldInputResources {
     fn materialize_primary(
         primary: &crate::declaration_context::WorldPrimaryInputs,
-    ) -> Result<(MaterializedContext, ReachableBlocks), CompileError> {
+    ) -> Result<(DecodedContext, ReachableBlocks), CompileError> {
         let snapshot = primary.context().snapshot();
         let store = fvm_ipld_blockstore::MemoryBlockstore::new();
         let mut materializer = Materializer::new(&store);
