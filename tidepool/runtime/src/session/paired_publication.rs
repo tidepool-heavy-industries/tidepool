@@ -621,22 +621,25 @@ impl PersistentSession {
             .ok_or(super::SessionTransitionReason::ScopeRevoked)?;
         let completed_values = admission.completed_values.lock();
         let (mut write_ids, binding_policy) = match selection {
-            FrozenBindingSelection::Completed => (
-                private_visibility
-                    .bindings
-                    .iter()
-                    .filter_map(|(_, id)| {
-                        self.bindings().get(*id).and_then(|entry| {
-                            (entry.scope == private_scope
-                                && completed_values
-                                    .get(id)
-                                    .is_some_and(|proof| proof.matches(entry)))
-                            .then_some(*id)
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-                super::BindingPublicationPolicy::ExactPromotion,
-            ),
+            FrozenBindingSelection::Completed => {
+                let mut writes = Vec::new();
+                for (_, id) in &private_visibility.bindings {
+                    let entry = self
+                        .bindings()
+                        .get(*id)
+                        .ok_or(super::SessionTransitionReason::RetainedValueUnavailable)?;
+                    if entry.scope != private_scope {
+                        continue;
+                    }
+                    if let Some(proof) = completed_values.get(id) {
+                        if !proof.matches(entry) {
+                            return Err(super::SessionTransitionReason::PreparedValueChanged.into());
+                        }
+                        writes.push(*id);
+                    }
+                }
+                (writes, super::BindingPublicationPolicy::ExactPromotion)
+            }
             FrozenBindingSelection::ActivationInput(input) => {
                 if input.source_lease().scope() != private_scope {
                     return Err(super::SessionTransitionReason::ScopeRevoked.into());
