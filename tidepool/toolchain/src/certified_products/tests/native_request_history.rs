@@ -1440,22 +1440,23 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
         .binding_dependencies()
         .unwrap()
         .contains(&expected_edge));
-    let role_roots = inputs
-        .projection()
-        .roles()
-        .into_iter()
-        .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
-        .collect();
-    let no_demand = inputs
-        .compiler_source_support()
-        .select_support_roots(role_roots)
-        .unwrap();
-    assert!(no_demand.artifacts().selected_native_groups().is_empty());
-    assert!(no_demand.same_selected_acquisitions(inputs.compiler_source_support()));
-    let private = OriginalCompilerInputs::from_issued_support(&no_demand);
+    // The inspected input owns its existing executable graph. Selecting its
+    // Original artifact roots would select their bodies, not clear demand.
+    let carried_support = inputs.compiler_source_support();
+    let input_groups = carried_support.artifacts().selected_native_groups();
+    let group_roots = |support: &ArtifactView| {
+        support
+            .capture_graph_selection()
+            .roots
+            .into_iter()
+            .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
+            .collect::<BTreeSet<_>>()
+    };
+    let input_group_roots = group_roots(carried_support.artifacts());
+    let private = OriginalCompilerInputs::from_issued_support(carried_support);
     let changed_source = private
         .for_program_continuation(
-            no_demand.artifacts(),
+            carried_support.artifacts(),
             execution.admissions(),
             &(source.to_owned() + "-- changed\n"),
         )
@@ -1466,8 +1467,8 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
             if detail == "program support lacks one authenticated generated source owner"),
         "changed source must fail source authentication before graph validation: {changed_source:?}"
     );
-    let graph = no_demand.artifacts().capture_graph_selection();
-    let edges = no_demand.artifacts().binding_dependencies();
+    let graph = carried_support.artifacts().capture_graph_selection();
+    let edges = carried_support.artifacts().binding_dependencies();
     let (graph, edges): (ArtifactGraphSelection, Vec<_>) =
         serde_json::from_slice(&serde_json::to_vec(&(graph, edges)).unwrap()).unwrap();
     // Recovery restores exact graph facts while this history retains the live
@@ -1476,7 +1477,7 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
     let recovered = fresh
         .recover_selection(
             &fresh.empty_view(),
-            no_demand.artifacts().entries(),
+            carried_support.artifacts().entries(),
             &graph,
             &edges,
         )
@@ -1484,21 +1485,25 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
     assert_eq!(recovered.capture_graph_selection(), graph);
     assert_eq!(recovered.binding_dependencies(), edges);
     let scratch = tempfile::tempdir().unwrap();
-    for (index, support) in [no_demand.artifacts(), &recovered].into_iter().enumerate() {
+    for (index, support) in [carried_support.artifacts(), &recovered]
+        .into_iter()
+        .enumerate()
+    {
         let carried = private
             .for_program_continuation(support, execution.admissions(), execution.source())
             .unwrap();
         assert!(carried
             .compiler_source_support()
-            .same_selected_acquisitions(&no_demand));
+            .same_selected_acquisitions(carried_support));
         assert!(carried
             .native_offers()
             .iter()
             .any(|candidate| candidate.same_issuance(&offer)));
-        assert!(carried
-            .issued_artifacts()
-            .selected_native_groups()
-            .is_empty());
+        assert_eq!(
+            carried.issued_artifacts().selected_native_groups(),
+            input_groups
+        );
+        assert_eq!(group_roots(carried.issued_artifacts()), input_group_roots);
         let public = Arc::new(
             ExactDeclarationContext::new(&[], &[], vec![])
                 .unwrap()
@@ -1518,11 +1523,14 @@ fn actual_source_handoff_preserves_sealed_native_dependency() {
                 Some(carried),
             )
             .unwrap();
-        assert!(next
-            .compiler_inputs()
-            .artifacts()
-            .selected_native_groups()
-            .is_empty());
+        assert_eq!(
+            next.compiler_inputs().artifacts().selected_native_groups(),
+            input_groups
+        );
+        assert_eq!(
+            group_roots(next.compiler_inputs().artifacts()),
+            input_group_roots
+        );
         let mut validation = PackageInterfaceValidation::default();
         let selection = CertifiedSourceSelection::from_compiler_inputs(
             next.compiler_inputs(),
