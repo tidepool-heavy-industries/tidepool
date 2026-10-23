@@ -104,7 +104,7 @@ import Tidepool.ExactScope
   , worldSourceRoots, worldSourceFiles, worldOriginalReferenceFor
   , readWorldSuccessorWithOwner, worldSuccessorFacts, worldSuccessorChangedAliases
   , readWorldInputsWithOwner, readWorldStringMap, WorldInputFacts, worldInputsIdentity, worldInputsIdentityBytes, worldInputsCompilerIdentity, worldInputsBindings, worldInputsBindingScope, worldInputsRetainedCharge, worldInputsPrimaryIsEmpty, worldHasSelectedSource, readWorldSourceInputs, WorldSourceClosureEntry(..), readWorldTypeInputs, worldTypeEntryArtifact, worldTypeEntryInterface, worldTypeEntryPackages, hydrateWorldDeclarationInputs, verifiedWorldDeclarationInterface, verifiedWorldDeclarationExports, WorldInputsFailure(..), WorldInputsFailureCause(..) )
-import Tidepool.FatIface (readExactInterface)
+import Tidepool.FatIface (readPackageInterface)
 import Tidepool.CompilerRequest (withBoundCompilerRequest, runBoundWorldQuery, runBoundWorldCellPlan, boundWorldCellPreparation
   , prepareWorldCell, commitPreparedWorldDependencies, preparedCompilationResult
   , preparedCompilationWorldInputs, prepareCompilationOriginals)
@@ -3535,7 +3535,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   root <- case roots of value:_ -> pure value; _ -> fail "publication fixture has no installed package root"
   let owner = mkModule (stringToUnit (packageUnit root)) (mkModuleName (packageModule root))
       alternate = work </> "alternate-package.hi"
-  (_,location) <- readExactInterface environment owner >>= either (fail . show) pure
+  (_,location) <- readPackageInterface environment owner >>= either (fail . show) pure
   copyFile (packagePath root) alternate
   isolatedFinder <- initFinderCache
   addModuleToFinder isolatedFinder (GWIB owner NotBoot) (location {ml_hi_file=alternate})
