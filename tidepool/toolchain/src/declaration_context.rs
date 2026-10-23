@@ -26316,7 +26316,7 @@ mod tests {
         let (graph, originals) =
             crate::execution_source::test_prepared_graph_with_interfaces_for_producer(
                 source.path(),
-                |_| b"iface".to_vec(),
+                |module| format!("{module} interface").into_bytes(),
                 CanonicalProducerIdentity::from_producer_bytes(producer),
             );
         assert_eq!(originals.len(), 3);
@@ -26326,6 +26326,10 @@ mod tests {
                 .map(|original| original.owner.module.as_str())
                 .collect::<Vec<_>>(),
             vec!["A", "B", "Input"]
+        );
+        assert_ne!(
+            originals[0].owner.skinny_iface_sha256, originals[1].owner.skinny_iface_sha256,
+            "module-specific interface bytes keep their owner-specific package sidecars distinct"
         );
         assert!(originals[..2]
             .iter()
