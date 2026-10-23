@@ -96,8 +96,11 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The accepted structural boundaries are integrated through `b4933926fb`;
-see `STATE.md` for exact compile/execution evidence and pending gates. The actual
+The accepted structural boundaries are integrated through `051e6b7e1c`;
+see `STATE.md` for exact compile/execution evidence and pending gates.
+Closeout still includes actual demand versus carried choices and fixture-owner
+contracts. These remain unqualified until the joined behavior and independent
+adversarial reviews settle. The actual
 World history now passes initial capture/declaration/publication, then fails at
 retained-value reuse through an authored native declaration. This is a distinct
 boundary under direct root investigation; G2/G3 remain unqualified.
