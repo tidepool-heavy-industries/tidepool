@@ -254,7 +254,7 @@ import Tidepool.HostBindingAuthority (hostBindingOriginsRequired)
 import Tidepool.TypePolicy (nominalHeadsOfType, stabilizeEffectRows)
 import Tidepool.ExtractUtil (getLibdir, boundedUtf8, trySynchronous)
 import Tidepool.Logging
-  ( LogLevel(LogTrace), LogValue(..), logTrace, loggerEnabled, readLogger )
+  ( LogLevel(LogTrace, LogWarn), LogValue(..), logEvent, logTrace, loggerEnabled, readLogger )
 import Tidepool.QuasiQuoteOccurrences (quasiQuoteOccurrences)
 import Tidepool.Introspection (normalizeInspectionWildcards, withInspectionWork, runWorldInspectionGhc, inspectPublicModuleExports, encodeInspectionResults, InspectionResult(..), StructuredQueryError(..))
 import Tidepool.ExtractRequest
@@ -2526,15 +2526,25 @@ encodeWorldObservationResult root query outcome = frameWorldQuery $ toStrictByte
 
 handleWorldObservationFailure :: WorldObservationQuery -> BS.ByteString -> Ghc BS.ByteString -> Ghc BS.ByteString
 handleWorldObservationFailure query root action = reifyGhc $ \session ->
-  let reject cause = pure (encodeWorldObservationResult root query (Left cause))
+  let reject constructor detail cause = do
+        _ <- trySynchronous $ do
+          logger <- readLogger "compiler.world.observation"
+          logEvent logger LogWarn "query_rejected"
+            [ ("phase", LogText "observation")
+            , ("failure_constructor", LogText constructor)
+            , ("detail", LogText detail)
+            , ("generation", LogText (show (inspectionGeneration (observationProvenance query))))
+            , ("fingerprint", LogText (inspectionFingerprint (observationProvenance query)))
+            ]
+        pure (encodeWorldObservationResult root query (Left cause))
   in (encodeWorldObservationResult root query . Right <$> reflectGhc action session)
-    `catch` (\(failure :: WorldQueryFailure) -> reject failure)
-    `catch` (\(failure :: WorldCellRefusal) -> reject (case failure of
+    `catch` (\(failure :: WorldQueryFailure) -> reject "WorldQueryFailure" (show failure) failure)
+    `catch` (\(failure :: WorldCellRefusal) -> reject "WorldCellRefusal" (show failure) (case failure of
       WorldCellUnavailable -> WorldQueryUnavailable
       WorldCellCorrupt -> WorldQueryCorrupt
       _ -> WorldQueryUnsupported))
-    `catch` (\(_failure :: WorldModulePolicyFailure) -> reject WorldQueryUnsupported)
-    `catch` (\(_failure :: IOException) -> reject WorldQueryUnavailable)
+    `catch` (\(failure :: WorldModulePolicyFailure) -> reject "WorldModulePolicyFailure" (show failure) WorldQueryUnsupported)
+    `catch` (\(failure :: IOException) -> reject "IOException" (show failure) WorldQueryUnavailable)
 
 -- Correlation belongs to the exact request, including refused or absent
 -- queries whose inspection payload cannot supply a successful name receipt.

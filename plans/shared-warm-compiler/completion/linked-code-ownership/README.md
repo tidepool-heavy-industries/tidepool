@@ -81,6 +81,14 @@ fallback. Dormant availability is not executable demand.
 
 ## Current evidence and decisions
 
+The current review checkpoint is [the next-wave brief](next-review.md), based on
+executed code `1c56d053aa`. All nine selected targets compile. Small histories
+expose a shared captured-versus-preprocessed import-coordinate defect, one stale
+typed refusal assertion, an incompletely diagnosed World query refusal, and two
+invalid publication-fixture premises. Checked-value TYPE closure and two genuine
+publication/recovery controls pass. Validation has settled and released its pin;
+the brief names bounded owners, design decisions and exact next evidence.
+
 At joined checkpoint `72c34141e3`, linked-code consumers, independent source
 scope, source-import protocol 4 and Context9 are consolidated. The first joined
 build stopped on a missing `renderDependencyQualifier` import; no histories
