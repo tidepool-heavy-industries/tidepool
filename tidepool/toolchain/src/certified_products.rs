@@ -25316,8 +25316,8 @@ pub(crate) mod tests {
             .find(|group| group.original_ordinal == 17)
             .unwrap();
         assert!(next.binding_dependencies().iter().any(|(source, target, edge)| {
-            *source == crate::artifact_inventory::InventoryNodeKey::Group(future_group)
-                && matches!(target, crate::artifact_inventory::InventoryNodeKey::Artifact(binding)
+            *source == ArtifactBindingNode::Group(future_group)
+                && matches!(target, ArtifactBindingNode::Artifact(binding)
                     if binding.artifact == future.descriptor.id)
                 && matches!(edge, ArtifactDependency::NativeBinding {
                     dependent_ordinal: 17, generation: 11, occurrence, ..
