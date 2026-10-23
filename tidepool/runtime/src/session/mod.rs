@@ -547,6 +547,11 @@ pub enum SessionError {
     UnsupportedPrivateValueReplacement,
     #[error("public binding promotion failed preflight: {0:?}")]
     InvalidPublicBindingPromotion(tidepool_codegen::binding_table::BindingPromotionError),
+    #[error("compiler input witness {revision} cannot retain up to {possible_retirements} pending stub retirements")]
+    CompilerInputWitnessExhausted {
+        revision: u64,
+        possible_retirements: usize,
+    },
     #[error(
         "staged declaration no longer matches this session's live declaration or value environment"
     )]

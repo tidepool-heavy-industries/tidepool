@@ -4794,6 +4794,24 @@ impl PersistentSession {
         self.bindings
             .validate_capture_capacity(entries.len(), observation.is_some())
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        // Observation collection can retire old host stubs. Each retained stub
+        // can advance this separate compiler-input witness at most once.
+        let possible_retirements = if observation.is_some() {
+            self.stub_generations.len()
+        } else {
+            0
+        };
+        if self.compiler_input_revision == 0
+            || self
+                .compiler_input_revision
+                .checked_add(possible_retirements as u64)
+                .is_none()
+        {
+            return Err(SessionError::CompilerInputWitnessExhausted {
+                revision: self.compiler_input_revision,
+                possible_retirements,
+            });
+        }
         let epoch = self.prepare_public_visibility_advance(scope)?;
         Ok(PreparedCheckedBindings {
             scope,
