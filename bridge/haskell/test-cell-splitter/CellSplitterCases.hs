@@ -5,7 +5,7 @@ module CellSplitterCases where
 
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, evaluate, finally, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), SomeException, bracket, displayException, evaluate, finally, fromException, throwIO, try)
 import qualified Data.Map.Strict as Map
 import Control.Monad.IO.Class (liftIO)
 import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
@@ -90,8 +90,10 @@ import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedRequirements, finalizedInterfaceSeals, finalizedValueInterfaceSeals, encodeFinalizedModuleArtifacts )
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.PlannedDeclaration (hydratePlannedDeclarationInventory, transformProgramDeclarationImports)
-import Tidepool.ImportSyntax (captureImportSyntax, matchDriverImports, beginImportRefinement)
-import Tidepool.CheckedCell (nativeParsedModule, unannotatedModule)
+import Tidepool.ImportSyntax
+  ( captureImportSyntax, matchDriverImports, beginImportRefinement
+  , refinedImportOccurrences, importOccurrenceLineage, ImportLineage(..) )
+import Tidepool.CheckedCell (nativeParsedModule, nativeImportSyntax, unannotatedModule)
 import Tidepool.GhcPipeline
 import Tidepool.ExtractRequest
   ( ExactInputsRequest(..), ExactInputsAcquisition(..), EnsureExactInputsOutcome(..), ExactInputsRejection(..)
@@ -697,11 +699,39 @@ programOriginalImportsCompilation = bracket temporary removeDirectoryRecursive $
             [declaration] -> fmap sort (selectedValues declaration) == Just ["b","c"]
             _ -> False)
         (fail "program winner pass widened a restricted alias or lost the direct winner selection")
-      let rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr transformedSource)
+      unless (any ((== SyntheticPrelude) . importOccurrenceLineage)
+          (refinedImportOccurrences (nativeImportSyntax transformed))
+          && any (\declaration -> unLoc (ideclName declaration) == mkModuleName "Prelude"
+            && ideclImplicit (ideclExt declaration)) imports)
+        (fail "actual refined module lost its synthetic implicit Prelude evidence")
+      -- GHC's diagnostic printer emits '(implicit)' for synthetic imports.
+      -- Make only the source-printing copy explicit; the checked AST and its
+      -- occurrence lineage above retain their actual compiler metadata.
+      let explicit :: LImportDecl GhcPs -> LImportDecl GhcPs
+          explicit located@(L location declaration)
+            | unLoc (ideclName declaration) == mkModuleName "Prelude"
+            , ideclImplicit (ideclExt declaration) = L location declaration
+                {ideclExt = (ideclExt declaration) {ideclImplicit = False}}
+            | otherwise = located
+          printable = case transformedSource of
+            L location syntax -> L location syntax {hsmodImports = map explicit (hsmodImports syntax)}
+          rendered = "{-# LANGUAGE PatternSynonyms #-}\n" ++ showSDocUnsafe (ppr printable)
       _ <- evaluate (length rendered)
       pure rendered
-    writeFile target (rendered ++ "\n__legacy = Tidepool.Session.Lib.G1.Old\n")
-    runRequest (pure ()) $ \compiler -> void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing)
+    let positiveSource = rendered ++ "\n__legacy = Tidepool.Session.Lib.G1.Old\n"
+    writeFile target positiveSource
+    positive <- try (runRequest (pure ()) $ \compiler ->
+        void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing))
+      :: IO (Either SourceError ())
+    case positive of
+      Left failure ->
+        -- Retain this small compiler input in the counted test's failure log
+        -- before temporary-directory cleanup; cap unexpected fixture growth.
+        let (prefix,suffix) = splitAt 4096 positiveSource
+            ending = if null suffix then "" else "\n[rendered source truncated at 4096 characters]"
+        in fail ("refined source compiler check failed:\n" ++ displayException failure
+          ++ "\nRendered compiler input:\n" ++ prefix ++ ending)
+      Right () -> pure ()
     writeFile target (rendered ++ "\n__aliasLeak = Restricted.c\n")
     aliasRefusal <- try (runRequest (pure ()) $ \compiler ->
         void (compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing))
