@@ -36,7 +36,6 @@ pub use execution_evidence::{
 mod published_source;
 mod source_admission;
 mod source_dependency;
-pub(crate) use source_dependency::SourceDependencyBasis;
 pub(crate) use published_source::PublishedOriginalEndorsement;
 pub use published_source::PublishedSourceOriginalSelection;
 use source_admission::ReceiptSourceClaims;
@@ -46,6 +45,7 @@ pub(crate) use source_admission::{
 pub use source_admission::{
     SourceAdmissionBoundary, SourceAdmissionFailure, SourceAdmissionRefusal, SourceLexicalClaim,
 };
+pub(crate) use source_dependency::SourceDependencyBasis;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExactImportWitnessRefusal {
@@ -3479,16 +3479,29 @@ impl DemandCertifiedGroups {
     ) -> Result<Vec<RetainedValueEvidence>, CompileError> {
         // The exact graph is traversed once for the whole reached use.
         let issued = self.retained_occurrences_for_use(reference)?;
-        NativeDemandBudget(Some(&self.operation)).reserve::<RetainedValueEvidence>(requested.len())?;
-        requested.iter().map(|occurrence| {
-            if issued.binary_search(occurrence).is_err() {
-                return Err(failure("native terminal exceeds its issued exact use"));
-            }
-            let entry = self.basis.source_support.artifacts()
-                .observed_payload(&occurrence.binding.artifact)
-                .ok_or_else(|| failure("selected native retained occurrence lost its immutable value payload"))?;
-            Ok(RetainedValueEvidence { entry: Arc::clone(entry) })
-        }).collect()
+        NativeDemandBudget(Some(&self.operation))
+            .reserve::<RetainedValueEvidence>(requested.len())?;
+        requested
+            .iter()
+            .map(|occurrence| {
+                if issued.binary_search(occurrence).is_err() {
+                    return Err(failure("native terminal exceeds its issued exact use"));
+                }
+                let entry = self
+                    .basis
+                    .source_support
+                    .artifacts()
+                    .observed_payload(&occurrence.binding.artifact)
+                    .ok_or_else(|| {
+                        failure(
+                            "selected native retained occurrence lost its immutable value payload",
+                        )
+                    })?;
+                Ok(RetainedValueEvidence {
+                    entry: Arc::clone(entry),
+                })
+            })
+            .collect()
     }
 
     /// Follow roots recorded by the original choice issuer and their exact
@@ -24484,13 +24497,20 @@ mod tests {
             crate::certified_products::NativeDemandPacket::decode(&bytes, &validation.inventory)
                 .unwrap();
         let mut source_packet: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let Value::Array(fields) = &mut source_packet else { unreachable!() };
+        let Value::Array(fields) = &mut source_packet else {
+            unreachable!()
+        };
         fields[1] = Value::Integer(0u64.into());
         let mut source_bytes = Vec::new();
         ciborium::ser::into_writer(&source_packet, &mut source_bytes).unwrap();
-        assert!(crate::certified_products::NativeDemandPacket::decode(
-            &source_bytes, &validation.inventory).is_err(),
-            "a source observation cannot become an executable acquisition query");
+        assert!(
+            crate::certified_products::NativeDemandPacket::decode(
+                &source_bytes,
+                &validation.inventory
+            )
+            .is_err(),
+            "a source observation cannot become an executable acquisition query"
+        );
         let acquired = cold
             .resolve_native_demand(&packet, &mut validation)
             .unwrap();

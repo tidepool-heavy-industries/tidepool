@@ -205,9 +205,7 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
     let public = first.mint_isolated_scope();
     first.bind_durable_public_scope(owner(1), public).unwrap();
     let admission = first.begin_private_execution(public).unwrap();
-    let intent = first
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = first.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = first
         .restage_execution_publication(owner(1), intent.clone())
         .unwrap()
@@ -235,7 +233,9 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
     assert!(snapshot.source_instances.is_empty());
     assert!(matches!(
         second.freeze_private_execution(&admission),
-        Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
+        Err(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::OwnerChanged
+        ))
     ));
     assert!(matches!(
         second.restage_execution_publication(owner(1), intent),
@@ -504,9 +504,7 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         session.public_visibility_snapshot_in(private).unwrap(),
         before
     );
-    let intent = session
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let CertifiedDeclarationPublication::Accepted(accepted) =
         tidepool_testing::with_settlement(|settlement| {
             session
@@ -690,9 +688,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         producer.retract_in(admission.private_scope(), "answer", settlement)
     })
     .unwrap();
-    let intent = producer
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = producer.freeze_private_execution(&admission).unwrap();
     let CertifiedDeclarationPublication::Accepted(accepted) =
         tidepool_testing::with_settlement(|settlement| {
             producer
@@ -1326,9 +1322,7 @@ fn successor_transfer_fences_old_admissions_after_commit_or_commit_error() {
         let mut session = PersistentSession::new(Some(library(4421, &recovery, &[])), 1024);
         let target = session.mint_scope(ScopeId::ROOT).unwrap();
         let old = session.begin_private_execution(target).unwrap();
-        let old_intent = session
-            .freeze_private_execution(&old)
-            .unwrap();
+        let old_intent = session.freeze_private_execution(&old).unwrap();
         let before = session.public_visibility_snapshot_in(target).unwrap();
         if uncertain {
             recovery
@@ -1371,7 +1365,9 @@ fn successor_transfer_fences_old_admissions_after_commit_or_commit_error() {
             assert!(matches!(outcome, PublicManifestCommit::Durable));
             assert!(matches!(
                 session.freeze_private_execution(&old),
-                Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
+                Err(SessionError::TransitionRefused(
+                    crate::session::SessionTransitionReason::OwnerChanged
+                ))
             ));
             assert!(matches!(
                 session.restage_execution_publication(owner(2), old_intent),

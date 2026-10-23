@@ -2307,22 +2307,26 @@ pub(in crate::session) mod tests {
         // A reserved node can settle without changing the generation counter.
         let generation = session.lib().generation();
         let revision = session.lib().log.publication_revision();
-        session.lib_mut().log.commit_reserved_authored(
-            unrelated,
-            DeclTurn {
-                normalized: DeclarationSource {
-                    prologue: Default::default(),
-                    body: String::new()
+        session
+            .lib_mut()
+            .log
+            .commit_reserved_authored(
+                unrelated,
+                DeclTurn {
+                    normalized: DeclarationSource {
+                        prologue: Default::default(),
+                        body: String::new(),
+                    },
+                    external_imports: SourceImports::new(),
+                    sources: Vec::new(),
+                    workbench_imports: SourceImports::new(),
+                    items: Vec::new(),
+                    value_types: BTreeMap::new(),
+                    retracts: Vec::new(),
+                    parent: None,
                 },
-                external_imports: SourceImports::new(),
-                sources: Vec::new(),
-                workbench_imports: SourceImports::new(),
-                items: Vec::new(),
-                value_types: BTreeMap::new(),
-                retracts: Vec::new(),
-                parent: None,
-            }
-        ).unwrap();
+            )
+            .unwrap();
         assert_eq!(session.lib().generation(), generation);
         assert_ne!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();

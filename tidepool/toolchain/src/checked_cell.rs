@@ -4130,9 +4130,12 @@ impl ExactCheckedItem {
     ) -> Option<&Arc<crate::compiler_world::SealedStageDependencies>> {
         match &self.cell.specification {
             CheckedCellSpecification::World { program, .. } => Some(
-                program.item(self.index)
+                program
+                    .item(self.index)
                     .expect("exact checked World item belongs to its program")
-                    .proof().stage().dependencies(),
+                    .proof()
+                    .stage()
+                    .dependencies(),
             ),
             CheckedCellSpecification::Finite(_) => None,
         }

@@ -12149,9 +12149,7 @@ mod authored_publication_tests {
             )
         })
         .unwrap();
-        let intent = producer
-            .freeze_private_execution(&admission)
-            .unwrap();
+        let intent = producer.freeze_private_execution(&admission).unwrap();
         let CertifiedDeclarationPublication::Accepted(accepted) =
             tidepool_testing::with_settlement(|settlement| {
                 producer

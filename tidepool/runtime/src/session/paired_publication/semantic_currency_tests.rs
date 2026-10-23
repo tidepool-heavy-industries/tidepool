@@ -172,9 +172,7 @@ fn semantic_change_between_metadata_retry_and_refresh_retains_execution_intent()
     let admission = session
         .begin_durable_private_execution(&owner, public)
         .unwrap();
-    let intent = session
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = session
         .restage_execution_publication(owner, intent.clone())
         .unwrap()
@@ -238,9 +236,7 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public = session.mint_scope(ScopeId::ROOT).unwrap();
     let admission = session.begin_private_execution(public).unwrap();
-    let intent = session
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let ExecutionPublication::Bindings(base) = session
         .restage_ephemeral_execution_publication(intent.clone())
         .unwrap()
@@ -259,7 +255,9 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     *session.lib_mut() = library;
     assert!(matches!(
         session.freeze_private_execution(&before_first_freeze),
-        Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
+        Err(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::OwnerChanged
+        ))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),
@@ -286,7 +284,9 @@ fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_int
     let _removed_library = session.take_lib().unwrap();
     assert!(matches!(
         session.freeze_private_execution(&before_first_freeze),
-        Err(SessionError::TransitionRefused(crate::session::SessionTransitionReason::OwnerChanged))
+        Err(SessionError::TransitionRefused(
+            crate::session::SessionTransitionReason::OwnerChanged
+        ))
     ));
     assert!(matches!(
         session.compile_view_for_execution(&before_first_freeze),

@@ -90,9 +90,7 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     );
     let addition_id = private_only.id;
     session.bind_in(private, private_only).unwrap();
-    let intent = session
-        .freeze_private_execution(&admission)
-        .unwrap();
+    let intent = session.freeze_private_execution(&admission).unwrap();
     let stage = |session: &mut PersistentSession| {
         let publication = match persistence {
             Persistence::Durable => session
@@ -294,9 +292,7 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     let id_a = value_a.id;
     session.bind_in(a.private_scope(), value_a).unwrap();
     session.save_observation(id_a, &[]);
-    let intent_a = session
-        .freeze_private_execution(&a)
-        .unwrap();
+    let intent_a = session.freeze_private_execution(&a).unwrap();
     let before_a = session
         .public_visibility_snapshot_in(a.private_scope())
         .unwrap();
@@ -319,9 +315,7 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     let id_b = value_b.id;
     session.bind_in(b.private_scope(), value_b).unwrap();
     session.save_observation(id_b, &[]);
-    let intent_b = session
-        .freeze_private_execution(&b)
-        .unwrap();
+    let intent_b = session.freeze_private_execution(&b).unwrap();
     let ExecutionPublication::Bindings(base_b) = session
         .restage_execution_publication(owner_b, intent_b)
         .unwrap()
@@ -372,8 +366,6 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     );
     assert!(Arc::ptr_eq(
         &intent_a,
-        &session
-            .freeze_private_execution(&a)
-            .unwrap()
+        &session.freeze_private_execution(&a).unwrap()
     ));
 }
