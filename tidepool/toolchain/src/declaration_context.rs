@@ -6598,11 +6598,20 @@ pub(crate) struct RecoveryInspectionInputs(CertifiedInterfaceInputs);
 /// Owner-issued interface observation; native bindings remain in its context.
 pub struct DeclarationJoinInputs(CertifiedInterfaceInputs);
 pub struct PublicationJoinInputs {
-    pub(crate) interfaces: DeclarationJoinInputs,
-    pub(crate) surface: crate::declaration_join::AdmittedDeclarationSurface,
+    interfaces: DeclarationJoinInputs,
+    surface: crate::declaration_join::AdmittedDeclarationSurface,
 }
 
 impl PublicationJoinInputs {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        DeclarationJoinInputs,
+        crate::declaration_join::AdmittedDeclarationSurface,
+    ) {
+        (self.interfaces, self.surface)
+    }
+
     pub fn interface(&self, owner: &ExactModuleIdentity) -> Option<&ExactIfaceArtifact> {
         self.interfaces.interface(owner)
     }

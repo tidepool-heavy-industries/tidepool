@@ -16485,7 +16485,6 @@ mod tests {
             if program {
                 context.extend_program_value_interface(value)
             } else {
-                let lexical = context.lexical_graph().to_vec();
                 context.extend_with_value_interfaces(&[value])
             }
         };

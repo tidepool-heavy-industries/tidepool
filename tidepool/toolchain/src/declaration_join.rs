@@ -1403,13 +1403,14 @@ pub fn certify_publication_join(
     session_root: &Path,
     settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedPublicationJoin, CompileError> {
-    match certify_declaration_join(spec, inputs.interfaces, includes, session_root, settlement)? {
+    let (interfaces, surface) = inputs.into_parts();
+    match certify_declaration_join(spec, interfaces, includes, session_root, settlement)? {
         CertifiedDeclarationJoin::Accepted(join) => {
             let join = Arc::new(join);
             let context = join
                 .context
                 .clone()
-                .compose_joined_publication(&join, &inputs.surface)?;
+                .compose_joined_publication(&join, &surface)?;
             Ok(CertifiedPublicationJoin::Accepted(PublicationComposition {
                 join,
                 context: Arc::new(context),
