@@ -1343,6 +1343,8 @@ def runtime_world_publication_test_cases(binary):
         "paired_reused_projection_keeps_nominal_owner_and_atomic_arbitration",
         "paired_reused_projection_restores_detached_summary_under_original_interface",
         "paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix",
+        "paired_ephemeral_completion_order_rebases_without_replaying_native_writes",
+        "paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode",
     )]
     tests.append("session::resident::world_cell_test_support::source_hidden_join::"
                  "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")

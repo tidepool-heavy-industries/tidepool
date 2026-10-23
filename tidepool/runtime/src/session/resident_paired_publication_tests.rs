@@ -1,7 +1,8 @@
 //! Atomic publication histories through the actual resident World pipeline.
 
 use super::world_cell_test_support::{
-    bootstrap_world_for, execute_fixture_cell_for, source_action_with_original, InputRecipe,
+    bootstrap_world_for, execute_fixture_cell_for, plan_fixture_cell_for,
+    source_action_with_original, InputRecipe,
 };
 use super::*;
 use crate::session::paired_publication::{
@@ -78,6 +79,34 @@ fn restage_execution(
         resident
             .restage_execution_publication(owner, intent)
             .unwrap()
+    })
+}
+
+fn begin_ephemeral_execution(
+    resident: &mut PublicationSession,
+    source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+) -> Arc<crate::session::PrivateExecutionAdmission> {
+    Arc::new(
+        source_action_with_original(resident, source.original_source().clone(), |resident, _| {
+            resident.begin_ephemeral_private_execution(source.scope())
+        })
+        .unwrap(),
+    )
+}
+
+fn ephemeral_binding_stage(
+    resident: &mut PublicationSession,
+    source: &Arc<crate::session::RuntimeLexicalScopeLease>,
+    intent: Arc<FrozenWorldExecution>,
+) -> crate::session::StagedPublicManifest {
+    source_action_with_original(resident, source.original_source().clone(), |resident, _| {
+        let ExecutionPublication::Bindings(base) = resident
+            .restage_ephemeral_execution_publication(intent)
+            .unwrap()
+        else {
+            panic!("actual checked execution contains no declaration writes");
+        };
+        base.stage().unwrap()
     })
 }
 
@@ -1559,4 +1588,232 @@ fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_su
         .unwrap(),
         CertifiedDeclarationPublication::Rejected(_)
     ));
+}
+
+#[test]
+fn paired_ephemeral_completion_order_rebases_without_replaying_native_writes() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let lib = SessionLib::open(
+        SessionId(4480),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let a = begin_ephemeral_execution(&mut resident, &source);
+    let b = begin_ephemeral_execution(&mut resident, &source);
+    let (_, _, a_prefix) =
+        execute_fixture_cell_for(&mut resident, &source, &recipe, &a, "let x = (701 :: Int)");
+    let a_id = binding_id(&resident, a.private_scope(), "x");
+    let (_, _, b_prefix) =
+        execute_fixture_cell_for(&mut resident, &source, &recipe, &b, "let x = (702 :: Int)");
+    let b_id = binding_id(&resident, b.private_scope(), "x");
+    let completed_a = a_prefix.snapshot();
+    let completed_b = b_prefix.snapshot();
+    let a_intent = resident.freeze_private_execution(&a).unwrap();
+    let b_intent = resident.freeze_private_execution(&b).unwrap();
+    let before_publication = tidepool_extract_cmd::extract_spawn_count();
+    let stale_a = ephemeral_binding_stage(&mut resident, &source, a_intent.clone());
+    let b_stage = ephemeral_binding_stage(&mut resident, &source, b_intent);
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(b_stage, &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Ephemeral
+    ));
+    assert_eq!(binding_id(&resident, public, "x"), b_id);
+    let decision = PublicationDecision::new();
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(stale_a, &decision)
+            .unwrap(),
+        crate::session::PublicationAttempt::Rebase(_)
+    ));
+    assert_eq!(decision.phase(), PublicationPhase::Running);
+    let current_a = ephemeral_binding_stage(&mut resident, &source, a_intent.clone());
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(current_a, &decision)
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Ephemeral
+    ));
+    assert_eq!(decision.phase(), PublicationPhase::Published);
+    assert_eq!(binding_id(&resident, public, "x"), a_id);
+    assert!(resident.state.bindings().get(b_id).is_some());
+    assert!(resident.state.lib().durable_graph.is_none());
+    assert!(Arc::ptr_eq(
+        &resident.freeze_private_execution(&a).unwrap(),
+        &a_intent
+    ));
+    assert!(Arc::ptr_eq(&a_prefix.snapshot(), &completed_a));
+    assert!(Arc::ptr_eq(&b_prefix.snapshot(), &completed_b));
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        before_publication
+    );
+}
+
+#[test]
+fn paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(
+        SessionId(4481),
+        root.path().join("source"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let admission = begin_ephemeral_execution(&mut resident, &source);
+    execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &admission,
+        "let local = (703 :: Int)",
+    );
+    let id = binding_id(&resident, admission.private_scope(), "local");
+    let before_freeze = resident.state.lib().generation();
+    let before_freeze_revision = resident.state.lib().log.publication_revision();
+    let intent = resident.freeze_private_execution(&admission).unwrap();
+    assert_eq!(resident.state.lib().generation(), before_freeze);
+    assert_eq!(
+        resident.state.lib().log.publication_revision(),
+        before_freeze_revision
+    );
+    let before = recovery.state();
+    let cancelled = PublicationDecision::new();
+    cancelled.request_cancellation();
+    let stage = ephemeral_binding_stage(&mut resident, &source, intent.clone());
+    assert_eq!(resident.state.lib().generation(), before_freeze);
+    assert_eq!(
+        resident.state.lib().log.publication_revision(),
+        before_freeze_revision
+    );
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(stage, &cancelled)
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Cancelled
+    ));
+    assert!(!resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings
+        .iter()
+        .any(|(name, _)| name == "local"));
+
+    // Reserve the unrelated identity through its actual World plan. Its checked
+    // adoption changes causal facts after the ticket without allocating again.
+    let unrelated = begin_ephemeral_execution(&mut resident, &source);
+    let planned = plan_fixture_cell_for(
+        &mut resident,
+        &source,
+        &recipe,
+        "unrelated :: Int\nunrelated = 704",
+        unrelated.clone(),
+    )
+    .unwrap();
+    let original = source.original_source().clone();
+    let settled = original
+        .with_source_compiler_transaction(
+            tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+            crate::CompilerTransactionCancellation::new(),
+            None,
+            |_| {},
+            |owner, report| turn::prepare_cell_program_admitted(owner, planned, report),
+        )
+        .unwrap();
+    let (checked, program) = turn::finish_cell_program_admitted(settled).unwrap();
+    assert_eq!(checked.items.len(), 1);
+    let prefix = resident.begin_cell_program(program).unwrap().unwrap();
+    let stale = ephemeral_binding_stage(&mut resident, &source, intent.clone());
+    let generation = resident.state.lib().generation();
+    let revision = resident.state.lib().log.publication_revision();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: unrelated.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    source_action_with_original(&mut resident, original, |resident, _| {
+        let reservation = resident
+            .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+            .unwrap();
+        resident.adopt_checked_declaration(reservation).unwrap();
+    });
+    assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
+    assert_eq!(resident.state.lib().generation(), generation);
+    assert_ne!(resident.state.lib().log.publication_revision(), revision);
+    let decision = PublicationDecision::new();
+    assert!(matches!(
+        resident.attempt_public_manifest(stale, &decision).unwrap(),
+        crate::session::PublicationAttempt::Settled(PublicManifestCommit::Ephemeral)
+    ));
+    assert_eq!(decision.phase(), PublicationPhase::Published);
+    assert_eq!(recovery.state(), before);
+    assert_eq!(resident.state.lib().generation(), generation);
+    assert_eq!(binding_id(&resident, public, "local"), id);
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/ephemeral-mode").unwrap(),
+        1,
+    )
+    .unwrap();
+    resident
+        .bind_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    assert!(source_action_with_original(
+        &mut resident,
+        source.original_source().clone(),
+        |resident, _| { resident.restage_execution_publication(owner, intent) }
+    )
+    .is_err());
+    assert!(source_action_with_original(
+        &mut resident,
+        source.original_source().clone(),
+        |resident, _| { resident.begin_ephemeral_private_execution(public) }
+    )
+    .is_err());
+    assert_eq!(recovery.state(), before);
 }
