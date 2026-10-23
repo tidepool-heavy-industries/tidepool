@@ -275,7 +275,7 @@ fn replay(count: usize, explicit_dependency: bool, tail: &[Operation]) {
     // Completed availability retains immutable proof custody, not live views.
     assert_eq!(inventory.node_count(), 0);
     assert!(completion.upgrade().is_some());
-    assert!(selection.permits_native_group(authored_id, authored.owner(), ORDINALS[0]));
+    assert!(selection.has_native_group_support(authored_id, authored.owner(), ORDINALS[0]));
     drop(selection);
     assert!(completion.upgrade().is_none());
     assert_eq!(groups(&last), expected_groups);
