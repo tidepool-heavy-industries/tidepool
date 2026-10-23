@@ -1277,8 +1277,8 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             std::process::id()
         );
     }
-    // Recovered compiler facts become executable only after the actual source
-    // owner issues a World over the recovered selection.
+    // Notebook cells also require the actual source owner's World over the
+    // recovered selection exercised by the immutable native probe above.
     let recipe = super::world_cell_test_support::InputRecipe::capture(
         effects.preamble().to_owned(),
         effects.row().to_owned(),
@@ -1726,16 +1726,17 @@ fn initial_public_owner_survives_restart_before_first_cell() {
 
 #[test]
 fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
     let durable = tempfile::tempdir().unwrap();
     let recovery = RecoveryFixture::create(durable.path());
-    let mut session = PersistentSession::new(Some(library(4407, &recovery, &[])), 1024);
-    let parent = session.mint_isolated_scope();
-    assert!(matches!(
-        session
-            .initialize_durable_public_scope(owner(1), parent)
-            .unwrap(),
-        PublicManifestCommit::Durable
-    ));
+    let mut world = recovery_world(
+        library(4407, &recovery, effects.include_paths()),
+        &effects,
+        Some(owner(1)),
+    );
+    let parent = world.source.scope();
+    let session = &mut world.resident.state;
     let before_parent = session.public_visibility_snapshot_in(parent).unwrap();
     let parent_surface = recovery
         .store
@@ -1751,9 +1752,14 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
     session
         .bind_durable_public_scope(child_owner.clone(), child)
         .unwrap();
-    assert!(session
-        .begin_durable_private_execution(&child_owner, child)
-        .is_err());
+    assert!(matches!(
+        session.begin_durable_private_execution(&child_owner, child),
+        Err(SessionError::InvalidDurablePublicAdmission {
+            reason: DurablePublicAdmissionFailure::MissingSurface,
+            ..
+        })
+    ));
+
     let before = recovery.state();
     assert!(session
         .initialize_durable_public_scope(child_owner.clone(), parent)
@@ -1777,15 +1783,16 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         Some(parent_surface)
     );
     assert!(session.lib().tips.contains_key(&child));
-    assert_eq!(
-        session
-            .begin_durable_private_execution(&child_owner, child)
-            .unwrap()
-            .admitted_public()
-            .unwrap()
-            .epoch,
-        1
+    let expected = session.public_visibility_snapshot_in(child).unwrap();
+    assert_eq!(expected.epoch, 1);
+    let _child_source = assert_durable_recovery_admission(
+        &mut world.resident,
+        &world.recipe,
+        child,
+        &child_owner,
+        &expected,
     );
+    let session = &mut world.resident.state;
     let initialized = recovery.state();
     assert!(matches!(
         session
@@ -1798,13 +1805,17 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
 
 #[test]
 fn durable_child_commit_error_requires_reopen_without_reinitializing_or_reexecuting() {
+    tidepool_testing::eval_harness::require_extract();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
     let durable = tempfile::tempdir().unwrap();
     let recovery = RecoveryFixture::create(durable.path());
-    let mut session = PersistentSession::new(Some(library(4408, &recovery, &[])), 1024);
-    let parent = session.mint_isolated_scope();
-    session
-        .initialize_durable_public_scope(owner(1), parent)
-        .unwrap();
+    let mut world = recovery_world(
+        library(4408, &recovery, effects.include_paths()),
+        &effects,
+        Some(owner(1)),
+    );
+    let parent = world.source.scope();
+    let session = &mut world.resident.state;
     let parent_before = session.public_visibility_snapshot_in(parent).unwrap();
     let child = session.mint_detached_scope(parent).unwrap();
     let child_before = session.public_visibility_snapshot_in(child).unwrap();
@@ -1836,27 +1847,35 @@ fn durable_child_commit_error_requires_reopen_without_reinitializing_or_reexecut
         .is_err());
     let reopened = RecoveryFixture::reopen(recovery.owner.clone());
     let durable_before = reopened.state();
-    let mut recovered = PersistentSession::new(Some(library(4409, &reopened, &[])), 1024);
+    let mut recovered = PersistentSession::new(
+        Some(library(4409, &reopened, effects.include_paths())),
+        1024,
+    );
     let parent = recovered.recover_public_scope(&owner(1)).unwrap();
     let child = recovered.recover_public_scope(&child_owner).unwrap();
-    assert_eq!(
-        recovered
-            .begin_durable_private_execution(&owner(1), parent)
-            .unwrap()
-            .admitted_public()
-            .unwrap()
-            .epoch,
-        1
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, EmptyOutput, recovered);
+    let expected_parent = resident.public_visibility_snapshot_in(parent).unwrap();
+    let expected_child = resident.public_visibility_snapshot_in(child).unwrap();
+    assert_eq!(expected_parent.epoch, 1);
+    assert_eq!(expected_child.epoch, 1);
+    let _parent_source = assert_durable_recovery_admission(
+        &mut resident,
+        &world.recipe,
+        parent,
+        &owner(1),
+        &expected_parent,
     );
-    assert_eq!(
-        recovered
-            .begin_durable_private_execution(&child_owner, child)
-            .unwrap()
-            .admitted_public()
-            .unwrap()
-            .epoch,
-        1
+    let _child_source = assert_durable_recovery_admission(
+        &mut resident,
+        &world.recipe,
+        child,
+        &child_owner,
+        &expected_child,
     );
     assert_eq!(reopened.state(), durable_before);
-    assert!(session.begin_private_execution(ScopeId::ROOT).is_err());
+    assert!(world
+        .resident
+        .begin_durable_private_execution(&owner(1), world.source.scope())
+        .is_err());
 }
