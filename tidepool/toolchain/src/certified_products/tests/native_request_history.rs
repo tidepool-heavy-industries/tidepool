@@ -5,8 +5,8 @@ use crate::artifact_inventory::{
     CanonicalProducerIdentity, CompilerInputProjection, NativeGroupKey,
 };
 use crate::declaration_context::{
-    generated_source_admission_fixture, issue_fixture_compiler_support, ExactCompilationRequest,
-    ExactCompileContext, ExactDeclarationContext, OriginalCompilerInputs,
+    issue_fixture_compiler_support, ExactCompilationRequest, ExactCompileContext,
+    ExactDeclarationContext, OriginalCompilerInputs,
 };
 use crate::recovery_artifacts::CertifiedRecoveryProduct;
 use crate::CompileError;
@@ -146,13 +146,16 @@ struct NativeTransportCoverage {
     duplicate_joins: usize,
     reversed_joins: usize,
     joined_preparations: usize,
-    namespace_pin_continuations: usize,
+    namespace_pins: usize,
     output_request_preparations: usize,
     dependent_issuances: usize,
-    continuations: usize,
+    private_output_handoffs: usize,
     successful_demands: usize,
     ambiguous_demands: usize,
     recoveries: usize,
+    produced_demands: usize,
+    recovered_input_refusals: usize,
+    unselected_root_ambiguities: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -574,36 +577,19 @@ fn replay_native_transport_history(
         }
         let complete_input =
             issue_fixture_compiler_support(root_projection.clone(), selected).unwrap();
-        let issued = complete_input.artifacts();
-        let mut graph = issued.capture_graph_selection();
-        let namespace = graph.namespace.clone();
-        let execution = graph
-            .roots
-            .iter()
-            .filter(|root| matches!(root, ArtifactBindingNode::Group(_)))
-            .copied()
-            .collect::<Vec<_>>();
-        graph.roots.retain(|root| !execution.contains(root));
-        graph.custody_roots.extend(execution);
-        graph.custody_roots.sort();
-        graph.custody_roots.dedup();
-        let chosen = issued
-            .select_issued(
-                namespace.iter().map(|binding| binding.artifact).collect(),
-                &crate::artifact_inventory::ExactArtifactSelection::from_recovered_graph_selection(
-                    graph,
-                ),
-            )
-            .unwrap();
+        let roots = root_projection
+            .roles()
+            .into_iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect();
+        let support = complete_input.select_support_roots(roots).unwrap();
+        assert!(support.same_selected_acquisitions(&complete_input));
         for id in [canonical.descriptor.id, entries[index + 1].descriptor.id] {
-            assert_eq!(binding(&chosen, id), binding(&sources[index], id));
+            assert_eq!(
+                binding(support.artifacts(), id),
+                binding(&sources[index], id)
+            );
         }
-        let support = issue_fixture_compiler_support(root_projection, chosen)
-            .unwrap()
-            .retain_offers(complete_input.native_offers().iter().cloned())
-            .unwrap()
-            .retain_normalized_availability(complete_input.native_availability())
-            .unwrap();
         let roles = support.projection().snapshot_roles();
         assert_eq!(
             roles[&entries[index + 1].descriptor.owner].original(),
@@ -654,23 +640,11 @@ fn replay_native_transport_history(
         joined_support = joined_support.merge(&closed[first]).unwrap();
         coverage.duplicate_joins += 1;
     }
-    let mut joined = OriginalCompilerInputs::from_issued_support(&joined_support);
-    // Join order must not change demand when the caller pins the same namespace.
-    let pinned = private[0]
-        .issued_artifacts()
-        .retain_custody(joined.issued_artifacts())
-        .unwrap();
-    let pin_request = ExactCompileContext::new(base_context.clone())
-        .prepare_compilation(&root.path().join("namespace-pin-input"), PRODUCER)
-        .unwrap();
-    let (pin_admission, pin_source) = generated_source_admission_fixture(
-        &root.path().join("namespace-pin-receipt"),
-        &pin_request,
-    );
-    joined = joined
-        .for_program_continuation(&pinned, &[pin_admission], &pin_source)
-        .unwrap();
-    coverage.namespace_pin_continuations += 1;
+    // Pin the same actual selected issuer after either join order. This is
+    // namespace reconciliation, not a completed source-compilation claim.
+    joined_support = closed[0].merge(&joined_support).unwrap();
+    let joined = OriginalCompilerInputs::from_issued_support(&joined_support);
+    coverage.namespace_pins += 1;
     // The private product constructor deliberately has no full issuer view.
     // Eager-fold equivalence is covered by the independently issued history
     // above; this history follows the real opaque-owner consumer path.
@@ -763,22 +737,88 @@ fn replay_native_transport_history(
             &BTreeMap::new(),
             &mut validation,
         );
-        if same_root && shared_carrier {
+        let admitted = admitted.unwrap();
+        let groups = admitted
+            .resolve()
+            .map(|resolved| resolved.groups().clone())
+            .unwrap();
+        let expected_index = if same_root { 0 } else { index };
+        assert_eq!(groups, expected[expected_index].keys().copied().collect());
+        coverage.successful_demands += 1;
+    }
+    if same_root && shared_carrier {
+        // Removing the selected Original removes its exact root choice. The
+        // independently issued Full proofs still compete on the shared carrier.
+        let type_support = joined_support.for_source_owners(&BTreeSet::new()).unwrap();
+        assert!(
+            type_support.projection().snapshot_roles()[&entries[1].descriptor.owner]
+                .original()
+                .is_none()
+        );
+        let competing = expected
+            .iter()
+            .map(|groups| {
+                *groups
+                    .keys()
+                    .find(|group| {
+                        group.binding.artifact() == entries[1].descriptor.id
+                            && group.original_ordinal == 7
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(competing[0], competing[1]);
+        assert_eq!(expected[0][&competing[0]], expected[1][&competing[1]]);
+        let type_request = ExactCompileContext::new(base_context.clone())
+            .prepare_compilation_with_private_input(
+                &root.path().join("unselected-competing-root"),
+                PRODUCER,
+                None,
+                Some(OriginalCompilerInputs::from_issued_support(&type_support)),
+            )
+            .unwrap();
+        let type_inputs = type_request.compiler_inputs();
+        let type_selection =
+            CertifiedSourceSelection::from_compiler_inputs(type_inputs, &validation.inventory)
+                .unwrap();
+        for index in 0..2 {
+            let fixed = type_inputs
+                .artifacts()
+                .inventory()
+                .bind_segment(
+                    type_inputs.artifacts(),
+                    vec![],
+                    &type_selection,
+                    &mut validation,
+                )
+                .unwrap();
+            let observations = source_target_observations(&[(&products[index + 1], 7)]);
+            let prepared = prepared_target_fixture(&observations);
+            let observed =
+                AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
+                    .unwrap();
+            let error = type_inputs
+                .artifacts()
+                .inventory()
+                .select_native_target(
+                    fixed.captured_stage().physical_cohort(),
+                    observed,
+                    None,
+                    Some(type_inputs.artifacts()),
+                    &[],
+                    &BTreeMap::new(),
+                    &mut validation,
+                )
+                .err()
+                .expect("TYPE-only input cannot choose between independent Full issuers");
             assert!(
-                matches!(admitted, Err(CompileError::ArtifactInventory(error))
+                matches!(error, CompileError::ArtifactInventory(ref error)
                 if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { artifact }
-                    if artifact == entries[1].descriptor.id))
+                    if artifact == entries[1].descriptor.id)),
+                "{error:?}"
             );
             coverage.ambiguous_demands += 1;
-        } else {
-            let admitted = admitted.unwrap();
-            let groups = admitted
-                .resolve()
-                .map(|resolved| resolved.groups().clone())
-                .unwrap();
-            let expected_index = if same_root { 0 } else { index };
-            assert_eq!(groups, expected[expected_index].keys().copied().collect());
-            coverage.successful_demands += 1;
+            coverage.unselected_root_ambiguities += 1;
         }
     }
     let fixed = bind(&mut validation).unwrap();
@@ -997,23 +1037,66 @@ fn replay_native_transport_history(
         assert!(edges.contains(&expected_dependency));
     };
     assert_dependent_offer(produced.compiler_inputs().native_offers());
-    let (admission, source) =
-        generated_source_admission_fixture(&root.path().join("receipt"), &request);
-    let continued = produced
-        .compiler_inputs()
-        .for_program_continuation(&support, &[admission], &source)
+    // The actual physical cohort owns this new RetainedCore completion. Its
+    // TYPE projection does not make a later Input cohort its current producer.
+    let mut observations = source_target_observations(&[(&dependent, 7)]);
+    let ReceiptImportOwner::Source { module_version, .. } = &mut observations[0].owner else {
+        unreachable!()
+    };
+    *module_version = None;
+    let prepared = prepared_target_fixture(&observations);
+    let observed =
+        AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory).unwrap();
+    let demanded = produced
+        .issued_artifacts()
+        .inventory()
+        .select_native_target(
+            produced.physical_cohort(),
+            observed,
+            None,
+            Some(produced.issued_artifacts()),
+            &[],
+            &BTreeMap::new(),
+            &mut validation,
+        )
+        .unwrap()
+        .resolve()
+        .map(|resolved| resolved.groups().clone())
         .unwrap();
-    coverage.continuations += 1;
+    assert_eq!(demanded, dependent_expected.keys().copied().collect());
+    coverage.produced_demands += 1;
+    coverage.successful_demands += 1;
+    // Transport the actual captured prefix. No generated source owner is
+    // omitted, and no source-compilation authority is needed for this carry.
+    let completed_support =
+        crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+            produced.compiler_inputs(),
+        )
+        .unwrap()
+        .retain_custody(&support)
+        .unwrap();
+    let continued = OriginalCompilerInputs::from_issued_support(&completed_support);
+    coverage.private_output_handoffs += 1;
+    assert!(completed_support
+        .same_selected_acquisitions(produced.compiler_inputs().compiler_source_support()));
     assert_eq!(
         continued.issued_artifacts().capture_graph_selection().roots,
-        support.capture_graph_selection().roots
+        produced
+            .compiler_inputs()
+            .issued_artifacts()
+            .capture_graph_selection()
+            .roots
     );
     assert_eq!(
         continued
             .issued_artifacts()
             .capture_graph_selection()
             .namespace,
-        support.capture_graph_selection().namespace
+        produced
+            .compiler_inputs()
+            .issued_artifacts()
+            .capture_graph_selection()
+            .namespace
     );
     assert!(proof
         .issued_group_carriers(continued.issued_artifacts())
@@ -1074,7 +1157,18 @@ fn replay_native_transport_history(
         let observed =
             AuthenticatedTargetImports::issue(&prepared, &observations, &validation.inventory)
                 .unwrap();
-        let admitted = view
+        let before = view.capture_graph_selection();
+        let key = NativeGroupKey {
+            artifact: dependent_entry.descriptor.id,
+            original_ordinal: 7,
+        };
+        assert!(fixed
+            .captured_stage()
+            .source_selection()
+            .current_product(key, &dependent_entry)
+            .unwrap()
+            .is_none());
+        let error = view
             .inventory()
             .select_native_target(
                 fixed.captured_stage().physical_cohort(),
@@ -1085,13 +1179,19 @@ fn replay_native_transport_history(
                 &BTreeMap::new(),
                 &mut validation,
             )
-            .unwrap();
-        let demanded = admitted
-            .resolve()
-            .map(|resolved| resolved.groups().clone())
-            .unwrap();
-        assert_eq!(demanded, dependent_expected.keys().copied().collect());
-        coverage.successful_demands += 1;
+            .err()
+            .expect("recovered TYPE+Full Input is not a new Current product");
+        assert!(
+            matches!(error, CompileError::ArtifactInventory(ref error)
+            if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
+                artifact: key.artifact, original_ordinal: key.original_ordinal,
+            } && error.native_refusal == Some(crate::artifact_inventory::NativeAdmissionRefusal::RootChoiceMissing {
+                owner: dependent_entry.descriptor.owner.clone(),
+            })),
+            "{error:?}"
+        );
+        assert_eq!(view.capture_graph_selection(), before);
+        coverage.recovered_input_refusals += 1;
     }
 }
 
@@ -1135,13 +1235,16 @@ fn private_transport_preserves_independent_closures_until_exact_demand() {
     assert_eq!(coverage.partial_with_ambient_full, 24);
     assert_eq!(coverage.full_without_demand, 24);
     assert_eq!(coverage.joined_preparations, 24);
-    assert_eq!(coverage.namespace_pin_continuations, 24);
+    assert_eq!(coverage.namespace_pins, 24);
     assert_eq!(coverage.output_request_preparations, 24);
     assert_eq!(coverage.dependent_issuances, 24);
-    assert_eq!(coverage.continuations, 24);
+    assert_eq!(coverage.private_output_handoffs, 24);
     assert_eq!(coverage.recoveries, 48);
+    assert_eq!(coverage.produced_demands, 24);
+    assert_eq!(coverage.recovered_input_refusals, 48);
+    assert_eq!(coverage.unselected_root_ambiguities, 8);
     assert!(coverage.successful_demands > 0 && coverage.ambiguous_demands > 0);
-    eprintln!("native transport deterministic support: {coverage:?}");
+    tracing::debug!(?coverage, "native transport deterministic support");
 }
 
 #[test]

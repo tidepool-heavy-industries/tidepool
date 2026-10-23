@@ -26851,23 +26851,15 @@ pub(crate) mod tests {
                     );
                 }
             }
-            let private = issued.captured_stage().compiler_inputs().as_ref().clone();
-            // Program support predates the new private proof issuance. Continue
-            // through that actual handoff rather than preparing from private directly.
-            let (admission, source) =
-                crate::declaration_context::generated_source_admission_fixture(
-                    &root
-                        .path()
-                        .join(format!("continuation-admission-{interface_only}")),
-                    &request,
-                );
-            let private = private
-                .for_program_continuation(
-                    issued.captured_stage().issued_artifacts(),
-                    &[admission],
-                    &source,
+            // This component carries the actual captured output into another
+            // request; it does not claim completion of a source program.
+            let completed =
+                crate::artifact_inventory::CompilerSourceSupport::close_complete_output(
+                    issued.captured_stage().compiler_inputs(),
                 )
                 .unwrap();
+            let private =
+                crate::declaration_context::OriginalCompilerInputs::from_issued_support(&completed);
             let public = Arc::new(
                 ExactDeclarationContext::new(&[], &[], vec![])
                     .unwrap()
