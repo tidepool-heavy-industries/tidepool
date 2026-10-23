@@ -3516,24 +3516,19 @@ impl CompilerSourceSupport {
                     }
                 }
             }
-            projection.admit_role(owner.clone(), role.clone())?;
-            let effective = &projection.roles[owner];
-            let mut retained = row.clone();
-            if effective.original().is_some() && retained.original().is_none() {
-                retained = ResolvedCompilerRole::from_issued_bindings(
-                    retained.interface().clone(),
-                    selected
-                        .get(owner)
-                        .and_then(|prior| prior.original().cloned()),
-                );
+            let issuer = match projection.roles.get(owner) {
+                Some(previous) => CompilerInputProjection::choose_role(owner, previous, role)?,
+                None => CompilerRoleIssuer::Incoming,
+            };
+            if matches!(issuer, CompilerRoleIssuer::Receiving) {
+                continue;
             }
-            if selected.get(owner) != Some(&retained) {
-                if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
-                    home_units.extend(interface.home_units().iter().cloned());
-                }
-                selected.rows.insert(owner.clone(), retained);
-                changed.insert(owner.clone());
+            projection.retain_role_selection(&SelectedCompilerRole { owner, role, issuer });
+            if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
+                home_units.extend(interface.home_units().iter().cloned());
             }
+            selected.rows.insert(owner.clone(), row.clone());
+            changed.insert(owner.clone());
         }
         projection.validate_requirements(
             incoming
