@@ -4475,6 +4475,44 @@ struct NativeInputSelection {
 }
 
 impl NativeInputSelection {
+    /// TYPE additions leave existing exact bindings and closed permissions
+    /// unchanged. A newly visible native child's owner can become a direct
+    /// candidate without requalifying its retained graph.
+    fn with_added_type_owners(
+        &self,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
+        metadata: &CompilerArtifactMetadata,
+        changed_owners: &[ExactModuleIdentity],
+    ) -> Result<Self, CompileError> {
+        let mut changed = BTreeSet::new();
+        for owner in changed_owners {
+            let role = support
+                .projection()
+                .snapshot_roles()
+                .get(owner)
+                .ok_or_else(|| failure("type candidate refresh lost its compiler role"))?;
+            if role.original().is_some() {
+                return Err(failure("type candidate refresh contains an Original role"));
+            }
+            changed.insert(owner);
+        }
+        if support
+            .native_availability()
+            .rows()
+            .any(|row| changed.contains(&row.original.descriptor.owner))
+        {
+            Self::from_normalized_rows(
+                support.projection(),
+                metadata,
+                support.artifacts(),
+                support.native_availability().clone(),
+                support.native_offers(),
+            )
+        } else {
+            self.retain_acquisitions(support)
+        }
+    }
+
     fn retain_acquisitions(
         &self,
         support: &crate::artifact_inventory::CompilerSourceSupport,
@@ -4984,28 +5022,7 @@ impl WorldPrimaryInputs {
         let mut facts = primary.owner.facts.clone();
         facts.compiler_support = support.clone();
         let context = Arc::new(ExactDeclarationContext::from_facts(facts));
-        // A newly visible TYPE owner can make an already retained native child
-        // eligible as a direct candidate. Unrelated type additions preserve the
-        // existing index and permission rows without rewalking native closures.
-        let changed_native_owners = changed_owners.iter().collect::<BTreeSet<_>>();
-        let native_selection = if support
-            .native_availability()
-            .rows()
-            .any(|row| changed_native_owners.contains(&row.original.descriptor.owner))
-        {
-            // TYPE admission only adds exact canonical bindings. The support's
-            // closed permission rows and their CompilerRole/PrivateInput
-            // classifications survive unchanged; reindex their direct choices.
-            NativeInputSelection::from_normalized_rows(
-                support.projection(),
-                &metadata,
-                support.artifacts(),
-                support.native_availability().clone(),
-                support.native_offers(),
-            )?
-        } else {
-            self.inputs.native_selection.retain_acquisitions(&support)?
-        };
+        let native_selection = self.inputs.native_selection.with_added_type_owners(&support, &metadata, &changed_owners)?;
         let inputs = Arc::new(RequestCompilerInputs {
             source_support: Arc::new(support),
             metadata,
@@ -5037,13 +5054,37 @@ impl WorldPrimaryInputs {
             incoming,
             &delta.changed_owners,
         )?;
-        let native_selection = NativeInputSelection::receive(
-            delta.support.projection(),
-            &metadata,
-            delta.support.artifacts(),
-            delta.support.native_availability(),
-            delta.support.native_offers(),
-        )?;
+        let unchanged_native_types = delta
+            .support
+            .native_availability()
+            .same_acquisition(self.source_support.native_availability())
+            && delta.support.native_offers().len() == self.source_support.native_offers().len()
+            && delta
+                .support
+                .native_offers()
+                .iter()
+                .zip(self.source_support.native_offers())
+                .all(|(current, previous)| current.same_issuance(previous))
+            && delta.changed_owners.iter().all(|owner| {
+                delta.support.projection().snapshot_roles()[owner]
+                    .original()
+                    .is_none()
+            });
+        let native_selection = if unchanged_native_types {
+            self.native_selection.with_added_type_owners(
+                &delta.support,
+                &metadata,
+                &delta.changed_owners,
+            )?
+        } else {
+            NativeInputSelection::receive(
+                delta.support.projection(),
+                &metadata,
+                delta.support.artifacts(),
+                delta.support.native_availability(),
+                delta.support.native_offers(),
+            )?
+        };
         primary
             .source_scope()
             .preserve_support(primary.compiler_source_support(), &delta.support)?;
