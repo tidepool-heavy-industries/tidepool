@@ -734,7 +734,7 @@ impl From<Vec<PathBuf>> for ActorSourceRoots {
 /// context before pairing them with the actor's explicit facade imports. A
 /// compiler can therefore consume this value without separately carrying an
 /// ambient session view or caller-selected import set.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ActorCompileView {
     session: SessionCompileView,
     external: SourceImports,

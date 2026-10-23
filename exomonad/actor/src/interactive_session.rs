@@ -137,7 +137,7 @@ impl ActivationContract {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct InteractiveSessionRequest {
     pub(crate) type_evidence: Arc<tidepool_runtime::session::SiteTypeEvidence>,
     pub request: crate::RequestId,
