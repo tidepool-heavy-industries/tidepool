@@ -403,7 +403,17 @@ fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_stagin
         .lib_mut()
         .initialize_captured_declaration_high_water(Generation(500))
         .unwrap();
-    let execution = Arc::new(session.begin_private_execution(ScopeId::ROOT).unwrap());
+    let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let public_source = session.mint_notebook_scope_with_lease(None).unwrap();
+    let execution = crate::session::world_cell_test_support::begin_state_fixture_execution(
+        &mut session,
+        &public_source,
+        &recipe,
+    );
     let view = session.compile_view_for_execution(&execution).unwrap();
     let imports = view.turn_imports(&crate::session::SourceImports::new());
     let specification = Arc::new(
@@ -426,34 +436,33 @@ fn inherited_mixed_cell_keeps_its_reserved_value_identity_and_burns_crash_stagin
         )
         .unwrap(),
     );
-    let include = view.include_paths(effects.include_paths());
-    let plan = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
-    })
+    let original = execution.original_source().unwrap();
+    let admission = crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+        &mut session,
+        execution.clone(),
+        crate::session::world_cell_test_support::world_recipe(&specification),
+    )
     .unwrap();
-    let admission = session
-        .admit_planned_cell_for_execution(
-            execution.clone(),
-            plan,
-            specification.clone(),
-            specification.specification_digest(),
-            [1; 32],
-            include,
-            None,
-        )
-        .unwrap();
     assert_eq!(admission.initial_value_generation(), Generation(501));
     assert_eq!(
-        admission.view().unwrap().next_value_generation(),
+        view.next_value_generation(),
         admission.initial_value_generation()
     );
     let planned_values = admission
-        .plan_reservation()
-        .unwrap()
+        .world_reservation()
         .unwrap()
         .items()
         .iter()
-        .filter_map(|item| item.value_generation())
+        .filter_map(|item| match item.slot() {
+            tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Bind { value } => {
+                Some(Generation(value))
+            }
+            tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Expression {
+                capture,
+                ..
+            } => Some(Generation(capture)),
+            _ => None,
+        })
         .collect::<Vec<_>>();
     assert_eq!(planned_values, [Generation(501)]);
     let (_, program) = tidepool_testing::with_settlement(|settlement| {
@@ -662,7 +671,17 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
             .with_validation_include(effects.include_paths().to_vec());
         let mut session = crate::session::PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(session.begin_private_execution(public).unwrap());
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let public_source = session.adopt_initial_notebook_scope(public).unwrap();
+        let execution = crate::session::world_cell_test_support::begin_state_fixture_execution(
+            &mut session,
+            &public_source,
+            &recipe,
+        );
         let view = session.compile_view_for_execution(&execution).unwrap();
         let imports = view.turn_imports(&crate::session::SourceImports::new());
         let specification = Arc::new(
@@ -685,24 +704,12 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
             )
             .unwrap(),
         );
-        let include = view.include_paths(effects.include_paths());
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let admission = session
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                specification.clone(),
-                specification.specification_digest(),
-                [1; 32],
-                include,
-                None,
+        let original = execution.original_source().unwrap();
+        let admission =
+            crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                &mut session,
+                execution.clone(),
+                crate::session::world_cell_test_support::world_recipe(&specification),
             )
             .unwrap();
         let (_, program) = tidepool_testing::with_settlement(|settlement| {
@@ -714,10 +721,7 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
         };
         let native = item.native().cloned();
         let item = item.checked_item().clone();
-        let prefix = session
-            .begin_cell_program(program)
-            .unwrap()
-            .unwrap();
+        let prefix = session.begin_cell_program(program).unwrap().unwrap();
         let mut missing_library = crate::session::PersistentSession::new(None, 1024 * 1024);
         let missing_scopes = missing_library.scope_tree().len();
         assert!(matches!(
@@ -736,13 +740,19 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
             Generation(1)
         };
         assert_eq!(session.lib().generation(), generation);
-        if native_start {
-            session
-                .admit_checked_item(prefix.clone(), item.clone())
-                .unwrap();
+        let _reserved_item = if native_start {
+            Some(
+                crate::session::world_cell_test_support::state_source_action(
+                    &mut session,
+                    original.clone(),
+                    |session| session.admit_checked_item(prefix.clone(), item.clone()),
+                )
+                .unwrap(),
+            )
         } else {
             assert!(session.lib().log.is_reserved(generation));
-        }
+            None
+        };
         let scopes = session.scope_tree().len();
         run.store.inject_fault(StoreFault::CommitError);
         assert!(sibling.reserve_declaration_generation_durable().is_err());
@@ -757,7 +767,11 @@ fn fenced_run_refuses_prepared_item_admission_and_native_start() {
             ));
         } else {
             assert!(matches!(
-                session.admit_checked_item(prefix.clone(), item),
+                crate::session::world_cell_test_support::state_source_action(
+                    &mut session,
+                    original.clone(),
+                    |session| session.admit_checked_item(prefix.clone(), item)
+                ),
                 Err(crate::session::SessionError::RecoveryStore(_))
             ));
         }
@@ -786,10 +800,24 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
     session
         .initialize_durable_public_scope(owner.clone(), public)
         .unwrap();
+    let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let source = session.adopt_initial_notebook_scope(public).unwrap();
+    crate::session::world_cell_test_support::bootstrap_state_world_for(
+        &mut session,
+        &recipe,
+        &source,
+    );
     let execution = Arc::new(
-        session
-            .begin_durable_private_execution(&owner, public)
-            .unwrap(),
+        crate::session::world_cell_test_support::state_source_action(
+            &mut session,
+            source.original_source().clone(),
+            |session| session.begin_durable_private_execution(&owner, public),
+        )
+        .unwrap(),
     );
     let private = execution.private_scope();
     let view = session.compile_view_for_execution(&execution).unwrap();
@@ -803,22 +831,13 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         )
         .unwrap(),
     );
-    let include = view.include_paths(effects.include_paths());
-    let plan = tidepool_testing::with_settlement(|settlement| {
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
-    })
+    let source_owner = execution.original_source().unwrap();
+    let admission = crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+        &mut session,
+        execution.clone(),
+        crate::session::world_cell_test_support::world_recipe(&specification),
+    )
     .unwrap();
-    let admission = session
-        .admit_planned_cell_for_execution(
-            execution,
-            plan,
-            specification.clone(),
-            specification.specification_digest(),
-            [1; 32],
-            include,
-            None,
-        )
-        .unwrap();
     let (_, program) = tidepool_testing::with_settlement(|settlement| {
         compile_cell_program_admitted(admission.clone(), settlement)
     })
@@ -827,11 +846,13 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         panic!("one checked declaration required")
     };
     let item = item.checked_item().clone();
-    let prefix = session
-        .begin_cell_program(program)
-        .unwrap()
-        .unwrap();
-    let reservation = session.admit_checked_item(prefix.clone(), item).unwrap();
+    let prefix = session.begin_cell_program(program).unwrap().unwrap();
+    let reservation = crate::session::world_cell_test_support::state_source_action(
+        &mut session,
+        source_owner.clone(),
+        |session| session.admit_checked_item(prefix.clone(), item),
+    )
+    .unwrap();
     let original = prefix.snapshot();
     let visible = session.public_visibility_snapshot_in(private).unwrap();
     let stored = store_state(session.lib());
@@ -839,7 +860,11 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
 
     run.store.inject_fault(StoreFault::BeforeCommit);
     assert!(matches!(
-        session.adopt_checked_declaration(reservation.clone()),
+        crate::session::world_cell_test_support::state_source_action(
+            &mut session,
+            source_owner.clone(),
+            |session| session.adopt_checked_declaration(reservation.clone())
+        ),
         Err(crate::session::SessionError::RecoveryStoreRefused(_))
     ));
     assert!(Arc::ptr_eq(&prefix.snapshot(), &original));
@@ -858,9 +883,12 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         "refused future capture is retired"
     );
 
-    let committed = session
-        .adopt_checked_declaration(reservation.clone())
-        .unwrap();
+    let committed = crate::session::world_cell_test_support::state_source_action(
+        &mut session,
+        source_owner.clone(),
+        |session| session.adopt_checked_declaration(reservation.clone()),
+    )
+    .unwrap();
     assert_eq!(committed.generation, Generation(1));
     assert!(!Arc::ptr_eq(&prefix.snapshot(), &original));
     assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 1);
@@ -892,7 +920,14 @@ fn checked_declaration_refusal_preserves_prefix_then_installs_prepared_successor
         projection.view().unwrap().exact_declaration_context(),
         canonical.exact_declaration_context()
     );
-    assert!(session.adopt_checked_declaration(reservation).is_err());
+    assert!(
+        crate::session::world_cell_test_support::state_source_action(
+            &mut session,
+            source_owner.clone(),
+            |session| session.adopt_checked_declaration(reservation)
+        )
+        .is_err()
+    );
 }
 
 #[test]

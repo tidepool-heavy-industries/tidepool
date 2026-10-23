@@ -7376,18 +7376,16 @@ mod tests {
 
     #[test]
     fn dependency_load_errors_keep_source_spans_and_allow_a_valid_retry() {
-        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
-        use tidepool_codegen::scope::ScopeId;
+        use crate::session::world_cell_test_support::{
+            begin_state_fixture_execution, fixture_cell_recipe,
+            plan_state_fixture_specification_for, InputRecipe,
+        };
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib, SourceImports};
         use tidepool_repr::SessionId;
         use tidepool_testing::effect_surface::TestEffectSurface;
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
         let dependency = root.path().join("RootChoice.hs");
-        std::fs::write(
-            &dependency,
-            include_str!("fixtures/checked-search-invalid.hs"),
-        )
-        .unwrap();
         let effects = TestEffectSurface::minimal(&[]).unwrap();
         let lib = SessionLib::open(
             SessionId(1010),
@@ -7397,240 +7395,107 @@ mod tests {
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
         let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = state.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view().unwrap();
-        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
-            "qualified RootChoice",
-        ]));
-        let template = crate::session::resident_cell_check_template(
-            effects.preamble(),
-            effects.row(),
-            &imports,
-        );
-        let templates = crate::session::resident_workbench_templates(
-            effects.preamble(),
-            effects.row(),
-            &imports,
-        );
-        let specification = CellRecipe::new(
-            "let value = RootChoice.value".to_string(),
-            template,
-            templates
-                .iter()
-                .map(|template| {
-                    (
-                        template.kind.wire_name().to_string(),
-                        template.source.clone(),
-                    )
+        let source = state.mint_notebook_scope_with_lease(None).unwrap();
+        let mut prior_capture = None;
+        for (body, valid) in [
+            (include_str!("fixtures/checked-search-invalid.hs"), false),
+            (include_str!("fixtures/checked-search-original.hs"), true),
+        ] {
+            std::fs::write(&dependency, body).unwrap();
+            let mut roots = effects.include_paths().to_vec();
+            roots.insert(0, root.path().to_owned());
+            let recipe = InputRecipe::capture(
+                effects.preamble().to_owned(),
+                effects.row().to_owned(),
+                roots,
+            );
+            if let Some(previous) = prior_capture {
+                assert_ne!(
+                    *recipe.sources.seal(),
+                    previous,
+                    "retry captures the changed source owner"
+                );
+            }
+            prior_capture = Some(*recipe.sources.seal());
+            let execution = begin_state_fixture_execution(&mut state, &source, &recipe);
+            let imports = SourceImports::from_specs(["qualified RootChoice"]);
+            let specification =
+                fixture_cell_recipe(&recipe, "let value = RootChoice.value", &imports);
+            let admission =
+                plan_state_fixture_specification_for(&mut state, execution, specification).map_err(
+                    |error| match error {
+                        crate::session::WorldInspectionError::Runtime(
+                            crate::RuntimeError::Compile(error),
+                        ) => error,
+                        other => panic!("unexpected source preparation failure: {other:?}"),
+                    },
+                );
+            let result = admission.and_then(|admission| {
+                tidepool_testing::with_settlement(|settlement| {
+                    compile_cell_program_admitted(admission, settlement)
                 })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap();
-        let mut roots = effects.include_paths().to_vec();
-        roots.insert(0, root.path().to_owned());
-        let include = view.include_paths(&roots);
-        let plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let admission = state
-            .admit_planned_cell_for_execution(
-                execution,
-                plan,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                include,
-                None,
-            )
-            .unwrap();
-        let failure = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap_err()
-        .error;
-        assert_eq!(
-            crate::failclass::classify_compile(&failure).class,
-            crate::failclass::FailureClass::UserHaskell
-        );
-        let CompileError::Diagnostics(diagnostics) = failure else {
-            panic!("a dependency type error must remain a structured source failure")
-        };
-        assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.severity
-                == crate::diag::DiagnosticSeverity::Error
-                && diagnostic
-                    .span
-                    .as_ref()
-                    .is_some_and(
-                        |span| Path::new(&span.file) == dependency && span.start_line == 3
-                    )),
-            "the original dependency source span must survive the load barrier"
-        );
-        std::fs::write(
-            &dependency,
-            include_str!("fixtures/checked-search-original.hs"),
-        )
-        .unwrap();
-        let (_, program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(admission.clone(), settlement)
-        })
-        .unwrap();
-        state.begin_cell_program(program).unwrap().unwrap();
+                .map_err(|failure| failure.error)
+            });
+            if valid {
+                let (_, program) = result.expect("new captured source repairs the dependency");
+                state.begin_cell_program(program).unwrap().unwrap();
+            } else {
+                let failure = result.err().expect("invalid dependency must fail");
+                assert_eq!(
+                    crate::failclass::classify_compile(&failure).class,
+                    crate::failclass::FailureClass::UserHaskell
+                );
+                let CompileError::Diagnostics(diagnostics) = failure else {
+                    panic!("dependency load must retain structured diagnostics");
+                };
+                assert!(
+                    diagnostics.iter().any(|diagnostic| diagnostic.severity
+                        == crate::diag::DiagnosticSeverity::Error
+                        && diagnostic
+                            .span
+                            .as_ref()
+                            .is_some_and(|span| Path::new(&span.file).file_name()
+                                == dependency.file_name()
+                                && span.start_line == 3)),
+                    "the captured dependency module and exact source line survive the load barrier"
+                );
+            }
+        }
     }
 
     #[test]
-    fn settled_search_inputs_refuse_a_foreign_session_before_prefix_claim() {
-        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
-        use tidepool_codegen::scope::ScopeId;
-        use tidepool_repr::SessionId;
-        use tidepool_testing::effect_surface::TestEffectSurface;
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let original_root = root.path().join("original");
-        let alternate_root = root.path().join("alternate");
-        std::fs::create_dir(&original_root).unwrap();
-        std::fs::create_dir(&alternate_root).unwrap();
-        std::fs::write(
-            original_root.join("RootChoice.hs"),
-            include_str!("fixtures/checked-search-original.hs"),
-        )
-        .unwrap();
-        std::fs::write(
-            alternate_root.join("RootChoice.hs"),
-            include_str!("fixtures/checked-search-alternate.hs"),
-        )
-        .unwrap();
-        let effects = TestEffectSurface::minimal(&[]).unwrap();
-        let lib = SessionLib::open(
-            SessionId(1001),
-            root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap()
-        .with_validation_include(effects.include_paths().to_vec());
-        let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = state.mint_scope(ScopeId::ROOT).unwrap();
-        let execution = Arc::new(state.begin_private_execution(public).unwrap());
-        let view = execution.view().unwrap();
-        let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
-            "qualified RootChoice",
-        ]));
-        let templates = crate::session::resident_workbench_templates(
-            effects.preamble(),
-            effects.row(),
-            &imports,
-        );
-        let specification = CellRecipe::new(
-            "let value = RootChoice.value".to_string(),
-            crate::session::resident_cell_check_template(
-                effects.preamble(),
-                effects.row(),
-                &imports,
-            ),
-            templates
-                .iter()
-                .map(|template| {
-                    (
-                        template.kind.wire_name().to_string(),
-                        template.source.clone(),
-                    )
-                })
-                .collect(),
-            view.injected_module_names(),
-        )
-        .unwrap();
-        let original_include = view.include_paths(
-            &[
-                vec![original_root.clone()],
-                effects.include_paths().to_vec(),
-            ]
-            .concat(),
-        );
-        let alternate_include = view.include_paths(
-            &[
-                vec![alternate_root.clone()],
-                effects.include_paths().to_vec(),
-            ]
-            .concat(),
-        );
-        let original_plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &original_include,
-                settlement,
-            )
+    fn settled_world_program_refuses_a_foreign_session_before_prefix_claim() {
+        use crate::session::world_cell_test_support::source_action_with_original;
+        let mut original = CheckedHomeFixture::new();
+        let mut foreign = CheckedHomeFixture::new();
+        let cell = original.check("let value = (42 :: Int)", &[]).unwrap();
+        let source = cell.admission.compiler_preparation_source();
+        let before = original
+            .resident
+            .public_visibility_snapshot_in(original.execution.private_scope())
+            .unwrap();
+        let foreign_source = foreign.execution.original_source().unwrap();
+        let refused =
+            source_action_with_original(&mut foreign.resident, foreign_source, |resident, _| {
+                resident.begin_cell_program(cell.program.clone())
+            });
+        assert!(matches!(
+            refused,
+            Err(crate::session::SessionError::StaleStagedDeclaration)
+        ));
+        let prefix = source_action_with_original(&mut original.resident, source, |resident, _| {
+            resident.begin_cell_program(cell.program)
         })
+        .expect("foreign receiver must not claim the original allocation")
         .unwrap();
-        let alternate_plan = tidepool_testing::with_settlement(|settlement| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &alternate_include,
-                settlement,
-            )
-        })
-        .unwrap();
-        let before = state.public_visibility_snapshot_in(execution.private_scope());
-        assert!(state
-            .admit_planned_cell_for_execution(
-                execution.clone(),
-                alternate_plan.clone(),
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                original_include.clone(),
-                None
-            )
-            .is_err());
+        assert_eq!(prefix.snapshot().compiler_prefix().next_item(), 0);
         assert_eq!(
-            state.public_visibility_snapshot_in(execution.private_scope()),
+            original
+                .resident
+                .public_visibility_snapshot_in(original.execution.private_scope())
+                .unwrap(),
             before
         );
-        let _admission = state
-            .admit_planned_cell_for_execution(
-                execution.clone(),
-                original_plan,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                original_include,
-                None,
-            )
-            .unwrap();
-        let alternate = state
-            .admit_planned_cell_for_execution(
-                execution,
-                alternate_plan,
-                Arc::new(specification.clone()),
-                specification.specification_digest(),
-                [1; 32],
-                alternate_include,
-                None,
-            )
-            .unwrap();
-        let (_, alternate_program) = tidepool_testing::with_settlement(|settlement| {
-            compile_cell_program_admitted(alternate.clone(), settlement)
-        })
-        .unwrap();
-        assert_eq!(
-            alternate_program.items()[0].checked_item().include_paths(),
-            alternate.include_paths().unwrap()
-        );
-        assert!(
-            crate::session::PersistentSession::new(None, crate::DEFAULT_NURSERY_SIZE)
-                .begin_cell_program(alternate_program.clone())
-                .is_err()
-        );
-        state
-            .begin_cell_program(alternate_program)
-            .expect("foreign receiver refusal must leave the same settled prefix unclaimed")
-            .unwrap();
     }
 
     #[test]
@@ -8632,7 +8497,7 @@ mod tests {
             .unwrap()
             .with_validation_include(effects.include_paths().to_vec());
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
+        let public = session.mint_notebook_scope_with_lease(None).unwrap();
         for (index, expected) in [
             ProductOrigin::Fresh,
             ProductOrigin::Cached,
@@ -8644,7 +8509,18 @@ mod tests {
             if index == 2 {
                 std::fs::write(&support, support_source.replace("41", "42")).unwrap();
             }
-            let execution = Arc::new(session.begin_private_execution(public).unwrap());
+            let mut roots = effects.include_paths().to_vec();
+            roots.insert(0, root.path().to_owned());
+            let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+                effects.preamble().to_owned(),
+                effects.row().to_owned(),
+                roots,
+            );
+            let execution = crate::session::world_cell_test_support::begin_state_fixture_execution(
+                &mut session,
+                &public,
+                &recipe,
+            );
             let view = execution.view().unwrap();
             let imports = view.turn_imports(&crate::session::SourceImports::from_specs([
                 "qualified CheckedTiny",
@@ -8669,27 +8545,14 @@ mod tests {
                 view.injected_module_names(),
             )
             .unwrap();
-            let mut roots = effects.include_paths().to_vec();
-            roots.insert(0, root.path().to_owned());
-            let admitted_include = view.include_paths(&roots);
-            let admission = session
-                .admit_planned_cell_for_execution(
-                    execution,
-                    tidepool_testing::with_settlement(|settlement| {
-                        tidepool_toolchain::artifacts::parse_cell_plan(
-                            Arc::new(specification.clone()),
-                            &(admitted_include),
-                            settlement,
-                        )
-                    })
-                    .unwrap(),
-                    Arc::new(specification.clone()),
-                    specification.specification_digest(),
-                    [1; 32],
-                    admitted_include,
-                    None,
+            let admission =
+                crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                    &mut session,
+                    execution.clone(),
+                    crate::session::world_cell_test_support::world_recipe(&specification),
                 )
                 .unwrap();
+            let original = admission.compiler_preparation_source();
             let started = std::time::Instant::now();
             let (checked, program) = tidepool_testing::with_settlement(|settlement| {
                 compile_cell_program_admitted(admission.clone(), settlement)
@@ -8697,7 +8560,12 @@ mod tests {
             .unwrap();
             let item = checked.checked_item(0).unwrap();
             let prefix = session.begin_cell_program(program).unwrap().unwrap();
-            let item_admission = session.admit_checked_item(prefix, item).unwrap();
+            let item_admission = crate::session::world_cell_test_support::state_source_action(
+                &mut session,
+                original,
+                |session| session.admit_checked_item(prefix, item),
+            )
+            .unwrap();
             let TurnResult::Bind { compiled, .. } =
                 consume_cell_program_item(item_admission).unwrap()
             else {
