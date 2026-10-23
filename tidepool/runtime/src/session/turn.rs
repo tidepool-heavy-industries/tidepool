@@ -3441,6 +3441,10 @@ fn compile_cell_program_admitted_inner(
         },
     )?;
     #[cfg(test)]
+    if matches!(audit, CellProgramAudit::None) {
+        return finish_cell_program_admitted(outcome);
+    }
+    #[cfg(test)]
     let evidence = outcome.action().as_ref().ok().map(|prepared| {
         (
             prepared.finite_evidence().1.clone(),
