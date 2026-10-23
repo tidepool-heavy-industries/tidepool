@@ -1069,7 +1069,10 @@ fn mount_original(
         "mount installs no preview program"
     );
     assert!(Arc::ptr_eq(
-        &resident.binding_provenance[&mounted.binding().raw()],
+        resident
+            .state
+            .binding_provenance(mounted.binding().raw())
+            .unwrap(),
         &original_provenance,
     ));
     assert!(Arc::ptr_eq(
@@ -2479,7 +2482,11 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .unwrap(),
             ResidentOutcome::Completed { .. }
         ));
-        let original = source.binding_provenance[&binder.var_id].clone();
+        let original = source
+            .state
+            .binding_provenance(binder.var_id)
+            .unwrap()
+            .clone();
         assert_eq!(
             original
                 .authenticated_inputs
@@ -6046,7 +6053,7 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         "scope cleanup leaves original parked callers owned by their realm"
     );
     assert!(resident.state.bindings().get(binding).is_none());
-    assert!(resident.binding_provenance.get(&binding.raw()).is_none());
+    assert!(resident.state.binding_provenance(binding.raw()).is_none());
     assert_eq!(resident.retire_scope(scope), ScopeRetirement::default());
     assert!(certificate_lease.upgrade().is_none());
     assert!(

@@ -1502,3 +1502,48 @@ proptest! {
         prop_assert!(table.is_empty());
     }
 }
+
+#[test]
+fn capture_counter_preflight_refuses_exhaustion_without_mutation() {
+    let tree = ScopeTree::new();
+    let scope = ScopeId::ROOT;
+    let mut table = BindingTable::new();
+    for generation in 1..=10 {
+        table.validate_capture_capacity(1, true).unwrap();
+        let before_revision = table.mutation_revision().unwrap();
+        let id = table
+            .bind_in(scope, entry(&format!("capture{generation}"), generation))
+            .unwrap();
+        table.save_observation(id, &[], 8);
+        // One value insertion and one observation insertion; after the ninth
+        // value, the oldest observation and its unleased root also retire.
+        let committed_events = if generation <= 8 { 2 } else { 4 };
+        assert_eq!(
+            table.mutation_revision().unwrap() - before_revision,
+            committed_events
+        );
+    }
+    assert!(!visible(&table, &tree, scope)
+        .iter()
+        .any(|(name, _)| name == "capture1"));
+    assert!(visible(&table, &tree, scope)
+        .iter()
+        .any(|(name, _)| name == "capture10"));
+    let before = visible(&table, &tree, scope);
+    table.next_observation_order = u64::MAX;
+    assert_eq!(
+        table.validate_capture_capacity(1, true),
+        Err(BindingPromotionError::ObservationOrderExhausted { order: u64::MAX })
+    );
+    assert_eq!(visible(&table, &tree, scope), before);
+    table.next_observation_order = 11;
+    table.revision = u64::MAX;
+    assert!(matches!(
+        table.validate_capture_capacity(1, false),
+        Err(BindingPromotionError::MutationWitnessExhausted {
+            revision: u64::MAX,
+            ..
+        })
+    ));
+    assert_eq!(visible(&table, &tree, scope), before);
+}

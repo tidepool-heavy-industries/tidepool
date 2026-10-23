@@ -766,7 +766,7 @@ impl ProgramProvenance {
         Ok(())
     }
 
-    fn source_custody(&self) -> NativeSourceCustody {
+    pub(super) fn source_custody(&self) -> NativeSourceCustody {
         let mut sources = self.original_sources.clone();
         for site in self.sites.keys().copied().chain(self.native_sites.ids()) {
             if !sources.sites.contains_key(&site) {
@@ -3077,6 +3077,7 @@ impl CapturedCheckedValues {
 pub(crate) struct CapturedCheckedValueSet {
     payload: CapturedCheckedValuePayload,
     provenance: Arc<ProgramProvenance>,
+    observation: Option<(SessionVarId, Vec<tidepool_repr::VarId>)>,
 }
 
 /// Checked capture staging follows the item's sealed empty/value distinction.
@@ -3146,7 +3147,7 @@ impl CheckedCaptureStage {
 enum CapturedCheckedValuePayload {
     Empty,
     Values {
-        row: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+        stage: CheckedCaptureStage,
         values: Vec<CapturedCheckedValue>,
     },
 }
@@ -3161,7 +3162,7 @@ impl CapturedCheckedValueSet {
     ) -> Option<&Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
         match &self.payload {
             CapturedCheckedValuePayload::Empty => None,
-            CapturedCheckedValuePayload::Values { row, .. } => Some(row),
+            CapturedCheckedValuePayload::Values { stage, .. } => stage.row(),
         }
     }
 
@@ -3174,32 +3175,84 @@ impl CapturedCheckedValueSet {
 }
 
 pub(crate) struct CapturedCheckedValue {
-    name: String,
-    id: SessionVarId,
-    identity: SymbolIdentity,
-    generation: Generation,
-    handle: PreparedHandle,
+    entry: BindingEntry,
+    custody: RootCustody,
 }
 
 impl CapturedCheckedValue {
     pub(crate) fn name(&self) -> &str {
-        &self.name
+        &self.entry.name.0
     }
-
     pub(crate) fn id(&self) -> SessionVarId {
-        self.id
+        self.entry.id
     }
-
     pub(crate) fn identity(&self) -> &SymbolIdentity {
-        &self.identity
+        &self.entry.value.identity
     }
-
     pub(crate) fn generation(&self) -> Generation {
-        self.generation
+        self.entry.module.gen()
     }
-
     pub(crate) fn handle(&self) -> PreparedHandle {
-        self.handle
+        self.entry.value.handle
+    }
+}
+
+pub(super) struct PreparedCapturedCheckedValues {
+    payload: PreparedCapturedCheckedPayload,
+}
+
+static_assertions::assert_not_impl_any!(PreparedCapturedCheckedValues: Clone, Copy);
+
+enum PreparedCapturedCheckedPayload {
+    Empty,
+    Values {
+        bindings: super::persistent::PreparedCheckedBindings,
+        custody: Vec<RootCustody>,
+    },
+}
+
+impl CapturedCheckedValueSet {
+    pub(super) fn prepare_commit(
+        self,
+        session: &mut PersistentSession,
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<PreparedCapturedCheckedValues, SessionError> {
+        match self.payload {
+            CapturedCheckedValuePayload::Empty => Ok(PreparedCapturedCheckedValues {
+                payload: PreparedCapturedCheckedPayload::Empty,
+            }),
+            CapturedCheckedValuePayload::Values { stage, values } => {
+                let (entries, custody): (Vec<_>, Vec<_>) = values
+                    .into_iter()
+                    .map(|value| (value.entry, value.custody))
+                    .unzip();
+                let bindings = session.prepare_checked_private_values_in(
+                    ticket,
+                    entries,
+                    stage,
+                    self.provenance,
+                    self.observation,
+                )?;
+                Ok(PreparedCapturedCheckedValues {
+                    payload: PreparedCapturedCheckedPayload::Values { bindings, custody },
+                })
+            }
+        }
+    }
+}
+
+impl PreparedCapturedCheckedValues {
+    pub(super) fn commit(self, session: &mut PersistentSession) {
+        if let PreparedCapturedCheckedPayload::Values {
+            bindings,
+            mut custody,
+        } = self.payload
+        {
+            session.commit_checked_private_values_in(bindings);
+            for root in &mut custody {
+                root.handle.take();
+            }
+        }
     }
 }
 
@@ -3334,9 +3387,7 @@ impl PreparedCheckedTurn {
         session: &PersistentSession,
         scope: ScopeId,
     ) -> Result<RunningCheckedTicket, SessionError> {
-        self.prefix
-            .start(session, scope, self.execution)
-            .map(RunningCheckedTicket::new)
+        self.prefix.start(session, scope, self.execution)
     }
 }
 
@@ -4131,7 +4182,6 @@ pub struct ResidentSession<H, O> {
     parked: Vec<ParkedContinuation>,
     continuation_resource_owner: Option<ContinuationResourceOwner>,
     continuation_observer: Option<Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync>>,
-    binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
     /// Host-owned text identities for materialized bindings whose equality is
     /// meaningful to a caller (currently retained command jobs). The binding
     /// table remains the owner of reachability and scope retirement; this map
@@ -4274,7 +4324,6 @@ where
             parked: Vec::new(),
             continuation_resource_owner: None,
             continuation_observer: None,
-            binding_provenance: HashMap::new(),
             host_text_bindings: HashMap::new(),
             hidden_host_bindings: HashMap::new(),
             host_binding_prototypes: Vec::new(),
@@ -4880,16 +4929,6 @@ where
         self.state.adopt_checked_declaration(admission)
     }
 
-    #[cfg(test)]
-    pub(crate) fn start_checked_item_for_test(
-        &self,
-        prefix: &Arc<super::RuntimeCheckedPrefix>,
-        scope: ScopeId,
-        execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<super::admission::CheckedTurnCompletion>, SessionError> {
-        prefix.start(&self.state, scope, execution)
-    }
-
     /// Finalize the current writes selected by this resident owner. Private
     /// host input carriers retain native dependencies but never become public
     /// value heads.
@@ -4989,13 +5028,8 @@ where
         prepared: tidepool_repr::execution_schema::PreparedProgram,
         metadata: &DataConTable,
     ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
-        let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-            self.binding_provenance
-                .get(&input.id().raw())
-                .map(|provenance| provenance.source_custody())
-        };
         self.state
-            .install_prepared_with_sources(prepared, Some(metadata), &retained_sources)
+            .install_prepared_with_sources(prepared, Some(metadata))
     }
 
     fn retire_failed_turn_source_instances(
@@ -5341,7 +5375,6 @@ where
         {
             return Err(BindingAliasError::StaleGeneration.into());
         }
-        let provenance = self.binding_provenance.get(&source.raw()).cloned();
         let committed = self.state.publish_alias_in(
             scope,
             BindingEntry {
@@ -5358,20 +5391,12 @@ where
         )?;
         self.state.set_val_gen(generation);
         self.advance_public_visibility(scope);
-        if let Some(provenance) = provenance {
-            self.binding_provenance.insert(id.raw(), provenance);
-        }
         self.prune_binding_metadata();
         Ok(committed)
     }
 
     fn prune_binding_metadata(&mut self) {
-        self.binding_provenance.retain(|id, _| {
-            self.state
-                .bindings()
-                .get(SessionVarId::from_extract(*id))
-                .is_some()
-        });
+        self.state.prune_binding_provenance();
         self.host_text_bindings
             .retain(|id, _| self.state.bindings().get(*id).is_some());
         let mut removed_generic = false;
@@ -5750,18 +5775,12 @@ where
             super::prepared::NativeInstantiationPlan::prepare_code(crossed, &registry)
                 .expect("crossed selections keep compatible import shapes"),
         );
-        let provenance = &self.binding_provenance;
-        let retained = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-            provenance
-                .get(&input.id().raw())
-                .map(|owner| owner.source_custody())
-        };
         let before = self.state.public_visibility_snapshot_in(scope).unwrap();
         let residency = self.state.residency();
         assert!(
             matches!(
                 self.state
-                    .resolve_native_turn_in(scope, crossed, crossed_plan, &retained),
+                    .resolve_native_turn_in(scope, crossed, crossed_plan),
                 Err(PreparedRuntimeError::NativeSourceEvidence(_))
             ),
             "the actual source consumer must refuse a different checked target selection"
@@ -5772,7 +5791,7 @@ where
             before
         );
         self.state
-            .resolve_native_turn_in(scope, code, plan, &retained)
+            .resolve_native_turn_in(scope, code, plan)
             .expect("honest checked target resolves its own physical current source");
         assert_eq!(self.state.residency(), residency);
         assert_eq!(
@@ -6292,8 +6311,8 @@ where
                 defining_expr: None,
                 scope: ScopeId::ROOT,
             }).expect("all library identities preflighted before native import under exclusive checkout");
-            self.binding_provenance
-                .insert(id.raw(), Arc::clone(&provenance));
+            self.state
+                .record_binding_provenance(id.raw(), Arc::clone(&provenance));
             self.advance_public_visibility(ScopeId::ROOT);
         }
         Ok(RootCustody::new(
@@ -8208,16 +8227,9 @@ where
                     &self.state.certified_image_registry(),
                 )?),
             };
-            let provenance = &self.binding_provenance;
-            let retained_sources = |input: super::persistent::ValidatedRetainedSourceRef<'_>| {
-                provenance
-                    .get(&input.id().raw())
-                    .map(|owner| owner.source_custody())
-            };
             match certification.purpose() {
                 super::turn::TurnPurpose::Execution { .. } => NativeTurnAdmission::Native(
-                    self.state
-                        .resolve_native_turn_in(scope, &code, plan, &retained_sources)?,
+                    self.state.resolve_native_turn_in(scope, &code, plan)?,
                 ),
                 super::turn::TurnPurpose::Ordinary {
                     original: Some(original),
@@ -8296,7 +8308,7 @@ where
         if let NativeTurnAdmission::Native(resolved) = &admission.resolved {
             retained = resolved
                 .retained_ids()
-                .filter_map(|id| self.binding_provenance.get(&id.raw()))
+                .filter_map(|id| self.state.binding_provenance(id.raw()))
                 .collect();
         }
         {
@@ -9068,6 +9080,7 @@ where
                                 values: CapturedCheckedValueSet {
                                     payload: CapturedCheckedValuePayload::Empty,
                                     provenance: Arc::clone(&provenance),
+                                    observation: None,
                                 },
                             });
                         }
@@ -9087,7 +9100,12 @@ where
                             settlement,
                         )?;
                         if let Some(dependencies) = observation {
-                            self.finish_observation(binder, &dependencies);
+                            if let Some(captured) = &mut captured {
+                                captured.values.observation =
+                                    Some((SessionVarId::from_extract(binder.var_id), dependencies));
+                            } else {
+                                self.finish_observation(binder, &dependencies);
+                            }
                         }
                     }
                     PreparedTurnMode::Projected { .. } => {
@@ -9307,9 +9325,6 @@ where
                 return Err(error.into());
             }
         };
-        let row = checked_stage
-            .as_ref()
-            .and_then(|stage| stage.row().cloned());
         let scope_is_live = self.state.scope_tree().is_live(scope);
         let engine = self.state.require_prepared()?;
         if !scope_is_live {
@@ -9355,18 +9370,34 @@ where
             };
             entries.push(entry);
         }
-        let captured_values = ticket.as_ref().map(|_| {
-            entries
-                .iter()
+        if let Some(ticket) = ticket {
+            // The completed result owns its roots while compiler and runtime
+            // publication are prepared. No binding is visible yet.
+            if private_overlay.is_none() {
+                engine.release_all(entries.iter().map(|entry| entry.value.handle));
+                return Err(SessionError::WorldCellRequiresServicePreparation.into());
+            }
+            let stage = checked_stage.take().expect("checked capture stage");
+            let values = entries
+                .into_iter()
                 .map(|entry| CapturedCheckedValue {
-                    name: entry.name.0.clone(),
-                    id: entry.id,
-                    identity: entry.value.identity.clone(),
-                    generation: entry.module.gen,
-                    handle: entry.value.handle,
+                    custody: RootCustody::new(
+                        entry.value.handle.raw(),
+                        self.custody_cleanup.clone(),
+                        Arc::clone(provenance),
+                    ),
+                    entry,
                 })
-                .collect::<Vec<_>>()
-        });
+                .collect();
+            return Ok(Some(CapturedCheckedValues {
+                ticket,
+                values: CapturedCheckedValueSet {
+                    payload: CapturedCheckedValuePayload::Values { stage, values },
+                    provenance: Arc::clone(provenance),
+                    observation: None,
+                },
+            }));
+        }
         if let PreparedBindingInstall::Host(HostBindingInstall {
             private_input: Some(private_input),
             reservation,
@@ -9403,19 +9434,6 @@ where
                 self.hidden_host_bindings
                     .insert(id, HiddenHostBinding::PrivateInput);
             }
-        } else if let Some(completion) = private_overlay {
-            self.state.bind_checked_private_values_in(
-                completion,
-                ticket
-                    .as_ref()
-                    .expect("checked overlay owns its capture ticket"),
-                scope,
-                entries,
-                &binders,
-                checked_stage
-                    .take()
-                    .expect("checked overlay owns its capture stage"),
-            )?;
         } else if matches!(&install, PreparedBindingInstall::Host(_)) {
             let entry = entries.pop().expect("one reserved host binding");
             let handle = entry.value.handle;
@@ -9438,24 +9456,12 @@ where
             self.state.commit_staged_value_interface(host.interface);
         }
         for (binder, _) in bound {
-            self.binding_provenance
-                .insert(binder.var_id, Arc::clone(provenance));
+            self.state
+                .record_binding_provenance(binder.var_id, Arc::clone(provenance));
             self.advance_public_visibility(scope);
         }
         self.state.set_val_gen(generation);
-        Ok(ticket.map(|ticket| CapturedCheckedValues {
-            ticket,
-            values: CapturedCheckedValueSet {
-                payload: match row {
-                    Some(row) => CapturedCheckedValuePayload::Values {
-                        row,
-                        values: captured_values.expect("checked capture carries its result set"),
-                    },
-                    None => CapturedCheckedValuePayload::Empty,
-                },
-                provenance: Arc::clone(provenance),
-            },
-        }))
+        Ok(None)
     }
 
     fn run_transient_with_sites(
@@ -10575,8 +10581,8 @@ where
         }
         Ok(Some((
             entry.value.handle.raw(),
-            self.binding_provenance
-                .get(&expected.raw())
+            self.state
+                .binding_provenance(expected.raw())
                 .cloned()
                 .unwrap_or_default(),
         )))
@@ -10707,7 +10713,7 @@ mod custody_release_tests {
                 })) if fields == fields_count
             ));
             assert!(resident.state.bindings().get(entries[0].id).is_none());
-            assert!(!resident.binding_provenance.contains_key(&binder.var_id));
+            assert!(resident.state.binding_provenance(binder.var_id).is_none());
             for handle in handles {
                 assert!(resident
                     .state
@@ -10911,8 +10917,8 @@ mod custody_release_tests {
         let id = bind_fixture(&mut session, &source, ScopeId::ROOT, 41);
         let provenance = Arc::new(ProgramProvenance::default());
         session
-            .binding_provenance
-            .insert(id.raw(), provenance.clone());
+            .state
+            .record_binding_provenance(id.raw(), provenance.clone());
         let original = session.value_handle_count();
         let custody = session.retain_binding_custody("x").unwrap().unwrap();
         assert!(Arc::ptr_eq(&custody.provenance, &provenance));
@@ -10951,16 +10957,16 @@ mod custody_release_tests {
             let other_id = bind_fixture(&mut session, &other_source, other_scope, 43);
             let other_provenance = Arc::new(ProgramProvenance::default());
             session
-                .binding_provenance
-                .insert(other_id.raw(), Arc::clone(&other_provenance));
+                .state
+                .record_binding_provenance(other_id.raw(), Arc::clone(&other_provenance));
             let scope = session.mint_scope(ScopeId::ROOT).unwrap();
             let source = session.adopt_initial_notebook_scope(scope).unwrap();
             let id = bind_fixture(&mut session, &source, scope, 42);
             let provenance = Arc::new(ProgramProvenance::default());
             let weak = Arc::downgrade(&provenance);
             session
-                .binding_provenance
-                .insert(id.raw(), Arc::clone(&provenance));
+                .state
+                .record_binding_provenance(id.raw(), Arc::clone(&provenance));
             let binding_lease = retain_binding.then(|| session.lease_bindings(&[id.var()]));
             let lexical_lease =
                 retain_lexical.then(|| session.retain_lexical_scope(scope).unwrap());
@@ -10984,9 +10990,9 @@ mod custody_release_tests {
             drop(source);
             session.settle_dropped_custody();
             assert_eq!(session.state.bindings().get(id).is_some(), leased);
-            assert_eq!(session.binding_provenance.contains_key(&id.raw()), leased);
+            assert_eq!(session.state.binding_provenance(id.raw()).is_some(), leased);
             assert!(Arc::ptr_eq(
-                &session.binding_provenance[&other_id.raw()],
+                session.state.binding_provenance(other_id.raw()).unwrap(),
                 &other_provenance
             ));
             assert!(
@@ -11014,13 +11020,13 @@ mod custody_release_tests {
                 assert!(!session.state.scope_tree().is_live(retained_scope));
             }
             assert!(session.state.bindings().get(id).is_none());
-            assert!(!session.binding_provenance.contains_key(&id.raw()));
+            assert!(session.state.binding_provenance(id.raw()).is_none());
             assert!(
                 weak.upgrade().is_none(),
                 "last metadata share retires after the owning lease cleanup"
             );
             assert!(Arc::ptr_eq(
-                &session.binding_provenance[&other_id.raw()],
+                session.state.binding_provenance(other_id.raw()).unwrap(),
                 &other_provenance
             ));
             major_collect(&mut session);
@@ -11028,7 +11034,7 @@ mod custody_release_tests {
             session.retire_scope(other_scope);
             drop(other_source);
             session.settle_dropped_custody();
-            assert!(!session.binding_provenance.contains_key(&other_id.raw()));
+            assert!(session.state.binding_provenance(other_id.raw()).is_none());
             major_collect(&mut session);
             assert_eq!(session.value_handle_count(), 0);
         }
@@ -11225,25 +11231,186 @@ mod authored_publication_tests {
     }
 
     #[test]
-    fn checked_capture_refuses_missing_binder_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::MissingBinder);
+    fn checked_capture_stage_requires_its_actual_issued_ticket_and_session() {
+        fn stage(
+            fixture: &mut CheckedCaptureFixture,
+        ) -> (
+            RunningCheckedTicket,
+            CheckedCaptureTicket,
+            CheckedCaptureStage,
+        ) {
+            let native = fixture
+                .compiled
+                .certification
+                .as_ref()
+                .unwrap()
+                .checked_execution()
+                .unwrap()
+                .clone();
+            let running = source_action(&mut fixture.resident, &fixture.original, |resident, _| {
+                fixture
+                    .prefix
+                    .start(&resident.state, fixture.execution.private_scope(), native)
+            })
+            .unwrap();
+            let ticket = running.completion().capture_ticket().unwrap();
+            let stage = CheckedCaptureStage::prepare(&fixture.resident.state, &ticket).unwrap();
+            (running, ticket, stage)
+        }
+        let mut own = checked_capture_fixture(SessionId(1002));
+        let mut foreign = checked_capture_fixture(SessionId(1003));
+        let (_own_running, own_ticket, own_stage) = stage(&mut own);
+        let (_foreign_running, foreign_ticket, foreign_stage) = stage(&mut foreign);
+        own_stage
+            .validate(&own.resident.state, &own_ticket)
+            .unwrap();
+        foreign_stage
+            .validate(&foreign.resident.state, &foreign_ticket)
+            .unwrap();
+        assert!(matches!(
+            foreign_stage.validate(&own.resident.state, &own_ticket),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(matches!(
+            own_stage.validate(&foreign.resident.state, &own_ticket),
+            Err(SessionError::StaleStagedDeclaration)
+        ));
+        assert!(own.resident.state.binding_provenance_is_empty());
+        assert!(foreign.resident.state.binding_provenance_is_empty());
+        assert_eq!(own.prefix.snapshot().compiler_prefix().next_item(), 0);
+        assert_eq!(foreign.prefix.snapshot().compiler_prefix().next_item(), 0);
     }
 
     #[test]
-    fn checked_capture_refuses_extra_binder_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::ExtraBinder);
-    }
-
-    #[test]
-    fn checked_capture_refuses_foreign_checked_row_at_binding_receiver() {
-        checked_capture_receiver_refusal(CaptureRefusal::ForeignStage);
-    }
-
-    #[derive(Clone, Copy)]
-    enum CaptureRefusal {
-        MissingBinder,
-        ExtraBinder,
-        ForeignStage,
+    fn checked_capture_rejects_invalid_second_binder_then_commits_the_actual_pair() {
+        let mut fixture = checked_capture_fixture_from(
+            SessionId(1001),
+            include_str!("fixtures/checked-pattern-capture.hs"),
+        );
+        assert_eq!(fixture.bound.len(), 2);
+        let scope = fixture.execution.private_scope();
+        let module = SessionModule::val(fixture.reservation.generation());
+        let mut invalid = fixture.bound.clone();
+        invalid[1].var_id = invalid[0].var_id;
+        let before = fixture.prefix.snapshot();
+        let refused = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_projected_bind_with_sites(
+                    "pair",
+                    fixture.compiled.code(),
+                    &invalid,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(ResidentError::Session(SessionError::InvalidBindingIdentity(error))) if error.id == SessionVarId::from_extract(invalid[0].var_id)
+        ));
+        assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(module)
+            .is_none());
+        for binder in &fixture.bound {
+            assert!(fixture
+                .resident
+                .current_binding_in(scope, &binder.name)
+                .is_none());
+            assert!(!fixture
+                .resident
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
+        }
+        let mut extra = fixture.bound.clone();
+        let mut added = extra[1].clone();
+        added.var_id ^= 1 << 63;
+        extra.push(added);
+        for malformed in [&fixture.bound[..1], extra.as_slice()] {
+            let refused = source_action(
+                &mut fixture.resident,
+                &fixture.original,
+                |resident, report| {
+                    resident.run_projected_bind_with_sites(
+                        "pair",
+                        fixture.compiled.code(),
+                        malformed,
+                        fixture.reservation.generation(),
+                        report,
+                    )
+                },
+            );
+            assert!(matches!(
+                refused,
+                Err(ResidentError::Session(SessionError::Compile(_)))
+            ));
+            assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
+            assert!(fixture
+                .resident
+                .state
+                .retained_checked_value_artifact(module)
+                .is_none());
+            for binder in &fixture.bound {
+                assert!(fixture
+                    .resident
+                    .current_binding_in(scope, &binder.name)
+                    .is_none());
+                assert!(fixture
+                    .resident
+                    .state
+                    .binding_provenance(binder.var_id)
+                    .is_none());
+            }
+        }
+        let completed = source_action(
+            &mut fixture.resident,
+            &fixture.original,
+            |resident, report| {
+                resident.run_projected_bind_with_sites(
+                    "pair",
+                    fixture.compiled.code(),
+                    &fixture.bound,
+                    fixture.reservation.generation(),
+                    report,
+                )
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            completed,
+            ResidentOutcome::BindingsCommitted { .. }
+        ));
+        assert_eq!(fixture.prefix.snapshot().compiler_prefix().next_item(), 1);
+        assert!(fixture
+            .resident
+            .state
+            .retained_checked_value_artifact(module)
+            .is_some());
+        for binder in &fixture.bound {
+            let id = SessionVarId::from_extract(binder.var_id);
+            assert_eq!(
+                fixture
+                    .resident
+                    .current_binding_in(scope, &binder.name)
+                    .unwrap()
+                    .0,
+                id
+            );
+            assert!(fixture
+                .resident
+                .state
+                .binding_provenance(binder.var_id)
+                .is_some());
+        }
+        fixture
+            .resident
+            .freeze_private_execution(&fixture.execution)
+            .unwrap();
     }
 
     struct CheckedCaptureFixture {
@@ -11258,150 +11425,14 @@ mod authored_publication_tests {
         compiled: super::super::turn::CompiledTurn,
     }
 
-    impl CheckedCaptureFixture {
-        fn capture(
-            &mut self,
-        ) -> (
-            Arc<CheckedTurnCompletion>,
-            CheckedCaptureTicket,
-            CheckedCaptureStage,
-        ) {
-            let native = self
-                .compiled
-                .certification
-                .as_ref()
-                .unwrap()
-                .checked_execution()
-                .unwrap()
-                .clone();
-            let completion = source_action(&mut self.resident, &self.original, |resident, _| {
-                self.prefix
-                    .start(&resident.state, self.execution.private_scope(), native)
-            })
-            .unwrap();
-            let ticket = completion.capture_ticket().unwrap();
-            let stage = CheckedCaptureStage::prepare(&self.resident.state, &ticket).unwrap();
-            (completion, ticket, stage)
-        }
-    }
-
-    fn checked_capture_receiver_refusal(refusal: CaptureRefusal) {
-        let mut fixture = checked_capture_fixture(SessionId(1001));
-        let mut foreign = matches!(refusal, CaptureRefusal::ForeignStage)
-            .then(|| checked_capture_fixture(SessionId(1002)));
-        let (completion, ticket, own_stage) = fixture.capture();
-        own_stage
-            .validate(&fixture.resident.state, &ticket)
-            .unwrap();
-        completion.validate_capture_ticket(&ticket).unwrap();
-        assert!(completion
-            .validates_private_overlay(
-                &fixture.resident.state,
-                fixture.execution.private_scope(),
-                &fixture.bound.iter().collect::<Vec<_>>(),
-            )
-            .unwrap());
-        let (stage, _foreign_completion, _foreign_ticket) = match foreign.as_mut() {
-            Some(foreign) => {
-                let (completion, ticket, stage) = foreign.capture();
-                drop(own_stage);
-                (stage, Some(completion), Some(ticket))
-            }
-            None => (own_stage, None, None),
-        };
-        let binder = &fixture.bound[0];
-        let scope = fixture.execution.private_scope();
-        let mut entry = crate::session::prepared::tests::evaluated_publication_fixture(
-            &mut fixture.resident.state,
-            &binder.name,
-            fixture.reservation.generation().0,
-        );
-        entry.id = SessionVarId::from_extract(binder.var_id);
-        entry.scope = scope;
-        entry.value.identity = SymbolIdentity {
-            unit: "main".into(),
-            module: binder.module.clone(),
-            namespace: "value".into(),
-            occurrence: binder.name.clone(),
-            record_parent: None,
-        };
-        // This receiver-level malformed-input control supplies an independently
-        // evaluated handle. Establish every unchanged entry premise before
-        // changing the binder list or substituting the foreign checked stage.
-        assert_eq!(entry.name.0, binder.name);
-        assert_eq!(
-            entry.module,
-            SessionModule::val(fixture.reservation.generation())
-        );
-        assert_eq!(entry.module.gen.0, ticket.execution().generation());
-        assert_eq!(entry.value.identity.module, binder.module);
-        assert_eq!(entry.value.identity.occurrence, binder.name);
-        assert_eq!(ticket.scope(), scope);
-        let id = entry.id;
-        let handle = entry.value.handle;
-        assert_eq!(
-            fixture
-                .resident
-                .state
-                .prepared()
-                .unwrap()
-                .prepared_handle_of(handle.raw()),
-            Some(handle)
-        );
-        if matches!(refusal, CaptureRefusal::ForeignStage) {
-            assert!(matches!(
-                stage.validate(&fixture.resident.state, &ticket),
-                Err(SessionError::StaleStagedDeclaration)
-            ));
-        }
-        let mut binders = fixture.bound.clone();
-        match refusal {
-            CaptureRefusal::MissingBinder => binders.clear(),
-            CaptureRefusal::ExtraBinder => binders.push(binders[0].clone()),
-            CaptureRefusal::ForeignStage => {}
-        }
-        let binders = binders.iter().collect::<Vec<_>>();
-        let before = fixture.prefix.snapshot();
-        let result = source_action(&mut fixture.resident, &fixture.original, |resident, _| {
-            resident.state.bind_checked_private_values_in(
-                &completion,
-                &ticket,
-                scope,
-                vec![entry],
-                &binders,
-                stage,
-            )
-        });
-        match refusal {
-            CaptureRefusal::MissingBinder | CaptureRefusal::ExtraBinder => {
-                assert!(matches!(result, Err(SessionError::Compile(_))));
-            }
-            CaptureRefusal::ForeignStage => {
-                assert!(matches!(result, Err(SessionError::StaleStagedDeclaration)));
-            }
-        }
-        assert!(Arc::ptr_eq(&before, &fixture.prefix.snapshot()));
-        assert!(fixture.resident.state.bindings().get(id).is_none());
-        assert!(fixture
-            .resident
-            .state
-            .retained_checked_value_artifact(SessionModule::val(fixture.reservation.generation()))
-            .is_none());
-        assert!(!fixture.resident.binding_provenance.contains_key(&id.raw()));
-        assert!(fixture
-            .resident
-            .state
-            .prepared()
-            .unwrap()
-            .prepared_handle_of(handle.raw())
-            .is_none());
-        assert!(fixture
-            .resident
-            .freeze_private_execution(&fixture.execution)
-            .is_err());
-    }
-
     fn checked_capture_fixture(session: SessionId) -> CheckedCaptureFixture {
+        checked_capture_fixture_from(
+            session,
+            include_str!("fixtures/checked-interface-publication.hs"),
+        )
+    }
+
+    fn checked_capture_fixture_from(session: SessionId, source: &str) -> CheckedCaptureFixture {
         use super::world_cell_test_support::{
             bootstrap_world_for, plan_fixture_cell_for, InputRecipe,
         };
@@ -11438,7 +11469,6 @@ mod authored_publication_tests {
             })
             .unwrap(),
         );
-        let source = include_str!("fixtures/checked-interface-publication.hs");
         let admission =
             plan_fixture_cell_for(&mut resident, &original, &recipe, source, execution.clone())
                 .unwrap();
@@ -11558,7 +11588,7 @@ mod authored_publication_tests {
             resident.state.bindings().get(id).is_none(),
             "row refusal must precede private binding installation"
         );
-        assert!(!resident.binding_provenance.contains_key(&id.raw()));
+        assert!(resident.state.binding_provenance(id.raw()).is_none());
         drop(before);
         drop(compiled);
         drop(checked);
@@ -13232,7 +13262,7 @@ mod authored_publication_tests {
                 &identities[1].occurrence,
             )))
             .is_none());
-        assert!(destination.binding_provenance.is_empty());
+        assert!(destination.state.binding_provenance_is_empty());
         let reexported = destination.export_shared(&custody).unwrap();
         let carried = reexported
             .native

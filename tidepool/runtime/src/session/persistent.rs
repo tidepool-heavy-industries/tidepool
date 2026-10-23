@@ -77,18 +77,11 @@ impl InstalledCertifiedTurn {
     }
 }
 
-/// Borrowed only after the actual scoped binding identity and generation match.
-pub(crate) struct ValidatedRetainedSourceRef<'a> {
-    entry: &'a BindingEntry,
-}
-
-impl ValidatedRetainedSourceRef<'_> {
-    pub(crate) fn id(&self) -> SessionVarId {
-        self.entry.id
-    }
-    pub(crate) fn handle(&self) -> tidepool_codegen::prepared_program::PreparedHandle {
-        self.entry.value.handle
-    }
+/// Runtime provenance is optional only for genuinely closed/bootstrap values.
+/// A missing binding is distinct from an existing value without compiler metadata.
+pub(super) enum BindingRuntimeOrigin<'a> {
+    Program(&'a Arc<super::resident::ProgramProvenance>),
+    Closed,
 }
 
 pub(crate) struct ResolvedNativeTurn {
@@ -105,6 +98,51 @@ impl ResolvedNativeTurn {
 
     pub(super) fn retained_ids(&self) -> impl Iterator<Item = SessionVarId> + '_ {
         self.captures.values().map(|capture| capture.id)
+    }
+}
+
+impl PersistentSession {
+    pub(super) fn binding_runtime_origin(
+        &self,
+        id: SessionVarId,
+    ) -> Option<BindingRuntimeOrigin<'_>> {
+        self.bindings.get(id)?;
+        Some(match self.binding_provenance.get(&id.raw()) {
+            Some(provenance) => BindingRuntimeOrigin::Program(provenance),
+            None => BindingRuntimeOrigin::Closed,
+        })
+    }
+
+    pub(super) fn binding_provenance(
+        &self,
+        id: u64,
+    ) -> Option<&Arc<super::resident::ProgramProvenance>> {
+        match self.binding_runtime_origin(SessionVarId::from_extract(id))? {
+            BindingRuntimeOrigin::Program(provenance) => Some(provenance),
+            BindingRuntimeOrigin::Closed => None,
+        }
+    }
+
+    pub(super) fn record_binding_provenance(
+        &mut self,
+        id: u64,
+        provenance: Arc<super::resident::ProgramProvenance>,
+    ) {
+        assert!(
+            self.bindings.get(SessionVarId::from_extract(id)).is_some(),
+            "provenance accompanies an installed binding"
+        );
+        self.binding_provenance.insert(id, provenance);
+    }
+
+    pub(super) fn prune_binding_provenance(&mut self) {
+        self.binding_provenance
+            .retain(|id, _| self.bindings.get(SessionVarId::from_extract(*id)).is_some());
+    }
+
+    #[cfg(test)]
+    pub(super) fn binding_provenance_is_empty(&self) -> bool {
+        self.binding_provenance.is_empty()
     }
 }
 
@@ -147,6 +185,19 @@ pub struct DurablePublicBootstrap {
     surface: super::RecoveryPublicOwnerState,
     context: Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
+
+/// Complete checked binding publication prepared by this session owner.
+/// Fields stay private so a caller cannot replace its entries, row or epoch.
+pub(super) struct PreparedCheckedBindings {
+    scope: ScopeId,
+    entries: Vec<BindingEntry>,
+    stage: super::resident::CheckedCaptureStage,
+    epoch: u64,
+    provenance: Arc<super::resident::ProgramProvenance>,
+    observation: Option<(SessionVarId, Vec<VarId>)>,
+}
+
+static_assertions::assert_not_impl_any!(PreparedCheckedBindings: Clone, Copy);
 
 /// The exact checked interface prepared before a host value enters the heap.
 /// Dropping an uncommitted token reaps only the file this staging operation created.
@@ -268,6 +319,7 @@ pub struct PersistentSession {
     /// The persistent binding store: `name → (SessionVarId, PreparedHandle, Val.G<g>)` for each
     /// materialized bind, seeded into a later fragment's [`ExternalEnv`].
     bindings: BindingTable,
+    binding_provenance: HashMap<u64, Arc<super::resident::ProgramProvenance>>,
     /// Immutable scoped semantics, keyed by witnesses from the mutation owners.
     /// Request counters and the ambient injection inventory are refreshed separately.
     compile_views: parking_lot::Mutex<HashMap<ScopeId, Arc<CachedCompileView>>>,
@@ -526,6 +578,7 @@ impl PersistentSession {
             session_table: DataConTable::new(),
             lib,
             bindings: BindingTable::new(),
+            binding_provenance: HashMap::new(),
             compile_views: parking_lot::Mutex::new(HashMap::new()),
             compiler_input_revision: 1,
             #[cfg(test)]
@@ -800,7 +853,6 @@ impl PersistentSession {
         scope: ScopeId,
         code: &super::turn::TurnCode<'_>,
         plan: Arc<super::prepared::NativeInstantiationPlan>,
-        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<ResolvedNativeTurn, PreparedRuntimeError> {
         if !self.scopes.is_live(scope) || !plan.matches_code(code) {
             return Err(PreparedRuntimeError::SourceScopeAdmission);
@@ -838,7 +890,10 @@ impl PersistentSession {
                     identity: requirement.identity().clone(),
                     generation: requirement.generation(),
                 })?;
-            let sources = retained_sources(ValidatedRetainedSourceRef { entry })
+            let sources = self
+                .binding_provenance
+                .get(&entry.id.raw())
+                .map(|owner| owner.source_custody())
                 .ok_or(PreparedRuntimeError::MissingRetainedSource { id: entry.id })?;
             captures.insert(
                 key,
@@ -1113,6 +1168,7 @@ impl PersistentSession {
     pub(super) fn release_binding_roots(&mut self, entries: Vec<BindingEntry>) -> usize {
         let mut released = 0usize;
         for entry in entries {
+            self.binding_provenance.remove(&entry.id.raw());
             let module = entry.module;
             // `on_evict` is the single point of truth for whether any OTHER
             // live entry still shares this handle (an alias published by
@@ -1452,7 +1508,7 @@ impl PersistentSession {
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
     ) -> Result<tidepool_codegen::prepared_program::ProgramId, PreparedRuntimeError> {
-        self.install_prepared_with_sources(prepared, metadata, &|_| None)
+        self.install_prepared_with_sources(prepared, metadata)
             .map(|(program, _)| program)
     }
 
@@ -1460,7 +1516,6 @@ impl PersistentSession {
         &mut self,
         prepared: PreparedProgram,
         metadata: Option<&DataConTable>,
-        retained_sources: &dyn Fn(ValidatedRetainedSourceRef<'_>) -> Option<NativeSourceCustody>,
     ) -> Result<(ProgramId, NativeSourceCustody), PreparedRuntimeError> {
         self.admit_source_work_in(ScopeId::ROOT)?;
 
@@ -1483,7 +1538,9 @@ impl PersistentSession {
             }
             Some(engine) => {
                 engine.install(prepared, &self.bindings, &self.binding_index, &|entry| {
-                    retained_sources(ValidatedRetainedSourceRef { entry })
+                    self.binding_provenance
+                        .get(&entry.id.raw())
+                        .map(|owner| owner.source_custody())
                 })?
             }
         };
@@ -4544,6 +4601,8 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let provenance = self.binding_provenance.get(&source.raw()).cloned();
+        let alias_id = entry.id;
         let name = entry.name.0.clone();
         self.bindings.validate_bind_in(scope, &entry)?;
         self.retract_value_heads_in(scope, std::slice::from_ref(&name), settlement)?;
@@ -4565,6 +4624,9 @@ impl PersistentSession {
             .bind_alias_in(scope, entry, source)
             .expect("source and alias identity validated before declaration retraction");
         self.binding_index.on_bind_record(&record);
+        if let Some(provenance) = provenance {
+            self.record_binding_provenance(alias_id.raw(), provenance);
+        }
         self.release_binding_roots(expired);
         Ok(receipt)
     }
@@ -4629,89 +4691,93 @@ impl PersistentSession {
         Ok(MaterializationSetCommit { bindings })
     }
 
-    /// A sealed checked native item overlays Value heads in its exact private
-    /// scope. Its original declaration module remains available by qualification.
-    #[allow(
-        clippy::expect_used,
-        reason = "the complete sealed set is preflighted under the exclusive session checkout"
-    )]
-    pub(crate) fn bind_checked_private_values_in(
+    /// Prepare the sealed item's complete private overlay before publication.
+    pub(super) fn prepare_checked_private_values_in(
         &mut self,
-        completion: &super::admission::CheckedTurnCompletion,
         ticket: &super::admission::CheckedCaptureTicket,
-        scope: ScopeId,
         entries: Vec<BindingEntry>,
-        binders: &[&super::BoundBinder],
         stage: super::resident::CheckedCaptureStage,
-    ) -> Result<MaterializationSetCommit, SessionError> {
-        match self.admit_source_work_in(scope) {
-            Ok(()) => (),
-            Err(error) => {
-                self.discard_unbound_entries(entries);
-                return Err(error.into());
-            }
-        };
-
-        match completion.validates_private_overlay(self, scope, binders) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.discard_unbound_entries(entries);
-                return Err(SessionError::StaleStagedDeclaration);
-            }
-            Err(error) => {
-                self.discard_unbound_entries(entries);
-                return Err(error);
-            }
-        }
+        provenance: Arc<super::resident::ProgramProvenance>,
+        observation: Option<(SessionVarId, Vec<VarId>)>,
+    ) -> Result<PreparedCheckedBindings, SessionError> {
+        let scope = ticket.scope();
+        self.admit_source_work_in(scope)?;
+        stage.validate(self, ticket)?;
+        let expected = ticket
+            .execution()
+            .bound_binder_identities()
+            .collect::<Vec<_>>();
         let handles_match = self.prepared().is_some_and(|engine| {
             entries.iter().all(|entry| {
                 engine.prepared_handle_of(entry.value.handle.raw()) == Some(entry.value.handle)
             })
         });
-        if ticket.scope() != scope
+        if !self.scopes.is_live(scope)
             || !handles_match
-            || entries.len() != binders.len()
-            || entries.iter().zip(binders).any(|(entry, binder)| {
-                entry.name.0 != binder.name
-                    || entry.id != SessionVarId::from_extract(binder.var_id)
+            || entries.len() != expected.len()
+            || entries.iter().zip(expected).any(|(entry, (name, id))| {
+                entry.name.0 != name
+                    || entry.id.raw() != id
                     || entry.scope != scope
                     || entry.module
                         != SessionModule::val(Generation(ticket.execution().generation()))
                     || entry.value.identity.unit != "main"
-                    || entry.value.identity.module != binder.module
-                    || entry.value.identity.occurrence != binder.name
+                    || entry.value.identity.module != entry.module.module_name()
+                    || entry.value.identity.occurrence != name
                     || entry.value.identity.namespace != "value"
                     || entry.value.identity.record_parent.is_some()
             })
         {
-            self.discard_unbound_entries(entries);
             return Err(SessionError::StaleStagedDeclaration);
         }
-        if let Err(error) = completion
-            .validate_capture_ticket(ticket)
-            .and_then(|()| stage.validate(self, ticket))
-        {
-            self.discard_unbound_entries(entries);
-            return Err(error);
+        let mut ids = std::collections::HashSet::new();
+        for entry in &entries {
+            if !ids.insert(entry.id) || self.bindings.get(entry.id).is_some() {
+                return Err(
+                    tidepool_codegen::binding_table::BindingIdentityError { id: entry.id }.into(),
+                );
+            }
+            self.bindings.validate_bind_in(scope, entry)?;
         }
-        if let Err(error) = self.validate_binding_set_in(scope, &entries) {
-            self.discard_unbound_entries(entries);
-            return Err(error);
+        self.bindings
+            .validate_capture_capacity(entries.len(), observation.is_some())
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let epoch = self.prepare_public_visibility_advance(scope)?;
+        Ok(PreparedCheckedBindings {
+            scope,
+            entries,
+            stage,
+            epoch,
+            provenance,
+            observation,
+        })
+    }
+
+    /// The complete set was checked under exclusive checkout. Source admission
+    /// is held by the capture commit, so insertion must not reacquire that gate.
+    pub(super) fn commit_checked_private_values_in(&mut self, prepared: PreparedCheckedBindings) {
+        let PreparedCheckedBindings {
+            scope,
+            entries,
+            stage,
+            epoch,
+            provenance,
+            observation,
+        } = prepared;
+        for entry in entries {
+            let record = BindRecord::of(&entry);
+            let id = entry.id.raw();
+            self.bindings
+                .bind_in(scope, entry)
+                .expect("prepared checked binding identity");
+            self.binding_index.on_bind_record(&record);
+            self.record_binding_provenance(id, Arc::clone(&provenance));
         }
-        let bindings = entries
-            .into_iter()
-            .map(|entry| {
-                let receipt = ValuePlaneCommit {
-                    name: entry.name.0.clone(),
-                    module: entry.module,
-                };
-                self.bind_in(scope, entry)
-                    .expect("complete checked binding set preflighted before mutation");
-                receipt
-            })
-            .collect();
         stage.commit(self);
-        Ok(MaterializationSetCommit { bindings })
+        self.commit_public_visibility_advance(scope, epoch);
+        if let Some((id, dependencies)) = observation {
+            self.save_observation(id, &dependencies);
+        }
     }
 
     fn validate_binding_set_in(

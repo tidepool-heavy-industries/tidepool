@@ -3084,7 +3084,7 @@ impl RuntimeCheckedPrefix {
         session: &PersistentSession,
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
-    ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
+    ) -> Result<RunningCheckedTicket, SessionError> {
         if let Some(private) = self.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -3210,8 +3210,7 @@ impl RuntimeCheckedPrefix {
         drop(state);
         let ticket = RunningCheckedTicket::new(Arc::clone(&completion));
         super::complete_native_transition(admission)?;
-        ticket.handoff();
-        Ok(completion)
+        Ok(ticket)
     }
 }
 
@@ -3308,7 +3307,7 @@ impl CheckedCaptureTicket {
             prefix: Arc::clone(&self.prefix),
             running: Arc::clone(&self.running),
         };
-        completion.settle_captured(session, captured)?;
+        completion.settle_captured(session, &self, captured)?;
         self.committed = true;
         Ok(())
     }
@@ -3593,8 +3592,10 @@ impl CheckedTurnCompletion {
     fn settle_captured(
         &self,
         session: &mut PersistentSession,
+        ticket: &CheckedCaptureTicket,
         captured: super::resident::CapturedCheckedValueSet,
     ) -> Result<(), SessionError> {
+        self.validate_capture_ticket(ticket)?;
         if let Some(private) = self.prefix.admission.private_execution() {
             private.ensure_open()?;
         }
@@ -3732,38 +3733,52 @@ impl CheckedTurnCompletion {
                 }
             })
             .transpose()?;
-        settle_checked_snapshot(
+        let prepared = prepare_checked_snapshot(
             session,
-            &mut state,
-            self.prefix.admission.scope,
-            compiler_prefix,
+            &state,
             &self.prefix.admission,
-            &self.prefix.program,
+            compiler_prefix,
             captured.row().cloned(),
             Some(native),
             successor,
         )?;
-        if let Some(lifecycle) = lifecycle.as_mut() {
-            match terminal {
-                Some(Some(frontier)) => {
-                    lifecycle.authored = PrivateAuthoredProgram::Ready(frontier)
+        let captured = captured.prepare_commit(session, ticket)?;
+        self.prefix
+            .admission
+            .with_open_sources(|| -> Result<(), SessionError> {
+                if !self.prefix.admission.belongs_to(session) {
+                    return Err(super::SessionTransitionReason::OwnerChanged.into());
                 }
-                _ => {
-                    if let PrivateAuthoredProgram::Active { predecessor, .. } =
-                        &mut lifecycle.authored
-                    {
-                        *predecessor = state
-                            .snapshot()
-                            .world()
-                            .expect("World active successor")
-                            .clone();
+                captured.commit(session);
+                prepared.commit(
+                    session,
+                    &mut state,
+                    &self.prefix.admission,
+                    &self.prefix.program,
+                );
+                if let Some(lifecycle) = lifecycle.as_mut() {
+                    match terminal {
+                        Some(Some(frontier)) => {
+                            lifecycle.authored = PrivateAuthoredProgram::Ready(frontier)
+                        }
+                        _ => {
+                            if let PrivateAuthoredProgram::Active { predecessor, .. } =
+                                &mut lifecycle.authored
+                            {
+                                *predecessor = state
+                                    .snapshot()
+                                    .world()
+                                    .expect("World active successor")
+                                    .clone();
+                            }
+                        }
                     }
                 }
-            }
-        }
-        if let Some((private, values)) = completed_values {
-            private.completed_values.lock().extend(values);
-        }
+                if let Some((private, values)) = completed_values {
+                    private.completed_values.lock().extend(values);
+                }
+                Ok(())
+            })??;
         if let (
             Some(predecessor_world),
             Some(successor),
@@ -3787,26 +3802,45 @@ impl CheckedTurnCompletion {
     }
 }
 
-fn settle_checked_snapshot(
-    session: &mut PersistentSession,
-    state: &mut RuntimeCheckedState,
+struct PreparedCheckedSnapshot {
     scope: ScopeId,
     compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
+    interfaces: CheckedInterfaces,
+    added_interface: Option<(u64, [u8; 32])>,
+    retained: Arc<RuntimeLexicalScopeLease>,
+    native_imports: CheckedNativeImports,
+    added_native: Vec<((SymbolIdentity, u64), u64)>,
+    basis: PreparedCheckedSnapshotBasis,
+}
+
+enum PreparedCheckedSnapshotBasis {
+    World {
+        successor: tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
+        original_source: Arc<RuntimeOriginalSource>,
+        source: Arc<super::GenerationArtifactReference>,
+        target: Arc<RuntimeLexicalScopeLease>,
+    },
+    Finite(SessionCompileView),
+}
+
+fn prepare_checked_snapshot(
+    session: &mut PersistentSession,
+    state: &RuntimeCheckedState,
     admission: &RuntimeCellAdmission,
-    program: &tidepool_toolchain::checked_cell::CellProgram,
+    compiler_prefix: tidepool_toolchain::checked_cell::ExactCompiledPrefix,
     interface: Option<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>>,
     native_delta: Option<CapturedNativeDelta>,
     successor: Option<tidepool_toolchain::compiler_world::CheckedWorldSuccessor>,
-) -> Result<(), SessionError> {
-    let visibility = session
+) -> Result<PreparedCheckedSnapshot, SessionError> {
+    let scope = admission.scope;
+    session
         .public_visibility_snapshot_in(scope)
         .ok_or(SessionError::DeadScope(scope))?;
     let mut interfaces = state.snapshot().interfaces.clone();
     let mut added_interface = None;
     if let Some(interface) = &interface {
         let module = interface.owner();
-        let bytes = interface.bytes_owned();
-        let digest = interfaces.interface_digest(bytes);
+        let digest = interfaces.interface_digest(interface.bytes_owned());
         match state.interface_index.get(&module.gen.0) {
             Some(existing) if existing != &digest => {
                 return Err(SessionError::StaleStagedDeclaration)
@@ -3821,11 +3855,6 @@ fn settle_checked_snapshot(
             }
         }
     }
-    // The next snapshot owns the complete exact dependency closure before
-    // the previous snapshot can drop. Outstanding compiler owners
-    // keep their own old snapshot and lexical lease until they finish.
-    // Settlement must retain the scope validated by this operation without
-    // retiring it through housekeeping after its visible writes have committed.
     let retained = session.retain_current_lexical_scope(scope)?;
     let (native_imports, added_native) = match native_delta {
         Some(delta) => state
@@ -3834,23 +3863,26 @@ fn settle_checked_snapshot(
             .append(delta, &state.native_index)?,
         None => (state.snapshot().native_imports.clone(), Vec::new()),
     };
-    // The captured owner already installed its exact checked row together
-    // with the value and provenance. This snapshot only projects that receipt.
-    let snapshot = match (&state.snapshot().basis, successor.as_ref()) {
-        (RuntimeCheckedPrefixBasis::World { .. }, Some(successor)) => {
-            Arc::new(world_checked_snapshot(
-                Arc::clone(successor.world()),
-                session
-                    .compile_view_key_in(scope)
-                    .ok_or(SessionError::DeadScope(scope))?,
-                state.snapshot().session_root.clone(),
-                visibility,
-                interfaces,
-                compiler_prefix,
-                admission.digest(),
-                retained,
-                native_imports,
-            ))
+    let basis = match (&state.snapshot().basis, successor) {
+        (RuntimeCheckedPrefixBasis::World { world, .. }, Some(successor)) => {
+            session
+                .compile_view_key_in(scope)
+                .ok_or(SessionError::DeadScope(scope))?;
+            if session
+                .lib()
+                .tips
+                .get(&scope)
+                .and_then(|tip| tip.inspection_world.as_ref())
+                .is_none_or(|association| !Arc::ptr_eq(&association.world, world))
+            {
+                return Err(SessionError::StaleStagedDeclaration);
+            }
+            PreparedCheckedSnapshotBasis::World {
+                successor,
+                original_source: admission.original_source()?,
+                source: admission.world_source_reference()?.clone(),
+                target: admission._retained_scope.clone(),
+            }
         }
         (RuntimeCheckedPrefixBasis::Finite { .. }, None) => {
             let view = session
@@ -3863,31 +3895,113 @@ fn settle_checked_snapshot(
                         .as_ref()
                         .ok_or(SessionError::StaleStagedDeclaration)?,
                 )?;
-            let view_digest = session
+            session
                 .compile_view_digest_in(scope)
                 .ok_or(SessionError::DeadScope(scope))?;
-            Arc::new(checked_snapshot(
-                view,
-                view_digest,
-                visibility,
-                interfaces,
-                compiler_prefix,
-                admission.digest(),
-                retained,
-                native_imports,
-            ))
+            PreparedCheckedSnapshotBasis::Finite(view)
         }
         _ => return Err(SessionError::StaleStagedDeclaration),
     };
-    if let (Some(predecessor), Some(successor)) = (state.snapshot().world(), successor.as_ref()) {
-        session.adopt_checked_world_successor_in(scope, admission, predecessor, successor)?;
+    Ok(PreparedCheckedSnapshot {
+        scope,
+        compiler_prefix,
+        interfaces,
+        added_interface,
+        retained,
+        native_imports,
+        added_native,
+        basis,
+    })
+}
+
+impl PreparedCheckedSnapshot {
+    fn commit(
+        self,
+        session: &mut PersistentSession,
+        state: &mut RuntimeCheckedState,
+        admission: &RuntimeCellAdmission,
+        program: &tidepool_toolchain::checked_cell::CellProgram,
+    ) {
+        let scope = self.scope;
+        // Only the preflighted value insertions changed this exclusively held
+        // session. Source choices, lexical liveness and compiler inputs are
+        // unchanged; their witnesses were checked before publication.
+        let visibility = session
+            .public_visibility_snapshot_in(scope)
+            .expect("prepared capture visibility");
+        let snapshot = match self.basis {
+            PreparedCheckedSnapshotBasis::World {
+                successor,
+                original_source,
+                source,
+                target,
+            } => {
+                let key = session
+                    .compile_view_key_in(scope)
+                    .expect("prepared capture compiler witness");
+                let association = Arc::new(super::inspection::InspectionWorldAssociation {
+                    base: super::inspection::InspectionWorldBase {
+                        scope,
+                        key: key.clone(),
+                        owner: session.admission_owner().clone(),
+                        epoch: session.admission_owner().epoch(),
+                        source,
+                        original_source: super::inspection::InspectionWorldSourceObservation::new(
+                            &original_source,
+                        ),
+                        target: super::inspection::InspectionWorldLeaseObservation::new(&target),
+                    },
+                    world: successor.world().clone(),
+                });
+                let tip = session
+                    .lib_mut()
+                    .tips
+                    .get_mut(&scope)
+                    .expect("prepared capture scope");
+                tip.exact_context = Some(super::recovery::ScopedCompilerContext::new(
+                    successor.compiler_context().clone(),
+                ));
+                tip.inspection_world = Some(association);
+                session.invalidate_compile_view_in(scope);
+                Arc::new(world_checked_snapshot(
+                    successor.world().clone(),
+                    key,
+                    state.snapshot().session_root.clone(),
+                    visibility,
+                    self.interfaces,
+                    self.compiler_prefix,
+                    admission.digest(),
+                    self.retained,
+                    self.native_imports,
+                ))
+            }
+            PreparedCheckedSnapshotBasis::Finite(view) => {
+                let view_digest = session
+                    .compile_view_digest_in(scope)
+                    .expect("prepared finite capture view");
+                let current = session
+                    .compile_view_in(scope)
+                    .expect("prepared finite capture scope")
+                    .with_scoped_injection();
+                let view = view.with_committed_values(current);
+                Arc::new(checked_snapshot(
+                    view,
+                    view_digest,
+                    visibility,
+                    self.interfaces,
+                    self.compiler_prefix,
+                    admission.digest(),
+                    self.retained,
+                    self.native_imports,
+                ))
+            }
+        };
+        if let Some((generation, digest)) = self.added_interface {
+            state.interface_index.insert(generation, digest);
+        }
+        state.native_index.extend(self.added_native);
+        state.commit(snapshot, program);
     }
-    if let Some((generation, digest)) = added_interface {
-        state.interface_index.insert(generation, digest);
-    }
-    state.native_index.extend(added_native);
-    state.commit(snapshot, program);
-    Ok(())
 }
 
 fn checked_snapshot(
@@ -6794,85 +6908,6 @@ impl PersistentSession {
             owners,
             commitment: *hash.finalize().as_bytes(),
         })
-    }
-
-    fn adopt_checked_world_successor_in(
-        &mut self,
-        scope: ScopeId,
-        admission: &RuntimeCellAdmission,
-        predecessor: &Arc<tidepool_toolchain::compiler_world::CompilerWorld>,
-        successor: &tidepool_toolchain::compiler_world::CheckedWorldSuccessor,
-    ) -> Result<(), SessionError> {
-        let RuntimeCellCompilerBasis::World {
-            original_source, ..
-        } = &admission.compiler_basis
-        else {
-            return Err(SessionError::StaleStagedDeclaration);
-        };
-        let source = admission.world_source_reference()?.clone();
-        let original_source = original_source.clone();
-        let target = admission._retained_scope.clone();
-        let replaced = RuntimeOriginalSource::with_sources_and_targets(
-            [original_source.clone()],
-            [target.clone()],
-            |sources, _| {
-                super::RuntimeSourceAdmission::with_open_admissions(
-                    sources.iter().map(|source| source.source_admission()),
-                    || {
-                        if !admission.belongs_to(self)
-                            || admission.scope != scope
-                            || !self
-                                .source_lease_in(scope)
-                                .is_ok_and(|lease| Arc::ptr_eq(&lease, &target))
-                            || self
-                                .lib()
-                                .tips
-                                .get(&scope)
-                                .and_then(|tip| tip.inspection_world.as_ref())
-                                .is_none_or(|association| {
-                                    !Arc::ptr_eq(&association.world, predecessor)
-                                })
-                        {
-                            return Err(SessionError::StaleStagedDeclaration);
-                        }
-                        let key = self
-                            .compile_view_key_in(scope)
-                            .ok_or(SessionError::DeadScope(scope))?;
-                        let association = Arc::new(super::inspection::InspectionWorldAssociation {
-                            base: super::inspection::InspectionWorldBase {
-                                scope,
-                                key,
-                                owner: self.admission_owner().clone(),
-                                epoch: self.admission_owner().epoch(),
-                                source: source.clone(),
-                                original_source:
-                                    super::inspection::InspectionWorldSourceObservation::new(
-                                        &original_source,
-                                    ),
-                                target: super::inspection::InspectionWorldLeaseObservation::new(
-                                    &target,
-                                ),
-                            },
-                            world: Arc::clone(successor.world()),
-                        });
-                        let tip = self.lib_mut().tips.entry(scope).or_default();
-                        let old_context =
-                            tip.exact_context
-                                .replace(super::recovery::ScopedCompilerContext::new(Arc::clone(
-                                    successor.compiler_context(),
-                                )));
-                        let old_world = tip.inspection_world.replace(association);
-                        Ok((old_context, old_world))
-                    },
-                )
-            },
-        )??;
-        // Completion changes runtime compiler custody even when the item's
-        // Haskell names and TYPE input are unchanged. Future captures must read
-        // the newly installed context rather than a cached predecessor view.
-        self.invalidate_compile_view_in(scope);
-        drop(replaced);
-        Ok(())
     }
 
     fn bind_world_retained_inputs(
