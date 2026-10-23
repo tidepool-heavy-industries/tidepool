@@ -1404,7 +1404,7 @@ fn checked_input_group_choices(
 struct AdmittedCompilerRowMerge<'a> {
     receiving: AdmittedCompilerRoles<'a>,
     incoming: AdmittedCompilerRoles<'a>,
-    selected: &'a mut BTreeMap<ExactModuleIdentity, compiler_projection::ResolvedCompilerRole>,
+    selected: &'a mut compiler_projection::SelectedCompilerRows,
 }
 
 enum CompilerNativeDemand<'a> {
@@ -8891,7 +8891,7 @@ impl ArtifactView {
         right: &CompilerSourceSupport,
         validation: CompilerInputValidation,
     ) -> Result<compiler_projection::ResolvedCompilerInputs, CompileError> {
-        let mut selected = BTreeMap::new();
+        let mut selected = left.fork_selected_rows();
         let (artifacts, projection, input_decisions) =
             left.artifacts().merge_compiler_inputs_inner(
                 left.projection(),
@@ -8991,7 +8991,9 @@ impl ArtifactView {
                 for binding in row.selected_bindings() {
                     namespace.insert(binding.artifact, binding);
                 }
-                rows.selected.insert(owner.clone(), row.clone());
+                if matches!(issuer, compiler_projection::CompilerRoleIssuer::Incoming) {
+                    rows.selected.insert_incoming(owner.clone(), row.clone());
+                }
             } else {
                 let state = source.lease.inventory.0.lock().expect("inventory lock");
                 let owned = &source.read_projection(&state).nodes;
@@ -9016,23 +9018,30 @@ impl ArtifactView {
                 },
                 _ => Vec::new(),
             };
-            let selected_choices = selected_sources
-                .iter()
-                .filter_map(|decisions| {
-                    decisions
-                        .facts
-                        .get(owner)
-                        .filter(|fact| &fact.role == role)
-                        .map(|fact| fact.groups.values().copied().collect::<Vec<_>>())
-                })
-                .collect::<Vec<_>>();
-            if selected_rows.as_ref().is_some_and(|rows| {
-                rows.selected.get(owner).is_some_and(|row| {
-                    matches!(row.native_decision(), InputNativeDecision::UnissuedPolicy)
-                })
-            }) {
-                continue;
-            }
+            let selected_choices = if let Some(rows) = selected_rows.as_ref() {
+                match rows
+                    .selected
+                    .get(owner)
+                    .expect("chosen acquired compiler row")
+                    .native_decision()
+                {
+                    InputNativeDecision::UnissuedPolicy => continue,
+                    InputNativeDecision::IssuedChoices(groups) => {
+                        vec![groups.values().copied().collect::<Vec<_>>()]
+                    }
+                }
+            } else {
+                selected_sources
+                    .iter()
+                    .filter_map(|decisions| {
+                        decisions
+                            .facts
+                            .get(owner)
+                            .filter(|fact| &fact.role == role)
+                            .map(|fact| fact.groups.values().copied().collect::<Vec<_>>())
+                    })
+                    .collect::<Vec<_>>()
+            };
             let choices = if !selected_choices.is_empty() {
                 // An explicit empty decision suppresses role policy for this
                 // exact winning role, independently of every other owner.

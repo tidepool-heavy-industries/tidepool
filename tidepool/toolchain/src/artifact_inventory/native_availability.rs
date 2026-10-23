@@ -56,6 +56,9 @@ impl<'a> NativeDependencyCatalog<'a> {
                 return supports.into_iter().collect();
             }
         }
+        // A fresh product's emitted dependency may consume available input
+        // code without choosing that code as an older executable root. An
+        // explicitly selected group above must keep its exact acquisition.
         if let Some(support) = self.0.native_availability().dependency_support(key, owner) {
             for group in support.groups() {
                 if let Some(offer) = support.offer_for_group(group) {
@@ -995,8 +998,7 @@ fn current_product_dependencies(
             crate::certified_products::CertifiedNativeGroupSupport::Issued(offer),
         )?;
         let mut issued = support.describe(binding)?;
-        if let Some(selected) = catalog.selected_support(&module_identity(required_owner), binding)
-        {
+        if let Some(selected) = catalog.selected_support(required_owner, binding) {
             issued.source = NativeSourceCause::Historical {
                 selected_at: issued.binding,
                 support: selected.clone(),

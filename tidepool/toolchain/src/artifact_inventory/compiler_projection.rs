@@ -1979,7 +1979,7 @@ impl Clone for ResolvedCompilerRole {
 pub(super) struct ResolvedCompilerInputs {
     pub(super) artifacts: ArtifactView,
     pub(super) projection: CompilerInputProjection,
-    pub(super) selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
+    pub(super) selected: SelectedCompilerRows,
     pub(super) input_decisions: RecordedInputNativeDecisions,
 }
 
@@ -2059,7 +2059,7 @@ impl ResolvedCompilerRole {
         self
     }
 
-    fn narrow_native_choice(&mut self, view: &ArtifactView) {
+    fn narrow_native_choice(&mut self, view: &ArtifactView) -> bool {
         if let SelectedCompilerRow::Original {
             native_choice: SelectedInputNativeChoice::Issued { groups, support },
             ..
@@ -2070,11 +2070,14 @@ impl ResolvedCompilerRole {
                 .filter(|(_, group)| !view.roots().contains(&InventoryNodeKey::Group(**group)))
                 .map(|(ordinal, group)| (*ordinal, *group))
                 .collect::<Vec<_>>();
+            let changed = !removed.is_empty();
             for (ordinal, group) in removed {
                 groups.remove(&ordinal);
                 support.remove(&group);
             }
+            return changed;
         }
+        false
     }
 
     fn same_selected_acquisition(&self, other: &Self) -> bool {
@@ -2263,17 +2266,24 @@ impl SelectedCompilerRows {
         AdmittedCompilerRoles { selected: self }
     }
 
-    fn decision_facts(&self) -> RecordedInputNativeDecisions {
-        RecordedInputNativeDecisions {
-            facts: self
-                .rows
+    pub(super) fn insert_incoming(
+        &mut self,
+        owner: ExactModuleIdentity,
+        row: ResolvedCompilerRole,
+    ) {
+        if let ArtifactPayload::Canonical(interface) = &row.interface().1.payload {
+            let missing = interface
+                .home_units()
                 .iter()
-                .filter_map(|(owner, row)| {
-                    row.recorded_decision()
-                        .map(|decision| (owner.clone(), decision))
-                })
-                .collect(),
+                .filter(|unit| !self.home_units.contains(*unit))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                Arc::make_mut(&mut self.home_units).extend(missing);
+            }
         }
+        self.changed_owners.insert(owner.clone());
+        self.rows.insert(owner, row);
     }
 
     fn same_recorded_facts(&self, other: &Self) -> bool {
@@ -2305,7 +2315,7 @@ impl SelectedCompilerRows {
 }
 
 impl SelectedCompilerRows {
-    fn get(&self, owner: &ExactModuleIdentity) -> Option<&ResolvedCompilerRole> {
+    pub(super) fn get(&self, owner: &ExactModuleIdentity) -> Option<&ResolvedCompilerRole> {
         #[cfg(test)]
         type_query_work::lookup();
         self.rows.get(owner)
@@ -2870,6 +2880,10 @@ impl CompilerSourceSupport {
         &self.native_fact_owner.roles
     }
 
+    pub(super) fn fork_selected_rows(&self) -> SelectedCompilerRows {
+        self.selected.as_ref().clone()
+    }
+
     pub(crate) fn compiler_roles(&self) -> AdmittedCompilerRoles<'_> {
         self.selected.admitted_roles()
     }
@@ -2942,7 +2956,7 @@ impl CompilerSourceSupport {
             ResolvedCompilerInputs {
                 artifacts: artifacts.clone(),
                 projection,
-                selected,
+                selected: SelectedCompilerRows::from_admitted(selected),
                 input_decisions,
             },
             offers,
@@ -3115,6 +3129,13 @@ impl CompilerSourceSupport {
                 selected.rows.remove(owner);
                 projection.roles.remove(owner);
                 projection.recorded_roles.remove(owner);
+            }
+        }
+        for (owner, prior) in self.selected.iter() {
+            let mut row = prior.clone();
+            if selected.rows.contains_key(owner) && row.narrow_native_choice(support) {
+                selected.changed_owners.insert(owner.clone());
+                selected.rows.insert(owner.clone(), row);
             }
         }
         let input_decisions = self.input_decisions.restricted(&projection, support);
@@ -3662,7 +3683,7 @@ impl CompilerSourceSupport {
             ResolvedCompilerInputs {
                 artifacts,
                 projection,
-                selected,
+                selected: SelectedCompilerRows::from_admitted(selected),
                 input_decisions,
             },
             native_offers,
@@ -3687,7 +3708,7 @@ impl CompilerSourceSupport {
             artifacts,
             projection,
             selected,
-            input_decisions: _,
+            input_decisions,
         } = inputs;
         let artifacts = native_closures
             .iter()
@@ -3747,12 +3768,10 @@ impl CompilerSourceSupport {
         // Custody-only retention preserves these exact selected bindings while
         // it may acquire additional immutable sources for their payloads.
         timing.advance("qualify_canonical_availability");
-        let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
-        let input_decisions = selected.decision_facts();
+        let selected = Arc::new(selected);
         let native_availability =
             native_availability.for_compiler_roles(selected.admitted_roles(), &retained)?;
         timing.advance("assemble_support");
-        let input_decisions = input_decisions.with_recorded_facts(input_decisions.facts.clone());
         let support = SupportDraft {
             native_availability,
             projection,
@@ -3885,7 +3904,7 @@ impl CompilerSourceSupport {
             ResolvedCompilerInputs {
                 projection,
                 artifacts,
-                selected: selected.rows.into_iter().collect(),
+                selected,
                 input_decisions: decisions,
             },
             offers,
@@ -4043,7 +4062,7 @@ impl CompilerSourceSupport {
             ResolvedCompilerInputs {
                 artifacts,
                 projection,
-                selected,
+                selected: SelectedCompilerRows::from_admitted(selected),
                 input_decisions,
             },
             offers,
@@ -4387,7 +4406,7 @@ impl CompilerSourceSupport {
             .try_fold(artifacts, |view, completion| {
                 view.retain_custody(completion.artifacts())
             })?;
-        let input_decisions = selected.decision_facts();
+        let input_decisions = self.input_decisions.clone();
         let mut native_availability = match self
             .native_availability
             .merge(&incoming.native_availability)?
@@ -6022,6 +6041,9 @@ impl CompilerSourceSupport {
         // Keep the existing topology/custody transition. Only its already
         // authenticated role rows bypass metadata reconstruction afterward.
         let artifacts = self.artifacts.select_compiler_support(&projection)?;
+        for row in selected.values_mut() {
+            row.narrow_native_choice(&artifacts);
+        }
         let selected = Arc::new(SelectedCompilerRows::from_admitted(selected));
         let decisions = self.input_decisions.restricted(&projection, &artifacts);
         let mut native_offer_facts = self.native_offer_facts.clone();
@@ -6086,9 +6108,18 @@ impl CompilerSourceSupport {
         timing.advance("validate_carried_associations");
         // The solver carries each whole selected row from its actual issuer.
         // Additional custody cannot replace those acquired inputs.
-        inputs
-            .projection
-            .validate_selected_requirements(&inputs.selected)?;
+        inputs.projection.validate_requirements(
+            inputs
+                .selected
+                .values()
+                .flat_map(|row| row.bindings().map(|(_, entry)| entry.as_ref())),
+            |owner| {
+                inputs
+                    .selected
+                    .get(owner)
+                    .map(|row| row.interface().1.as_ref())
+            },
+        )?;
         let support = Self::complete_resolved(
             inputs,
             self.native_offers
