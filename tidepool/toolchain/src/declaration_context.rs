@@ -29968,7 +29968,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         &projection, &artifacts.metadata_snapshot(),
         &validation.inventory,
     ).map_err(compiler_evidence_failure)?;
-    CapturedCompilerStage::issue(&mut selection, &artifacts, Vec::new(), &mut validation)
+    CapturedCompilerStage::issue(&mut selection, &inventory.empty_view(), entries, &mut validation)
     .map(|stage| stage.compiler_inputs().as_ref().clone())
 })()
             .unwrap();
@@ -31002,10 +31002,16 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
             ArtifactEntry::canonical(interface.clone()),
         )])
         .unwrap();
-        CompilerSupportFixture::RecordedRoles {
-            artifacts: certified_product_artifact_view(producer, &[], &[interface], None).unwrap(),
-            projection,
-        }
+        let artifacts = certified_product_artifact_view(producer, &[], &[interface], None).unwrap();
+        let context = ExactDeclarationContext::from_authenticated_interfaces(
+            producer, &artifacts, projection,
+        )
+        .unwrap();
+        CompilerSupportFixture::Complete(
+            ProtectedScaffoldRequirements::default()
+                .compiler_inputs(&context, None)
+                .unwrap(),
+        )
     }
 
     fn receiver_value_interface() -> Arc<CertifiedValueInterface> {
