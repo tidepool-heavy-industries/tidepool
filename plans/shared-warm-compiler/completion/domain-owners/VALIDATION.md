@@ -21,10 +21,9 @@ source tree, outcome, logs and cleanup. Linking and zero selections are not pass
 
 ## Joined semantic histories
 
-- Actual generated publication history currently fails NativeAcquisitionOwner at
-  Compose after Recover. Distinguish the three guard sites before claiming exact
-  incident cause; source review separately establishes witness allocation is not
-  native permission. Preserve the reproducer and refuse real grant substitutions.
+- The actual generated publication history passed at aa93ccab0e; rerun it on the
+  final joined owners. Keep its Recover->Compose counterexample and real grant
+  substitution refusals. That historical pass does not qualify the current tree.
 - Independent same facts/different allocation/valid contribution succeeds;
   same facts or witness/wrong contribution refuses; no partial grant union.
 - Historical23→published f(INLINE/NOINLINE)→visible91→same-cell g=f→recordg

@@ -25,6 +25,8 @@ Read [CONTRACTS.md](CONTRACTS.md), then the owning group plan:
 [facts/context](FACTS.md), [compiler service](COMPILER.md),
 [runtime/publication](RUNTIME.md), [validation](VALIDATION.md).
 [STATE.md](STATE.md) records ownership and exact candidates.
+[CLOSEOUT.md](CLOSEOUT.md) owns the accepted final selected-row implementation,
+joined runtime cleanup and G2 qualification sequence.
 
 Root owns shared architectural decisions, cross-group integration, exact-source
 validation pins, map updates and final aesthetic review. Group owners implement
