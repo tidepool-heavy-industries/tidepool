@@ -258,13 +258,15 @@ fn selected_original_packet_keeps_exact_old_group_and_refuses_foreign_acquisitio
             .resolve_native_demand(&request, &mut validation)
             .unwrap();
         assert!(acquired.belongs_to(&cold));
-        let expected = history.offers[0]
+        let expected = *history.offers[0]
             .issued_group_carriers()
             .unwrap()
             .keys()
-            .find(|group| group.original_ordinal == 9001)
-            .unwrap()
-            .binding;
+            .find(|group| {
+                group.binding.artifact() == history.entries[0].descriptor.id
+                    && group.original_ordinal == 9001
+            })
+            .unwrap();
         assert_eq!(
             acquired
                 .groups()
@@ -440,7 +442,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
     let parent_offer =
         IssuedNativeOffer::issue(parent.descriptor.id, &parent_view, Some(proof)).unwrap();
     assert!(parent_offer.is_full());
-    let expected = parent_offer
+    let expected = *parent_offer
         .issued_group_carriers()
         .unwrap()
         .keys()
@@ -448,8 +450,15 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
             group.binding.artifact() == history.entries[0].descriptor.id
                 && group.original_ordinal == 9001
         })
+        .unwrap();
+    let expected_parent = *parent_offer
+        .issued_group_carriers()
         .unwrap()
-        .binding;
+        .keys()
+        .find(|group| {
+            group.binding.artifact() == parent.descriptor.id && group.original_ordinal == 7
+        })
+        .unwrap();
     let projection =
         CompilerInputProjection::from_issued_entries(&[parent.clone(), history.canonical.clone()])
             .unwrap();
@@ -509,16 +518,16 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         .resolve_native_demand(&packet(&reference, &validation.inventory), &mut validation)
         .unwrap();
     let rows = acquired.groups().selected_rows();
-    let parent_binding = *rows
-        .keys()
-        .find(|binding| binding.artifact() == parent.descriptor.id)
-        .unwrap();
-    assert_eq!(rows[&parent_binding].dependencies(), &[expected]);
+    assert_eq!(
+        rows.keys().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([expected_parent, expected])
+    );
+    assert_eq!(rows[&expected_parent].dependencies(), &[expected]);
     assert!(rows.contains_key(&expected));
     assert_eq!(rows[&expected].product().owner(), old.owner());
     assert!(!rows
         .keys()
-        .any(|binding| binding.artifact() == history.entries[1].descriptor.id));
+        .any(|binding| binding.binding.artifact() == history.entries[1].descriptor.id));
 
     // The parent's authenticated edge needs the old payload, even when the
     // other exact version and the common canonical bytes are both present.
