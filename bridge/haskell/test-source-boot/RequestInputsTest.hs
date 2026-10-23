@@ -168,7 +168,7 @@ import GHC.Unit.Module (moduleName, moduleNameString)
 import Codec.CBOR.Term (Term(..), encodeTerm, decodeTerm)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
-import SourceBootCases (admitCheckedScope, counterValues)
+import SourceBootCases (admitInspectionScope, counterValues)
 import CodecFixtureSupport
   ( readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
   , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
@@ -3368,7 +3368,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
       source = work </> "CanonicalConsumer.hs"
       includes = [emptyRoot,work]
   createDirectory emptyRoot
-  admitted <- admitCheckedScope retained includes []
+  admitted <- admitInspectionScope retained includes []
   prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
     (ExactScopeCompile GeneralCompile admitted)
     (Just emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)})

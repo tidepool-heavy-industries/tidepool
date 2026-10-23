@@ -93,7 +93,7 @@ import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..)
 import Tidepool.PreparedStg (pmBindings, prepareModule)
 import Tidepool.ModuleCandidates (candidateModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
-import SourceBootCases (admitCheckedScope)
+import SourceBootCases (admitInspectionScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, captureDiagnostics, capturePreparedFixture
   , writeExecutionScope, hasIntResultLiteral, manifest )
@@ -138,7 +138,7 @@ agentPageDisplayFinalizationHistory = withScratch $ \work -> do
               (Map.delete (mkModuleName "AgentPageHistory0") (pprFinalizedModules prepared))))
       scopePath <- writeGenuineMetadataScope work support fixture
       scope <- requireRight =<< readExactScope scopePath
-      admitted <- admitCheckedScope scope roots []
+      admitted <- admitInspectionScope scope roots []
       let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
       laterSource <- target (10 :: Int) "Tidepool.Actors.Exomonad"
       later <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
@@ -1127,7 +1127,7 @@ unownedUpToDateDependency = withTiming $ withScratch $ \work -> do
       "admitted completed dependency replayed its source frontend"
     -- This actual current-source import runs checkOldIface over the complete
     -- captured dependency graph, under the same resident summary history.
-    admitted <- admitCheckedScope scope [work] []
+    admitted <- admitInspectionScope scope [work] []
     let consumer = work </> "CurrentOriginalConsumer.hs"
         session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
     writeFile consumer "module CurrentOriginalConsumer where\nimport MetadataCurrentSourceTarget qualified as Original\n__result :: Int\n__result = Original.__result\n"
