@@ -3,7 +3,9 @@
 Updated 2026-10-23. **Adversarial closeout is open; G2/G3 are unqualified.**
 Root: `/srv/swarm/checkouts/tidepool-domain-runtime-join-20261023`, branch
 `integration/g2-domain-runtime-20261023`. Accepted scope: `LIVE-COMPLETION.md`.
-Last settled validation pin: `f7588c7e2e`; current warm candidate: `4a1958226c`.
+Last settled validation pin: `2de0e83ee2`: 17 consumers compiled; nine tests
+executed, five passed and four failed. The broader Rust/Haskell retirement is
+integrated through `26244edfb3`; generated targets and joined checks are pending.
 These are bounded review checkpoints, not a release.
 
 ## Integrated boundaries
@@ -31,8 +33,8 @@ These are bounded review checkpoints, not a release.
 Deleted production surfaces include live projection-to-receipt reconstruction,
 optional captured-product fallback, unchecked stage attachment and the native
 origin/version/availability cross-product. The unused
-`from_certified_continuation` route is also deleted. Test-only alternatives are
-not fully removed: the following migrations are still open.
+`from_certified_continuation` route is also deleted. Test-only alternatives
+require the cross-language closeout below.
 
 ## Finite-path retirement is incomplete
 
@@ -43,18 +45,29 @@ the unreachable finite segment branches and fallback reads are deleted. The
 test-only unsealed native-output constructor is also deleted; its tests now
 exercise data capture and assembly without claiming execution authority.
 
-That is not a complete purge. Tests still construct finite checked cells, and
-unused public DTOs and the old `check_cell` / `--cell` transport remain. Keeping
-these because tests consume them would preserve the obsolete architecture.
-Three coordinated workers now own the remaining retirement:
+The source purge now also removes the checked-cell DTOs, finite ownership
+variants, runtime `check_cell`, Rust/Haskell `--cell` transport, request field 31,
+finite recipe/state/item-receipt machinery and their exclusive tests. Checked
+cells retain the actual World owner directly; checked native entries require
+their sealed typed proof. No optional finite fallback survives in these owners.
+Meaningful tests use actual World issuance or test certified data at its own
+boundary. Missing/corrupt staged-output controls enter actual World publication.
 
-- `audit_tranche_phases`: toolchain finite ownership variants/issuers, runtime
-  specification DTO, and callers. Replace one-variant ownership wrappers with
-  the actual World owner. Migrate meaningful tests without a fake World issuer.
-- `audit_tranche_scope_tests`: obsolete Rust `check_cell`, extractor `--cell`
-  transport and tests. Retired modes must refuse; live wire tags must not shift.
-- `finite_haskell_retirement`: matching Haskell operation, finite cell/item
-  recipe branches and exclusive tests. Retain the live parser and World helpers.
+`f16cecf8e8` removes the old fabricated SOURCE promotion history and successful
+SOURCE-authority factory after the real replacement history passed at `2de0`.
+The real promotion body and its assertion helpers are preserved. Other inline
+fixture families are not covered by that bounded deletion claim.
+
+Remaining closeout work:
+
+- Regenerate Haskell components from the current pinned Cabal metadata and
+  compile both language consumers. Rust checked-value authority tests are
+  registered as two actual resident cases in `59cbcc346a`.
+- Repair the four failing ownership controls without weakening authorization.
+- Finish generator-test/orphan-fixture cleanup and independently inspect the
+  joined route, including test-only callers and generated build declarations.
+- Execute the changed controls and current production paths before claiming
+  migration completion. Source integration alone is insufficient.
 
 Preserve parser-only `--cell-plan` and ordinary native compilation for bootstrap,
 unprepared installers and packaged Original entries. Those are distinct live
@@ -69,9 +82,9 @@ review are required before claiming retirement complete.
 | Demand conflated selected acquisition with catalog object identity | Repaired `dfd09fd83d`; actual acquisition case passed at cf62 | Bounded independent source review accepted |
 | Producer-B test equated ordinary and World identity domains | Actual RetainedCore B and cold-request A control passed at `791f` | No new global identity equivalence claimed |
 | Target guard treated private custody as executable permission | Reproduced at `3559`; repaired `d098d86d40`; actual three-item case passed at `791f` | Historical scope component control still being repaired |
-| Physical test used full-stage cohort at item-target boundary | Synthetic tail retired; foreign-inventory refusal moved to actual item | Execute new negative and renamed custody test at `186ec` |
+| Physical test used full-stage cohort at item-target boundary | Synthetic tail retired; foreign-inventory refusal moved to actual item | Actual three-item test passed through terminal sealing at `2de0` |
 | Test-only `program_request` allowed absent transport backing | Deleted; actual request owner carries backing; lifetime/FD/merge cases passed at `791f` | Two remaining SOURCE oracle repairs integrated for `186ec` |
-| Helpers and inline receipts fabricated successful SOURCE authority | Two actual source fixtures passed; native handoff and promotion ports integrated | Execute new ports; preserve remaining proof-count/recovery/refusal obligations before final helper deletion |
+| Helpers and inline receipts fabricated successful SOURCE authority | Actual native handoff passed at `4a19`; promotion and its refusal tail passed at `2de0`; bounded old factory deleted | Joined compilation after deletion; other inline fixture families remain separately scoped |
 | Focused compiler tests do not execute runtime values | Explicit qualification limit | Joined runtime/actor execution and observed values before G2 |
 
 The transport review found a missed nested caller, stale producer constants,
@@ -92,6 +105,21 @@ Each repaired join receives another independent bounded adversarial review.
 
 ## Evidence and pending checks
 
+- At **`2de0e83ee2`**, **17 consumers compiled** and **nine tests executed:
+  five passed, four failed**, with cleanup confirmed. Actual promotion and its
+  0→1→0 history/refusal tail, three-item ordered sealing, typed cycle refusal,
+  current-cohort ownership and wrapper demand passed. Two native-wire cases
+  reach `RootChoiceMissing`: private availability is not an explicit Original
+  root choice. The Full-borrow test asserted compiler namespace policy on an
+  intermediate physical-custody view; `382ac0b781` moves that assertion to
+  actual request and completed-stage owners. The alias-positive fixture used
+  independently materialized issuers; equal bytes did not establish the claimed
+  shared issuance. Its repair must retain an actual shared-owner positive and
+  an independent-issuer refusal. An adjacent structural-equality path in
+  `certify_artifact_view_groups` is under investigation for the same invariant.
+- The wider source join deletes legacy Rust/Haskell routes and counterfeit
+  checked-output fixtures. Its generated metadata, compilation and focused
+  execution are still pending; it does not inherit the `2de0` passing results.
 - At **`c27c53a877`**, toolchain production/cfg compiled; **10 tests executed,
   6 passed and 4 failed**, with cleanup confirmed. Actual retained-Core promotion,
   three-item selection/sealing, historical native permission, custody and two
@@ -101,11 +129,12 @@ Each repaired join receives another independent bounded adversarial review.
   type errors in those repaired history assertions. **Zero tests executed.**
   Runtime/actor cfg artifacts were rebuilt, but this is not a passing joined
   compile claim. `96c43de6ff` fixes the two errors.
-- **`4a1958226c`** includes that repair, accepted ordinary-sealer specialization,
-  native capture test migration and the actual three-item counter/refusal checks.
-  The warm validator is compiling 17 consumers and then running 18 focused cases.
-  Results are pending. Synthetic SOURCE fixture deletion `915d7ccb79` remains
-  held until the actual replacement histories and lower-owner controls pass.
+- At **`4a1958226c`**, **17 consumers compiled** and **18 tests executed:
+  13 passed, five failed**, with cleanup confirmed. Actual SOURCE handoff,
+  three-item counter/refusal checks and capture cases passed. Subsequent
+  repairs and remaining failures are recorded at `2de0` above. The actual
+  promotion replacement and lower-owner controls now permit the bounded
+  synthetic SOURCE fixture deletion, integrated as `f16cecf8e8`.
   Positive NEW package additions through full item selection are not covered by
   the current three-item workload; it only observes stage-owned package witnesses.
   The lower reconciliation control is retained. No equivalence claim covers that

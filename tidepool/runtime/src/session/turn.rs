@@ -5,8 +5,8 @@
 //! ordered items through [`consume_cell_program_item`]; compilation completes
 //! before the first authored effect runs. Resident settlement owns publication.
 //!
-//! [`check_cell`] returns diagnostics without execution authority. [`run_turn`]
-//! compiles standalone bootstrap and non-notebook requests. Every source plan
+//! Failed cell preparation returns diagnostics without execution authority.
+//! [`run_turn`] compiles standalone bootstrap and non-notebook requests. Every source plan
 //! and classification comes from GHC; Rust owns runtime admission and decoding.
 
 use std::path::{Path, PathBuf};
@@ -4713,11 +4713,9 @@ mod ambiguity_advice_tests {
         assert!(rejection.diagnostics.is_empty());
     }
 
-    /// The live diagnostic reproduced against a real resident cell whose
-    /// final unit is `pure (1 :: Int)`. Distinct from [`BARE_ERROR_CELL`]
-    /// (also a `TidepoolCellExpression` overlap, but over a fully polymorphic
-    /// `error "…"` with no `Applicative`/`Monad` constraint left open) —
-    /// only this shape is [`check_cell`]'s to fix.
+    /// Pure/effect dispatch leaves an Applicative constraint open. This differs
+    /// from [`BARE_ERROR_CELL`], whose polymorphic error has no such constraint;
+    /// its diagnostic must not receive the same repair advice.
     const AMBIGUOUS_PURE_DISPATCH: &str = "<cell>:1:1: error: [GHC-39999]\n    \u{2022} Ambiguous type variable \u{2018}f0\u{2019} arising from a use of \u{2018}pure\u{2019}\n      prevents the constraint \u{2018}(Applicative f0)\u{2019} from being solved.\n      Probable fix: use a type annotation to specify what \u{2018}f0\u{2019} should be.";
 
     #[test]
@@ -4734,12 +4732,9 @@ mod ambiguity_advice_tests {
         }
     }
 
-    /// The whole point of the new advice: no signature repairs this, so the
-    /// reader is told to drop `pure`/`return` instead — and only when a
-    /// genuine error survives [`check_cell`]'s pinned
-    /// retry does this text ever reach anyone (see that function's own
-    /// tests for the common case, where the cell is admitted and no advice
-    /// is shown at all).
+    /// For a reported pure/effect dispatch ambiguity, preserve the compiler
+    /// diagnostic and suggest removing the ambiguous wrapper. This renderer
+    /// test establishes advice, not successful compiler admission or retry.
     #[test]
     fn a_pure_dispatch_ambiguity_is_told_to_drop_pure_not_add_a_signature() {
         assert_eq!(

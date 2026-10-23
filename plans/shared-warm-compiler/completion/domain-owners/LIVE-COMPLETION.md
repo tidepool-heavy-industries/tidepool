@@ -96,8 +96,10 @@ G3 matrices stay separate. No stale/generic launch.
 
 ## Current evidence and limits
 
-The current joined validation candidate is `4a1958226c`; last settled is `f7588c7e2e`;
-see `STATE.md` for exact compile/execution evidence and pending gates.
+The last settled validation candidate is `2de0e83ee2`: 17 consumers compiled,
+nine tests executed, five passed and four failed. The wider source retirement
+through `26244edfb3` still needs generated metadata and joined checks; see
+`STATE.md` for exact compile/execution evidence and pending gates.
 Adversarial closeout found a demand/catalog identity conflation and surviving
 test-only transport and SOURCE-authority issuers. The demand repair is integrated;
 test migrations and independent review remain open. The actual future-value
@@ -107,11 +109,12 @@ preserve refusal controls and execute the repaired join before completion. The a
 World history now passes initial capture/declaration/publication, then fails at
 retained-value reuse through an authored native declaration. This is a distinct
 boundary under direct root investigation; G2/G3 remain unqualified.
-Finite-path retirement remains open across Rust, Haskell and tests. Removing the
-unused runtime entry points alone did not retire the legacy ownership variants
-or compiler transport. `STATE.md` records the three implementation owners and
-the live ordinary/parser paths that must survive. Test-only consumers are not
-grounds to keep obsolete authority issuers.
+Finite notebook retirement now deletes the Rust/Haskell transport, ownership
+variants, recipes and exclusive tests. The actual World promotion test passed;
+the obsolete SOURCE fixture issuer is deleted. Cross-language compilation,
+remaining ownership controls and independent joined review still gate completion.
+`STATE.md` distinguishes the ordinary bootstrap/parser paths that remain live.
+Test-only consumers are not grounds to retain obsolete authority issuers.
 Evidence: `/srv/swarm/evidence/inanna/c-ownership-20261022/validation/`.
 
 Warm validation checkout: /srv/swarm/checkouts/tidepool-latent-original-stage-join-20261020.
