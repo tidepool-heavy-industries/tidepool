@@ -565,7 +565,18 @@ impl PersistentSession {
             .world
             .clone();
         let completed = admission.completed_frontier(&world)?;
-        let result = self.freeze_completed_execution(completed, selection);
+        let facts = admission.world_execution_facts();
+        let private_lease = completed.scope_lease().clone();
+        let result = super::RuntimeOriginalSource::with_sources_and_targets(
+            [facts.original_source],
+            [private_lease, facts.public_target],
+            |sources, _| {
+                super::RuntimeSourceAdmission::with_open_admissions(
+                    sources.iter().map(|source| source.source_admission()),
+                    || self.freeze_completed_execution(completed, selection),
+                )
+            },
+        )?;
         if result.is_ok() {
             if let Some(transition) = transition {
                 transition.commit();
@@ -591,9 +602,6 @@ impl PersistentSession {
         let private_scope = admission.private_scope();
         let private_scope_lease = completed.scope_lease().clone();
         let facts = admission.world_execution_facts();
-        facts
-            .original_source
-            .with_open_target(&private_scope_lease, || ())?;
         let private_world = self
             .lib()
             .tips
@@ -1636,9 +1644,7 @@ mod tests {
                 "answer :: Int\nanswer = 42",
             );
             let projection = session.lib().log.projection_at(original).unwrap().clone();
-            let intent = session
-                .freeze_private_execution(&execution)
-                .unwrap();
+            let intent = session.freeze_private_execution(&execution).unwrap();
             let restage = |session: &mut PersistentSession| {
                 if durable {
                     session
@@ -1801,9 +1807,7 @@ mod tests {
             execution.private_scope(),
             "answer :: Int\nanswer = 42",
         );
-        let intent = session
-            .freeze_private_execution(&execution)
-            .unwrap();
+        let intent = session.freeze_private_execution(&execution).unwrap();
         let publication = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
@@ -1860,9 +1864,7 @@ mod tests {
             continuation.private_scope(),
             "next :: Int\nnext = answer + 1",
         );
-        let continuation = reopened
-            .freeze_private_execution(&continuation)
-            .unwrap();
+        let continuation = reopened.freeze_private_execution(&continuation).unwrap();
         let publication = accepted(
             reopened
                 .restage_declaration_publication(owner, continuation.clone())
@@ -1914,9 +1916,7 @@ mod tests {
             include_str!("fixtures/paired-rich-base.hs"),
         );
         let projection = session.lib().log.projection_at(original).unwrap().clone();
-        let intent = session
-            .freeze_private_execution(&execution)
-            .unwrap();
+        let intent = session.freeze_private_execution(&execution).unwrap();
         let base = session
             .restage_declaration_publication(owner.clone(), intent.clone())
             .unwrap();
@@ -2131,12 +2131,8 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "x", 702);
         let b_id = b_value.id;
         session.bind_in(b.private_scope(), b_value).unwrap();
-        let a_intent = session
-            .freeze_private_execution(&a)
-            .unwrap();
-        let b_intent = session
-            .freeze_private_execution(&b)
-            .unwrap();
+        let a_intent = session.freeze_private_execution(&a).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let stale_a = ephemeral_binding_stage(&mut session, a_intent.clone());
         let b_stage = ephemeral_binding_stage(&mut session, b_intent);
         assert!(matches!(
@@ -2178,9 +2174,7 @@ mod tests {
         assert!(session.bindings().get(b_id).is_some());
         assert!(session.lib().durable_graph.is_none());
         assert!(Arc::ptr_eq(
-            &session
-                .freeze_private_execution(&a)
-                .unwrap(),
+            &session.freeze_private_execution(&a).unwrap(),
             &a_intent
         ));
     }
@@ -2206,9 +2200,7 @@ mod tests {
         session.bind_in(admission.private_scope(), value).unwrap();
         let before_freeze = session.lib().generation();
         let before_freeze_revision = session.lib().log.publication_revision();
-        let intent = session
-            .freeze_private_execution(&admission)
-            .unwrap();
+        let intent = session.freeze_private_execution(&admission).unwrap();
         assert_eq!(session.lib().generation(), before_freeze);
         assert_eq!(
             session.lib().log.publication_revision(),
@@ -2299,18 +2291,14 @@ mod tests {
         let mut first = make();
         let public = first.mint_isolated_scope();
         let admission = first.begin_ephemeral_private_execution(public).unwrap();
-        let intent = first
-            .freeze_private_execution(&admission)
-            .unwrap();
+        let intent = first.freeze_private_execution(&admission).unwrap();
         let ticket = ephemeral_binding_stage(&mut first, intent.clone());
         let mut second = make();
         let second_public = second.mint_isolated_scope();
         let second_admission = second
             .begin_ephemeral_private_execution(second_public)
             .unwrap();
-        second
-            .freeze_private_execution(&second_admission)
-            .unwrap();
+        second.freeze_private_execution(&second_admission).unwrap();
         assert_eq!(
             first.public_visibility_snapshot_in(public),
             second.public_visibility_snapshot_in(second_public)
@@ -2349,9 +2337,7 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let private = first.begin_private_execution(public).unwrap();
-        let intent = first
-            .freeze_private_execution(&private)
-            .unwrap();
+        let intent = first.freeze_private_execution(&private).unwrap();
         let ExecutionPublication::Bindings(base) = first
             .restage_execution_publication(owner.clone(), intent.clone())
             .unwrap()
@@ -2455,9 +2441,7 @@ mod tests {
             session.retract_many_in(withdrawal.private_scope(), &["%%".into()], settlement)
         })
         .unwrap();
-        let withdrawn = session
-            .freeze_private_execution(&withdrawal)
-            .unwrap();
+        let withdrawn = session.freeze_private_execution(&withdrawal).unwrap();
         assert_eq!(withdrawn.writes()[0].retractions.len(), 2);
         let withdrawn_proof = accepted(
             session
@@ -2469,9 +2453,7 @@ mod tests {
             .exports()
             .iter()
             .any(|export| export.head.occurrence == "%%"));
-        let intent = session
-            .freeze_private_execution(&a)
-            .unwrap();
+        let intent = session.freeze_private_execution(&a).unwrap();
         assert_eq!(intent.writes()[0].retractions.len(), 1);
         assert_eq!(
             intent.writes()[0].retractions[0].namespace,
@@ -2528,9 +2510,7 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 501);
         let value_id = value.id;
         session.bind_in(a.private_scope(), value).unwrap();
-        let intent = session
-            .freeze_private_execution(&a)
-            .unwrap();
+        let intent = session.freeze_private_execution(&a).unwrap();
         assert!(intent.writes().is_empty());
         assert!(matches!(
             session
