@@ -45,9 +45,8 @@ import Tidepool.GhcPipeline
   , cellGeneratedInstanceRecipe )
 import Tidepool.CheckedPrefixImports
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
+  ( ExactIfaceArtifact(..), CheckedTemplateImports(..), captureProtectedTemplateImportsAt, renderProtectedTemplateImports
   , generatedCheckingTemplateRecipeWithImportRendering )
-import Tidepool.ExactScope (CheckedTemplateImports(..))
 import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
