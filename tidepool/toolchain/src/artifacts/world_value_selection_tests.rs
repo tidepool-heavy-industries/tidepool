@@ -179,7 +179,7 @@ fn real_world_value_selection_preserves_physical_owner_and_item_prefix() {
 #[test]
 #[ignore = "requires the declared rooted compiler service; toolchain_world_produced_value_prefix_test owns it"]
 fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand() {
-    let (prepared, admission) = settle(|| {
+    let ((prepared, foreign_operation), admission) = settle(|| {
         let (endpoint, world, source) = open_empty_world()?;
         let checked = prepare_checked(
             &endpoint,
@@ -194,7 +194,8 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
         assert!(checked.runtime_binding_demand().existing().is_empty());
         assert!(checked.runtime_binding_demand().prior_stage().is_empty());
         assert_physical_selection(&checked, None)?;
-        prepare_world_cell_program(checked)
+        let operation = Arc::clone(&checked.validation().inventory);
+        Ok((prepare_world_cell_program(checked)?, operation))
     });
     let program = prepared
         .seal(&admission)
@@ -219,7 +220,7 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
                 (53, "dependentSelection"),
             ],
         )?;
-        assert_private_future_dependency(&checked, foreign_inventory)?;
+        assert_private_future_dependency(&checked, foreign_inventory, &foreign_operation)?;
         prepare_world_cell_program(checked)
     });
     let program = prepared
@@ -231,10 +232,12 @@ fn real_world_produced_value_prefix_preserves_closed_indexes_without_an_operand(
 fn assert_private_future_dependency(
     checked: &Arc<CheckedWorldCellProgram>,
     foreign_inventory: &crate::artifact_inventory::ArtifactInventory,
+    foreign_operation: &Arc<tidepool_repr::execution_schema::InventoryOperation>,
 ) -> Result<(), CompileError> {
     use crate::artifact_inventory::{
         ArtifactBindingNode, ArtifactDependency, NativeRequirementRoot,
     };
+    use certified_products::tests::ActualItemProofObservation;
     assert_eq!(checked.stages().len(), 1);
     assert_eq!(checked.stages()[0].ordinals(), &[0, 1, 2]);
     let mut validation =
@@ -245,14 +248,18 @@ fn assert_private_future_dependency(
     )?;
     let physical = produced.for_segment(0..3)?;
     let later = physical.current_interface(52)?.artifact_id();
+    let before_segment = ActualItemProofObservation::capture();
     let pending = crate::declaration_context::WorldProgramContinuation::begin(checked).open_next(
         checked,
         &physical,
         &mut validation,
         &mut |_| {},
     )?;
+    ActualItemProofObservation::capture().assert_issued_after(&before_segment);
     let segment = pending.segment();
     let stage = segment.originals.captured_stage();
+    let stage_packages = segment.originals.package_witnesses();
+    assert!(!Arc::ptr_eq(foreign_operation, &validation.inventory));
     let mut future_edges = BTreeSet::new();
     for availability in stage.source_selection().issued_native_availability() {
         for offer in availability.offers().filter(|offer| offer.is_full()) {
@@ -331,6 +338,8 @@ fn assert_private_future_dependency(
     let mut native_cursor = segment.native_prefix_artifacts()?;
     for (index, (artifact, receipt)) in items.iter().enumerate() {
         let item_types = physical.for_item(index)?;
+        let mut refusal_cursor = cursor.clone();
+        let before_item = ActualItemProofObservation::capture();
         let (certified, _, packages, package_selection) = segment
             .originals
             .select_item(
@@ -341,6 +350,19 @@ fn assert_private_future_dependency(
                 &mut validation,
             )
             .map_err(compiler_evidence_failure)?;
+        before_item.assert_item_reuses_segment(&segment.originals, &certified);
+        assert_eq!(segment.originals.package_witnesses(), stage_packages);
+        for (owner, witness) in &receipt.packages {
+            assert_eq!(
+                stage_packages.get(owner),
+                Some(witness),
+                "this actual workload observes packages already owned by its segment"
+            );
+        }
+        assert!(
+            packages.is_empty(),
+            "observing an already owned package does not add item package state"
+        );
         assert!(Arc::ptr_eq(certified.captured_stage(), stage));
         assert_item_prefix_keeps_closed_indexes(
             &certified,
@@ -381,6 +403,99 @@ fn assert_private_future_dependency(
         native_cursor = target.artifacts().clone();
         assert!(native_cursor.selected_native_groups().contains(&entry_key));
         if index == 0 {
+            let before_refused_items = ActualItemProofObservation::capture();
+            let before_refused_scopes = inventory.metrics().issued_scope_nodes;
+            let before_foreign_work = foreign_operation.work_usage().unwrap();
+            let foreign_item = segment.originals.select_item(
+                &mut refusal_cursor,
+                receipt.clone(),
+                &artifact.bind_package_program(),
+                Some(&item_types),
+                &mut PackageInterfaceValidation::with_inventory(Arc::clone(foreign_operation)),
+            );
+            assert!(matches!(
+                foreign_item,
+                Err(certified_products::CertificationError::Mismatch(
+                    "segment inventory accounting owner"
+                ))
+            ));
+            assert_eq!(foreign_operation.work_usage().unwrap(), before_foreign_work);
+            before_refused_items.assert_item_reuses_segment(&segment.originals, &certified);
+            assert_eq!(
+                inventory.metrics().issued_scope_nodes,
+                before_refused_scopes
+            );
+
+            let (unused_owner, unused_witness) = stage_packages
+                .iter()
+                .find(|(owner, _)| {
+                    !receipt.globals.iter().any(|global| {
+                        matches!(&global.owner,
+                        certified_products::ReceiptImportOwner::Package {unit, module, ..}
+                        if unit == &owner.0 && module == &owner.1)
+                    }) && !artifact
+                        .prepared_shared()
+                        .bindings()
+                        .iter()
+                        .flat_map(|group| match group {
+                            tidepool_repr::execution_schema::Group::NonRecursive(top) => {
+                                std::slice::from_ref(top)
+                            }
+                            tidepool_repr::execution_schema::Group::Recursive(tops) => {
+                                tops.as_slice()
+                            }
+                        })
+                        .any(|top| {
+                            top.identity.unit == owner.0
+                                && top.identity.module == owner.1
+                                && top.identity.namespace == "value"
+                        })
+                })
+                .expect("the actual segment owns a package unused by its first target");
+            assert!(!receipt.packages.contains_key(unused_owner));
+            let mut unused_package = receipt.clone();
+            unused_package
+                .packages
+                .insert(unused_owner.clone(), unused_witness.clone());
+            let unused_item = segment.originals.select_item(
+                &mut refusal_cursor,
+                unused_package,
+                &artifact.bind_package_program(),
+                Some(&item_types),
+                &mut validation,
+            );
+            assert!(matches!(
+                unused_item,
+                Err(certified_products::CertificationError::Mismatch(
+                    "item package has no target demand"
+                ))
+            ));
+            before_refused_items.assert_item_reuses_segment(&segment.originals, &certified);
+            assert_eq!(
+                inventory.metrics().issued_scope_nodes,
+                before_refused_scopes
+            );
+            assert_eq!(segment.originals.package_witnesses(), stage_packages);
+
+            // Both refusals leave the same actual prefix ready for this item.
+            let before_retry = ActualItemProofObservation::capture();
+            let (retried, _, retry_packages, _) = segment
+                .originals
+                .select_item(
+                    &mut refusal_cursor,
+                    receipt.clone(),
+                    &artifact.bind_package_program(),
+                    Some(&item_types),
+                    &mut validation,
+                )
+                .map_err(compiler_evidence_failure)?;
+            before_retry.assert_item_reuses_segment(&segment.originals, &retried);
+            assert!(retried
+                .compiler_inputs()
+                .compiler_source_support()
+                .same_selected_acquisitions(certified.compiler_inputs().compiler_source_support()));
+            assert_eq!(retry_packages, packages);
+
             let before_foreign = foreign_inventory.metrics().issued_scope_nodes;
             let before_original = inventory.metrics().issued_scope_nodes;
             let cursor_before_foreign = target_cursor.capture_graph_selection();

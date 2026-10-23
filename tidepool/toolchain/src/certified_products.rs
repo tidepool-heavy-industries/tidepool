@@ -15208,6 +15208,76 @@ pub(crate) mod tests {
     use tidepool_repr::execution_schema::testing;
     use tidepool_repr::execution_schema::InventoryDecodeLimits;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct ActualItemProofObservation {
+        home_issues: usize,
+        module_inventory_decodes: usize,
+        original_decodes: usize,
+        home_decodes: usize,
+    }
+
+    impl ActualItemProofObservation {
+        pub(crate) fn capture() -> Self {
+            Self {
+                home_issues: HOME_CERTIFICATION_ISSUES.with(std::cell::Cell::get),
+                module_inventory_decodes: MODULE_PRODUCT_INVENTORY_DECODES
+                    .with(std::cell::Cell::get),
+                original_decodes: ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get),
+                home_decodes: HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get),
+            }
+        }
+
+        pub(crate) fn assert_issued_after(&self, before: &Self) {
+            assert!(
+                self.home_issues > before.home_issues,
+                "the actual segment must issue nonzero HOME proofs before item projection"
+            );
+        }
+
+        pub(crate) fn assert_item_reuses_segment(
+            &self,
+            segment: &CertifiedSegmentOriginals,
+            item: &CapturedProducts,
+        ) {
+            assert_eq!(
+                *self,
+                Self::capture(),
+                "actual item projection must neither issue nor decode immutable HOME facts"
+            );
+            let original = segment.products.data();
+            assert!(Arc::ptr_eq(
+                &item.data().groups.groups,
+                &original.groups.groups
+            ));
+            assert!(Arc::ptr_eq(
+                &item.data().groups.originals,
+                &original.groups.originals
+            ));
+            assert!(Arc::ptr_eq(
+                &item.data().recovery_products,
+                &original.recovery_products
+            ));
+            assert!(Arc::ptr_eq(
+                &item.data().module_interfaces,
+                &original.module_interfaces
+            ));
+            assert!(Arc::ptr_eq(
+                &item.source_selection().modules,
+                &segment.products.source_selection().modules,
+            ));
+            assert!(Arc::ptr_eq(
+                item.data()
+                    .home_contracts
+                    .as_ref()
+                    .expect("actual item HOME contracts"),
+                original
+                    .home_contracts
+                    .as_ref()
+                    .expect("actual segment HOME contracts"),
+            ));
+        }
+    }
+
     #[test]
     fn bounded_evidence_read_preserves_path_reason_and_operation_budget() {
         let directory = tempfile::tempdir().unwrap();
