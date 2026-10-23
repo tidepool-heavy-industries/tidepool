@@ -39,7 +39,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprPackageImports, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation
   , CompilePurpose(..), prBinds, prHscEnv
-  , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope
+  , prCapturedType, prWarnings, prWarningDiagnostics, prTargetTcGblEnv, CompilerScope
   , withResidentCompilerScopes, captureSupportedPackageProfile
   , scopedEnsureWorld, WorldCellRefusal(..)
   , satisfiesCapturedConstraint, activationPreviewInputType )
@@ -186,9 +186,10 @@ dispatch timing bound = case boundAdmittedOperation bound of
   AdmittedWorldCellPrepare _ -> do
     outcome <- prepareWorldCell bound
     case outcome of
-      Left _ -> pure ()
-      Right completed -> mapM_ (commitPreparedWorldDependencies bound) completed
-    pure []
+      Left _ -> pure []
+      Right completed -> do
+        mapM_ (commitPreparedWorldDependencies bound) completed
+        pure (concatMap (prWarningDiagnostics . pprPipelineResult . preparedCompilationResult) completed)
   AdmittedWorldCellPlan question -> do
     bytes <- runBoundWorldCellPlan bound
     BS.writeFile (worldCellPlanOutput question) bytes

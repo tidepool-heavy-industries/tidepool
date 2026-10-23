@@ -19,7 +19,7 @@ module Tidepool.GhcPipeline
   , captureSupportedPackageProfile
   , CompilePurpose(..), CompilePurposeConflict(..), normalizeCompilePurpose
   , PipelineResult, prBinds, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
-  , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
+  , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings, prWarningDiagnostics
   , prTargetRdrEnv, prTargetTcGblEnv
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
@@ -111,7 +111,7 @@ import GHC.Tc.Errors.Types
   ( TcRnMessage(..), TcRnMessageDetailed(..), DeriveInstanceErrReason(..)
   , SolverReportWithCtxt(..) )
 import GHC.Tc.Errors.Types qualified as TcError
-import GHC.Utils.Logger (LogAction, makeThreadSafe)
+import GHC.Utils.Logger (LogAction, makeThreadSafe, pushLogHook)
 import Tidepool.TypedSegment (TypedSegmentPlan, GeneratedSegmentOperations, TypedSegment, PendingTypedSegment, TypedSegmentFailure(..),
   pendingSegmentItems, pendingSegmentSupportRoots, typedItemRoot, typedItemCaptures, typedCaptureType, captureTypedSegment, closeTypedSegment, installTypedSegmentRoots)
 import Tidepool.TypedSegment.Source
@@ -798,10 +798,10 @@ data PipelineResult = PipelineResult
   -- | GHC diagnostic warnings (@-Wincomplete-patterns@, name shadowing, ...)
   -- emitted while compiling the TARGET module — dependency modules (the
   -- preamble, stdlib) are excluded, see 'diagnosticCollectorHook'. Rendered by
-  -- GHC's own diagnostic pretty-printer, so a warning carries its
-  -- @Expr.hs:<line>:<col>@ location exactly like a compile error does. Empty
-  -- on a clean compile.
-  , ownedPrWarnings :: [String]
+  -- GHC's own diagnostic pretty-printer. The rendered and structured views
+  -- retain the same captured warning; neither is reconstructed from the other.
+  -- Empty on a clean compile.
+  , ownedPrWarnings :: [(String, Diag)]
   -- | GHC's resolved reader environment for the target module. Inspection
   -- uses this exact scope rather than reconstructing visibility from source.
   , ownedPrTargetRdrEnv :: GlobalRdrEnv
@@ -834,7 +834,10 @@ prResultType :: PipelineResult -> Maybe Type
 prResultType = ownedPrResultType
 
 prWarnings :: PipelineResult -> [String]
-prWarnings = ownedPrWarnings
+prWarnings = map fst . ownedPrWarnings
+
+prWarningDiagnostics :: PipelineResult -> [Diag]
+prWarningDiagnostics = map snd . ownedPrWarnings
 
 prTargetRdrEnv :: PipelineResult -> GlobalRdrEnv
 prTargetRdrEnv = ownedPrTargetRdrEnv
@@ -5263,7 +5266,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     typedSessionEnvironmentRef <- liftIO (newIORef Nothing)
     typedFailureRef <- liftIO (newIORef Nothing)
     typedPreparationFailureRef <- liftIO (newIORef Nothing)
-    pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
+    pushLogHookM (diagnosticCollectorHook PhysicalTargetCoordinates path warnRef errorRef)
     -- Downsweep may select the interpreter for splice dependencies and enable
     -- IgnoreInterfacePragmas. Canonical summaries restore the interface policy
     -- before any shared package interface is demanded. Package unfoldings and
@@ -6193,6 +6196,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         canonicalSummary summary = (restoreFreshSource summary)
           { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts (restoreFreshSource summary)) }
         canonicalEnvironment env summary = scopeRetainedSummaryHscEnv (canonicalSummary summary) env
+        -- Virtual LINE coordinates identify authored input only while the
+        -- actual World target's diagnostic phase is emitting them. An imported
+        -- module may use the same coordinates without becoming authored input.
+        moduleDiagnosticLogger env summary
+          | ms_mod summary == targetOwner && closedWorldCellPurpose (pvPurpose variant) =
+              pushLogHook (diagnosticCollectorHook AuthoredCellCoordinates path warnRef errorRef)
+                (hsc_logger env)
+          | otherwise = hsc_logger env
         validateCandidateInterface env name iface =
           forM_ (Map.lookup name acceptedCandidates) $ \candidate -> do
             directory <- getTemporaryDirectory
@@ -6336,7 +6347,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (moduleNameString (ms_mod_name summaryC)) $
                 runHsc' typedEnv (hscDesugar' (ms_location summaryC) tcg)
               desugared <- installSegment typedEnv typedSegment desugared0
-              printOrThrowDiagnostics (hsc_logger env) (initPrintConfig flags) (initDiagOpts flags)
+              printOrThrowDiagnostics (moduleDiagnosticLogger env summaryC) (initPrintConfig flags) (initDiagOpts flags)
                 (unionMessages tcWarnings dsWarnings)
               dependencyEnv <- captureSourceDependenciesFor typedEnv desugared
               plugins <- readIORef (tcg_th_coreplugins tcg)
@@ -6615,7 +6626,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                       (typecheckNativeModuleWithDiagnostics typecheckEnv transformed)
                     liftIO (recordImportFrontend targetImportFrontendRef importPrepared tcg)
                     let flags = ms_hspp_opts modSum
-                    liftIO (printOrThrowDiagnostics (hsc_logger typecheckEnv)
+                    liftIO (printOrThrowDiagnostics (moduleDiagnosticLogger typecheckEnv modSum)
                       (initPrintConfig flags) (initDiagOpts flags) warnings)
                     familyEnvironment <- getSession
                     liftIO (validateCompilationFamilies familyEnvironment tcg)
@@ -7254,7 +7265,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 , ownedPrCapturedType = capturedType
                 , ownedPrCheckedBinderPins = checkedBinderPins
                 , ownedPrResultType   = resultTy
-                , ownedPrWarnings     = nub (map fst warnings)
+                , ownedPrWarnings     = warnings
                 , ownedPrTargetRdrEnv = tcg_rdr_env targetEnvironment
                 , ownedPrTargetTcGblEnv = targetEnvironment
                 }
@@ -7358,7 +7369,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                         (typecheckNativeModuleWithDiagnostics current transformed)
                       liftIO (recordImportFrontend targetImportFrontendRef importPrepared checkedEnvironment)
                       let flags = ms_hspp_opts summary
-                      liftIO (printOrThrowDiagnostics (hsc_logger current)
+                      liftIO (printOrThrowDiagnostics (moduleDiagnosticLogger current summary)
                         (initPrintConfig flags) (initDiagOpts flags) warnings)
                       familyEnvironment <- getSession
                       liftIO (validateCompilationFamilies familyEnvironment checkedEnvironment)
@@ -9396,22 +9407,26 @@ compileSearchPaths variant requested ordinaryBase = case pvExactScope variant >>
 -- prevents the barrier from losing the source diagnostic or treating it as a
 -- worker failure. Dependency errors retain their original paths and spans.
 --
--- Warning capture records only @targetPath@. Cell warnings also accept GHC's
--- @<cell>@ LINE-pragmas for authored input; dependency errors are captured
--- regardless of their physical or virtual source span.
+-- The outer collector records only the exact physical target path. The local
+-- World target logger separately records authored @<cell>@ LINE coordinates;
+-- its caller establishes the actual module and closed World purpose. Only the
+-- outer collector records errors, regardless of their source span.
 -- Rendered with 'mkLocMessage', the same formatter GHC's default log action
 -- uses, so the text carries the familiar @Expr.hs:<line>:<col>: warning:
 -- ...@ shape callers already parse compile errors out of. Delegates to
 -- `fallback` unconditionally so normal stderr printing is unaffected — this
 -- only ADDS a capture, it never suppresses.
+data TargetWarningCoordinates = PhysicalTargetCoordinates | AuthoredCellCoordinates
+
 diagnosticCollectorHook
-  :: FilePath -> IORef [(String, Diag)] -> IORef [Diag] -> LogAction -> LogAction
-diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
+  :: TargetWarningCoordinates -> FilePath -> IORef [(String, Diag)] -> IORef [Diag] -> LogAction -> LogAction
+diagnosticCollectorHook coordinates targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
   case msgClass of
     MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
       modifyIORef' warningRef ((rendered, structured DiagWarning) :)
-    MCDiagnostic SevError _ _ ->
-      modifyIORef' errorRef (structured DiagError :)
+    MCDiagnostic SevError _ _ -> case coordinates of
+      PhysicalTargetCoordinates -> modifyIORef' errorRef (structured DiagError :)
+      AuthoredCellCoordinates -> pure ()
     _ -> pure ()
   fallback flags msgClass srcSpan msg
   where
@@ -9428,9 +9443,9 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
       , dSeverity = severity
       , dMessage = renderWithContext defaultSDocContext msg
       }
-    inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
-      || (takeFileName targetPath == "CellCheck.hs"
-          && unpackFS (srcSpanFile rss) == "<cell>")
+    inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == case coordinates of
+      PhysicalTargetCoordinates -> targetPath
+      AuthoredCellCoordinates -> "<cell>"
     inTarget _ = False
 
 -- Boot establishes the package and x86_64-linux target policy before GHC unit
