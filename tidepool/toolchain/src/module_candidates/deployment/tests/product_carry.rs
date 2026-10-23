@@ -1523,6 +1523,7 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let selected = borrow_catalog(&acquired).unwrap();
         let checked_previous = admit_borrowed_catalog(&fixture, &selected)
             .unwrap()
+            .data()
             .recovery_products
             .first()
             .expect("the actual fixture compiler returned its Original")
@@ -1550,6 +1551,7 @@ fn acquired_native_custody_join_preserves_selected_source_witness_in_both_orders
         let incoming_selected = borrow_catalog(&incoming_package).unwrap();
         let checked_incoming = admit_borrowed_catalog(&fixture, &incoming_selected)
             .unwrap()
+            .data()
             .recovery_products
             .first()
             .expect("the actual fixture compiler returned its Original")
