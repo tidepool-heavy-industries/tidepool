@@ -535,8 +535,10 @@ mod tests {
             array(&terminals[0]).unwrap()[2],
             array(&terminals[1]).unwrap()[2]
         );
-        assert!(reply(&[retained[0], retained[0]]).is_err());
-        assert!(reply(&[retained[1], retained[0]]).is_err());
+        let duplicate = [retained[0], retained[0]];
+        let reordered = [retained[1], retained[0]];
+        assert!(reply(&duplicate).is_err());
+        assert!(reply(&reordered).is_err());
     }
 
     #[test]
