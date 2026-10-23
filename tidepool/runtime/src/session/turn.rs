@@ -6463,6 +6463,7 @@ mod tests {
         resident: crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
         execution: Arc<crate::session::PrivateExecutionAdmission>,
         home: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
+        recipe: crate::session::world_cell_test_support::InputRecipe,
     }
 
     impl CheckedHomeFixture {
@@ -6493,6 +6494,16 @@ mod tests {
             let mut state = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = state.mint_scope(ScopeId::ROOT).unwrap();
             let source = state.adopt_initial_notebook_scope(public).unwrap();
+            let mut include = effects.include_paths().to_vec();
+            include.insert(0, root.path().to_owned());
+            let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+                effects.preamble().to_owned(),
+                effects.row().to_owned(),
+                include,
+            );
+            crate::session::world_cell_test_support::bootstrap_state_world_for(
+                &mut state, &recipe, &source,
+            );
             let admitted = state
                 .with_source_compiler_transaction(
                     source.original_source().clone(),
@@ -6519,9 +6530,9 @@ mod tests {
                 .unwrap();
             // Each fresh runtime owns its admission and completed native prefix.
             // The resulting immutable certificate is reused by every probe here.
-            let cell = Self::check_in(&mut resident, &execution, &effects, root.path(),
+            let cell = Self::check_in(&mut resident, &execution, &effects,
                 "let (home, homeNumber) = (CheckedHomeValue.homeValue, CheckedHomeValue.homeNumber)",
-                &["qualified CheckedHomeValue"], None).unwrap();
+                &["qualified CheckedHomeValue"]).unwrap();
             let home = Self::execute_in(&mut resident, cell)
                 .into_iter()
                 .next()
@@ -6537,6 +6548,7 @@ mod tests {
                 resident,
                 execution,
                 home,
+                recipe,
             }
         }
 
@@ -6544,10 +6556,8 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             execution: &Arc<crate::session::PrivateExecutionAdmission>,
             effects: &tidepool_testing::effect_surface::TestEffectSurface,
-            root: &Path,
             source: &str,
             imports: &[&str],
-            first_include: Option<&Path>,
         ) -> Result<Arc<crate::session::RuntimeCellAdmission>, CompileError> {
             use crate::session::{
                 resident_cell_check_template, resident_workbench_templates, SourceImports,
@@ -6573,69 +6583,32 @@ mod tests {
                 view.injected_module_names(),
             )
             .unwrap();
-            let mut roots = effects.include_paths().to_vec();
-            roots.insert(0, root.to_owned());
-            if let Some(first) = first_include {
-                roots.insert(0, first.to_owned());
-            }
-            let include_paths = view.include_paths(&roots);
-            let admitted = resident
-                .with_source_compiler_transaction(
-                    execution.retained_lexical_scope().original_source().clone(),
-                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
-                    crate::CompilerTransactionCancellation::new(),
-                    None,
-                    |_| {},
-                    |resident, settlement| {
-                        resident
-                            .admit_source_mutation(execution.private_scope())
-                            .unwrap();
-                        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                            Arc::new(specification.clone()),
-                            &include_paths,
-                            settlement,
-                        )?;
-                        let admission = resident
-                            .admit_planned_cell_for_execution(
-                                execution.clone(),
-                                plan,
-                                Arc::new(specification.clone()),
-                                specification.specification_digest(),
-                                [1; 32],
-                                include_paths,
-                                None,
-                            )
-                            .unwrap();
-                        Ok(admission)
-                    },
-                )
-                .unwrap();
-            assert!(matches!(
-                admitted.close(),
-                crate::CompilerTransactionClose::Clean
-                    | crate::CompilerTransactionClose::NotStarted
-            ));
-            admitted.into_outcome().action
+            crate::session::world_cell_test_support::plan_state_fixture_specification_for(
+                &mut resident.state,
+                execution.clone(),
+                crate::session::world_cell_test_support::world_recipe(&specification),
+            )
+            .map_err(|error| match error {
+                crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Compile(
+                    error,
+                )) => error,
+                crate::session::WorldInspectionError::Runtime(crate::RuntimeError::Session(
+                    crate::session::SessionError::Compile(error),
+                )) => error,
+                other => {
+                    panic!("actual fixture World admission failed outside compilation: {other:?}")
+                }
+            })
         }
 
         fn check_in(
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             execution: &Arc<crate::session::PrivateExecutionAdmission>,
             effects: &tidepool_testing::effect_surface::TestEffectSurface,
-            root: &Path,
             source: &str,
             imports: &[&str],
-            first_include: Option<&Path>,
         ) -> Result<CheckedHomeCell, CompileError> {
-            let admission = Self::admit_in(
-                resident,
-                execution,
-                effects,
-                root,
-                source,
-                imports,
-                first_include,
-            )?;
+            let admission = Self::admit_in(resident, execution, effects, source, imports)?;
             let (checked, program) = tidepool_testing::with_settlement(|settlement| {
                 compile_cell_program_admitted(admission.clone(), settlement)
             })
@@ -6651,16 +6624,13 @@ mod tests {
             &mut self,
             source: &str,
             imports: &[&str],
-            first_include: Option<&Path>,
         ) -> Result<CheckedHomeCell, CompileError> {
             Self::check_in(
                 &mut self.resident,
                 &self.execution,
                 &self.effects,
-                self.root.path(),
                 source,
                 imports,
-                first_include,
             )
         }
 
@@ -6668,9 +6638,9 @@ mod tests {
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             cell: CheckedHomeCell,
         ) -> Vec<Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>> {
-            let source = cell.admission.source_lease();
+            let source = cell.admission.compiler_preparation_source();
             let executed = resident.with_source_compiler_transaction(
-                source.original_source().clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                source.clone(), tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(), None, |_| {},
                 |resident, settlement| {
             let prefix = resident
@@ -6782,6 +6752,101 @@ mod tests {
 
         fn execute(&mut self, cell: CheckedHomeCell) {
             Self::execute_in(&mut self.resident, cell);
+        }
+
+        fn assert_foreign_source_capture_refused(&mut self, first: Option<&Path>) {
+            use crate::session::world_cell_test_support::{
+                source_action_with_original, InputRecipe,
+            };
+            let mut roots = self.effects.include_paths().to_vec();
+            roots.insert(0, self.root.path().to_owned());
+            if let Some(first) = first {
+                roots.insert(0, first.to_owned());
+            }
+            let foreign = InputRecipe::capture(
+                self.effects.preamble().to_owned(),
+                self.effects.row().to_owned(),
+                roots,
+            );
+            assert_ne!(foreign.sources.seal(), self.recipe.sources.seal());
+            assert_ne!(foreign.reference.sha256(), self.recipe.reference.sha256());
+            let original = self.execution.original_source().unwrap();
+            let snapshot =
+                source_action_with_original(&mut self.resident, original.clone(), |resident, _| {
+                    resident.prepare_private_execution_snapshot(self.execution.clone())
+                })
+                .unwrap();
+            let admitted = self
+                .resident
+                .capture_inspection_world_in(
+                    self.execution.private_scope(),
+                    &foreign.reference,
+                    &original,
+                )
+                .unwrap();
+            let settled = original
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |owner, _| {
+                        crate::session::run_admitted_compiler_world(owner, admitted, || {
+                            Ok(Some(foreign.sources.clone()))
+                        })
+                    },
+                )
+                .unwrap();
+            let completed = crate::session::finish_admitted_compiler_world(settled).unwrap();
+            assert_ne!(
+                completed.world().logical_id(),
+                snapshot.world().logical_id()
+            );
+            let specification = crate::session::world_cell_test_support::fixture_cell_recipe(
+                &foreign,
+                "let foreignSourceProbe = (0 :: Int)",
+                &crate::session::SourceImports::new(),
+            );
+            let settled = original
+                .with_source_compiler_transaction(
+                    tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                    crate::CompilerTransactionCancellation::new(),
+                    None,
+                    |_| {},
+                    |owner, _| {
+                        prepare_world_cell_plan_admitted(
+                            owner,
+                            completed.world(),
+                            specification,
+                            None,
+                        )
+                    },
+                )
+                .unwrap();
+            let plan = finish_world_cell_plan_admitted(settled).unwrap();
+            let before = self
+                .resident
+                .public_visibility_snapshot_in(self.execution.private_scope())
+                .unwrap();
+            let refused =
+                source_action_with_original(&mut self.resident, original, |resident, _| {
+                    resident.admit_world_planned_cell_with_snapshot(
+                        self.execution.clone(),
+                        snapshot,
+                        plan,
+                        None,
+                    )
+                });
+            assert!(matches!(
+                refused,
+                Err(crate::session::SessionError::StaleStagedDeclaration)
+            ));
+            assert_eq!(
+                self.resident
+                    .public_visibility_snapshot_in(self.execution.private_scope())
+                    .unwrap(),
+                before
+            );
         }
 
         fn assert_number(&mut self, name: &str, expected: i64) {
@@ -6901,10 +6966,7 @@ mod tests {
             let admitted = self
                 .resident
                 .with_source_compiler_transaction(
-                    self.execution
-                        .retained_lexical_scope()
-                        .original_source()
-                        .clone(),
+                    self.execution.original_source().unwrap(),
                     tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                     crate::CompilerTransactionCancellation::new(),
                     None,
@@ -6931,7 +6993,7 @@ mod tests {
 
         fn assert_retained_original(&mut self) {
             let cell = self
-                .check("let retainedObserved = homeNumber home", &[], None)
+                .check("let retainedObserved = homeNumber home", &[])
                 .unwrap();
             self.execute(cell);
             self.assert_number("retainedObserved", 41);
@@ -6951,37 +7013,43 @@ mod tests {
         fixture.begin_next_execution();
         let initial = fixture.resident.val_gen().0 + 1;
         let cell = fixture
-            .check(
-                include_str!("fixtures/checked-expression-history.hs"),
-                &[],
-                None,
-            )
+            .check(include_str!("fixtures/checked-expression-history.hs"), &[])
             .unwrap();
         assert_eq!(cell.checked.items.len(), 4);
         assert_eq!(cell.program.items().len(), 4);
         assert_eq!(fixture.resident.val_gen().0, initial + 3);
-        // The admission owner issued one request for the plan's own recipe.
-        // `fixture.execute` installs through `begin_cell_program`, which
-        // compares this exact digest and declaration inventory before the
-        // program can run.
-        let issued = cell.admission.checked_request().unwrap();
-        assert_eq!(issued.admission_digest(), cell.admission.digest());
-        assert_eq!(
-            issued.recipe().specification_digest(),
-            cell.admission.specification_digest().unwrap()
-        );
-        let reserved = cell
-            .admission
-            .reserved_generations()
+        let reservation = cell.admission.world_reservation().unwrap();
+        assert_eq!(reservation.admission_digest(), &cell.admission.digest());
+        let tidepool_toolchain::checked_cell::CellProgramBasis::World(output) =
+            cell.program.basis()
+        else {
+            panic!("the actual World producer owns this cell");
+        };
+        assert!(Arc::ptr_eq(output.reservation(), reservation));
+        let reserved = reservation
+            .items()
             .iter()
-            .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
+            .filter_map(|item| match item.slot() {
+                tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Prologue {
+                    declaration,
+                }
+                | tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Declaration {
+                    declaration,
+                } => Some(tidepool_repr::Generation(declaration)),
+                _ => None,
+            })
             .collect::<Vec<_>>();
-        assert_eq!(issued.reserved_declaration_modules(), reserved.as_slice());
-        let reservation = cell.admission.plan_reservation().unwrap().unwrap();
+        assert_eq!(cell.admission.reserved_generations(), reserved.as_slice());
         let observations = reservation
             .items()
             .iter()
-            .filter_map(|item| item.observation_name().map(str::to_owned))
+            .filter_map(|item| match item.slot() {
+                tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Expression {
+                    observation_name,
+                    ..
+                } => Some(observation_name),
+                _ => None,
+            })
             .collect::<Vec<_>>();
         assert_eq!(observations.len(), 2);
         for (index, (reserved, compiled)) in reservation
@@ -6991,7 +7059,17 @@ mod tests {
             .enumerate()
         {
             let generation = initial + index as u64;
-            assert_eq!(reserved.value_generation().unwrap().0, generation);
+            let (actual_generation, observation) = match reserved.slot() {
+                tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Bind { value } => {
+                    (value, None)
+                }
+                tidepool_toolchain::checked_cell::CheckedPlannedCellSlot::Expression {
+                    capture,
+                    observation_name,
+                } => (capture, Some(observation_name)),
+                _ => panic!("history contains only captured values"),
+            };
+            assert_eq!(actual_generation, generation);
             let native = compiled
                 .native()
                 .expect("every history item has its original native target");
@@ -7000,7 +7078,7 @@ mod tests {
                 native.value_interface_certificate().unwrap().owner(),
                 tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation))
             );
-            assert_eq!(native.observation_name(), reserved.observation_name());
+            assert_eq!(native.observation_name(), observation.as_deref());
             let products = compiled.native_products().unwrap();
             assert!(products
                 .certified_groups
@@ -7053,7 +7131,7 @@ mod tests {
         let followup = fixture.check(&format!(
             "let historyStart = (99 :: Int)\nlet originalPure = {} ()\nlet originalEffectful = {} ()\nlet originalEffectfulAgain = {} ()",
             observations[0], observations[1], observations[1],
-        ), &[], None).unwrap();
+        ), &[]).unwrap();
         fixture.execute(followup);
         fixture.publish_execution(&[
             "historyStart",
@@ -7068,13 +7146,12 @@ mod tests {
     }
 
     #[test]
-    fn checked_explicit_home_import_executes_original_and_refuses_source_drift() {
+    fn checked_explicit_home_import_executes_original_and_refuses_foreign_source_capture() {
         let mut fixture = CheckedHomeFixture::new();
         let cell = fixture
             .check(
                 "import qualified CheckedHomeValue\nlet originalAgain = CheckedHomeValue.homeValue",
                 &[],
-                None,
             )
             .unwrap();
         assert_eq!(cell.checked.items.len(), 2);
@@ -7085,7 +7162,7 @@ mod tests {
         );
         fixture.execute(cell);
         let observe = fixture
-            .check("let originalObserved = homeNumber originalAgain", &[], None)
+            .check("let originalObserved = homeNumber originalAgain", &[])
             .unwrap();
         fixture.execute(observe);
         fixture.assert_number("originalObserved", 41);
@@ -7098,14 +7175,7 @@ mod tests {
             .resident
             .public_visibility_snapshot_in(fixture.execution.private_scope())
             .unwrap();
-        let Err(error) = fixture.check(
-            "import qualified CheckedHomeValue\nlet changed = CheckedHomeValue.homeValue",
-            &[],
-            None,
-        ) else {
-            panic!("an authored current import accepted changed original source");
-        };
-        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        fixture.assert_foreign_source_capture_refused(None);
         assert_eq!(
             fixture
                 .resident
@@ -7117,13 +7187,12 @@ mod tests {
     }
 
     #[test]
-    fn checked_explicit_helper_import_reproves_retained_home_dependency() {
+    fn checked_explicit_helper_import_keeps_retained_home_dependency_across_source_capture() {
         let mut fixture = CheckedHomeFixture::new();
         let cell = fixture
             .check(
                 "import qualified CheckedHomeRelay\nlet relayAgain = CheckedHomeRelay.homeValue",
                 &[],
-                None,
             )
             .unwrap();
         assert_eq!(cell.checked.items.len(), 2);
@@ -7134,7 +7203,7 @@ mod tests {
         );
         fixture.execute(cell);
         let observe = fixture
-            .check("let relayObserved = homeNumber relayAgain", &[], None)
+            .check("let relayObserved = homeNumber relayAgain", &[])
             .unwrap();
         fixture.execute(observe);
         fixture.assert_number("relayObserved", 41);
@@ -7147,14 +7216,7 @@ mod tests {
             .resident
             .public_visibility_snapshot_in(fixture.execution.private_scope())
             .unwrap();
-        let Err(error) = fixture.check(
-            "import qualified CheckedHomeRelay\nlet changedRelay = CheckedHomeRelay.homeValue",
-            &[],
-            None,
-        ) else {
-            panic!("a fresh helper accepted changed retained source");
-        };
-        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        fixture.assert_foreign_source_capture_refused(None);
         assert_eq!(
             fixture
                 .resident
@@ -7166,7 +7228,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_explicit_home_import_refuses_ordered_path_shadow() {
+    fn checked_same_byte_ordered_path_shadow_has_distinct_source_owner() {
         let mut fixture = CheckedHomeFixture::new();
         let shadow = fixture.root.path().join("shadow");
         std::fs::create_dir(&shadow).unwrap();
@@ -7179,14 +7241,27 @@ mod tests {
             .resident
             .public_visibility_snapshot_in(fixture.execution.private_scope())
             .unwrap();
-        let Err(error) = fixture.check(
-            "import qualified CheckedHomeValue\nlet shadowed = CheckedHomeValue.homeValue",
-            &[],
-            Some(&shadow),
-        ) else {
-            panic!("current import accepted identical bytes from another ordered source path");
-        };
-        assert!(matches!(error, CompileError::InputRejected(_)), "{error:?}");
+        assert_eq!(
+            std::fs::read(shadow.join("CheckedHomeValue.hs")).unwrap(),
+            std::fs::read(fixture.root.path().join("CheckedHomeValue.hs")).unwrap()
+        );
+        let ordered = crate::session::world_cell_test_support::InputRecipe::capture(
+            fixture.effects.preamble().to_owned(),
+            fixture.effects.row().to_owned(),
+            vec![fixture.root.path().to_owned(), shadow.clone()],
+        );
+        let reversed = crate::session::world_cell_test_support::InputRecipe::capture(
+            fixture.effects.preamble().to_owned(),
+            fixture.effects.row().to_owned(),
+            vec![shadow.clone(), fixture.root.path().to_owned()],
+        );
+        assert_ne!(
+            ordered.sources.seal(),
+            reversed.sources.seal(),
+            "ordering the same actual roots changes the source namespace"
+        );
+        assert_ne!(ordered.reference.sha256(), reversed.reference.sha256());
+        fixture.assert_foreign_source_capture_refused(Some(&shadow));
         assert_eq!(
             fixture
                 .resident
@@ -7220,7 +7295,7 @@ mod tests {
                 "capturedUnqualified",
             ),
         ] {
-            let cell = fixture.check(source, &[imports], None).unwrap();
+            let cell = fixture.check(source, &[imports]).unwrap();
             assert_eq!(cell.checked.items.len(), 1);
             fixture.execute(cell);
             fixture.assert_number(value, 41);
@@ -7244,7 +7319,6 @@ mod tests {
             .check(
                 "let alias = home\nlet aliasObserved = homeNumber alias",
                 &[],
-                None,
             )
             .unwrap();
         assert_eq!(cell.checked.items.len(), 2);
@@ -7567,10 +7641,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "declaredNumber = (42 :: Int)\nlet capturedNumber = declaredNumber",
             &[],
-            None,
         )
         .unwrap();
         let before = tidepool_extract_cmd::extract_spawn_count();
@@ -7631,10 +7703,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "let first = (41 :: Int)\nlet second = (42 :: Int)",
             &[],
-            None,
         )
         .unwrap();
         // Fixture bootstrap has its own real checked compilation; exclude it.
@@ -7811,7 +7881,7 @@ mod tests {
     fn publication_restage_refuses_fenced_original_before_join_reservation() {
         let mut fixture = CheckedHomeFixture::new();
         let declaration = fixture
-            .check("freshPublication n = (n :: Int)", &[], None)
+            .check("freshPublication n = (n :: Int)", &[])
             .unwrap();
         fixture.execute(declaration);
         let intent = fixture
@@ -7933,10 +8003,8 @@ mod tests {
                 &mut fixture.resident,
                 &fixture.execution,
                 &fixture.effects,
-                fixture.root.path(),
                 "let capturedNumber = missingPreparedCellName",
                 &[],
-                None,
             )
             .unwrap();
             let source = admission.source_lease();
@@ -8028,10 +8096,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "let capturedNumber = (42 :: Int)",
             &[],
-            None,
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
@@ -8131,39 +8197,48 @@ mod tests {
             )
             .unwrap(),
         );
-        let includes = view.include_paths(effects.include_paths());
-        let admitted = resident
+        let recipe = crate::session::world_cell_test_support::InputRecipe::capture(
+            effects.preamble().to_owned(),
+            effects.row().to_owned(),
+            effects.include_paths().to_vec(),
+        );
+        let world = crate::session::world_cell_test_support::bootstrap_world_for(
+            &mut resident,
+            &recipe,
+            &source,
+        );
+        let original = source.original_source().clone();
+        let settled = original
             .with_source_compiler_transaction(
-                source.original_source().clone(),
                 tidepool_toolchain::artifacts::CompileWorkload::Foreground,
                 crate::CompilerTransactionCancellation::new(),
                 None,
                 |_| {},
-                |resident, settlement| {
-                    let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                        specification.clone(),
-                        &includes,
-                        settlement,
-                    )?;
-                    resident
-                        .admit_host_carrier_cell_in(
-                            scope,
-                            plan,
-                            specification.clone(),
-                            specification.specification_digest(),
-                            [1; 32],
-                            includes,
-                            "carrier".to_owned(),
-                            HostBindingType::TEXT,
-                            None,
-                        )
-                        .map_err(|error| CompileError::ExtractFailed(error.to_string()))
+                |owner, _| {
+                    prepare_world_cell_plan_admitted(
+                        owner,
+                        &world,
+                        crate::session::world_cell_test_support::world_recipe(&specification),
+                        None,
+                    )
                 },
             )
-            .unwrap()
-            .into_outcome()
-            .action
             .unwrap();
+        let plan = finish_world_cell_plan_admitted(settled).unwrap();
+        let admitted = crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original.clone(),
+            |resident, _| {
+                resident.admit_world_planned_host_carrier_cell_in(
+                    scope,
+                    plan,
+                    "carrier".to_owned(),
+                    HostBindingType::TEXT,
+                    [1; 32],
+                )
+            },
+        )
+        .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
         let outcome = admitted
             .source_lease()
@@ -8178,9 +8253,14 @@ mod tests {
         assert_eq!(*outcome.close(), crate::CompilerTransactionClose::Clean);
         let (checked, program) = finish_cell_program_admitted(outcome).unwrap();
         let prefix = resident.begin_cell_program(program).unwrap().unwrap();
-        let reservation = resident
-            .admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
-            .unwrap();
+        let reservation = crate::session::world_cell_test_support::source_action_with_original(
+            &mut resident,
+            original,
+            |resident, _| {
+                resident.admit_checked_item(prefix.clone(), checked.checked_item(0).unwrap())
+            },
+        )
+        .unwrap();
         let TurnResult::Bind {
             bound, compiled, ..
         } = consume_cell_program_item(reservation.clone()).unwrap()
@@ -8224,10 +8304,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "let capturedNumber = (42 :: Int)",
             &[],
-            None,
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
@@ -8293,10 +8371,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "let capturedNumber = (42 :: Int)",
             &[],
-            None,
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
@@ -8361,10 +8437,8 @@ mod tests {
             &mut fixture.resident,
             &fixture.execution,
             &fixture.effects,
-            fixture.root.path(),
             "declaredNumber = (42 :: Int)\nlet capturedNumber = declaredNumber",
             &[],
-            None,
         )
         .unwrap();
         let cancellation = crate::CompilerTransactionCancellation::new();
@@ -8405,8 +8479,8 @@ mod tests {
     #[test]
     fn settled_checked_specification_refuses_a_foreign_session_before_claiming_prefix() {
         let mut fixture = CheckedHomeFixture::new();
-        let legitimate = fixture.check("let value = (42 :: Int)", &[], None).unwrap();
-        let alternate = fixture.check("let value = (43 :: Int)", &[], None).unwrap();
+        let legitimate = fixture.check("let value = (42 :: Int)", &[]).unwrap();
+        let alternate = fixture.check("let value = (43 :: Int)", &[]).unwrap();
         assert_ne!(
             alternate.admission.specification_digest().unwrap(),
             legitimate.admission.specification_digest().unwrap()
@@ -8427,12 +8501,8 @@ mod tests {
     #[test]
     fn settled_reserved_original_refuses_a_foreign_session_before_claiming_prefix() {
         let mut fixture = CheckedHomeFixture::new();
-        let legitimate = fixture
-            .check("originalValue = (42 :: Int)", &[], None)
-            .unwrap();
-        let alternate = fixture
-            .check("originalValue = (42 :: Int)", &[], None)
-            .unwrap();
+        let legitimate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
+        let alternate = fixture.check("originalValue = (42 :: Int)", &[]).unwrap();
         assert_eq!(
             alternate.admission.specification_digest().unwrap(),
             legitimate.admission.specification_digest().unwrap()
@@ -8667,27 +8737,26 @@ mod tests {
             .check(
                 include_str!("fixtures/checked-interleaved-declaration.hs"),
                 &[],
-                None,
             )
             .unwrap();
-        let items = cell.admission.plan_reservation().unwrap().unwrap().items();
+        let items = cell.admission.world_reservation().unwrap().plan().items();
         assert_eq!(items.len(), 3);
         assert_eq!(
             items[0].kind(),
-            crate::session::RuntimePlannedCellItemKind::Bind
+            tidepool_toolchain::cell_plan::ParsedCellPlanKind::Bind
         );
         assert_eq!(
             items[1].kind(),
-            crate::session::RuntimePlannedCellItemKind::Declaration
+            tidepool_toolchain::cell_plan::ParsedCellPlanKind::Declaration
         );
         assert_eq!(
             items[2].kind(),
-            crate::session::RuntimePlannedCellItemKind::Bind
+            tidepool_toolchain::cell_plan::ParsedCellPlanKind::Bind
         );
         fixture.execute(cell);
         fixture.assert_number("before", 40);
         let cell = fixture
-            .check("let laterObserved = case after of Later n -> n", &[], None)
+            .check("let laterObserved = case after of Later n -> n", &[])
             .unwrap();
         fixture.execute(cell);
         fixture.assert_number("laterObserved", 40);
@@ -8924,12 +8993,12 @@ mod tests {
             admission.reserved_generations(),
             &[expected_prologue.gen(), expected_declaration.gen()]
         );
-        use crate::session::RuntimePlannedCellItemKind as ItemKind;
+        use tidepool_toolchain::cell_plan::ParsedCellPlanKind as ItemKind;
         assert_eq!(
             admission
-                .plan_reservation()
+                .world_reservation()
                 .unwrap()
-                .unwrap()
+                .plan()
                 .items()
                 .iter()
                 .map(|item| item.kind())
@@ -9077,11 +9146,7 @@ mod tests {
             |node| node.owner.module == SessionModule::lib(inherited_generation).module_name()
         ));
         assert_eq!(protected.snapshot().compiler_prefix().next_item(), 2);
-        let adopted = protected.snapshot();
-        let imports = adopted
-            .view()
-            .unwrap()
-            .turn_imports(&crate::session::SourceImports::new());
+        let imports = view.turn_imports(&crate::session::SourceImports::new());
         assert!(
             imports
                 .lines()
@@ -9093,13 +9158,11 @@ mod tests {
             "the local native original is not the future lexical import"
         );
         assert_eq!(
-            adopted.view().unwrap().library().unwrap().module_name(),
+            view.library().unwrap().module_name(),
             module,
             "the reserved native declaration identity remains unchanged"
         );
-        assert!(adopted
-            .view()
-            .unwrap()
+        assert!(view
             .exact_declaration_context()
             .unwrap()
             .lexical_graph()
@@ -9118,11 +9181,9 @@ mod tests {
             1,
             "repeated transfer retains one exact issued capsule"
         );
-        let projected = protected
-            .admission()
+        let projected = execution
             .view()
             .unwrap()
-            .clone()
             .with_compile_inputs(&source_inputs)
             .unwrap();
         assert!(projected
@@ -9163,9 +9224,8 @@ mod tests {
             graph.len()
         );
         assert!(resident.adopt_checked_declaration(reservation).is_err());
-        let original_context = protected
-            .snapshot()
-            .view()
+        let original_context = resident
+            .compile_view_in(execution.private_scope())
             .unwrap()
             .exact_declaration_context()
             .cloned();
@@ -9244,9 +9304,8 @@ mod tests {
                 item.index() + 1
             );
             assert_eq!(
-                protected
-                    .snapshot()
-                    .view()
+                resident
+                    .compile_view_in(execution.private_scope())
                     .unwrap()
                     .exact_declaration_context(),
                 original_context.as_ref(),
