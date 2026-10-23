@@ -84,8 +84,15 @@ pub struct RecoveryJoinRef {
 #[derive(Clone, Debug)]
 pub struct CertifiedRecoveryProduct {
     facts: Arc<OriginalFacts>,
-    source_admission: Option<crate::certified_products::OriginalSourceAdmission>,
+    admission: OriginalAdmission,
     module_interface: crate::certified_products::CertifiedModuleInterface,
+}
+
+/// Admission is provenance of this acquired input, not immutable artifact identity.
+#[derive(Clone, Debug)]
+enum OriginalAdmission {
+    Recovered,
+    Fresh(crate::certified_products::OriginalSourceAdmission),
 }
 
 /// Pending certification is private to the product issuers and cannot be admitted.
@@ -224,21 +231,44 @@ impl CertifiedRecoveryProduct {
         if !admission.matches(&product.owner, &product.module_interface) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        product.source_admission = Some(admission);
+        product.admission = OriginalAdmission::Fresh(admission);
         Ok(product)
     }
+    /// Reuse of an acquired input preserves actual admission and transport owners.
+    /// Immutable fact equality and derived witness allocation are irrelevant here.
+    pub(crate) fn same_admission_and_transport(&self, other: &Self) -> bool {
+        let same_admission = match (&self.admission, &other.admission) {
+            (OriginalAdmission::Recovered, OriginalAdmission::Recovered) => true,
+            (OriginalAdmission::Fresh(left), OriginalAdmission::Fresh(right)) => {
+                Arc::ptr_eq(left.evidence(), right.evidence())
+            }
+            _ => false,
+        };
+        same_admission
+            && match (
+                self.module_interface.catalog_input_custody(),
+                other.module_interface.catalog_input_custody(),
+            ) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(&left, &right),
+                _ => false,
+            }
+    }
+
     pub(crate) fn source_admission(&self) -> Option<&Arc<crate::cache::CompletedSourceEvidence>> {
-        self.source_admission
-            .as_ref()
-            .map(|admission| admission.evidence())
+        match &self.admission {
+            OriginalAdmission::Recovered => None,
+            OriginalAdmission::Fresh(admission) => Some(admission.evidence()),
+        }
     }
     pub fn owner(&self) -> &CachedHomeOwner {
         &self.owner
     }
     pub fn source_sha256(&self) -> Option<[u8; 32]> {
-        self.source_admission
-            .as_ref()
-            .map(|admission| admission.source_sha256())
+        match &self.admission {
+            OriginalAdmission::Recovered => None,
+            OriginalAdmission::Fresh(admission) => Some(admission.source_sha256()),
+        }
     }
     pub fn interface_bytes(&self) -> &[u8] {
         &self.interface_bytes
@@ -474,7 +504,10 @@ impl OriginalDraft {
         });
         Ok(CertifiedRecoveryProduct {
             facts,
-            source_admission: self.source_admission,
+            admission: match self.source_admission {
+                Some(admission) => OriginalAdmission::Fresh(admission),
+                None => OriginalAdmission::Recovered,
+            },
             module_interface,
         })
     }

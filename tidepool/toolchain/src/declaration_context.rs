@@ -1863,6 +1863,16 @@ pub(crate) struct ContinuationNativeInputs<'a> {
 }
 
 impl<'a> ContinuationNativeInputs<'a> {
+    pub(crate) fn native_decision(
+        &self,
+        owner: &ExactModuleIdentity,
+    ) -> crate::artifact_inventory::InputNativeDecision<'_> {
+        match self.projection.snapshot_roles().get(owner) {
+            Some(role) => self.decisions.for_role(owner, role),
+            None => crate::artifact_inventory::InputNativeDecision::UnissuedPolicy,
+        }
+    }
+
     fn from_selection(
         selection: &'a crate::certified_products::CertifiedSourceSelection,
         projection: &CompilerInputProjection,
@@ -2104,9 +2114,7 @@ impl NativeTransportAvailability {
             return Err(failure("normalized native row is not original"));
         };
         Ok(ArtifactEntry::canonical_artifact_id(
-            product
-                .module_interface()
-                .ok_or_else(|| failure("normalized native row lacks canonical owner"))?,
+            product.module_interface(),
         ))
     }
 
@@ -5411,7 +5419,7 @@ impl ExactCompileContext {
             .entries
             .get(&identity(&product.owner().unit, &product.owner().module))
             .ok_or_else(|| failure("protected scaffold lacks a selected canonical interface"))?;
-        if canonical_source_interface(selected) != product.module_interface()
+        if canonical_source_interface(selected) != Some(product.module_interface())
             || certificate.product().owner() != product.owner()
         {
             return Err(failure(
@@ -5523,7 +5531,7 @@ fn canonical_source_interface(
 ) -> Option<&crate::certified_products::CertifiedModuleInterface> {
     match &entry.payload {
         ArtifactPayload::Canonical(interface) => Some(interface),
-        ArtifactPayload::Original(product) => product.module_interface(),
+        ArtifactPayload::Original(product) => Some(product.module_interface()),
         ArtifactPayload::Interface(_, _) | ArtifactPayload::PackageCode(_) => None,
     }
 }
@@ -6731,7 +6739,7 @@ impl RecoveredArtifactInventory {
         let canonical = entries
             .iter()
             .filter_map(|entry| match &entry.payload {
-                ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                ArtifactPayload::Original(product) => Some(product.module_interface().clone()),
                 _ => None,
             })
             .map(ArtifactEntry::canonical)
@@ -8506,10 +8514,8 @@ impl ProgramSourceSupportRow {
         };
         receipt.row().original_artifact_id() == entry.descriptor.id
             && receipt.row().original_owner() == product.owner()
-            && product
-                .module_interface()
-                .map(ArtifactEntry::canonical_artifact_id)
-                == Some(receipt.row().canonical)
+            && ArtifactEntry::canonical_artifact_id(product.module_interface())
+                == receipt.row().canonical
             && receipt
                 .row()
                 .target_original(product.owner())
@@ -11799,11 +11805,9 @@ impl ProductInputFacts<'_> {
                         interface.origin(),
                         crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                     ),
-                    ArtifactPayload::Original(product) => product.module_interface().is_some_and(
-                        |interface| matches!(
-                            interface.origin(),
-                            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
-                        ),
+                    ArtifactPayload::Original(product) => matches!(
+                        product.module_interface().origin(),
+                        crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
                     ),
                 })
                 .map(|entry| entry.descriptor.owner.clone())
@@ -13686,9 +13690,7 @@ fn scope_interface_evidence(
             return Err(failure("package code has no compiler interface evidence"))
         }
         ArtifactPayload::Canonical(interface) => interface,
-        ArtifactPayload::Original(product) => product
-            .module_interface()
-            .ok_or_else(|| failure("native interface evidence is missing"))?,
+        ArtifactPayload::Original(product) => product.module_interface(),
         ArtifactPayload::Interface(_, role) => {
             let tag = match role {
                 JoinedInterfaceRole::LexicalJoin => "join",
@@ -14248,8 +14250,8 @@ impl ExactDeclarationContext {
             .ok_or_else(|| failure("authored source scope lacks its issued output"))?;
         if !matches!(&entry.payload, ArtifactPayload::Original(product)
             if product.source_sha256() == Some(authored.source_sha256())
-                && product.module_interface().map(|interface| interface.origin())
-                    == Some(crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() }))
+                && product.module_interface().origin()
+                    == crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { generation: authored.generation() })
         {
             return Err(failure(
                 "authored source scope differs from its reserved output",
@@ -14862,10 +14864,8 @@ impl ExactDeclarationContext {
             .iter()
             .filter(|entry| match &entry.payload {
                 ArtifactPayload::Original(product) if generation != 0 => {
-                    product
-                        .module_interface()
-                        .map(|interface| interface.origin())
-                        == Some(CanonicalOrigin::NativeAuthoredDeclaration { generation })
+                    product.module_interface().origin()
+                        == CanonicalOrigin::NativeAuthoredDeclaration { generation }
                 }
                 _ => false,
             })
@@ -16384,7 +16384,7 @@ impl ExactDeclarationContext {
 
             let canonical = match &entry.payload {
                 ArtifactPayload::Canonical(interface) => Some(interface),
-                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Original(product) => Some(product.module_interface()),
                 ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
             };
             if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
@@ -16452,7 +16452,9 @@ impl ExactDeclarationContext {
                     payload,
                     canonical_custody: match &entry.payload {
                         ArtifactPayload::Canonical(interface) => Some(interface.clone()),
-                        ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                        ArtifactPayload::Original(product) => {
+                            Some(product.module_interface().clone())
+                        }
                         ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => None,
                     },
                 },
@@ -16532,7 +16534,7 @@ impl ExactDeclarationContext {
                     {
                         if let Some(slice) = product
                             .module_interface()
-                            .and_then(|canonical| canonical.catalog_input_custody())
+                            .catalog_input_custody()
                             .and_then(|custody| {
                                 custody
                                     .transport(original_inputs::OriginalInputKind::Graph)
@@ -16874,9 +16876,9 @@ impl ExactDeclarationContext {
                             ArtifactPayload::Canonical(interface) => {
                                 interface.original_input_origins()
                             }
-                            ArtifactPayload::Original(product) => product
-                                .module_interface()
-                                .and_then(|interface| interface.original_input_origins()),
+                            ArtifactPayload::Original(product) => {
+                                product.module_interface().original_input_origins()
+                            }
                             ArtifactPayload::Interface(..) | ArtifactPayload::PackageCode(_) => {
                                 None
                             }

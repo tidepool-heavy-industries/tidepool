@@ -164,11 +164,8 @@ impl<'a> PublicationCohort<'a> {
         {
             return false;
         }
-        let (Some(canonical), Some(native)) =
-            (original.module_interface(), original.original_native())
-        else {
-            return false;
-        };
+        let canonical = original.module_interface();
+        let native = original.original_native();
         data.original_certification = original.certification_bytes().to_vec();
         let execution_source = original.execution_source().cloned();
         data.execution_source_sha256 = execution_source.as_ref().map(|graph| graph.digest());

@@ -380,10 +380,38 @@ impl<'a> AssemblyRoleView<'a> {
 
 /// Only the actual selected row owner lends this admitted compiler surface.
 #[derive(Clone, Copy)]
-pub struct AdmittedCompilerRoles<'a>(&'a SelectedCompilerRows);
+pub struct AdmittedCompilerRoles<'a> {
+    selected: &'a SelectedCompilerRows,
+    decisions: &'a IssuedInputNativeDecisions,
+}
 impl<'a> AdmittedCompilerRoles<'a> {
+    pub(super) fn selected_row(
+        self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<&'a ResolvedCompilerRole> {
+        self.selected.rows.get(owner)
+    }
+
+    pub(crate) fn native_decision(self, owner: &ExactModuleIdentity) -> InputNativeDecision<'a> {
+        let Some(role) = self.get(owner) else {
+            return InputNativeDecision::UnissuedPolicy;
+        };
+        match self
+            .decisions
+            .facts
+            .get(owner)
+            .filter(|decision| decision.role.matches_role_facts(role))
+        {
+            Some(decision) => InputNativeDecision::IssuedChoices(&decision.groups),
+            None => InputNativeDecision::UnissuedPolicy,
+        }
+    }
+
     pub fn get(self, owner: &ExactModuleIdentity) -> Option<CompilerRoleFacts<'a>> {
-        self.0.rows.get(owner).map(CompilerRoleFacts::from_admitted)
+        self.selected
+            .rows
+            .get(owner)
+            .map(CompilerRoleFacts::from_admitted)
     }
     pub fn iter(self) -> impl Iterator<Item = (&'a ExactModuleIdentity, CompilerRoleFacts<'a>)> {
         self.0
@@ -392,13 +420,13 @@ impl<'a> AdmittedCompilerRoles<'a> {
             .map(|(owner, row)| (owner, CompilerRoleFacts::from_admitted(row)))
     }
     pub fn keys(self) -> impl Iterator<Item = &'a ExactModuleIdentity> {
-        self.0.rows.keys()
+        self.selected.rows.keys()
     }
     pub fn len(self) -> usize {
-        self.0.rows.len()
+        self.selected.rows.len()
     }
     pub fn is_empty(self) -> bool {
-        self.0.rows.is_empty()
+        self.selected.rows.is_empty()
     }
 }
 
@@ -449,6 +477,33 @@ pub(crate) enum RecordedCompilerRole {
 }
 
 impl RecordedCompilerRole {
+    fn matches_role_facts(&self, role: CompilerRoleFacts<'_>) -> bool {
+        if self.interface() != role.interface() || self.original() != role.original() {
+            return false;
+        }
+        match (self, role.publication()) {
+            (
+                Self::PublishedSourceOriginal {
+                    source_revision,
+                    original_input_identity,
+                    selection,
+                    selection_sha256,
+                    native_authority,
+                    ..
+                },
+                Some(publication),
+            ) => {
+                source_revision == publication.source_revision()
+                    && original_input_identity == publication.original_input_identity()
+                    && selection_sha256 == publication.selection_sha256()
+                    && selection.snapshot() == publication.selection().snapshot()
+                    && native_authority == publication.native_facts()
+            }
+            (Self::PublishedSourceOriginal { .. }, None) | (_, Some(_)) => false,
+            (_, None) => true,
+        }
+    }
+
     /// A recorded role still needs the existing receiving-view acquisition.
     pub(crate) fn to_recorded_role(&self) -> CompilerInputRole {
         match self {
@@ -1925,33 +1980,6 @@ impl ResolvedCompilerRole {
     pub(super) fn selected_bindings(&self) -> impl Iterator<Item = ArtifactBinding> + '_ {
         self.bindings().map(|(binding, _)| *binding)
     }
-    pub(super) fn acquire_selected(
-        owner: &ExactModuleIdentity,
-        role: &CompilerInputRole,
-        source: &ArtifactView,
-    ) -> Result<Self, CompileError> {
-        let payloads = &source.lease.payloads;
-        let interface = payloads
-            .get(&role.interface())
-            .ok_or_else(|| failure("selected compiler interface lacks acquired bytes"))?;
-        let original =
-            CompilerInputProjection::validate_role_payload(owner, role, interface, |id| {
-                payloads.get(&id)
-            })?;
-        let state = source.lease.inventory.0.lock().expect("inventory lock");
-        let owned = &source.read_projection(&state).nodes;
-        let canonical = source.resolve_binding(role.interface(), owned)?;
-        let original = role
-            .original()
-            .map(|id| {
-                let binding = source.resolve_binding(id, owned)?;
-                Self::validate_original_pair(&state, canonical, binding)?;
-                Ok::<_, CompileError>((binding, Arc::clone(original)))
-            })
-            .transpose()?;
-        Self::from_issued_bindings((canonical, Arc::clone(interface)), original)
-            .with_issued_provenance(role)
-    }
 }
 impl PartialEq for ResolvedCompilerRole {
     fn eq(&self, other: &Self) -> bool {
@@ -2661,7 +2689,10 @@ impl crate::declaration_context::RequestCompilerInputs {
 
 impl CompilerSourceSupport {
     pub(crate) fn compiler_roles(&self) -> AdmittedCompilerRoles<'_> {
-        AdmittedCompilerRoles(&self.selected)
+        AdmittedCompilerRoles {
+            selected: &self.selected,
+            decisions: &self.input_decisions,
+        }
     }
 
     /// Reopen a closed support as assembly state for one bounded mutation.
@@ -5249,8 +5280,8 @@ impl CompilerSourceSupport {
         );
         let inputs = ArtifactView::merge_admitted_compiler_supports(self, other)?;
         timing.advance("validate_carried_associations");
-        // Merged custody preserves the checked payload facts; only its acquisition
-        // owner can change. Refresh those Arcs once, after offer retention below.
+        // The solver carries each whole selected row from its actual issuer.
+        // Additional custody cannot replace those acquired inputs.
         inputs
             .projection
             .validate_resolved(&inputs.selected, &inputs.artifacts)?;
@@ -5583,11 +5614,7 @@ impl CompilerInputProjection {
         for entry in entries {
             let (interface, original_reuse) = match &entry.payload {
                 ArtifactPayload::Original(product) => (
-                    ArtifactEntry::canonical_artifact_id(
-                        product
-                            .module_interface()
-                            .ok_or_else(|| failure("native compiler role lacks its interface"))?,
-                    ),
+                    ArtifactEntry::canonical_artifact_id(product.module_interface()),
                     Some(entry.descriptor.id),
                 ),
                 ArtifactPayload::Canonical(_) | ArtifactPayload::Interface(_, _) => {
@@ -5851,7 +5878,7 @@ impl CompilerInputProjection {
                     return None;
                 };
                 let role = self.roles.get(&entry.descriptor.owner)?;
-                let interface = product.module_interface()?;
+                let interface = product.module_interface();
                 if !matches!(
                     interface.origin(),
                     crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
@@ -6099,9 +6126,7 @@ impl CompilerInputProjection {
                 let ArtifactPayload::Original(product) = &original.payload else {
                     return Err(failure("compiler original offer has no native proof"));
                 };
-                let canonical = product
-                    .module_interface()
-                    .ok_or_else(|| failure("compiler original offer lacks canonical attachment"))?;
+                let canonical = product.module_interface();
                 if &original.descriptor.owner != owner || {
                     #[cfg(test)]
                     type_query_work::canonical_descriptor_rebuild();
