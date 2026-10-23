@@ -48,7 +48,7 @@ fn candidate_availability_preserves_roles_and_historical_custody() {
     let proof = NativeOriginalRequirement::from_selected_view(a.descriptor.id, &historical)
         .unwrap()
         .unwrap();
-    let offer = IssuedNativeOffer::issue(a.descriptor.id, &historical, Some(proof)).unwrap();
+    let offer = IssuedNativeOffer::issue(a, &historical, Some(proof)).unwrap();
     assert!(offer.is_full());
     let original_offer = offer.snapshot_facts();
     let canonical = Arc::new(ArtifactEntry::canonical(

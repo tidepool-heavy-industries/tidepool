@@ -54,7 +54,7 @@ impl History {
                         .unwrap()
                         .unwrap();
                 let offer =
-                    IssuedNativeOffer::issue(entry.descriptor.id, view, Some(proof)).unwrap();
+                    IssuedNativeOffer::issue(entry, view, Some(proof)).unwrap();
                 assert!(offer.is_full());
                 offer
             })
@@ -441,7 +441,7 @@ fn exact_parent_demand_keeps_historical_child_under_interface_only_namespace() {
         .unwrap()
         .unwrap();
     let parent_offer =
-        IssuedNativeOffer::issue(parent.descriptor.id, &parent_view, Some(proof)).unwrap();
+        IssuedNativeOffer::issue(&parent, &parent_view, Some(proof)).unwrap();
     assert!(parent_offer.is_full());
     let expected = *parent_offer
         .issued_group_carriers()

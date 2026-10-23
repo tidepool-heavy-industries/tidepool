@@ -1629,7 +1629,7 @@ fn normalized_dependency_rows_reference_distinct_root_offer_issuers() {
         let proof = NativeOriginalRequirement::from_selected_view(root.descriptor.id, &view)
             .unwrap()
             .unwrap();
-        let offer = IssuedNativeOffer::issue(root.descriptor.id, &view, Some(proof)).unwrap();
+        let offer = IssuedNativeOffer::issue(&root, &view, Some(proof)).unwrap();
         let facts = offer.snapshot_facts();
         let offer_id = facts.identity().unwrap();
         assert_ne!(facts.original, hidden_entry.descriptor.id);

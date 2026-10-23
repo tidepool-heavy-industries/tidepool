@@ -785,7 +785,7 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                 ])
                 .unwrap();
                 let old =
-                    IssuedNativeOffer::issue(native.descriptor.id, &views[1 - selected], None)
+                    IssuedNativeOffer::issue(&native, &views[1 - selected], None)
                         .unwrap();
                 let support = crate::declaration_context::recover_fixture_compiler_support(
                     projection.clone(),
