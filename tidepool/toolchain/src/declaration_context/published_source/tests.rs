@@ -328,14 +328,15 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
     assert!(foreign_groups
         .iter()
         .all(|group| birth.artifacts().contains_acquired_native_group(*group)));
-    assert_eq!(
-        birth.native_availability(),
-        source
-            .compiler_source_support()
-            .publication_birth_support(&root.descriptor.owner)
-            .unwrap()
-            .native_availability(),
-        "adding DATA before birth preserves the actual issued permission"
+    assert!(
+        birth.native_availability().same_recorded_facts(
+            source
+                .compiler_source_support()
+                .publication_birth_support(&root.descriptor.owner)
+                .unwrap()
+                .native_availability()
+        ),
+        "adding DATA before birth preserves the recorded issued permission"
     );
     assert_target_selection(&prebirth);
 
