@@ -1347,6 +1347,8 @@ def runtime_world_publication_test_cases(binary):
         "paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode",
         "paired_ephemeral_foreign_runtime_ticket_never_claims",
         "paired_foreign_staged_ticket_never_claims_publication",
+        "paired_materialized_value_retracts_only_admitted_value_namespace",
+        "paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace",
     )]
     tests.append("session::resident::world_cell_test_support::source_hidden_join::"
                  "paired_join_compiles_source_hidden_checked_bind_in_fresh_worker")

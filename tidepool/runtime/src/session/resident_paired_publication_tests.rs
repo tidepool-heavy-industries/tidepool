@@ -8,7 +8,8 @@ use super::*;
 use crate::session::paired_publication::{
     tests::{
         assert_allocation_preserves_publication_semantics, assert_original_writes,
-        assert_tip_instance_counts, reject_missing_export, reused_projection,
+        assert_tip_instance_counts, assert_unfrozen_operator_withdrawal, reject_missing_export,
+        reused_projection,
     },
     AcceptedDeclarationPublication, CertifiedDeclarationPublication,
     DeclarationPublicationRejection, ExecutionPublication, FrozenWorldExecution,
@@ -18,7 +19,7 @@ use crate::session::{
     RecoveryPublicOwner, SessionId, SessionLib,
 };
 use std::collections::BTreeSet;
-use tidepool_toolchain::declaration_join::ExactDeclarationContext;
+use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExportNamespace};
 
 #[derive(Clone)]
 struct QuietOutput;
@@ -1977,4 +1978,243 @@ fn paired_foreign_staged_ticket_never_claims_publication() {
             .unwrap(),
         PublicManifestCommit::Durable
     ));
+}
+
+#[test]
+fn paired_materialized_value_retracts_only_admitted_value_namespace() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/admitted-namespace").unwrap(),
+        1,
+    )
+    .unwrap();
+    resident
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let baseline = begin_execution(&mut resident, &source, &owner);
+    execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &baseline,
+        include_str!("fixtures/paired-late-operator.hs"),
+    );
+    let baseline_intent = resident.freeze_private_execution(&baseline).unwrap();
+    let baseline_publication =
+        certify_declarations(&mut resident, &source, owner.clone(), baseline_intent);
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(
+                baseline_publication.stage().unwrap(),
+                &PublicationDecision::new()
+            )
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    let a = begin_execution(&mut resident, &source, &owner);
+    let withdrawal = begin_execution(&mut resident, &source, &owner);
+    execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &a,
+        "let (%%) = (601 :: Int)",
+    );
+    let value_id = binding_id(&resident, a.private_scope(), "%%");
+    let before_public = resident.public_visibility_snapshot_in(public).unwrap();
+    source_action_with_original(
+        &mut resident,
+        source.original_source().clone(),
+        |resident, report| {
+            resident
+                .state
+                .retract_many_in(withdrawal.private_scope(), &["%%".into()], report)
+        },
+    )
+    .unwrap();
+    assert_unfrozen_operator_withdrawal(resident.state.lib(), withdrawal.private_scope());
+    assert!(matches!(
+        resident.freeze_private_execution(&withdrawal),
+        Err(SessionError::WorldCellPublicationBaseStale)
+    ));
+    assert_eq!(
+        resident.public_visibility_snapshot_in(public).unwrap(),
+        before_public
+    );
+    assert_eq!(binding_id(&resident, a.private_scope(), "%%"), value_id);
+
+    // Checked values retain their completed World overlay. Publication removes
+    // only the matching term head while preserving the same-spelled type head.
+    let intent = resident.freeze_private_execution(&a).unwrap();
+    assert_original_writes(&intent, resident.state.lib(), &[]);
+    let publication = certify_declarations(&mut resident, &source, owner, intent);
+    assert!(publication
+        .accepted_join_for_test()
+        .exports()
+        .iter()
+        .any(|export| export.head.occurrence == "%%"
+            && export.head.namespace == ExportNamespace::Type));
+    assert!(!publication
+        .accepted_join_for_test()
+        .exports()
+        .iter()
+        .any(|export| export.head.occurrence == "%%"
+            && export.head.namespace == ExportNamespace::Value));
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    assert!(resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings
+        .contains(&("%%".into(), value_id)));
+}
+
+#[test]
+fn paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+    let recipe = InputRecipe::capture(
+        effects.preamble().to_owned(),
+        effects.row().to_owned(),
+        effects.include_paths().to_vec(),
+    );
+    let mut lib = SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(recipe.include.clone());
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut resident =
+        ResidentSession::unbootstrapped(frunk::HNil, QuietOutput, 1024 * 1024, Some(lib));
+    let source = resident.mint_notebook_scope_with_lease(None).unwrap();
+    let public = source.scope();
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/binding-late").unwrap(),
+        1,
+    )
+    .unwrap();
+    resident
+        .initialize_durable_public_scope(owner.clone(), public)
+        .unwrap();
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: public,
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    bootstrap_world_for(&mut resident, &recipe, &source);
+    let a = begin_execution(&mut resident, &source, &owner);
+    execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &a,
+        "let (%%) = (501 :: Int)",
+    );
+    let value_id = binding_id(&resident, a.private_scope(), "%%");
+    let intent = resident.freeze_private_execution(&a).unwrap();
+    assert_original_writes(&intent, resident.state.lib(), &[]);
+    assert!(matches!(
+        restage_execution(&mut resident, &source, owner.clone(), intent.clone()),
+        ExecutionPublication::Bindings(_)
+    ));
+    let b = begin_execution(&mut resident, &source, &owner);
+    let original = execute_cell(
+        &mut resident,
+        &source,
+        &recipe,
+        &b,
+        include_str!("fixtures/paired-late-operator.hs"),
+    );
+    let b_intent = resident.freeze_private_execution(&b).unwrap();
+    let b_publication = certify_declarations(&mut resident, &source, owner.clone(), b_intent);
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(b_publication.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    let ExecutionPublication::Declarations(base) =
+        restage_execution(&mut resident, &source, owner, intent)
+    else {
+        panic!("later value head requires a compiler-certified join");
+    };
+    let publication = source_action_with_original(
+        &mut resident,
+        source.original_source().clone(),
+        |_, report| match base.certify(report).unwrap() {
+            CertifiedDeclarationPublication::Accepted(publication) => publication,
+            CertifiedDeclarationPublication::Rejected(_) => {
+                panic!("exact checked value shadow must certify")
+            }
+        },
+    );
+    let proof = publication.accepted_join_for_test().clone();
+    assert!(
+        proof
+            .exports()
+            .iter()
+            .any(|export| export.head.occurrence == "%%"
+                && export.head.namespace == ExportNamespace::Type),
+        "certified exports: {:?}",
+        proof.exports()
+    );
+    assert!(!proof
+        .exports()
+        .iter()
+        .any(|export| export.head.occurrence == "%%"
+            && export.head.namespace == ExportNamespace::Value));
+    assert!(proof
+        .exports()
+        .iter()
+        .any(|export| export.head.occurrence == "laterUnrelated"
+            && export.head.module == SessionModule::lib(original).module_name()));
+    let published_generation = publication.reserved_generation();
+    assert!(matches!(
+        resident
+            .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    assert_eq!(resident.state.lib().scope_tip(public), published_generation);
+    assert!(resident
+        .public_visibility_snapshot_in(public)
+        .unwrap()
+        .bindings
+        .contains(&("%%".into(), value_id)));
+    resident.retire_scope(a.private_scope());
+    assert!(resident.state.bindings().get(value_id).is_some());
 }

@@ -1684,6 +1684,28 @@ pub(in crate::session) mod tests {
         assert_eq!(cumulative.instances.families.len(), families);
     }
 
+    pub(in crate::session) fn assert_unfrozen_operator_withdrawal(
+        lib: &SessionLib,
+        scope: ScopeId,
+    ) {
+        let generation = lib.scope_tip(scope);
+        let declaration = tip(lib, generation).unwrap().unwrap();
+        assert!(!declaration
+            .exports
+            .iter()
+            .any(|export| export.head.occurrence == "%%"));
+        let turn = lib.log.turn(generation).unwrap();
+        let retractions =
+            exact_retractions(lib, turn.parent.unwrap_or(Generation(0)), &turn.retracts).unwrap();
+        assert_eq!(retractions.len(), 2);
+        assert!(retractions
+            .iter()
+            .any(|identity| identity.namespace == ExportNamespace::Type));
+        assert!(retractions
+            .iter()
+            .any(|identity| identity.namespace == ExportNamespace::Value));
+    }
+
     #[track_caller]
     pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
@@ -1923,207 +1945,5 @@ pub(in crate::session) mod tests {
             proptest::prop_assert_eq!(cold.surface(&owner).unwrap().unwrap().declaration_root, Some(generation));
             cold.context(&node.context_root).unwrap();
         }
-    }
-
-    #[test]
-    fn paired_materialized_value_retracts_only_admitted_value_namespace() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/admitted-namespace").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        commit_source(
-            &mut session,
-            public,
-            include_str!("fixtures/paired-late-operator.hs"),
-        );
-        let a = session.begin_private_execution(public).unwrap();
-        let withdrawal = session.begin_private_execution(public).unwrap();
-        let value =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 601);
-        let value_id = value.id;
-        tidepool_testing::with_settlement(|settlement| {
-            session.bind_replacing_decl_in(a.private_scope(), value, settlement)
-        })
-        .unwrap();
-        let private_tip = tip(session.lib(), session.lib().scope_tip(a.private_scope()))
-            .unwrap()
-            .unwrap();
-        assert!(private_tip
-            .exports
-            .iter()
-            .any(|export| export.head.occurrence == "%%"
-                && export.head.namespace == ExportNamespace::Type));
-        assert!(!private_tip
-            .exports
-            .iter()
-            .any(|export| export.head.occurrence == "%%"
-                && export.head.namespace == ExportNamespace::Value));
-        tidepool_testing::with_settlement(|settlement| {
-            session.retract_many_in(withdrawal.private_scope(), &["%%".into()], settlement)
-        })
-        .unwrap();
-        let withdrawn = session.freeze_private_execution(&withdrawal).unwrap();
-        assert_eq!(withdrawn.writes()[0].retractions.len(), 2);
-        let withdrawn_proof = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), withdrawn)
-                .unwrap(),
-        );
-        assert!(!withdrawn_proof
-            .receipt
-            .exports()
-            .iter()
-            .any(|export| export.head.occurrence == "%%"));
-        let intent = session.freeze_private_execution(&a).unwrap();
-        assert_eq!(intent.writes()[0].retractions.len(), 1);
-        assert_eq!(
-            intent.writes()[0].retractions[0].namespace,
-            ExportNamespace::Value
-        );
-        let publication = accepted(
-            session
-                .restage_declaration_publication(owner, intent)
-                .unwrap(),
-        );
-        assert!(publication
-            .receipt
-            .exports()
-            .iter()
-            .any(|export| export.head.occurrence == "%%"
-                && export.head.namespace == ExportNamespace::Type));
-        assert!(matches!(
-            session
-                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert!(session
-            .public_visibility_snapshot_in(public)
-            .unwrap()
-            .bindings
-            .contains(&("%%".into(), value_id)));
-    }
-
-    #[test]
-    fn paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace() {
-        tidepool_testing::eval_harness::require_extract();
-        let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
-                .unwrap()
-                .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
-        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
-            .unwrap();
-        let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
-        let public = session.mint_scope(ScopeId::ROOT).unwrap();
-        let owner = RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root/binding-late").unwrap(),
-            1,
-        )
-        .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
-        let a = session.begin_private_execution(public).unwrap();
-        let value =
-            crate::session::prepared::tests::rooted_publication_fixture(&mut session, "%%", 501);
-        let value_id = value.id;
-        session.bind_in(a.private_scope(), value).unwrap();
-        let intent = session.freeze_private_execution(&a).unwrap();
-        assert!(intent.writes().is_empty());
-        assert!(matches!(
-            session
-                .restage_execution_publication(owner.clone(), intent.clone())
-                .unwrap(),
-            ExecutionPublication::Bindings(_)
-        ));
-        let b = session.begin_private_execution(public).unwrap();
-        let original = commit_source(
-            &mut session,
-            b.private_scope(),
-            include_str!("fixtures/paired-late-operator.hs"),
-        );
-        let b_intent = session.freeze_private_execution(&b).unwrap();
-        let b_stage = accepted(
-            session
-                .restage_declaration_publication(owner.clone(), b_intent)
-                .unwrap(),
-        )
-        .stage()
-        .unwrap();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(b_stage, &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        let ExecutionPublication::Declarations(base) = session
-            .restage_execution_publication(owner.clone(), intent.clone())
-            .unwrap()
-        else {
-            panic!("later value head requires a compiler-certified join");
-        };
-        let publication = accepted(base);
-        let proof = publication.receipt.clone();
-        assert!(
-            proof
-                .exports()
-                .iter()
-                .any(|export| export.head.occurrence == "%%"
-                    && export.head.namespace == ExportNamespace::Type),
-            "certified exports: {:?}",
-            proof.exports()
-        );
-        assert!(!proof
-            .exports()
-            .iter()
-            .any(|export| export.head.occurrence == "%%"
-                && export.head.namespace == ExportNamespace::Value));
-        assert!(proof
-            .exports()
-            .iter()
-            .any(|export| export.head.occurrence == "laterUnrelated"
-                && export.head.module == SessionModule::lib(original).module_name()));
-        let published_generation = publication.reserved_generation();
-        assert!(matches!(
-            session
-                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
-                .map(crate::session::settled_manifest_attempt)
-                .unwrap(),
-            PublicManifestCommit::Durable
-        ));
-        assert_eq!(session.lib().scope_tip(public), published_generation);
-        assert!(session
-            .public_visibility_snapshot_in(public)
-            .unwrap()
-            .bindings
-            .contains(&("%%".into(), value_id)));
-        session.retire_scope(a.private_scope());
-        assert!(session.bindings().get(value_id).is_some());
-    }
-
-    fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {
-        tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_in(scope, &[source], settlement)
-        })
-        .unwrap()
     }
 }
