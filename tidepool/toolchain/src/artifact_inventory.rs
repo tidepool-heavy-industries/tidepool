@@ -9235,7 +9235,7 @@ impl ArtifactView {
                     let InventoryNodeKey::Group(group) = root else {
                         continue;
                     };
-                    if !owned.contains(root) || !state.contains_node(*root) {
+                    if !owned.contains(root) || !state.contains_node(root) {
                         return Err(failure("native merge root is outside its issuing view"));
                     }
                     let mut carriers =
