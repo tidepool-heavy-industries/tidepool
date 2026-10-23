@@ -409,6 +409,17 @@ pub struct AdmittedCompilerRoles<'a> {
     decisions: &'a IssuedInputNativeDecisions,
 }
 impl<'a> AdmittedCompilerRoles<'a> {
+    pub(crate) fn original_acquisition(
+        self,
+        owner: &ExactModuleIdentity,
+    ) -> Option<&'a Arc<ArtifactEntry>> {
+        self.selected
+            .rows
+            .get(owner)?
+            .original()
+            .map(|(_, entry)| entry)
+    }
+
     pub(super) fn selected_row(
         self,
         owner: &ExactModuleIdentity,
@@ -2919,7 +2930,7 @@ impl CompilerSourceSupport {
                 continue;
             };
             let canonical = row.interface().clone();
-            let mut candidates = BTreeSet::new();
+            let mut candidates = BTreeMap::<ArtifactBinding, Arc<ArtifactEntry>>::new();
             for offer in self.native_offers.iter() {
                 let facts = offer.snapshot_facts();
                 if &facts.owner != owner
@@ -2943,12 +2954,25 @@ impl CompilerSourceSupport {
                             },
                         )
                     {
-                        candidates.insert(*carrier);
+                        let acquisition = offer.original_acquisition();
+                        if candidates
+                            .get(carrier)
+                            .is_some_and(|prior| !prior.same_issuing_authority(acquisition))
+                        {
+                            return Err(admission_failure(
+                                ArtifactInventoryFailure::BindingAmbiguity {
+                                    artifact: carrier.artifact,
+                                },
+                            ));
+                        }
+                        candidates
+                            .entry(*carrier)
+                            .or_insert_with(|| Arc::clone(acquisition));
                     }
                 }
             }
             let mut candidates = candidates.into_iter();
-            let Some(carrier) = candidates.next() else {
+            let Some((carrier, original)) = candidates.next() else {
                 continue;
             };
             if candidates.next().is_some() {
@@ -2958,15 +2982,6 @@ impl CompilerSourceSupport {
                     },
                 ));
             }
-            let availability = self
-                .native_availability
-                .issued_row(carrier.artifact)
-                .ok_or_else(|| failure("authored Original lost its actual native acquisition"))?;
-            let original = Arc::clone(
-                availability
-                    .target_original(availability.original_owner())
-                    .expect("native row owns its Original"),
-            );
             let role = CompilerInputRole::ReusableOriginal {
                 interface: canonical.0.artifact,
                 original: carrier.artifact,
@@ -3567,9 +3582,11 @@ impl CompilerSourceSupport {
         projection: CompilerInputProjection,
         artifacts: ArtifactView,
     ) -> Result<Self, CompileError> {
+        projection.validate(&artifacts)?;
+        let selected = projection.resolve_associations(&artifacts)?;
         let mut offers = Vec::new();
         let mut input_decisions = IssuedInputNativeDecisions::default();
-        for role in projection.roles() {
+        for (owner, role) in projection.snapshot_roles() {
             if let Some(original) = role.original() {
                 let proof = NativeOriginalRequirement::from_role(role.clone())
                     .map(|proof| Ok(Some(proof)))
@@ -3595,15 +3612,8 @@ impl CompilerSourceSupport {
                             .collect::<Vec<_>>()
                     }),
                 )?;
-                let owner = artifacts
-                    .lease
-                    .payloads
-                    .get(&original)
-                    .ok_or_else(|| failure("checked original issuer lost its payload"))?
-                    .descriptor
-                    .owner
-                    .clone();
-                let offer = IssuedNativeOffer::issue(original, &artifacts, proof)?;
+                let entry = &selected[owner].original().expect("selected Original").1;
+                let offer = IssuedNativeOffer::issue(entry, &artifacts, proof)?;
                 for group in groups.values().copied() {
                     input_decisions.selected.insert(
                         group,
@@ -3611,7 +3621,7 @@ impl CompilerSourceSupport {
                     );
                 }
                 input_decisions.facts.insert(
-                    owner,
+                    owner.clone(),
                     RecordedInputNativeDecision {
                         role: role.recorded_fact(),
                         groups,
@@ -3620,8 +3630,6 @@ impl CompilerSourceSupport {
                 offers.push(offer);
             }
         }
-        projection.validate(&artifacts)?;
-        let selected = projection.resolve_associations(&artifacts)?;
         let metadata = CompilerArtifactMetadata {
             entries: selected
                 .iter()

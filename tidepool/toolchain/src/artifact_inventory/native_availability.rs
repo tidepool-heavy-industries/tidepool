@@ -2286,6 +2286,7 @@ impl NativeOfferContribution {
 
 #[derive(Debug)]
 struct NativeOfferFacts {
+    original_acquisition: Arc<ArtifactEntry>,
     original: ArtifactId,
     interface: ArtifactId,
     owner: ExactModuleIdentity,
@@ -2785,6 +2786,7 @@ impl IssuedNativeOffer {
                 original,
                 interface,
                 entry.descriptor.owner.clone(),
+                Arc::clone(entry),
                 body,
                 lease,
                 nodes,
@@ -2794,22 +2796,25 @@ impl IssuedNativeOffer {
         drop(state);
         offers
             .into_iter()
-            .map(|(original, interface, owner, body, lease, nodes, roots)| {
-                Ok(Self(Arc::new(NativeOfferFacts {
-                    original,
-                    interface,
-                    owner,
-                    body,
-                    custody: NativeOfferCustody::from_checked_nodes(
-                        lease,
-                        nodes,
-                        &source_receipt,
-                        &roots,
-                    )?,
-                    snapshot: OnceLock::new(),
-                    identity: OnceLock::new(),
-                })))
-            })
+            .map(
+                |(original, interface, owner, original_acquisition, body, lease, nodes, roots)| {
+                    Ok(Self(Arc::new(NativeOfferFacts {
+                        original_acquisition,
+                        original,
+                        interface,
+                        owner,
+                        body,
+                        custody: NativeOfferCustody::from_checked_nodes(
+                            lease,
+                            nodes,
+                            &source_receipt,
+                            &roots,
+                        )?,
+                        snapshot: OnceLock::new(),
+                        identity: OnceLock::new(),
+                    })))
+                },
+            )
             .collect()
     }
 
@@ -2873,10 +2878,22 @@ impl IssuedNativeOffer {
                 proofs.extend(complete);
             }
             if proofs.is_empty() {
-                offers.push(Self::issue(original, source, None)?);
+                offers.push(Self::issue(
+                    roles
+                        .original_acquisition(owner)
+                        .expect("selected original"),
+                    source,
+                    None,
+                )?);
             } else {
                 for proof in proofs {
-                    offers.push(Self::issue(original, source, Some(proof))?);
+                    offers.push(Self::issue(
+                        roles
+                            .original_acquisition(owner)
+                            .expect("selected original"),
+                        source,
+                        Some(proof),
+                    )?);
                 }
             }
         }
@@ -2886,15 +2903,14 @@ impl IssuedNativeOffer {
     /// Issuance is restricted to an input owner's view before independent
     /// inputs merge. `None` issues empty availability rather than discovery.
     pub(crate) fn issue(
-        original: ArtifactId,
+        entry: &Arc<ArtifactEntry>,
         source: &ArtifactView,
         proof: Option<NativeOriginalRequirement>,
     ) -> Result<Self, CompileError> {
-        let entry = source
-            .lease
-            .payloads
-            .get(&original)
-            .ok_or_else(|| failure("native offer original is outside issuer custody"))?;
+        let original = entry.descriptor.id;
+        if !source.lease.payloads.contains_key(&original) {
+            return Err(failure("native offer original is outside issuer custody"));
+        }
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(admission_failure(
                 ArtifactInventoryFailure::NativeRootNotOriginal { artifact: original },
@@ -2960,6 +2976,7 @@ impl IssuedNativeOffer {
             &BTreeMap::new(),
         )?;
         Ok(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(entry),
             original,
             interface,
             owner: entry.descriptor.owner.clone(),
@@ -3171,6 +3188,7 @@ impl IssuedNativeOffer {
             &BTreeMap::new(),
         )?;
         Ok(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(entry),
             original: facts.original,
             interface,
             owner: facts.owner.clone(),
@@ -3183,6 +3201,10 @@ impl IssuedNativeOffer {
 
     pub(crate) fn original(&self) -> ArtifactId {
         self.0.original
+    }
+
+    pub(super) fn original_acquisition(&self) -> &Arc<ArtifactEntry> {
+        &self.0.original_acquisition
     }
 
     /// Reopen this producer's exact offered subset as future input choices.
@@ -3693,6 +3715,7 @@ impl IssuedNativeOffer {
             return Ok(Some(self.clone()));
         }
         Ok(Some(Self(Arc::new(NativeOfferFacts {
+            original_acquisition: Arc::clone(&self.0.original_acquisition),
             original: self.0.original,
             interface: self.0.interface,
             owner: self.0.owner.clone(),
@@ -3791,8 +3814,12 @@ mod normalized_dependency_tests {
             let graph = custody
                 .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
                 .unwrap();
-            let graph_only =
-                IssuedNativeOffer::issue(offer.original(), &graph, offer.proof().cloned()).unwrap();
+            let graph_only = IssuedNativeOffer::issue(
+                offer.original_acquisition(),
+                &graph,
+                offer.proof().cloned(),
+            )
+            .unwrap();
             assert!(
                 matches!(
                     graph_only.0.custody.source_receipt,
@@ -3905,7 +3932,8 @@ mod normalized_dependency_tests {
             .select_issued(vec![offer.original()], &offer.proof().unwrap().selection)
             .unwrap();
         let graph_only =
-            IssuedNativeOffer::issue(offer.original(), &graph, offer.proof().cloned()).unwrap();
+            IssuedNativeOffer::issue(offer.original_acquisition(), &graph, offer.proof().cloned())
+                .unwrap();
         assert!(
             matches!(
                 graph_only.source_causes_at(left, child).unwrap().as_ref(),
@@ -4095,7 +4123,8 @@ mod normalized_dependency_tests {
             original,
             selection: ExactArtifactSelection::capture(&broad),
         };
-        let broad_offer = IssuedNativeOffer::issue(original, &broad, Some(proof)).unwrap();
+        let broad_offer =
+            IssuedNativeOffer::issue(offer.original_acquisition(), &broad, Some(proof)).unwrap();
         assert!(broad_offer.is_full());
         let mixed = Arc::new(
             broad_offer
