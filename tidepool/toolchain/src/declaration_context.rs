@@ -145,13 +145,6 @@ pub struct SelectedTypeInterfaces {
     identity: OnceLock<[u8; 32]>,
 }
 
-impl PartialEq for SelectedTypeInterfaces {
-    fn eq(&self, other: &Self) -> bool {
-        self.producer == other.producer && self.support == other.support
-    }
-}
-impl Eq for SelectedTypeInterfaces {}
-
 impl SelectedTypeInterfaces {
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
         self.producer
@@ -164,7 +157,8 @@ impl SelectedTypeInterfaces {
     pub fn same_authenticated_interfaces(&self, other: &Self) -> bool {
         // TYPE issuance closes every canonical requirement into selected rows.
         // Their scoped bindings own the immutable edges as well as payloads.
-        std::ptr::eq(self, other) || self == other
+        std::ptr::eq(self, other)
+            || (self.producer == other.producer && self.support.same_recorded_facts(&other.support))
     }
     pub fn select(
         &self,
@@ -593,7 +587,7 @@ impl SourceLexicalScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct DeclarationContextFacts {
     producer: [u8; 32],
     compiler_support: crate::artifact_inventory::CompilerSourceSupport,
@@ -643,17 +637,6 @@ impl Clone for ExactDeclarationContext {
         }
     }
 }
-
-impl PartialEq for ExactDeclarationContext {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.owner, &other.owner) || {
-            #[cfg(test)]
-            CONTEXT_FACT_COMPARISONS.with(|count| count.set(count.get() + 1));
-            self.owner.facts == other.owner.facts
-        }
-    }
-}
-impl Eq for ExactDeclarationContext {}
 
 /// Value and lexical roots select compiler support with its required native custody.
 pub(crate) struct RetainedValueSourceSurface {
@@ -899,7 +882,7 @@ impl RequestAnnotations {
 
 /// Request-local compiler inputs. Persistent publication retains declarations
 /// separately, so native request annotations cannot enter a lexical snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ExactCompileContext {
     declarations: Arc<ExactDeclarationContext>,
     request_annotations: Option<RequestAnnotations>,
@@ -917,7 +900,7 @@ pub(crate) struct ProtectedScaffoldRequirements {
 /// Private compiler inputs retain their actual acquired selection owner.
 /// The receiving request closes TYPE dependencies against its baseline without
 /// publishing authored lexical rights or persistent source-reuse roles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct OriginalCompilerInputs {
     support: crate::artifact_inventory::CompilerSourceSupport,
 }
@@ -5132,6 +5115,22 @@ impl ProtectedScaffoldRequirements {
 }
 
 impl ExactCompileContext {
+    /// Compare request annotations and recorded compiler observations.
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        self.request_annotations == other.request_annotations
+            && self.protected_scaffold == other.protected_scaffold
+            && self.declarations.same_recorded_facts(&other.declarations)
+    }
+
+    /// Compare this request's annotations and actual selected compiler inputs.
+    pub fn same_authenticated_context(&self, other: &Self) -> bool {
+        self.request_annotations == other.request_annotations
+            && self.protected_scaffold == other.protected_scaffold
+            && self
+                .declarations
+                .same_authenticated_context(&other.declarations)
+    }
+
     pub fn new(declarations: Arc<ExactDeclarationContext>) -> Self {
         Self {
             declarations,
@@ -8250,14 +8249,11 @@ impl ExactRequestInputs {
         {
             return Err(failure("private compiler input has another producer"));
         }
-        if self
-            .context
+        if !context
             .owner
             .facts
             .compiler_support
-            .projection()
-            .merge(&context.owner.facts.compiler_support.projection())?
-            != *context.owner.facts.compiler_support.projection()
+            .preserves_selected_rows_from(&self.context.owner.facts.compiler_support)?
         {
             return Err(failure("program context removed an issued compiler role"));
         }
@@ -15418,25 +15414,44 @@ impl ExactDeclarationContext {
         })
     }
 
-    /// Immutable owner equality includes exact dependency edges. Equal payload
-    /// rows alone cannot substitute another binding's captured dependencies.
-    pub fn same_authenticated_context(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.owner, &other.owner)
-            || (self == other
-                && self
-                    .owner
-                    .facts
+    /// Compare immutable compiler observations without equating their acquired
+    /// inputs. Equal records do not authorize replacing a selected owner.
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner) || {
+            #[cfg(test)]
+            CONTEXT_FACT_COMPARISONS.with(|count| count.set(count.get() + 1));
+            let left = &self.owner.facts;
+            let right = &other.owner.facts;
+            left.producer == right.producer
+                && left
+                    .compiler_support
+                    .same_recorded_facts(&right.compiler_support)
+                && left.source_scope == right.source_scope
+                && left.lexical == right.lexical
+                && left.template_imports == right.template_imports
+                && left
                     .compiler_support
                     .artifacts()
                     .metadata_snapshot()
                     .dependencies()
-                    == other
-                        .owner
-                        .facts
+                    == right
                         .compiler_support
                         .artifacts()
                         .metadata_snapshot()
-                        .dependencies())
+                        .dependencies()
+        }
+    }
+
+    /// Compare the selected acquisitions and their context policy. Independent
+    /// recovery can reproduce records without retaining the same live inputs.
+    pub fn same_authenticated_context(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            || (self.same_recorded_facts(other)
+                && self
+                    .owner
+                    .facts
+                    .compiler_support
+                    .same_selected_acquisitions(&other.owner.facts.compiler_support))
     }
 
     /// Identity of the exact retained observations, including dependency bindings
@@ -18002,11 +18017,11 @@ mod tests {
         let context = Arc::new(published_original_fixture());
         let same = Arc::clone(&context);
         let raw = context.as_ref().clone();
-        assert_eq!(context.as_ref(), &raw);
+        assert!(context.same_authenticated_context(&raw));
         assert!(context.owner.observations.get().is_none());
         assert_context_observation_wire(&context);
         assert_context_observation_wire(&same);
-        assert_eq!(context.as_ref(), &raw);
+        assert!(context.same_authenticated_context(&raw));
         assert!(raw.owner.observations.get().is_some());
         assert_eq!(context.owner.semantic_issuances.load(Ordering::Relaxed), 1);
         assert_eq!(context.owner.display_issuances.load(Ordering::Relaxed), 1);
@@ -18035,7 +18050,6 @@ mod tests {
         let context = published_original_fixture();
         let cloned = context.clone();
         let compare = || {
-            assert_eq!(context, cloned);
             assert!(context.same_authenticated_context(&cloned));
             assert!(context.same_display_observations(&cloned));
         };
@@ -18074,12 +18088,12 @@ mod tests {
     }
 
     #[test]
-    fn independently_issued_equal_contexts_compare_authenticated_facts() {
+    fn rebuilt_context_retains_recorded_facts_and_selected_acquisitions() {
         use std::sync::atomic::Ordering;
         let context = published_original_fixture();
         let independent = context.clone().rebuild(|_| {});
         let comparisons = CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get);
-        assert_eq!(context, independent);
+        assert!(context.same_recorded_facts(&independent));
         assert!(context.same_authenticated_context(&independent));
         assert!(CONTEXT_FACT_COMPARISONS.with(std::cell::Cell::get) > comparisons);
         assert!(context.same_display_observations(&independent));
@@ -18100,7 +18114,7 @@ mod tests {
         let lexical = context.owner.facts.lexical.replace(vec![]).unwrap();
         context = context.rebuild(|facts| facts.lexical = lexical);
         assert!(context.owner.observations.get().is_none());
-        assert_ne!(context, before);
+        assert!(!context.same_recorded_facts(&before));
         assert_ne!(context.semantic_sha256(), digest);
         assert!(!context.same_authenticated_context(&before));
         assert_context_observation_wire(&context);
@@ -22186,7 +22200,8 @@ mod tests {
             .context()
             .published_source_original_selections_for_target(&BTreeSet::new(), &[import])
             .unwrap();
-        assert_eq!(selected.as_slice(), std::slice::from_ref(&publication));
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].same_authenticated_selection(&publication));
     }
 
     #[test]
@@ -23013,7 +23028,7 @@ mod tests {
         let restored = inventory
             .context_for_expected_snapshot(receipt.root(), &decoded)
             .unwrap();
-        assert!(context.same_authenticated_context(&restored));
+        assert!(context.same_recorded_facts(&restored));
         assert_eq!(
             context
                 .compiler_source_support()
@@ -32890,7 +32905,7 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
         let independent = Arc::new(ExactDeclarationContext::from_facts(
             context.owner.facts.clone(),
         ));
-        assert_eq!(independent, context);
+        assert!(independent.same_authenticated_context(&context));
         assert!(!Arc::ptr_eq(&independent.owner, &context.owner));
         let checked = baseline.in_program_context(independent).unwrap();
         assert!(!Arc::ptr_eq(&baseline.inputs, &checked.inputs));
@@ -34707,7 +34722,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 Some(selected_private.clone()),
             )
             .unwrap();
-        assert_eq!(selected_request.context().as_ref(), &dependent_context);
+        assert!(selected_request
+            .context()
+            .same_authenticated_context(&dependent_context));
         assert_eq!(
             selected_request
                 .compiler_original_products()
@@ -34752,7 +34769,9 @@ let mut selection = crate::certified_products::CertifiedSourceSelection::from_co
                 Some(private),
             )
             .unwrap();
-        assert_eq!(private_request.context().as_ref(), &dependent_context);
+        assert!(private_request
+            .context()
+            .same_authenticated_context(&dependent_context));
         assert_eq!(
             private_request
                 .compiler_original_products()

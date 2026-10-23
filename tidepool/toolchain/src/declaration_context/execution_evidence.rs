@@ -56,12 +56,32 @@ pub struct CompletedOriginalExecution<'a> {
 }
 
 /// Original output and derived pure display have distinct issuing owners.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum OriginalExecutionSource {
     Original(Arc<OriginalExecutionEvidence>),
     PurePreview(Arc<crate::activation_preview::OriginalDisplayContext>),
 }
 impl OriginalExecutionSource {
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Original(left), Self::Original(right)) => left.same_recorded_facts(right),
+            (Self::PurePreview(left), Self::PurePreview(right)) => left.same_recorded_facts(right),
+            _ => false,
+        }
+    }
+
+    pub fn same_authenticated_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Original(left), Self::Original(right)) => {
+                left.same_authenticated_execution(right)
+            }
+            (Self::PurePreview(left), Self::PurePreview(right)) => {
+                left.same_authenticated_display(right)
+            }
+            _ => false,
+        }
+    }
+
     pub fn context(&self) -> &Arc<ExactDeclarationContext> {
         match self {
             Self::Original(evidence) => evidence.context(),
@@ -121,6 +141,14 @@ impl OriginalExecutionEvidence {
             Sha256::digest(bytes).into()
         })
     }
+    /// Compare completed output observations without substituting acquisitions.
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self.target == other.target
+                && self.census == other.census
+                && self.context.same_recorded_facts(&other.context))
+    }
+
     pub fn same_authenticated_execution(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
             || (self.target == other.target
@@ -167,12 +195,6 @@ impl OriginalExecutionEvidence {
         .finalize_native_target(issued)
     }
 }
-impl PartialEq for OriginalExecutionEvidence {
-    fn eq(&self, other: &Self) -> bool {
-        self.same_authenticated_execution(other)
-    }
-}
-impl Eq for OriginalExecutionEvidence {}
 
 impl<'a> CompletedOriginalExecution<'a> {
     pub fn evidence(&self) -> &'a Arc<OriginalExecutionEvidence> {
@@ -277,7 +299,9 @@ mod tests {
             vec![z.clone(), a.clone(), z.clone()],
         );
         assert_eq!(draft.missing_owners(), &[a, z]);
-        assert_eq!(draft.context, ExactDeclarationContext::empty());
+        assert!(draft
+            .context
+            .same_recorded_facts(&ExactDeclarationContext::empty()));
     }
 
     #[test]
