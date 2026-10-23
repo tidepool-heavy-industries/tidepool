@@ -10,7 +10,7 @@ module Tidepool.CheckedCell
   , CheckedTypeWitness, captureCheckedTypeWitness, sealCheckedTypeWitness
   , encodeCheckedTypeWitness, renderCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes
-  , NativeParsedModule(..), unannotatedModule, mapNativeModule, thenNativeModule, typecheckNativeModule
+  , NativeParsedModule, nativeParsedModule, nativeImportSyntax, unannotatedModule, mapNativeModule, typecheckNativeModule
   , typecheckNativeModuleWithDiagnostics
   , ResolvedNativeSlots, resolveNativeAnnotations, applyNativeAnnotations, annotateNativeModule
   , rewriteCheckedAnnotations, rewriteHostInputType, rewriteRequestTypes
@@ -46,6 +46,9 @@ import GHC.IfaceToCore (tcIfaceDecl)
 import GHC.Utils.Binary (openBinMem, withBinBuffer, unsafeUnpackBinBuffer)
 import Tidepool.TypePolicy (stabilizeEffectRows, NominalHead(..))
 import Tidepool.CanonicalTypeShape (captureClosedTypeShape, canonicalShapeExpressionBytes, canonicalShapeOwners)
+import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
+import Tidepool.ImportSyntax (RefinedImportSyntax, refinedParsedModule)
+import Tidepool.ImportSyntax.Internal (mapImportPreservingSource)
 import GHC.Driver.Env (lookupType, hsc_home_unit, hsc_NC, hscSetFlags)
 import GHC.Driver.Main (hscTypecheckRenameWithDiagnostics)
 import GHC.Driver.Errors.Types (GhcMessage)
@@ -269,23 +272,22 @@ encodeCheckedSignature signature = encodeListLen 5
 -- The parsed syntax and the generated types' dependency uses travel together.
 -- HsCoreTy bypasses ordinary name renaming, so its external Names must be
 -- registered before GHC builds usage fingerprints or desugars the module.
-data NativeParsedModule = NativeParsedModule
-  { nativeParsedModule :: ParsedModule
-  , nativeTypeUses :: NameSet
-  }
+nativeParsedModule :: NativeParsedModule -> ParsedModule
+nativeParsedModule (NativeParsedModule parsed _) = refinedParsedModule parsed
 
-unannotatedModule :: ParsedModule -> NativeParsedModule
+nativeImportSyntax :: NativeParsedModule -> RefinedImportSyntax
+nativeImportSyntax (NativeParsedModule parsed _) = parsed
+
+nativeTypeUses :: NativeParsedModule -> NameSet
+nativeTypeUses (NativeParsedModule _ names) = names
+
+unannotatedModule :: RefinedImportSyntax -> NativeParsedModule
 unannotatedModule parsed = NativeParsedModule parsed emptyNameSet
 
-mapNativeModule :: (ParsedModule -> IO ParsedModule) -> NativeParsedModule -> IO NativeParsedModule
-mapNativeModule transform annotated = do
-  parsed <- transform (nativeParsedModule annotated)
-  pure annotated { nativeParsedModule = parsed }
-
-thenNativeModule :: NativeParsedModule -> (ParsedModule -> IO NativeParsedModule) -> IO NativeParsedModule
-thenNativeModule first transform = do
-  next <- transform (nativeParsedModule first)
-  pure next { nativeTypeUses = unionNameSets [nativeTypeUses first, nativeTypeUses next] }
+mapNativeModule :: (ParsedSource -> IO ParsedSource) -> NativeParsedModule -> IO NativeParsedModule
+mapNativeModule transform (NativeParsedModule parsed uses) = do
+  next <- mapImportPreservingSource transform parsed
+  pure (NativeParsedModule next uses)
 
 typecheckNativeModule :: NativeParsedModule -> Ghc TypecheckedModule
 typecheckNativeModule annotated = do
@@ -439,12 +441,13 @@ applyNativeAnnotations (ResolvedNativeSlots resolved) source = do
           _ -> fail ("generated native type slot is qualified or promoted: " ++ spelling)
     replaceSlot _ _ node = pure node
 
-annotateNativeModule :: ResolvedNativeSlots -> ParsedModule -> IO NativeParsedModule
-annotateNativeModule resolved parsed = do
-  (source, names) <- applyNativeAnnotations resolved (pm_parsed_source parsed)
-  pure (NativeParsedModule (parsed { pm_parsed_source = source }) names)
+annotateNativeModule :: ResolvedNativeSlots -> NativeParsedModule -> IO NativeParsedModule
+annotateNativeModule resolved (NativeParsedModule parsed uses) = do
+  (source, names) <- applyNativeAnnotations resolved (pm_parsed_source (refinedParsedModule parsed))
+  next <- mapImportPreservingSource (const (pure source)) parsed
+  pure (NativeParsedModule next (unionNameSets [uses, names]))
 
-rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> ParsedModule -> IO NativeParsedModule
+rewriteHostInputType :: HscEnv -> Int -> CheckedSignature -> NativeParsedModule -> IO NativeParsedModule
 rewriteHostInputType env expected signature parsed = do
   resolved <- resolveNativeSlots env [(ActivationInputSlot, expected, Just signature)]
   annotateNativeModule resolved parsed
@@ -452,7 +455,7 @@ rewriteHostInputType env expected signature parsed = do
 -- Reply occurs in both sessionReply and respond; progress occurs only in
 -- reportProgress. No presentation string participates in these annotations.
 rewriteRequestTypes
-  :: HscEnv -> RequestHelperRecipe -> RequestTypeSignatures -> ParsedModule -> IO NativeParsedModule
+  :: HscEnv -> RequestHelperRecipe -> RequestTypeSignatures -> NativeParsedModule -> IO NativeParsedModule
 rewriteRequestTypes env recipe signatures parsed = do
   resolved <- resolveNativeSlots env (requestNativeSlots recipe signatures)
   annotateNativeModule resolved parsed
@@ -460,18 +463,19 @@ rewriteRequestTypes env recipe signatures parsed = do
 -- Only compiler-generated signature binders acquire exact Types. Authored
 -- source continues through ordinary GHC renaming and lexical lookup.
 rewriteCheckedAnnotations
-  :: HscEnv -> [(String, CheckedSignature)] -> ParsedModule -> IO NativeParsedModule
-rewriteCheckedAnnotations env annotations parsed = do
+  :: HscEnv -> [(String, CheckedSignature)] -> NativeParsedModule -> IO NativeParsedModule
+rewriteCheckedAnnotations env annotations (NativeParsedModule parsed uses) = do
   resolved <- forM annotations $ \(binder, signature) ->
     (,) binder <$> resolveCheckedSignature env signature
   counts <- newIORef []
   let types = [(binder, ty) | (binder, (ty, _)) <- resolved]
       names = unionNameSets [used | (_, (_, used)) <- resolved]
-  rewritten <- rewriteSyntax (mkM (rewriteSignature counts types)) (pm_parsed_source parsed)
+  rewritten <- rewriteSyntax (mkM (rewriteSignature counts types)) (pm_parsed_source (refinedParsedModule parsed))
   seen <- readIORef counts
   unless (sortOn id seen == sortOn id (map fst annotations))
     (fail "generated checked annotation is missing or duplicated")
-  pure (NativeParsedModule (parsed { pm_parsed_source = rewritten }) names)
+  next <- mapImportPreservingSource (const (pure rewritten)) parsed
+  pure (NativeParsedModule next (unionNameSets [uses, names]))
   where
     rewriteSignature :: IORef [String] -> [(String, Type)] -> Sig GhcPs -> IO (Sig GhcPs)
     rewriteSignature counts resolved signature@(TypeSig extension binders ty) =

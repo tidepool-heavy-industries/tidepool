@@ -55,7 +55,10 @@ import Tidepool.ExactHydration
   , selectVerifiedValueInterfaces, hydrateExactScope, checkedValueOwner )
 import Tidepool.Identity (stableVarId, nameSymbolIdentity)
 import Tidepool.ExecutionSchema (SymbolIdentity)
-import Tidepool.CheckedCell (NativeParsedModule(..))
+import Tidepool.CheckedCell.Internal (NativeParsedModule(..))
+import Tidepool.ImportSyntax (RefinedImportSyntax, refinedParsedModule)
+import Tidepool.ImportSyntax.Internal
+  ( ImportRefinement(..), mapRefinedImportsM, insertSyntheticPrelude, mapImportPreservingSource )
 import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule,
   sessionModuleString, scaffoldTargetName, registerSessionInterfaceLocation)
 
@@ -134,8 +137,8 @@ hydrateCompletedValueAliases requested captured env
 -- The generated root's segment chain stays untouched. Explicit native-typed
 -- top-level aliases let ordinary GHC renaming preserve authored local shadows
 -- and the imported value's sigma type without textual source stand-ins.
-transformCompletedValueAliases :: CompletedValueAliases -> HscEnv -> ParsedModule -> IO NativeParsedModule
-transformCompletedValueAliases (CompletedValueAliases owners aliases) env parsed = do
+transformCompletedValueAliases :: CompletedValueAliases -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+transformCompletedValueAliases (CompletedValueAliases owners aliases) env (NativeParsedModule parsed usesBefore) = do
   forM_ owners $ \owner -> do
     original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
     case refinementReadback owner of
@@ -144,7 +147,7 @@ transformCompletedValueAliases (CompletedValueAliases owners aliases) env parsed
         actual <- evaluate (hm_iface original) >>= makeStableName
         unless (actual == expected) (fail "completed value alias lost its exact installed interface allocation")
       Nothing -> fail "completed value alias lacks its installed interface allocation"
-  let syntax = unLoc (pm_parsed_source parsed)
+  let syntax = unLoc (pm_parsed_source (refinedParsedModule parsed))
       authored = concatMap parsedDeclarationOccurrences (hsmodDecls syntax)
       additions = concatMap aliasDeclarations (Map.toAscList aliases)
       uses = unionNameSets [extendNameSet
@@ -152,8 +155,9 @@ transformCompletedValueAliases (CompletedValueAliases owners aliases) env parsed
           (idName identifier) | identifier <- Map.elems aliases]
   unless (all ((`notElem` authored) . mkVarOcc) (Map.keys aliases))
     (fail "completed value alias conflicts with a generated top-level binder")
-  pure (NativeParsedModule (parsed {pm_parsed_source=case pm_parsed_source parsed of
-    L location _ -> L location syntax {hsmodDecls=additions ++ hsmodDecls syntax}}) uses)
+  next <- mapImportPreservingSource (\source -> pure (case source of
+    L location _ -> L location syntax {hsmodDecls=additions ++ hsmodDecls syntax})) parsed
+  pure (NativeParsedModule next (unionNameSets [usesBefore, uses]))
   where
     aliasDeclarations (alias,identifier) =
       let name = mkRdrUnqual (mkVarOcc alias)
@@ -248,15 +252,25 @@ hydrateCompletedValueInputs readInputs dependencies requested env
           _ -> Left "completed value selection lacks its exact exported native identity"
 
 transformCompletedValueImports
-  :: CompletedValueImports -> HscEnv -> ParsedModule -> IO ParsedModule
-transformCompletedValueImports (CompletedValueImports owners) = refineImports owners []
+  :: CompletedValueImports -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+transformCompletedValueImports (CompletedValueImports owners) env =
+  mapPrefixImports (refineImports owners [] env)
+
+-- Only this issuer applies lineage-changing import operations to the held
+-- bundle. Native type uses survive every import refinement unchanged.
+mapPrefixImports
+  :: (RefinedImportSyntax -> IO RefinedImportSyntax)
+  -> NativeParsedModule -> IO NativeParsedModule
+mapPrefixImports transform (NativeParsedModule parsed uses) = do
+  next <- transform parsed
+  pure (NativeParsedModule next uses)
 
 -- Planned declaration certification supplies the full authored-only original
 -- export inventory. Keep its direct wildcard import contract distinct from the
 -- completed value owner's exact selected import while sharing one AST policy.
 refineOriginalDeclarationImports
-  :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> ParsedModule -> IO ParsedModule
-refineOriginalDeclarationImports owner fingerprint names env parsed = do
+  :: Module -> Fingerprint -> [ExportIdentity] -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+refineOriginalDeclarationImports owner fingerprint names env = mapPrefixImports $ \parsed -> do
   original <- originalRefinement env owner fingerprint names
   refineImports [original] [] env parsed
 
@@ -265,9 +279,9 @@ refineOriginalDeclarationImports owner fingerprint names env parsed = do
 -- winners precedence over that Lib and every historical unqualified import.
 refineOriginalDeclarationImportsWithCompleted
   :: Module -> Fingerprint -> [ExportIdentity] -> CompletedValueImports
-  -> HscEnv -> ParsedModule -> IO ParsedModule
+  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
 refineOriginalDeclarationImportsWithCompleted owner fingerprint names
-    (CompletedValueImports completed) env parsed = do
+    (CompletedValueImports completed) env = mapPrefixImports $ \parsed -> do
   original <- originalRefinement env owner fingerprint names
   intermediate <- refineImports [original] completed env parsed
   refineImports completed [] env intermediate
@@ -277,8 +291,8 @@ refineOriginalDeclarationImportsWithCompleted owner fingerprint names
 -- already been pruned by declaration shadowing before they enter this pass.
 refineProgramDeclarationImports
   :: [(Module,Fingerprint,[[ExportIdentity]])] -> Maybe CompletedValueImports
-  -> HscEnv -> ParsedModule -> IO ParsedModule
-refineProgramDeclarationImports originals captured env parsed = do
+  -> HscEnv -> NativeParsedModule -> IO NativeParsedModule
+refineProgramDeclarationImports originals captured env = mapPrefixImports $ \parsed -> do
   owners <- mapM (\(owner,fingerprint,groups) -> originalRefinement env owner fingerprint (concat groups)) originals
   let completed = case captured of Just (CompletedValueImports values) -> values; Nothing -> []
       namespace TypeNamespace = TypeNamespace
@@ -294,24 +308,18 @@ refineProgramDeclarationImports originals captured env parsed = do
       winners = Map.fromList (originalWinners ++ [(key name,refinementOwner owner)
         | owner <- completed, name <- refinementNames owner])
   verified <- refineImports owners completed env parsed
-  let syntax = unLoc (pm_parsed_source verified)
-      select located = case [owner | owner <- owners
+  let select located = case [owner | owner <- owners
           , unLoc (ideclName (unLoc located)) == moduleName (refinementOwner owner)
           , ideclQualified (unLoc located) == NotQualified] of
-        [] -> pure [located]
+        [] -> pure KeepImport
         [owner] -> do
           original <- currentOwner env (refinementOwner owner) (refinementFingerprint owner)
           selected <- either fail pure (selectedImportNames (mi_exports (hm_iface original)) Nothing)
           let retained = [name | name <- selected
                 , Map.lookup (key (exportIdentity name)) winners == Just (refinementOwner owner)]
-              declaration = unLoc located
-              replace value = case located of L location _ -> L location value
-          pure [replace declaration {ideclImportList = Just (Exactly,noLocA (map importName retained))}
-            , replace declaration {ideclQualified = QualifiedPre}]
+          pure (NarrowUnqualified (map importName retained))
         _ -> fail "program declaration owner is duplicated"
-  imports <- concat <$> mapM select (hsmodImports syntax)
-  let selected = verified {pm_parsed_source = case pm_parsed_source verified of
-        L location _ -> L location syntax {hsmodImports = imports}}
+  selected <- mapRefinedImportsM select verified
   if null completed then pure selected else refineImports completed [] env selected
 
 originalRefinement
@@ -332,14 +340,12 @@ currentOwner env owner fingerprint = case lookupHpt (hsc_HPT env) (moduleName ow
 -- An original declaration has no certified inventory until after it checks.
 -- Its existing GHC parse supplies local occurrences before renaming; imported
 -- Names still come from their resolved interfaces and retain qualified access.
-refineParsedDeclarationImports :: HscEnv -> ParsedModule -> IO ParsedModule
-refineParsedDeclarationImports env parsed
-  | null locals = pure parsed
-  | otherwise = refineUnqualifiedImports (const False)
+refineParsedDeclarationImports :: HscEnv -> NativeParsedModule -> IO NativeParsedModule
+refineParsedDeclarationImports env = mapPrefixImports $ \parsed ->
+  let locals = nub (concatMap parsedDeclarationOccurrences
+        (hsmodDecls (unLoc (pm_parsed_source (refinedParsedModule parsed)))))
+  in if null locals then pure parsed else refineUnqualifiedImports (const False)
       ((`notElem` locals) . nameOccName) env parsed
-  where
-    locals = nub (concatMap parsedDeclarationOccurrences
-      (hsmodDecls (unLoc (pm_parsed_source parsed))))
 
 parsedDeclarationOccurrences :: LHsDecl GhcPs -> [OccName]
 parsedDeclarationOccurrences (L _ declaration) = case declaration of
@@ -373,10 +379,10 @@ parsedConstructorOccurrences (LConsWithFields constructors fields) =
         (rdrNameOcc (unLoc (foLabel (unLoc field)))) | field <- IntMap.elems fields]
     [] -> []
 
-refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> ParsedModule -> IO ParsedModule
+refineImports :: [RefinementOwner] -> [RefinementOwner] -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
 refineImports [] [] _ parsed = pure parsed
 refineImports owners protected env parsed = do
-  let syntax = unLoc (pm_parsed_source parsed)
+  let syntax = unLoc (pm_parsed_source (refinedParsedModule parsed))
       originalImports = hsmodImports syntax
       direct owner imported = let declaration = unLoc imported in
         unLoc (ideclName declaration) == moduleName (refinementOwner owner)
@@ -417,19 +423,20 @@ refineImports owners protected env parsed = do
 -- alias and import selection, so shadowing cannot widen historical access.
 refineUnqualifiedImports
   :: (LImportDecl GhcPs -> Bool) -> (Name -> Bool)
-  -> HscEnv -> ParsedModule -> IO ParsedModule
+  -> HscEnv -> RefinedImportSyntax -> IO RefinedImportSyntax
 refineUnqualifiedImports protected retain env parsed = do
-  let syntax = unLoc (pm_parsed_source parsed)
+  let module_ = refinedParsedModule parsed
+      syntax = unLoc (pm_parsed_source module_)
       originalImports = hsmodImports syntax
-      flags = ms_hspp_opts (pm_mod_summary parsed)
-      imports = if xopt ImplicitPrelude flags
-          && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
-        then noLocA (simpleImportDecl (mkModuleName "Prelude")) : originalImports
-        else originalImports
-  refined <- fmap concat $ forM imports $ \located -> do
+      flags = ms_hspp_opts (pm_mod_summary module_)
+  withPrelude <- if xopt ImplicitPrelude flags
+      && not (any ((== mkModuleName "Prelude") . unLoc . ideclName . unLoc) originalImports)
+    then either fail pure (insertSyntheticPrelude parsed)
+    else pure parsed
+  mapRefinedImportsM (\located -> do
     let declaration = unLoc located
     if protected located || ideclQualified declaration /= NotQualified
-      then pure [located]
+      then pure KeepImport
       else do
         let importedName = unLoc (ideclName declaration)
             qualifier = renameRawPkgQual (hsc_unit_env env) importedName (ideclPkgQual declaration)
@@ -445,15 +452,8 @@ refineUnqualifiedImports protected retain env parsed = do
         selected <- either fail pure (selectedImportNames available (ideclImportList declaration))
         let retained = filter retain selected
         if length retained == length selected
-          then pure [located]
-          else do
-            let qualified = declaration {ideclQualified = QualifiedPre}
-                narrowed = declaration
-                  {ideclImportList = Just (Exactly, noLocA (map importName retained))}
-                replace value = case located of L location _ -> L location value
-            pure [replace narrowed, replace qualified]
-  pure parsed {pm_parsed_source = case pm_parsed_source parsed of
-    L location _ -> L location syntax {hsmodImports = refined}}
+          then pure KeepImport
+          else pure (NarrowUnqualified (map importName retained))) withPrelude
 
 selectedImportNames
   :: [AvailInfo] -> Maybe (ImportListInterpretation, LocatedLI [LIE GhcPs])
