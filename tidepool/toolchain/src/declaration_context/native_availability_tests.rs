@@ -6794,16 +6794,37 @@ pub(crate) fn assert_selected_authored_private_inputs(
         .iter()
         .any(|product| product.owner() == certificate.product().owner()));
     assert_eq!(native_request.context().as_ref(), &native_context);
-    assert_eq!(
-        native_request
-            .compiler_inputs()
-            .metadata
-            .retained
-            .selected_native_groups
-            .as_ref()
-            .clone(),
-        selected_before
-    );
+    assert!(native_request
+        .compiler_inputs()
+        .metadata
+        .retained
+        .selected_native_groups
+        .is_empty());
+    let operation = tidepool_repr::execution_schema::InventoryOperation::new(Default::default());
+    let available = crate::certified_products::CertifiedSourceSelection::from_compiler_inputs(
+        native_request.compiler_inputs(),
+        &operation,
+    )
+    .unwrap();
+    for group in &authored_groups {
+        assert!(available.has_native_group_support(
+            authored_root,
+            certificate.product().owner(),
+            group.original_ordinal,
+        ));
+    }
+    let absent_ordinal = authored_groups
+        .iter()
+        .map(|group| group.original_ordinal)
+        .max()
+        .unwrap()
+        .checked_add(1)
+        .unwrap();
+    assert!(!available.has_native_group_support(
+        authored_root,
+        certificate.product().owner(),
+        absent_ordinal,
+    ));
     assert_exact_offer(&native_context, "full-authored-exact-offer", true);
     // Source-role demotion preserves the issuer's complete native group graph
     // as custody. A later private offer must keep that graph without restoring
