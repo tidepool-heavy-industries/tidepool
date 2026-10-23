@@ -455,6 +455,8 @@ pub enum DeclarationFactsFailure {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error("initial notebook facade selection changed or was adopted after World publication")]
+    InitialNotebookFacadesChanged,
     #[error(transparent)]
     DeclarationFacts(#[from] DeclarationFactsFailure),
     #[error(transparent)]
@@ -1116,6 +1118,7 @@ pub(crate) struct ScopeDeclarationState {
     pub(crate) published_sources:
         Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     pub(crate) inspection_world: Option<Arc<inspection::InspectionWorldAssociation>>,
+    pub(crate) initial_facades: Option<lexical_projection::InitialDeclarationFacades>,
 }
 
 struct DurableDeclarationGraph {
@@ -1981,6 +1984,7 @@ impl SessionLib {
                 exact_context: context.map(recovery::ScopedCompilerContext::new),
                 published_sources: Vec::new(),
                 inspection_world: None,
+                initial_facades: None,
             });
     }
 
@@ -2036,11 +2040,27 @@ impl SessionLib {
             .map_or(&[], |state| state.published_sources.as_slice())
     }
 
+    pub(crate) fn initial_facades_in(
+        &self,
+        scope: ScopeId,
+    ) -> Option<&lexical_projection::InitialDeclarationFacades> {
+        self.tips
+            .get(&scope)
+            .and_then(|state| state.initial_facades.as_ref())
+    }
+
     pub(crate) fn source_selections_preserved(
         &self,
         scope: ScopeId,
         context: Option<&Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     ) -> bool {
+        if self.initial_facades_in(scope).is_some_and(|selected| {
+            selected.references().iter().any(|reference| {
+                context.is_none_or(|context| reference.validate_in(context).is_err())
+            })
+        }) {
+            return false;
+        }
         let sources = self.published_source_selections_in(scope);
         if sources.is_empty() {
             return true;
@@ -2110,7 +2130,14 @@ impl SessionLib {
     /// declaration chain that is transferred during session recovery.
     #[must_use]
     pub fn workbench_imports_in(&self, scope: ScopeId) -> SourceImports {
-        let mut imports = SourceImports::new();
+        let mut imports = self
+            .tips
+            .get(&scope)
+            .and_then(|state| state.initial_facades.as_ref())
+            .map_or_else(
+                SourceImports::new,
+                lexical_projection::InitialDeclarationFacades::imports,
+            );
         for generation in self.log.chain_from_root(self.scope_tip(scope)) {
             let turn = self.log.turn(generation).expect("scope tip is committed");
             imports.extend(&turn.workbench_imports);

@@ -73,7 +73,7 @@ pub(crate) fn observe_context_materialization<T>(
 }
 
 const DOMAIN_SNAPSHOT_VERSION: u32 = 2;
-const SURFACE_SNAPSHOT_VERSION: u32 = 3;
+const SURFACE_SNAPSHOT_VERSION: u32 = 4;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DomainSnapshot {
@@ -176,8 +176,26 @@ struct SurfaceSnapshot {
     #[serde(with = "option_generation_serde")]
     declaration_root: Option<Generation>,
     context_root: Option<ContextRoot>,
+    initial_facades: Option<Vec<tidepool_toolchain::declaration_join::SelectedFacadeReference>>,
     bindings: SnapshotMapRoot,
     source_instances: SnapshotMapRoot,
+}
+
+fn validate_initial_facade_references(
+    references: Option<&[tidepool_toolchain::declaration_join::SelectedFacadeReference]>,
+    context: Option<&ContextRoot>,
+) -> Result<(), RecoveryError> {
+    if references.is_some_and(|references| {
+        (!references.is_empty() && context.is_none())
+            || references
+                .windows(2)
+                .any(|pair| pair[0].owner() >= pair[1].owner())
+    }) {
+        return Err(error(
+            "initial facade selection lacks its context or unique ordered roots",
+        ));
+    }
+    Ok(())
 }
 #[derive(Clone, Debug)]
 pub(crate) struct RecoveryPublicSurface {
@@ -185,6 +203,7 @@ pub(crate) struct RecoveryPublicSurface {
     pub declaration_root: Option<Generation>,
     pub epoch: u64,
     pub context_root: Option<ContextRoot>,
+    pub initial_facades: Option<Vec<tidepool_toolchain::declaration_join::SelectedFacadeReference>>,
     pub bindings: OrdMap<String, RecoveryBindingId>,
     pub source_instances: OrdMap<RecoveryPublicSourceInstance, ()>,
     binding_receipt: Option<MaterializedMap<String, RecoveryBindingId>>,
@@ -197,6 +216,7 @@ impl RecoveryPublicSurface {
             declaration_root: None,
             epoch: 0,
             context_root: None,
+            initial_facades: None,
             bindings: OrdMap::new(),
             source_instances: OrdMap::new(),
             binding_receipt: None,
@@ -763,6 +783,10 @@ impl RecoveryGraph {
                 "public surface has invalid version or declaration root",
             ));
         }
+        validate_initial_facade_references(
+            snapshot.initial_facades.as_deref(),
+            snapshot.context_root.as_ref(),
+        )?;
         let bindings = hydrate_map::<String, RecoveryBindingId, _>(self, &snapshot.bindings)?;
         let sources =
             hydrate_map::<RecoveryPublicSourceInstance, (), _>(self, &snapshot.source_instances)?;
@@ -771,6 +795,7 @@ impl RecoveryGraph {
             epoch: header.epoch,
             declaration_root: snapshot.declaration_root,
             context_root: snapshot.context_root,
+            initial_facades: snapshot.initial_facades,
             bindings: bindings.facts().clone(),
             source_instances: sources.facts().clone(),
             binding_receipt: Some(bindings),
@@ -1005,6 +1030,10 @@ impl RecoveryGraphCandidate {
         &mut self,
         mut surface: RecoveryPublicSurface,
     ) -> Result<(), RecoveryError> {
+        validate_initial_facade_references(
+            surface.initial_facades.as_deref(),
+            surface.context_root.as_ref(),
+        )?;
         if surface
             .declaration_root
             .is_some_and(|id| !self.graph.nodes.contains_key(&id.0))
@@ -1038,6 +1067,7 @@ impl RecoveryGraphCandidate {
             version: SURFACE_SNAPSHOT_VERSION,
             declaration_root: surface.declaration_root,
             context_root: surface.context_root.clone(),
+            initial_facades: surface.initial_facades.clone(),
             bindings: bindings.root().clone(),
             source_instances: sources.root().clone(),
         })?);
@@ -1249,8 +1279,8 @@ mod tests {
         let mut graph = candidate.seal().unwrap();
         let mut header = graph.owner_roots[&owner].clone();
         let mut snapshot: SurfaceSnapshot = read_value(&graph, header.surface_root.cid()).unwrap();
-        assert_eq!(snapshot.version, 3);
-        snapshot.version = 2;
+        assert_eq!(snapshot.version, 4);
+        snapshot.version = 3;
         let mut writer = Materializer::new(&graph);
         header.surface_root = PublicSurfaceRoot::new(writer.materialize_value(&snapshot).unwrap());
         let packet = writer.finish().unwrap();

@@ -7921,6 +7921,15 @@ where
             .adopt_initial_notebook_scope_with_source(scope, prerequisite)
     }
 
+    pub fn adopt_initial_notebook_facades(
+        &mut self,
+        scope: ScopeId,
+        projections: Vec<Arc<super::CertifiedDeclarationProjection>>,
+    ) -> Result<(), SessionError> {
+        self.state
+            .adopt_initial_notebook_facades(scope, projections)
+    }
+
     /// The persistent binding names visible at `scope`: its own mutable frame over
     /// the immutable inherited tip captured when the scope was minted.
     /// `binding_names_in(ScopeId::ROOT)` is [`Self::binding_names`]'s set.

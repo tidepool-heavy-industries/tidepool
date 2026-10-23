@@ -445,7 +445,7 @@ mod tests {
     fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
         use crate::session::{ModuleEnv, PersistentSession, SessionLib};
         use tidepool_toolchain::artifacts::{compile_invocation_in_context, CompileInvocation};
-        use tidepool_toolchain::declaration_join::ExactModuleIdentity;
+        use tidepool_toolchain::declaration_join::{ExactDeclarationContext, ExactModuleIdentity};
 
         let root = tempfile::tempdir().unwrap();
         let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
@@ -590,6 +590,114 @@ mod tests {
             .find(|node| node.owner.module == narrowed.module_name())
             .unwrap();
         assert_eq!(nested_root.imports, vec![inherited_owner]);
+
+        let reference = narrowed.composition().selected_facade_reference().unwrap();
+        let encoded = serde_json::to_value(&reference).unwrap();
+        let decoded: tidepool_toolchain::declaration_join::SelectedFacadeReference =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, reference);
+        decoded.validate_in(narrowed.context()).unwrap();
+        for field in ["artifact", "selection"] {
+            let mut mutated = encoded.clone();
+            mutated["binding"][field] = serde_json::to_value([17u8; 32]).unwrap();
+            let changed: tidepool_toolchain::declaration_join::SelectedFacadeReference =
+                serde_json::from_value(mutated).unwrap();
+            assert!(
+                changed.validate_in(narrowed.context()).is_err(),
+                "{field} must retain exact binding identity"
+            );
+        }
+        let mut mutated = encoded.clone();
+        mutated["lexical"]["imports"] = serde_json::json!([]);
+        let changed: tidepool_toolchain::declaration_join::SelectedFacadeReference =
+            serde_json::from_value(mutated).unwrap();
+        assert!(changed.validate_in(narrowed.context()).is_err());
+        assert!(reference
+            .validate_in(&ExactDeclarationContext::empty())
+            .is_err());
+
+        // A generation-zero notebook selects the narrowed facade, not every
+        // facade retained as a dependency. The actual durable writer/reader
+        // must preserve that choice before any local declaration exists.
+        let captured = session.mint_isolated_scope();
+        session
+            .adopt_initial_notebook_facades(captured, vec![narrowed.clone()])
+            .unwrap();
+        let captured_key = session.compile_view_key_in(captured);
+        session
+            .adopt_initial_notebook_facades(captured, vec![narrowed.clone(), narrowed.clone()])
+            .unwrap();
+        assert_eq!(session.compile_view_key_in(captured), captured_key);
+        assert!(matches!(
+            session.adopt_initial_notebook_facades(captured, vec![inherited.clone()]),
+            Err(crate::session::SessionError::InitialNotebookFacadesChanged)
+        ));
+        let captured_owner = crate::session::RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root/captured-facades").unwrap(),
+            1,
+        )
+        .unwrap();
+        session
+            .initialize_durable_public_scope(captured_owner.clone(), captured)
+            .unwrap();
+        let expected_imports = crate::session::SourceImports::from_specs([narrowed.module_name()]);
+        assert_eq!(
+            session.lib().workbench_imports_in(captured),
+            expected_imports
+        );
+        assert_eq!(
+            session.lib().scope_tip(captured),
+            tidepool_repr::Generation(0)
+        );
+        let reopened_store =
+            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
+        let mut reopened_lib = SessionLib::open(
+            SessionId(9917),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        tidepool_testing::with_settlement(|settlement| {
+            reopened_store.attach_root(&mut reopened_lib, settlement)
+        })
+        .unwrap();
+        let mut reopened = PersistentSession::new(Some(reopened_lib), crate::DEFAULT_NURSERY_SIZE);
+        let restored = reopened.recover_public_scope(&captured_owner).unwrap();
+        assert_eq!(
+            reopened.lib().scope_tip(restored),
+            tidepool_repr::Generation(0)
+        );
+        assert_eq!(
+            reopened.lib().workbench_imports_in(restored),
+            expected_imports
+        );
+        assert_eq!(
+            reopened.lib().initial_facades_in(restored),
+            session.lib().initial_facades_in(captured),
+        );
+        assert_eq!(
+            reopened
+                .lib()
+                .current_exact_context_in(restored)
+                .unwrap()
+                .semantic_sha256(),
+            session
+                .lib()
+                .current_exact_context_in(captured)
+                .unwrap()
+                .semantic_sha256(),
+        );
+        let replacement = reopened.mint_notebook_scope_with_lease(None).unwrap();
+        assert!(reopened
+            .lib()
+            .workbench_imports_in(replacement.scope())
+            .specs()
+            .is_empty());
+        assert!(reopened
+            .lib()
+            .current_exact_context_in(replacement.scope())
+            .is_none());
 
         let source = include_str!("fixtures/inherited-facade-subset-consumer.hs")
             .replace("DECLARATION_FACADE_MODULE", narrowed.module_name());

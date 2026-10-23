@@ -36,6 +36,63 @@ impl CertifiedDeclarationProjection {
     }
 }
 
+/// Once-selected notebook imports. The scope's authenticated compiler context
+/// retains their payload custody; these exact references select only imports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InitialDeclarationFacades {
+    references: Vec<tidepool_toolchain::declaration_join::SelectedFacadeReference>,
+}
+
+impl InitialDeclarationFacades {
+    pub(super) fn select(
+        projections: &[Arc<CertifiedDeclarationProjection>],
+    ) -> Result<Self, SessionError> {
+        let mut references = Vec::with_capacity(projections.len());
+        for projection in projections {
+            references.push(projection.composition().selected_facade_reference()?);
+        }
+        references.sort_by(|left, right| left.owner().cmp(right.owner()));
+        if references
+            .windows(2)
+            .any(|pair| pair[0].owner() == pair[1].owner() && pair[0] != pair[1])
+        {
+            return Err(SessionError::InitialNotebookFacadesChanged);
+        }
+        references.dedup();
+        Ok(Self { references })
+    }
+
+    pub(super) fn recover(
+        context: Option<&Arc<ExactDeclarationContext>>,
+        references: Vec<tidepool_toolchain::declaration_join::SelectedFacadeReference>,
+    ) -> Result<Self, SessionError> {
+        if references
+            .windows(2)
+            .any(|pair| pair[0].owner() >= pair[1].owner())
+        {
+            return Err(SessionError::InitialNotebookFacadesChanged);
+        }
+        for reference in &references {
+            reference.validate_in(context.ok_or(SessionError::InitialNotebookFacadesChanged)?)?;
+        }
+        Ok(Self { references })
+    }
+
+    pub(super) fn references(
+        &self,
+    ) -> &[tidepool_toolchain::declaration_join::SelectedFacadeReference] {
+        &self.references
+    }
+
+    pub(super) fn imports(&self) -> super::SourceImports {
+        super::SourceImports::from_specs(
+            self.references
+                .iter()
+                .map(|reference| reference.owner().module.as_str()),
+        )
+    }
+}
+
 /// Immutable selected declaration facts captured under their runtime owner.
 /// Artifact presence never constructs this lexical selection.
 #[derive(Clone, Debug, PartialEq, Eq)]

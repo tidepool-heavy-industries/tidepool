@@ -437,6 +437,72 @@ impl AdmittedDeclarationSurface {
     }
 }
 
+/// An exact selected facade reference. Decoding records intent, not authority;
+/// the receiving owner must validate it against its authenticated context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedFacadeReference {
+    binding: crate::artifact_inventory::ArtifactBinding,
+    lexical: ExactLexicalNode,
+}
+
+impl SelectedFacadeReference {
+    pub fn owner(&self) -> &ExactModuleIdentity {
+        &self.lexical.owner
+    }
+
+    pub fn validate_in(&self, context: &ExactDeclarationContext) -> Result<(), CompileError> {
+        let selected = context
+            .compiler_source_support()
+            .world_primary_type_row(self.owner())
+            .ok_or_else(|| contract("selected facade lacks its exact compiler binding"))?;
+        if selected.interface_binding != &self.binding
+            || selected.original_binding.is_some()
+            || !matches!(
+                &selected.entry.payload,
+                crate::artifact_inventory::ArtifactPayload::Interface(
+                    _,
+                    crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin
+                )
+            )
+            || !context.lexical_graph().contains(&self.lexical)
+        {
+            return Err(contract(
+                "selected facade differs from its retained binding or lexical owner",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PublicationComposition {
+    /// Observe the facade actually issued by this publication, including its
+    /// dependency binding. Equal interface bytes do not identify this owner.
+    pub fn selected_facade_reference(&self) -> Result<SelectedFacadeReference, CompileError> {
+        let owner = ExactModuleIdentity {
+            unit: self.join().reserved().unit.clone(),
+            module: self.join().reserved().module.clone(),
+        };
+        let context = self.context();
+        let selected = context
+            .compiler_source_support()
+            .world_primary_type_row(&owner)
+            .ok_or_else(|| contract("publication facade lacks its issued binding"))?;
+        let lexical = context
+            .lexical_graph()
+            .iter()
+            .find(|node| node.owner == owner)
+            .ok_or_else(|| contract("publication facade lacks its lexical owner"))?
+            .clone();
+        let reference = SelectedFacadeReference {
+            binding: *selected.interface_binding,
+            lexical,
+        };
+        reference.validate_in(context)?;
+        Ok(reference)
+    }
+}
+
 /// One accepted facade and the exact context issued for its publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationComposition {

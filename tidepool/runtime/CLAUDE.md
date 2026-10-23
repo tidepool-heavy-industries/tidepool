@@ -70,6 +70,11 @@ anchors retain their original ProgramFacts. Explicit prepared-source startup own
 its separate fresh-domain semantics.
 
 Compiled turns retain immutable provenance selections and context identities.
+Initial notebook facade imports are selected once from issued declaration
+projections before World birth or durable publication. The scope retains their
+exact interface bindings and derives imports from those selections. Recovery
+authenticates the recorded selections against the stored context; available
+interfaces never select imports. Changing the selection requires a new scope.
 Installation creates fresh runtime execution observations and still resolves
 current lexical domains, generations, bindings and snapshots. Static plans
 must not retain runtime provenance or renderer owners: a renderer can retain its

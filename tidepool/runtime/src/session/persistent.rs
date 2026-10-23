@@ -2952,6 +2952,69 @@ impl PersistentSession {
         self.prepared_notebook_scope_lease(scope, prerequisite)
     }
 
+    /// Select the actual captured facade owners once, before the notebook's
+    /// first World or durable public surface. Repeating the same selection is
+    /// harmless; another selection requires a fresh notebook scope.
+    pub fn adopt_initial_notebook_facades(
+        &mut self,
+        scope: ScopeId,
+        projections: Vec<Arc<super::CertifiedDeclarationProjection>>,
+    ) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        if scope == ScopeId::ROOT {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let selected = super::lexical_projection::InitialDeclarationFacades::select(&projections)?;
+        if let Some(state) = self.lib().tips.get(&scope) {
+            if let Some(existing) = &state.initial_facades {
+                return if existing == &selected {
+                    super::lexical_projection::InitialDeclarationFacades::recover(
+                        state.exact_context.as_ref().map(|context| context.exact()),
+                        existing.references().to_vec(),
+                    )?;
+                    Ok(())
+                } else {
+                    Err(SessionError::InitialNotebookFacadesChanged)
+                };
+            }
+            if state.inspection_world.is_some() {
+                return Err(SessionError::InitialNotebookFacadesChanged);
+            }
+        }
+        if self
+            .lib()
+            .durable_public_scopes
+            .values()
+            .any(|candidate| *candidate == scope)
+        {
+            return Err(SessionError::InitialNotebookFacadesChanged);
+        }
+        let mut composed = self
+            .lib()
+            .current_exact_context_in(scope)
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(tidepool_toolchain::declaration_join::ExactDeclarationContext::empty);
+        for projection in projections {
+            composed = composed.admit_publication(projection.composition())?;
+        }
+        let composed = Arc::new(composed);
+        super::lexical_projection::InitialDeclarationFacades::recover(
+            Some(&composed),
+            selected.references().to_vec(),
+        )?;
+        let epoch = self.prepare_public_visibility_advance(scope)?;
+        let state = self.lib_mut().tips.entry(scope).or_default();
+        if !selected.references().is_empty() {
+            state.exact_context = Some(super::recovery::ScopedCompilerContext::new(composed));
+        }
+        state.initial_facades = Some(selected);
+        self.commit_public_visibility_advance(scope, epoch);
+        Ok(())
+    }
+
     /// The session's one scope forest — read by both stores for their lookup
     /// walks. There is no `_mut` sibling on purpose: minting and retiring are
     /// the only writes, and both go through this type so the binding store's
@@ -3140,6 +3203,16 @@ impl PersistentSession {
         let generation = surface.declaration_root.unwrap_or(Generation(0));
         let epoch = surface.epoch;
         let recovered_context = lib.recovered_public_compiler_context(owner)?;
+        let initial_facades = surface
+            .initial_facades
+            .clone()
+            .map(|references| {
+                super::lexical_projection::InitialDeclarationFacades::recover(
+                    recovered_context.as_ref().map(|context| context.exact()),
+                    references,
+                )
+            })
+            .transpose()?;
         let published_sources = recovered_context
             .as_ref()
             .map(|context| context.exact().published_source_original_selections())
@@ -3163,6 +3236,7 @@ impl PersistentSession {
                 exact_context: recovered_context,
                 published_sources,
                 inspection_world: None,
+                initial_facades,
             },
         );
         if let Err(error) = lib.bind_durable_public_scope(owner.clone(), scope) {
@@ -3422,6 +3496,9 @@ impl PersistentSession {
         surface.declaration_root =
             (snapshot.declaration_tip.0 > 0).then_some(snapshot.declaration_tip);
         surface.context_root = context_root;
+        surface.initial_facades = lib
+            .initial_facades_in(target)
+            .map(|selected| selected.references().to_vec());
         if let Some(previous) = previous {
             if lib.durable_public_scopes.get(&owner) != Some(&target)
                 || surface.declaration_root != previous.declaration_root
@@ -3429,6 +3506,7 @@ impl PersistentSession {
                 || surface.bindings != previous.bindings
                 || surface.source_instances != previous.source_instances
                 || surface.context_root != previous.context_root
+                || surface.initial_facades != previous.initial_facades
             {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
@@ -3465,6 +3543,7 @@ impl PersistentSession {
                 exact_context: installing_context,
                 published_sources: lib.published_source_selections_in(target).to_vec(),
                 inspection_world: None,
+                initial_facades: lib.initial_facades_in(target).cloned(),
             },
         );
         self.public_visibility_epochs.try_reserve(1).map_err(|e| {
@@ -3570,6 +3649,16 @@ impl PersistentSession {
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         let generation = surface.declaration_root.unwrap_or(Generation(0));
         let context = lib.recovered_public_compiler_context(predecessor)?;
+        let initial_facades = surface
+            .initial_facades
+            .clone()
+            .map(|references| {
+                super::lexical_projection::InitialDeclarationFacades::recover(
+                    context.as_ref().map(|context| context.exact()),
+                    references,
+                )
+            })
+            .transpose()?;
         let published_sources = context
             .as_ref()
             .map(|context| context.exact().published_source_original_selections())
@@ -3604,6 +3693,7 @@ impl PersistentSession {
                 exact_context: context,
                 published_sources,
                 inspection_world: None,
+                initial_facades,
             },
         );
         let mut public_scopes = lib.durable_public_scopes.clone();
@@ -3740,6 +3830,9 @@ impl PersistentSession {
             .as_ref()
             .map(|context| context.root().clone());
         replacement.epoch = next_epoch;
+        replacement.initial_facades = lib
+            .initial_facades_in(scope)
+            .map(|selected| selected.references().to_vec());
         let bindings = current
             .bindings
             .iter()
@@ -10163,6 +10256,7 @@ impl PersistentSession {
                 exact_context: None,
                 published_sources: Vec::new(),
                 inspection_world: None,
+                initial_facades: None,
             });
         if let Some(source) = &source {
             tip.exact_context = Some(source.context.clone());
