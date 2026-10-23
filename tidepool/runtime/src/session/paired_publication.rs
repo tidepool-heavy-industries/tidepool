@@ -81,9 +81,14 @@ enum FrozenDeclarations {
     Bindings,
     Declarations {
         writes: Vec<AuthoredWrite>,
-        projection: Option<Arc<super::CertifiedDeclarationProjection>>,
+        projection: FrozenDeclarationProjection,
         surface: AdmittedDeclarationSurface,
     },
+}
+
+enum FrozenDeclarationProjection {
+    Retained(Arc<super::CertifiedDeclarationProjection>),
+    NeedsCertification,
 }
 
 /// The exact published World association and admitted source facts a final
@@ -607,7 +612,7 @@ impl PersistentSession {
             .public_visibility_snapshot_in(private_scope)
             .ok_or(super::SessionTransitionReason::ScopeRevoked)?;
         let completed_values = admission.completed_values.lock();
-        let (write_ids, binding_policy) = match selection {
+        let (mut write_ids, binding_policy) = match selection {
             FrozenBindingSelection::Completed => (
                 private_visibility
                     .bindings
@@ -634,12 +639,15 @@ impl PersistentSession {
                 )
             }
         };
+        write_ids.sort_by_key(|id| id.raw());
+        write_ids.dedup();
         let source_keys = private_visibility.source_instances.clone();
         if let Some(intent) = admission.final_intent.get() {
             if intent.private != private_visibility
                 || !intent.private_view_is_current(self)
                 || !Arc::ptr_eq(&intent.world.private, &private_world)
                 || intent.binding_policy != binding_policy
+                || intent.write_ids != write_ids
             {
                 return Err(super::SessionTransitionReason::WrongPhase.into());
             }
@@ -807,7 +815,10 @@ impl PersistentSession {
             } else {
                 FrozenDeclarations::Declarations {
                     writes,
-                    projection: final_projection,
+                    projection: final_projection.map_or(
+                        FrozenDeclarationProjection::NeedsCertification,
+                        FrozenDeclarationProjection::Retained,
+                    ),
                     surface: final_declarations
                         .ok_or(SessionError::StaleStagedDeclaration)?
                         .surface,
@@ -1091,7 +1102,7 @@ impl DeclarationPublicationBase {
             return None;
         }
         let FrozenDeclarations::Declarations {
-            projection: Some(projection),
+            projection: FrozenDeclarationProjection::Retained(projection),
             surface,
             ..
         } = &self.intent.declarations
@@ -1626,7 +1637,7 @@ mod tests {
             );
             let projection = session.lib().log.projection_at(original).unwrap().clone();
             let intent = session
-                .freeze_execution_intent(&execution, vec![], vec![])
+                .freeze_private_execution(&execution)
                 .unwrap();
             let restage = |session: &mut PersistentSession| {
                 if durable {
@@ -1791,7 +1802,7 @@ mod tests {
             "answer :: Int\nanswer = 42",
         );
         let intent = session
-            .freeze_execution_intent(&execution, vec![], vec![])
+            .freeze_private_execution(&execution)
             .unwrap();
         let publication = accepted(
             session
@@ -1850,7 +1861,7 @@ mod tests {
             "next :: Int\nnext = answer + 1",
         );
         let continuation = reopened
-            .freeze_execution_intent(&continuation, vec![], vec![])
+            .freeze_private_execution(&continuation)
             .unwrap();
         let publication = accepted(
             reopened
@@ -1904,7 +1915,7 @@ mod tests {
         );
         let projection = session.lib().log.projection_at(original).unwrap().clone();
         let intent = session
-            .freeze_execution_intent(&execution, vec![], vec![])
+            .freeze_private_execution(&execution)
             .unwrap();
         let base = session
             .restage_declaration_publication(owner.clone(), intent.clone())
@@ -2015,7 +2026,7 @@ mod tests {
                 insertion_order.push(generation);
                 private_generations.push(generation);
             }
-            let intent = session.freeze_execution_intent(&execution, vec![], vec![]).unwrap();
+            let intent = session.freeze_private_execution(&execution).unwrap();
             let private = session.public_visibility_snapshot_in(execution.private_scope()).unwrap();
             let old = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
             let old_generation = old.reserved_generation();
@@ -2025,7 +2036,7 @@ mod tests {
                 let concurrent = session.begin_private_execution(public).unwrap();
                 let original = commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
                 insertion_order.push(original);
-                let concurrent_intent = session.freeze_execution_intent(&concurrent, vec![], vec![]).unwrap();
+                let concurrent_intent = session.freeze_private_execution(&concurrent).unwrap();
                 let base = session.restage_declaration_publication(owner.clone(), concurrent_intent).unwrap();
                 let concurrent_publication = accepted(base);
                 proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
@@ -2121,10 +2132,10 @@ mod tests {
         let b_id = b_value.id;
         session.bind_in(b.private_scope(), b_value).unwrap();
         let a_intent = session
-            .freeze_execution_intent(&a, vec![a_id], vec![])
+            .freeze_private_execution(&a)
             .unwrap();
         let b_intent = session
-            .freeze_execution_intent(&b, vec![b_id], vec![])
+            .freeze_private_execution(&b)
             .unwrap();
         let stale_a = ephemeral_binding_stage(&mut session, a_intent.clone());
         let b_stage = ephemeral_binding_stage(&mut session, b_intent);
@@ -2168,7 +2179,7 @@ mod tests {
         assert!(session.lib().durable_graph.is_none());
         assert!(Arc::ptr_eq(
             &session
-                .freeze_execution_intent(&a, vec![a_id], vec![])
+                .freeze_private_execution(&a)
                 .unwrap(),
             &a_intent
         ));
@@ -2196,7 +2207,7 @@ mod tests {
         let before_freeze = session.lib().generation();
         let before_freeze_revision = session.lib().log.publication_revision();
         let intent = session
-            .freeze_execution_intent(&admission, vec![id], vec![])
+            .freeze_private_execution(&admission)
             .unwrap();
         assert_eq!(session.lib().generation(), before_freeze);
         assert_eq!(
@@ -2289,7 +2300,7 @@ mod tests {
         let public = first.mint_isolated_scope();
         let admission = first.begin_ephemeral_private_execution(public).unwrap();
         let intent = first
-            .freeze_execution_intent(&admission, vec![], vec![])
+            .freeze_private_execution(&admission)
             .unwrap();
         let ticket = ephemeral_binding_stage(&mut first, intent.clone());
         let mut second = make();
@@ -2298,7 +2309,7 @@ mod tests {
             .begin_ephemeral_private_execution(second_public)
             .unwrap();
         second
-            .freeze_execution_intent(&second_admission, vec![], vec![])
+            .freeze_private_execution(&second_admission)
             .unwrap();
         assert_eq!(
             first.public_visibility_snapshot_in(public),
@@ -2339,7 +2350,7 @@ mod tests {
             .unwrap();
         let private = first.begin_private_execution(public).unwrap();
         let intent = first
-            .freeze_execution_intent(&private, vec![], vec![])
+            .freeze_private_execution(&private)
             .unwrap();
         let ExecutionPublication::Bindings(base) = first
             .restage_execution_publication(owner.clone(), intent.clone())
@@ -2445,7 +2456,7 @@ mod tests {
         })
         .unwrap();
         let withdrawn = session
-            .freeze_execution_intent(&withdrawal, vec![], vec![])
+            .freeze_private_execution(&withdrawal)
             .unwrap();
         assert_eq!(withdrawn.writes()[0].retractions.len(), 2);
         let withdrawn_proof = accepted(
@@ -2459,7 +2470,7 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "%%"));
         let intent = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .freeze_private_execution(&a)
             .unwrap();
         assert_eq!(intent.writes()[0].retractions.len(), 1);
         assert_eq!(
@@ -2518,7 +2529,7 @@ mod tests {
         let value_id = value.id;
         session.bind_in(a.private_scope(), value).unwrap();
         let intent = session
-            .freeze_execution_intent(&a, vec![value_id], vec![])
+            .freeze_private_execution(&a)
             .unwrap();
         assert!(intent.writes().is_empty());
         assert!(matches!(
@@ -2533,7 +2544,7 @@ mod tests {
             b.private_scope(),
             include_str!("fixtures/paired-late-operator.hs"),
         );
-        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let b_stage = accepted(
             session
                 .restage_declaration_publication(owner.clone(), b_intent)
@@ -2649,7 +2660,7 @@ mod tests {
             .unwrap()
             .introduced_exports()
             .is_empty());
-        let intent = session.freeze_execution_intent(&a, vec![], vec![]).unwrap();
+        let intent = session.freeze_private_execution(&a).unwrap();
         let accepted_a = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
@@ -2668,7 +2679,7 @@ mod tests {
             include_str!("fixtures/paired-instance-only.hs"),
         );
         assert_ne!(private, conflicting);
-        let b_intent = session.freeze_execution_intent(&b, vec![], vec![]).unwrap();
+        let b_intent = session.freeze_private_execution(&b).unwrap();
         let b_publication = accepted(
             session
                 .restage_declaration_publication(owner.clone(), b_intent)

@@ -8547,7 +8547,7 @@ mod tests {
             )
             .unwrap();
         let intent = session
-            .freeze_execution_intent(&private, vec![], vec![])
+            .freeze_private_execution(&private)
             .unwrap();
         let ExecutionPublication::Bindings(base) = session
             .restage_execution_publication(owner.clone(), intent.clone())
@@ -8571,7 +8571,7 @@ mod tests {
             Err(SessionError::StaleStagedDeclaration)
         ));
         assert!(matches!(
-            session.freeze_execution_intent(&private, vec![], vec![]),
+            session.freeze_private_execution(&private),
             Err(SessionError::StaleStagedDeclaration)
         ));
         assert!(matches!(
@@ -8818,7 +8818,7 @@ mod tests {
             None
         );
         assert!(matches!(
-            second.freeze_execution_intent(&private, vec![], vec![]),
+            second.freeze_private_execution(&private),
             Err(SessionError::StaleStagedDeclaration)
         ));
         let first_cell = first

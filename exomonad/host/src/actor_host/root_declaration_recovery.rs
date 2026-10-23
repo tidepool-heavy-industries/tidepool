@@ -557,7 +557,7 @@ mod tests {
         ));
         let private = first.begin_private_execution(public).unwrap();
         let intent = first
-            .freeze_execution_intent(&private, vec![], vec![])
+            .freeze_private_execution(&private)
             .unwrap();
         drop(first);
         drop(first_lease);

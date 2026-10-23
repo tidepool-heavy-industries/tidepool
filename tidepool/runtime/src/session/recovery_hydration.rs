@@ -938,7 +938,7 @@ mod lazy_tests {
         })
         .unwrap();
         let intent = producer
-            .freeze_execution_intent(&execution, vec![], vec![])
+            .freeze_private_execution(&execution)
             .unwrap();
         let CertifiedDeclarationPublication::Accepted(accepted) =
             tidepool_testing::with_settlement(|settlement| {
