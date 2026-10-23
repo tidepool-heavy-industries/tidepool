@@ -66,7 +66,7 @@ import Data.List (mapAccumL)
 import Control.Exception
   ( Exception, IOException, SomeException, SomeAsyncException, bracket, try, fromException, throwIO, evaluate )
 import Data.Char (isHexDigit, toLower)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust)
 import Data.List (nub, sortOn)
 import GHC.Data.Strict qualified as Strict
 import qualified Data.ByteString as BS
