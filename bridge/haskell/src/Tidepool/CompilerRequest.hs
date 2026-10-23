@@ -92,6 +92,7 @@ import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
 import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.Logging (LogValue(..), logTrace, readLogger)
 import Tidepool.ExtractRequest
 import Tidepool.Introspection (InspectionWork, InspectionResult, runInspectionGhc)
 import Tidepool.GhcPipeline
@@ -613,6 +614,7 @@ prepareArtifactsWithProjectionIntent inputs _ _ _ completion [] _ _ _ =
 prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir completion targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings =
   withPreparationInputs completion prior $ \prepared recoveryCaches executor _ -> do
     timing <- readTimingEnabled
+    logger <- readLogger "tidepool.compiler.projection"
     let intent = preparedCompilationOutputIntent completion
         result = pprPipelineResult prepared
         hscEnv = prHscEnv result
@@ -706,7 +708,21 @@ prepareArtifactsWithProjectionIntent prior project originalInterfaces outDir com
             project (prepareComponentProjectionWithReachability finalContext
               (closureHomeModules recovered) (closureComponentSelections recovered) (closureReachability recovered))
           candidate <- project (projectSelectedCandidateWithHostBindings hostBindings selected)
-          project (requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate))
+          let executableGlobals = requireOriginalExecutableGlobals hscEnv admittedOriginalBinders (candidateGlobals candidate)
+          case executableGlobals of
+            Right () -> pure ()
+            Left failure -> do
+              acquired <- readIORef nativeUseObligations
+              logTrace logger "projection.original_import_refused"
+                [ ("target", LogText target)
+                , ("failure", LogText (show failure))
+                , ("retained_count", LogInteger (fromIntegral (Map.size retainedGenerations)))
+                , ("retained_sample", LogText (show (take 32 (Map.toAscList retainedGenerations))))
+                , ("original_reference_count", LogInteger (fromIntegral (Map.size (pprOriginalReferences prepared))))
+                , ("original_reference_sample", LogText (show (take 32 (Map.keys (pprOriginalReferences prepared)))))
+                , ("native_replies_acquired", LogInteger (fromIntegral (Map.size acquired)))
+                ]
+          project executableGlobals
           demand <- either (ioError . userError) pure
             (originalPackageGlobals
               (candidateGlobals candidate) (candidateBindingIdentities candidate))
@@ -1121,6 +1137,13 @@ prepareWorldCellQuestion bound question = do
           bindings = Set.fromList (map worldCellInputReferenceBinding references)
       _ <- either throwIO pure (selectWorldCellExecutionInputReferences bindings references)
       sourceGenerations <- maybe (pure Map.empty) frozenDependencyGenerations (worldCellDependencyBasis inputs)
+      logger <- readLogger "tidepool.compiler.projection"
+      logTrace logger "projection.input_generations"
+        [ ("direct_count", LogInteger (fromIntegral (Map.size (worldCellRetainedGenerations inputs))))
+        , ("source_dependency_count", LogInteger (fromIntegral (Map.size sourceGenerations)))
+        , ("source_dependency_sample", LogText (show (take 32 (Map.toAscList sourceGenerations))))
+        , ("inherited_reference_count", LogInteger (fromIntegral (Set.size earlierSelected)))
+        ]
       initialGenerations <- foldM (\known (symbol,generation) -> case Map.lookup symbol known of
         Nothing -> pure (Map.insert symbol generation known)
         Just old | old == generation -> pure known
