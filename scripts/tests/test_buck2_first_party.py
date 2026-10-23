@@ -1622,6 +1622,31 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                 self.assertIn("needs pinned diagnostic and valid control", refused.stderr)
                 self.write(f"{package}/tests/compile_pass/{stem}.rs", "fn main() {}\n")
 
+    def test_runtime_semantic_cases_keep_resident_mode_through_generic_selection(self):
+        result = self.generate("--package", "tidepool-runtime")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cohort = self.rule("tidepool/runtime", "runtime_typed_segment_semantic_tests",
+                           "tidepool_rust_test_cases")
+        generic = self.rule("tidepool/runtime", "tidepool_runtime_unit_tests_all",
+                            "tidepool_rust_test_cases")
+        selected = cohort["exact_tests"]
+        self.assertTrue(selected)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertEqual(cohort["expected_count"], len(selected))
+        self.assertEqual(cohort["case_compiler_modes"], {
+            name: "owned-resident" for name in selected
+        })
+        for name in selected:
+            with self.subTest(case=name):
+                self.assertEqual(generic["case_compiler_modes"].get(name),
+                                 cohort["case_compiler_modes"][name])
+        self.assertEqual(generic["binary"], cohort["binary"])
+        for rule in (generic, cohort):
+            self.assertIs(rule["haskell_worker"], True)
+            self.assertEqual(rule["resource_env"]["TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG"],
+                             "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin")
+            self.assertIn("//build/package:compiler_service_deployment", rule["resources"])
+
     def test_runtime_tests_separate_native_admission_from_compiler_resources(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -1355,6 +1355,30 @@ RUNTIME_PARKED_CAPTURE_CASES = ["session::turn::scaling_tests::typed_segment_tes
 )]
 
 
+RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
+    "scaffold_diagnostics::shipped_world_scaffold_scopes_equality_with_a_custom_prelude",
+    "scaffold_diagnostics::world_preparation_reports_authored_record_warning_without_imported_warnings",
+    "signed_template_helpers_execute_recursion_and_polymorphism_once",
+    "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
+    "scalar_publication_forces_after_effect_without_publishing_then_recovers",
+    "retained_action_closure_demand_does_not_repeat_completed_effect",
+    "bare_observation_retains_lazy_thunk_before_later_demand",
+    "effectful_observation_runs_once_and_retains_its_lazy_result",
+    "late_type_error_prevents_all_effects_and_publication_before_new_retry",
+    "cancellation_after_real_effect_preserves_receipt_and_allows_new_intent",
+    "generated_capture_histories_match_ghc_cold_warm_and_recovery",
+    "deterministic_capture_history_matches_ghc_cold_warm_and_recovery",
+    "authentic_native_entries_refuse_root_and_order_substitution_before_effects",
+    "warm_target_selects_previously_unselected_original_native_groups",
+    "one_four_eight_actions_use_one_completed_inference_segment",
+    "produced_capture_types_cross_a_declaration_barrier_without_replaying_effects",
+    "zero_capture_let_executes_without_publishing_a_dummy_binding",
+    "zero_capture_bang_let_preserves_forcing_and_prior_effects",
+    "zero_capture_action_runs_once_before_the_next_item",
+    "strict_let_group_forces_before_retaining_its_closure_capture",
+)] + RUNTIME_PARKED_CAPTURE_CASES
+
+
 def runtime_world_publication_test_cases(binary):
     tests = ["session::resident::paired_publication_tests::" + name for name in (
         "paired_independent_authored_rebase_preserves_originals_and_current_winners",
@@ -1454,29 +1478,7 @@ def runtime_test_cases(binary):
         "    case_compiler_modes = {" + json.dumps(lifetime_test) + ': "owned-resident"},',
         '    visibility = ["PUBLIC"],', ")", "",
     ]))
-    semantic_tests = ["session::turn::scaling_tests::typed_segment_tests::" + name for name in (
-        "scaffold_diagnostics::shipped_world_scaffold_scopes_equality_with_a_custom_prelude",
-        "scaffold_diagnostics::world_preparation_reports_authored_record_warning_without_imported_warnings",
-        "signed_template_helpers_execute_recursion_and_polymorphism_once",
-        "genuine_let_generalization_and_unused_inner_bottom_match_ghc",
-        "scalar_publication_forces_after_effect_without_publishing_then_recovers",
-        "retained_action_closure_demand_does_not_repeat_completed_effect",
-        "bare_observation_retains_lazy_thunk_before_later_demand",
-        "effectful_observation_runs_once_and_retains_its_lazy_result",
-        "late_type_error_prevents_all_effects_and_publication_before_new_retry",
-        "cancellation_after_real_effect_preserves_receipt_and_allows_new_intent",
-        "generated_capture_histories_match_ghc_cold_warm_and_recovery",
-        "deterministic_capture_history_matches_ghc_cold_warm_and_recovery",
-        "authentic_native_entries_refuse_root_and_order_substitution_before_effects",
-        "warm_target_selects_previously_unselected_original_native_groups",
-        "one_four_eight_actions_use_one_completed_inference_segment",
-        "produced_capture_types_cross_a_declaration_barrier_without_replaying_effects",
-        "zero_capture_let_executes_without_publishing_a_dummy_binding",
-        "zero_capture_bang_let_preserves_forcing_and_prior_effects",
-        "zero_capture_action_runs_once_before_the_next_item",
-        "strict_let_group_forces_before_retaining_its_closure_capture",
-    )]
-    semantic_tests.extend(RUNTIME_PARKED_CAPTURE_CASES)
+    semantic_tests = RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES
     semantic_env, semantic_resources, semantic_worker = compiler_service_test_inputs(
         "tidepool-runtime", "runtime_typed_segment_semantic_tests"
     )
@@ -2048,10 +2050,8 @@ tidepool_buildscript_run(
                     json.dumps(name) + ': "owned-resident"'
                     for name in [
                         "session::turn::tests::cell_program_primary_failure_keeps_its_outer_close_observation",
-                        "session::turn::scaling_tests::typed_segment_tests::bare_observation_retains_lazy_thunk_before_later_demand",
-                        "session::turn::scaling_tests::typed_segment_tests::effectful_observation_runs_once_and_retains_its_lazy_result",
                         *RUNTIME_CHECKED_CAPTURE_CASES,
-                        *RUNTIME_PARKED_CAPTURE_CASES,
+                        *RUNTIME_TYPED_SEGMENT_SEMANTIC_CASES,
                     ]) + "},"] if package_name == "tidepool-runtime" else []),
                 *(['    case_compiler_modes = {' + ", ".join(
                     json.dumps(name) + ": \"owned-resident\""
