@@ -2,7 +2,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, capturedCanonicalPromotionRefusesReadableMissingInputs, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws, compilerServiceBootBoundaries, worldCellAdmissionParse, worldCanonicalOriginalReuse, worldCarriedImportTypes, worldResidencyBoundaries, worldRejectionDiagnosticBoundaries, bufferedImportSyntaxBoundaries, bufferedImportRefinementLineage) where
 
 import Tidepool.RequestCompletion (finishCompletion)
 
@@ -45,14 +45,16 @@ import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
 import GHC.Driver.Env (HscEnv(..), hsc_HPT)
 import GHC (getSession, setSession, setContext, InteractiveImport(..), simpleImportDecl, exprType, TcRnExprMode(TM_Inst)
-  , Ghc, ParsedModule(..), Target(..), guessTarget, setTargets, depanal, parseModule
+  , Ghc, GhcPs, ParsedModule(..), Target(..), guessTarget, setTargets, depanal, parseModule
   , ms_mod_name, ms_hspp_opts)
 import GHC.Data.FastString (mkFastString)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Parser qualified as Parser
 import GHC.Parser.Lexer (ParseResult(..), initParserState, unP)
-import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Hs (HsModule(..), ImportDecl(..), ImportDeclQualifiedStyle(..), ImportListInterpretation(..), IE(..), IEWrappedName(..))
+import GHC.Types.Name.Reader (rdrNameOcc)
+import GHC.Types.SrcLoc (GenLocated(..), mkRealSrcLoc, unLoc)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
 import GHC.Data.ShortText qualified as PackageText
 import GHC.Unit.Env (ue_setUnits)
@@ -128,7 +130,10 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
 import Tidepool.ImportSyntax
   ( CapturedImportSyntax, captureImportSyntax, capturedImportOccurrences
-  , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor )
+  , matchDriverImports, driverImportOccurrences, importOccurrenceId, importOccurrenceDescriptor
+  , describeImport, beginImportRefinement, refinedImportOccurrences, ImportLineage(..), importOccurrenceLineage )
+import Tidepool.CheckedCell (nativeImportSyntax, nativeParsedModule, unannotatedModule, mapNativeModule)
+import Tidepool.CheckedPrefixImports (refineParsedDeclarationImports)
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.PackageWitness (readCompilerPackageBoot, requireObservationPackageEnvironment, captureSupportedPackageProfileWith)
 import Tidepool.ArtifactBytes
@@ -243,6 +248,83 @@ bufferedImportSyntaxBoundaries = withTiming $ withScratch $ \work ->
               (Left _,Left _) -> True
               _ -> False)
     unless (isSuccess propertyResult) (fail "buffered import sequence property failed")
+
+-- beginImportRefinement carries matched syntax DATA into the real refiner; it
+-- does not manufacture a Prepared admission or an interface/source grant.
+bufferedImportRefinementLineage :: IO ()
+bufferedImportRefinementLineage = withTiming $ withScratch $ \work ->
+  withResidentCompilerScopes [work] $ \runScope -> runScope (pure ()) $ \compiler -> do
+    let source = unlines
+          [ "module InMemoryImportRoot where"
+          , "import Data.List as Lists (sort, nub)"
+          , "import qualified Data.Maybe as Chosen (Maybe(..))"
+          , "sort = ()"
+          , "entry = ()"
+          ]
+    (captured,matched,environment) <- scopedRunGhc compiler $ do
+      (captured,parsed) <- bufferedParsedImports work source
+      matched <- either (liftIO . fail . show) pure (matchDriverImports captured parsed)
+      environment <- getSession
+      pure (captured,matched,environment)
+    let native = unannotatedModule (beginImportRefinement matched)
+        original = capturedImportOccurrences captured
+    parent <- case original of
+      first : _ -> pure first
+      _ -> fail "lineage control omitted its actual parent occurrence"
+    unchanged <- mapNativeModule pure native
+    unless (map importOccurrenceId (refinedImportOccurrences (nativeImportSyntax unchanged))
+        == map importOccurrenceId original)
+      (fail "import-preserving annotation changed its captured parent identities")
+    refined <- refineParsedDeclarationImports environment native
+    let occurrences = refinedImportOccurrences (nativeImportSyntax refined)
+        imports = hsmodImports (unLoc (pm_parsed_source (nativeParsedModule refined)))
+        observations = zip occurrences (map unLoc imports)
+        parentId = importOccurrenceId parent
+        narrowed = [declaration | (occurrence,declaration) <- observations
+          , importOccurrenceLineage occurrence == NarrowedImport parentId]
+        qualified = [declaration | (occurrence,declaration) <- observations
+          , importOccurrenceLineage occurrence == QualifiedImport parentId]
+        synthetic = [declaration | (occurrence,declaration) <- observations
+          , importOccurrenceLineage occurrence == SyntheticPrelude]
+        narrowedNames :: ImportDecl GhcPs -> Maybe [String]
+        narrowedNames declaration = case ideclImportList declaration of
+          Just (Exactly,entries) -> mapM (\entry -> case unLoc entry of
+            IEVar _ wrapped _ -> case unLoc wrapped of
+              IEName _ name -> Just (occNameString (rdrNameOcc (unLoc name)))
+              _ -> Nothing
+            _ -> Nothing) (unLoc entries)
+          _ -> Nothing
+    unless (length occurrences == length imports
+        && Set.size (Set.fromList (map importOccurrenceId occurrences)) == length occurrences
+        && case (narrowed,qualified,synthetic) of
+          ([unqualified],[clone],[prelude]) ->
+            ideclQualified unqualified == NotQualified
+              && narrowedNames unqualified == Just ["nub"]
+              && ideclQualified clone == QualifiedPre
+              && describeImport (clone {ideclQualified=NotQualified})
+                == Right (importOccurrenceDescriptor parent)
+              && moduleNameString (unLoc (ideclName prelude)) == "Prelude"
+          _ -> False)
+      (fail "actual refiner lost narrowed/qualified parent selection or synthetic Prelude lineage")
+    requireUserError "unregistered import reorder" "RefinementChangedImports" $
+      mapNativeModule (\(L location syntax) ->
+        pure (L location (syntax {hsmodImports=reverse (hsmodImports syntax)}))) native
+    let originalImports = hsmodImports (unLoc (pm_parsed_source (nativeParsedModule native)))
+    preservation <- quickCheckWithResult stdArgs
+        { maxSuccess=48, maxSize=6, replay=Just (mkQCGen 749104,0) } $
+      forAllShrink (frequency [(1,pure [0,1]),(3,resize 6 (listOf (elements [0,1])))])
+        (shrinkList (const [])) $ \indices ->
+        classify (indices == [0,1]) "unchanged" $
+        classify (length indices /= 2) "changed count" $
+        classify (indices == [1,0]) "reordered" $ ioProperty $ do
+          let transform (L location syntax) = pure (L location
+                (syntax {hsmodImports=map (originalImports !!) indices}))
+          if indices == [0,1]
+            then void (mapNativeModule transform native)
+            else requireUserError "unregistered generated import sequence" "RefinementChangedImports"
+              (mapNativeModule transform native)
+          pure True
+    unless (isSuccess preservation) (fail "import-preserving refinement property failed")
 
 bufferedParsedImports :: FilePath -> String -> Ghc (CapturedImportSyntax,ParsedModule)
 bufferedParsedImports work source = do
