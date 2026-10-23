@@ -69,6 +69,14 @@ Most changes touch one of three layers, and it helps to know which:
 - Treat surprising or needlessly complicated code as a finding. Fix it when
   it is in scope; otherwise report it plainly. Prefer deleting obsolete paths
   to preserving them through adapters.
+- A migration or refactoring is complete only when its superseded implementation,
+  APIs, fallback routes and test-only escape hatches are deleted. Remove the old
+  surface so missed callers become compile failures, then migrate those callers
+  and their meaningful tests through the new production boundary. Do not keep a
+  legacy implementation just to satisfy its tests, or hide it behind `cfg(test)`.
+  Preserve independent decoder/refusal tests at their actual data boundary.
+  An intermediate coexistence checkpoint must be described as incomplete; verify
+  removal across language, command, generated-build and documentation consumers.
 - Backward compatibility is not a goal when it would preserve a bad internal
   boundary. Serialized formats and externally consumed APIs still require an
   explicit migration decision.
