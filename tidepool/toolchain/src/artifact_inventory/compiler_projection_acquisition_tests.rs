@@ -595,7 +595,7 @@ fn assert_fresh_dependency_permission_boundary(
 }
 
 #[test]
-fn completed_output_keeps_actual_producer_with_private_equal_offer() {
+fn completed_output_keeps_actual_world_producer_beside_equal_canonical_private_offer() {
     let fixture = crate::artifacts::test_support::prepare_source_publication_entry_fixture()
         .expect("the actual compiler issues the prior completed source observation");
     let context = fixture
@@ -610,12 +610,12 @@ fn completed_output_keeps_actual_producer_with_private_equal_offer() {
         .iter()
         .find(|offer| offer.original() == fixture.helper.descriptor.id)
         .expect("the completed cohort carries its helper's actual native offer");
-    assert_completed_output_keeps_actual_producer_with_private_equal_offer(
+    assert_completed_output_keeps_actual_producer_beside_equal_canonical_private_offer(
         &fixture, support, offer, owner,
     );
 }
 
-fn assert_completed_output_keeps_actual_producer_with_private_equal_offer(
+fn assert_completed_output_keeps_actual_producer_beside_equal_canonical_private_offer(
     fixture: &crate::artifacts::test_support::SourcePublicationEntryFixture,
     prior: &CompilerSourceSupport,
     prior_offer: &IssuedNativeOffer,
@@ -964,10 +964,29 @@ fn assert_world_completed_output_keeps_actual_producer(
             actual.all(|(other, _)| other.same_admission_and_transport(&product)),
             "one independent physical H product is carried through later stage projections"
         );
+        // Ordinary A and World B have separate version/replay domains. Their
+        // shared canonical and body facts do not equate their Original owners.
+        // Equal-Original acquisition histories are covered by the independent
+        // ordinary requests in authored_promotion_preserves_actual_offered_acquisition.
+        assert_eq!(product.owner().unit, prior_product.owner().unit);
+        assert_eq!(product.owner().module, prior_product.owner().module);
         assert_eq!(
-            &product, prior_product,
-            "private A and produced B have equal immutable facts"
+            ArtifactEntry::canonical_artifact_id(product.module_interface()),
+            ArtifactEntry::canonical_artifact_id(prior_product.module_interface()),
         );
+        assert!(product.module_interface() == prior_product.module_interface());
+        assert_eq!(product.source_sha256(), prior_product.source_sha256());
+        assert!(product.interface_bytes() == prior_product.interface_bytes());
+        assert!(product.product_bytes() == prior_product.product_bytes());
+        assert!(product.package_imports_bytes() == prior_product.package_imports_bytes());
+        assert_ne!(
+            product.owner().module_version,
+            prior_product.owner().module_version,
+            "World product versions bind their actual checked source context"
+        );
+        assert!(product.certification_bytes() != prior_product.certification_bytes());
+        assert!(product.execution_source().is_none());
+        assert!(prior_product.execution_source().is_some());
         assert!(product.source_admission().is_some());
         assert!(!Arc::ptr_eq(
             product.source_admission().unwrap(),
@@ -978,6 +997,7 @@ fn assert_world_completed_output_keeps_actual_producer(
             .completed_compiler_output_offer(owner)
             .unwrap()
             .expect("the actual physical B receipt retains its own contribution");
+        assert_ne!(offer.original(), prior_offer.original());
         let ArtifactPayload::Original(offered_product) = &offer.original_acquisition().payload
         else {
             unreachable!()
