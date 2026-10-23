@@ -26774,17 +26774,30 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(output.selected_native_groups().is_empty());
             assert!(output.artifact_ids().contains(&entry.descriptor.id));
+            let assert_interface_only = |view: &crate::artifact_inventory::ArtifactView| {
+                let namespace = view.capture_graph_selection().namespace;
+                assert!(
+                    namespace
+                        .iter()
+                        .all(|binding| binding.artifact != entry.descriptor.id),
+                    "TYPE visibility does not select the historical Original compiler role"
+                );
+                assert!(
+                    namespace.iter().any(|binding| binding.artifact
+                        == ArtifactEntry::canonical_artifact_id(dependency.module_interface())),
+                    "the dependency's exact canonical interface remains visible"
+                );
+                assert!(
+                    view.selected_native_groups().is_empty(),
+                    "interface availability does not select executable groups"
+                );
+            };
             if interface_only {
-                for view in [request.compiler_inputs().artifacts(), &output] {
-                    assert!(
-                        view.capture_graph_selection()
-                            .namespace
-                            .iter()
-                            .all(|binding| binding.artifact != entry.descriptor.id),
-                        "historical dependency bytes do not enter the compiler namespace"
-                    );
-                }
+                assert_interface_only(request.compiler_inputs().artifacts());
             }
+            // This intermediate physical output uses SuppliedArtifacts custody.
+            // Its namespace is not the completed compiler role projection;
+            // bind_segment retains the actual selection's compiler roles.
             assert!(selection.new_product_native_requirements().next().is_none());
             let current_entry = output.entries().into_iter().find(|entry| {
                 matches!(&entry.payload, crate::artifact_inventory::ArtifactPayload::Original(product)
@@ -26834,6 +26847,31 @@ pub(crate) mod tests {
             assert!(!issued
                 .source_selection()
                 .has_unissued_current_native_products());
+            if interface_only {
+                let completed = issued.captured_stage().compiler_inputs();
+                assert!(
+                    completed
+                        .role_projection()
+                        .roles()
+                        .iter()
+                        .any(|role| role.interface()
+                            == ArtifactEntry::canonical_artifact_id(dependency.module_interface())
+                            && role.original().is_none()),
+                    "completed compiler inputs retain the exact dependency TYPE role"
+                );
+                assert!(completed
+                    .issued_artifacts()
+                    .selected_native_groups()
+                    .is_empty());
+                assert!(
+                    completed
+                        .role_projection()
+                        .roles()
+                        .iter()
+                        .all(|role| role.original() != Some(entry.descriptor.id)),
+                    "completion preserves the dependency's TYPE-only compiler role"
+                );
+            }
             if !full {
                 let current_issued = issued
                     .source_selection()
@@ -27045,6 +27083,7 @@ pub(crate) mod tests {
                     ArtifactInventoryFailure, NativeAdmissionRefusal, NativeGroupKey,
                 };
                 let input_view = next.compiler_inputs().artifacts();
+                assert_interface_only(input_view);
                 let inventory = input_view.inventory();
                 let operation = InventoryOperation::new(Default::default());
                 let input_selection = CertifiedSourceSelection::from_compiler_inputs(
