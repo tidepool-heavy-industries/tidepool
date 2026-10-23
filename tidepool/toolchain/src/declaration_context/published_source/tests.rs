@@ -439,16 +439,16 @@ fn check_publication_foreign_native_scopes(fixture: &CompiledPublicationFixture)
         let foreign_selection = ExactArtifactSelection::from_recovered_graph_selection(graph);
         held.artifact_view().select_issued(vec![root.descriptor.id], &foreign_selection)
             .unwrap_or_else(|error| panic!("{name} foreign DATA selection must authenticate before SOURCE refusal: {error:?}"));
-        let mut role = published_role.clone();
-        let CompilerInputRole::PublishedSourceOriginal { selection, .. } = &mut role else {
-            unreachable!()
-        };
-        *selection = foreign_selection;
         let mut snapshot = held.snapshot();
         snapshot.native_fact_owner = None;
-        snapshot
-            .roles
-            .insert(root.descriptor.owner.clone(), role.recorded_fact());
+        let crate::exact_context::RecordedCompilerRow::Original {
+            provenance: crate::exact_context::RecordedOriginalProvenance::Published(birth),
+            ..
+        } = snapshot.roles.get_mut(&root.descriptor.owner).unwrap()
+        else {
+            unreachable!()
+        };
+        birth.selection = foreign_selection;
         let mut writer = crate::exact_context::Materializer::new(&store);
         let mutated = writer.materialize_context(None, &snapshot).unwrap();
         for (cid, bytes) in writer.finish().unwrap().into_blocks() {
@@ -621,7 +621,7 @@ fn assert_sparse_partial_transport(context: &ExactDeclarationContext, original: 
         .iter()
         .all(|group| group.binding.artifact() != original || group.original_ordinal == 7));
     let transport = NativeInputSelection::issue_checked(
-        context.compiler_input_projection(),
+        context.compiler_source_support().compiler_roles(),
         &context.compiler_metadata_snapshot().unwrap(),
         context.artifact_view(),
         offers,
@@ -882,7 +882,7 @@ fn retained_composition_histories(sparse: bool, interface_adapter_only: bool) {
                     .compiler_source_support()
                     .checked_native_input_decision(
                         different_body.descriptor.id,
-                        ArtifactEntry::canonical_artifact_id(product.module_interface().unwrap()),
+                        ArtifactEntry::canonical_artifact_id(product.module_interface()),
                         product.owner(),
                     )
                     .map(|_| ());

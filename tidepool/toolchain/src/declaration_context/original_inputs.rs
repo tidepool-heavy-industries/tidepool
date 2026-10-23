@@ -138,7 +138,7 @@ pub(crate) fn entry_payloads(
         ArtifactPayload::Original(product) => (
             product.interface_bytes(),
             product.package_imports_bytes(),
-            product.module_interface(),
+            Some(product.module_interface()),
         ),
         ArtifactPayload::Canonical(interface) => (
             interface.interface_bytes(),

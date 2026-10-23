@@ -331,23 +331,29 @@ fn publication_reopening_refuses_missing_type_namespace_with_retained_custody() 
 fn published_role_refuses_missing_issuer_selection() {
     let fixture = super::tests::compiled_publication_fixture();
     let publication = &fixture.publication;
-    let mut roles = serde_json::to_value(publication.context().compiler_input_roles()).unwrap();
-    assert_eq!(
-        serde_json::from_value::<Vec<CompilerInputRole>>(roles.clone()).unwrap(),
-        publication.context().compiler_input_roles()
-    );
-    let published = publication
+    let recorded = publication
         .context()
-        .compiler_input_roles()
-        .into_iter()
-        .position(|role| role.is_published_source_original())
+        .snapshot()
+        .recorded_rows()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut roles = serde_json::to_value(&recorded).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Vec<crate::exact_context::RecordedCompilerRow>>(roles.clone())
+            .unwrap(),
+        recorded
+    );
+    let published = recorded
+        .iter()
+        .position(|row| row.publication().is_some())
         .expect("fixture publication carries an exact source selection");
-    roles[published]
+    roles[published]["provenance"]["birth"]
         .as_object_mut()
         .unwrap()
         .remove("selection");
     assert!(
-        serde_json::from_value::<Vec<CompilerInputRole>>(roles).is_err(),
+        serde_json::from_value::<Vec<crate::exact_context::RecordedCompilerRow>>(roles).is_err(),
         "legacy publication facts cannot reconstruct the issuer's selection from broader custody"
     );
 }
@@ -434,7 +440,7 @@ proptest! {
                 && role.original() == Some(other_helper.descriptor.id)));
         let before = context.semantic_sha256();
         let ArtifactPayload::Original(other_product) = &other_root.payload else { unreachable!() };
-        let canonical = ArtifactEntry::canonical_artifact_id(other_product.module_interface().unwrap());
+        let canonical = ArtifactEntry::canonical_artifact_id(other_product.module_interface());
         let crossed = context.compiler_source_support().checked_native_input_decision(
             other_root.descriptor.id, canonical, other_product.owner(),
         ).map(|_| ());

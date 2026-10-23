@@ -233,12 +233,10 @@ impl ExactDeclarationContext {
         let ArtifactPayload::Original(product) = &entry.payload else {
             return Err(failure("published selection has no native original"));
         };
-        if product.module_interface().is_none_or(|canonical| {
-            !matches!(
-                canonical.origin(),
-                crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
-            )
-        }) {
+        if !matches!(
+            product.module_interface().origin(),
+            crate::certified_products::CanonicalOrigin::SourceOriginal { .. }
+        ) {
             return Err(failure("published original lacks canonical source origin"));
         }
         let support = &self.owner.facts.compiler_support;
@@ -254,10 +252,7 @@ impl ExactDeclarationContext {
             let ArtifactPayload::Original(product) = &entry.payload else {
                 unreachable!()
             };
-            let canonical =
-                ArtifactEntry::canonical_artifact_id(product.module_interface().ok_or_else(
-                    || failure("published dependency lacks its canonical interface"),
-                )?);
+            let canonical = ArtifactEntry::canonical_artifact_id(product.module_interface());
             let issued_binding = closure.selection_snapshot().namespace.get(&canonical);
             let current_binding = support
                 .artifacts()
@@ -504,10 +499,10 @@ impl ExactDeclarationContext {
                 if !compiler.entries.get(&root).is_some_and(|entry| {
                     matches!(&entry.payload, ArtifactPayload::Original(product)
                         if product.owner() == owner
-                            && !product.module_interface().is_some_and(|interface| matches!(
-                                interface.origin(),
+                            && !matches!(
+                                product.module_interface().origin(),
                                 crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
-                            )))
+                            ))
                 }) {
                     continue;
                 }
