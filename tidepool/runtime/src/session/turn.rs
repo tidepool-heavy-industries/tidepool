@@ -5774,10 +5774,8 @@ mod tests {
                 view.injected_module_names(),
             )
             .unwrap();
-            let public_target = execution.world_execution_facts().public_target;
             crate::session::world_cell_test_support::plan_fixture_specification_for(
                 resident,
-                &public_target,
                 crate::session::world_cell_test_support::world_recipe(&specification),
                 execution.clone(),
             )
