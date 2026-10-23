@@ -93,24 +93,38 @@ impl OriginalDisplayContext {
     }
 }
 
-impl PartialEq for OriginalDisplayContext {
-    fn eq(&self, other: &Self) -> bool {
+impl OriginalDisplayContext {
+    /// Compare the closed observations used to specialize physical display code.
+    /// Each execution consumer still retains its own captured acquisitions.
+    pub fn same_recorded_facts(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self.execution.same_recorded_facts(&other.execution)
+                && self.declarations.same_recorded_facts(&other.declarations)
+                && self.same_display_inputs(other))
+    }
+
+    /// Compare an issued display together with its actual execution selection.
+    pub fn same_authenticated_display(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
             || (self
                 .execution
                 .same_authenticated_execution(&other.execution)
                 && self
                     .declarations
-                    .same_display_observations(&other.declarations)
-                && self.witness == other.witness
-                && self.witness.original_bytes() == other.witness.original_bytes()
-                && self
-                    .input_interfaces
-                    .same_authenticated_interfaces(&other.input_interfaces)
-                && self.declarations == other.declarations)
+                    .same_authenticated_context(&other.declarations)
+                && self.same_display_inputs(other))
+    }
+
+    fn same_display_inputs(&self, other: &Self) -> bool {
+        self.declarations
+            .same_display_observations(&other.declarations)
+            && self.witness == other.witness
+            && self.witness.original_bytes() == other.witness.original_bytes()
+            && self
+                .input_interfaces
+                .same_authenticated_interfaces(&other.input_interfaces)
     }
 }
-impl Eq for OriginalDisplayContext {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationPreviewDisposition {
