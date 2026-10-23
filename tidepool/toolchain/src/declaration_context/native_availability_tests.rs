@@ -5067,7 +5067,11 @@ fn candidate_availability_preserves_interface_only_with_historical_dependency() 
                 .unwrap();
             let program_types = types.clone();
             let type_context = Arc::new(SelectedTypeInterfaces {
-                support: complete.selected_interfaces().unwrap().type_interfaces_for_owners(vec![owner.clone()]).unwrap(),
+                support: complete
+                    .selected_interfaces()
+                    .unwrap()
+                    .type_interfaces_for_owners(vec![owner.clone()])
+                    .unwrap(),
                 producer: context.toolchain_identity_sha256(),
                 identity: OnceLock::new(),
             });

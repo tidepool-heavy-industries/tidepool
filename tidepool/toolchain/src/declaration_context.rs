@@ -5153,7 +5153,8 @@ impl WorldPrimaryInputs {
             .support
             .native_availability()
             .same_acquisition(self.inputs.source_support.native_availability())
-            && delta.support.native_offers().len() == self.inputs.source_support.native_offers().len()
+            && delta.support.native_offers().len()
+                == self.inputs.source_support.native_offers().len()
             && delta
                 .support
                 .native_offers()

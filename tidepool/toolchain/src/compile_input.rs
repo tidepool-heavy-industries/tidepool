@@ -824,9 +824,7 @@ mod tests {
             "module PreparedOriginal where\n__prepared :: Int\n__prepared = 42\n",
         )
         .unwrap();
-        let sources =
-            crate::artifacts::FrozenEntrySources::capture(&[authored], &source)
-                .unwrap();
+        let sources = crate::artifacts::FrozenEntrySources::capture(&[authored], &source).unwrap();
         let entry = crate::artifacts::test_support::prepare_frozen_production_entry(
             &sources,
             root.path(),
@@ -887,7 +885,11 @@ mod tests {
                 .is_none()
         );
         let projected = validated.project_type_interfaces(&[], &[]).unwrap();
-        assert!(projected.compiler_source_support().projection().roles().is_empty());
+        assert!(projected
+            .compiler_source_support()
+            .projection()
+            .roles()
+            .is_empty());
         assert_eq!(
             projected.toolchain_identity_sha256(),
             original.context().toolchain_identity_sha256()
