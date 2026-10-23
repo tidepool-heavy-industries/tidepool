@@ -1,29 +1,8 @@
-// Component histories use the existing representation-model certificates and
-// receipt fixtures. Genuine compiler issuance remains an integration gate.
+// Component histories carry representation-model certificates through actual
+// native and TYPE owners. SOURCE admission and generated-output omission require
+// the actual compiler integration gate.
 mod program_source_support_history {
     use super::*;
-
-    // The fixture originals issue roles before custody can add dependencies.
-    fn original_offer(
-        products: &[CertifiedRecoveryProduct],
-    ) -> (ArtifactView, CompilerInputProjection) {
-        let originals = products
-            .iter()
-            .map(|product| {
-                Arc::new(
-                    crate::artifact_inventory::ArtifactEntry::original(
-                        product.module_interface().producer_sha256(),
-                        product.clone(),
-                    )
-                    .unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let projection = CompilerInputProjection::from_issued_entries(&originals).unwrap();
-        let custody = support_view(products);
-        projection.validate(&custody).unwrap();
-        (custody, projection)
-    }
 
     type Graph = BTreeMap<ExactModuleIdentity, BTreeSet<ExactModuleIdentity>>;
 
@@ -163,7 +142,7 @@ mod program_source_support_history {
     }
 
     #[test]
-    fn private_original_choices_survive_sparse_outputs_publication_capture_and_retry() {
+    fn private_original_choices_survive_sparse_type_growth_capture_and_retry() {
         let directory = tempfile::tempdir().unwrap();
         let baseline = (0..20)
             .map(|index| support_product(&format!("Private{index:02}")))
@@ -188,15 +167,21 @@ mod program_source_support_history {
         let custody = support_view(&baseline)
             .merge_fixture_selections(&support_view(&[alternate.clone()]))
             .unwrap();
-        let sparse = [
-            support_product("Consumer"),
-            support_product_in_unit("main", "CachedSparseHelper"),
-        ];
-        let (sparse_view, sparse_projection) = original_offer(&sparse);
-        assert_eq!(sparse.len(), 2);
+        let sparse = support_product_in_unit("main", "CachedSparseHelper");
+        let CompilerSupportFixture::Complete(sparse_inputs) =
+            support_offer(std::slice::from_ref(&sparse))
+        else {
+            unreachable!("completed native fixture")
+        };
+        let sparse_support = sparse_inputs.compiler_source_support();
+        assert!(!sparse_support.native_offers().is_empty());
+        let sparse_input = OriginalCompilerInputs::from_issued_support(sparse_support);
+        let sparse_types = sparse_support
+            .selected_interfaces()
+            .unwrap()
+            .support_for_owners(vec![identity(&sparse.owner().unit, &sparse.owner().module)])
+            .unwrap();
 
-        // Both exact native versions share the public interface, but each history
-        // selects one immutable original and retains the other only as custody.
         for choose_alternate in [false, true] {
             let mut selected = baseline.clone();
             let excluded = if choose_alternate {
@@ -205,11 +190,15 @@ mod program_source_support_history {
             } else {
                 alternate.clone()
             };
-            let (selected_view, projection) = original_offer(&selected);
-            let issued = recover_fixture_compiler_support(projection.clone(), selected_view, [])
-                .unwrap()
+            let CompilerSupportFixture::Complete(selected_inputs) = support_offer(&selected) else {
+                unreachable!("completed native fixture")
+            };
+            let issued = selected_inputs
+                .compiler_source_support()
                 .retain_custody(&custody)
                 .unwrap();
+            assert!(!issued.native_offers().is_empty());
+            let projection = issued.projection().clone();
             let input = OriginalCompilerInputs::from_issued_support(&issued);
             let types = issued
                 .selected_interfaces()
@@ -229,8 +218,6 @@ mod program_source_support_history {
             assert_eq!(expected.len(), 20);
             let root = directory.path().join(format!("history-{choose_alternate}"));
             std::fs::create_dir_all(&root).unwrap();
-            // Public role growth and private promotion retain one semantic owner;
-            // neither transition creates compiler transport copies.
             let empty = Arc::new(
                 ExactDeclarationContext::from_authenticated_interfaces(
                     program_test_producer_sha256(),
@@ -246,11 +233,7 @@ mod program_source_support_history {
                 .in_program_context(public.clone())
                 .unwrap();
             assert_eq!(original.compiler_inputs().metadata.entries.len(), 20);
-            assert_eq!(
-                std::fs::read_dir(&root).unwrap().count(),
-                1,
-                "semantic public roles must not create transport files"
-            );
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
             let before_promotion = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let request = original
                 .in_program_context_with_private_input(public.clone(), &input)
@@ -268,94 +251,22 @@ mod program_source_support_history {
             assert_private_choices(&original, &BTreeSet::new(), &public);
             let captured = request.clone();
 
-            let receipt = import_receipt(
-                &root,
-                request.receipt_admission().physical_request(),
-                "Unadmitted",
+            // Public TYPE growth and private Original choice use their actual
+            // completed owners independently. Neither issues SOURCE authority.
+            let published = Arc::new(
+                public
+                    .as_ref()
+                    .clone()
+                    .extend_issued_compiler_support(&sparse_types)
+                    .unwrap(),
             );
-            let mut value = read_receipt(&receipt);
-            value.as_array_mut().unwrap()[8].as_array_mut().unwrap()[0]
-                .as_array_mut()
-                .unwrap()[3] = Value::Array(vec![]);
-            write_receipt(&receipt, &value);
-            let mut validation = PackageInterfaceValidation::default();
-            let admission = request
-                .receipt_admission()
-                .validate_receipt_with_validation(&receipt, None, &public, &mut validation)
-                .unwrap();
-            let generated_owner = admission.generated_source_owner();
-            assert_eq!(generated_owner, identity("fixture", "Consumer"));
-            let source = "module Consumer where\n";
-            let effective = request.compiler_inputs();
-            let full_view = effective
-                .artifacts()
-                .merge_fixture_selections(&sparse_view)
-                .unwrap();
-            let full_projection = effective.projection().merge(&sparse_projection).unwrap();
-            let mut full_selection =
-                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
-                    &full_projection,
-                    &full_view.metadata_snapshot(),
-                    &validation.inventory,
-                )
-                .unwrap();
-            let full_stage = CapturedCompilerStage::issue(
-                &mut full_selection,
-                &full_view,
-                Vec::new(),
-                &mut validation,
-            )
-            .unwrap();
-            let full_input = full_stage.compiler_inputs();
-            let full_selection = full_stage.source_selection();
-            let execution = (&request)
-                .receipt_admission()
-                .product_admission(&admission)
-                .prepare_execution_context(full_input)
-                .unwrap();
-            let execution = execution.context;
-            expected.extend(offered_owners(&sparse));
-            assert_eq!(expected.len(), 22);
-            assert_eq!(
-                offered_owners(&execution.compiler_original_products().unwrap()),
-                expected
-            );
-
-            // The sparse output adds its generated target and a cached helper. Only the
-            // authenticated generated target leaves the continuation offer.
-            let continuation_artifacts = full_view
-                .select_roots(
-                    full_view
-                        .descriptors()
-                        .into_iter()
-                        .filter(|descriptor| descriptor.owner != generated_owner)
-                        .map(|descriptor| descriptor.id)
-                        .collect(),
-                )
-                .unwrap();
-            let continuation_input = full_input
-                .for_program_continuation(
-                    &continuation_artifacts,
-                    std::slice::from_ref(&admission),
-                    source,
-                )
-                .unwrap();
-            let mut publication = request.clone();
-            let published = publication
-                .admit_program_support_with_selection(
-                    public.clone(),
-                    &continuation_artifacts,
-                    std::slice::from_ref(&admission),
-                    None,
-                    full_selection,
-                )
-                .unwrap();
-            assert_private_choices(&request, &offered_owners(&selected), &public);
+            let publication = request.in_program_context(published.clone()).unwrap();
+            assert_private_choices(&publication, &expected, &published);
             let before_continuation = REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get());
             let continued = publication
-                .in_program_context_with_private_input(published.clone(), &continuation_input)
+                .in_program_context_with_private_input(published.clone(), &sparse_input)
                 .unwrap();
-            assert!(expected.remove(sparse[0].owner()));
+            expected.insert(sparse.owner().clone());
             assert_eq!(expected.len(), 21);
             assert_eq!(
                 REQUEST_COMPILER_INPUT_COMPUTATIONS.with(|count| count.get()),
@@ -369,16 +280,43 @@ mod program_source_support_history {
             assert_private_choices(&continued, &expected, &published);
             assert_private_choices(&captured, &offered_owners(&selected), &public);
             assert_eq!(public.semantic_sha256(), before);
+            assert_ne!(published.semantic_sha256(), before);
+            let held = continued
+                .compiler_inputs()
+                .compiler_source_support()
+                .native_offers();
+            for offer in issued
+                .native_offers()
+                .iter()
+                .chain(sparse_support.native_offers())
+            {
+                assert!(
+                    held.iter().any(|actual| actual.same_issuance(offer)),
+                    "growth retains the exact issuing native contribution"
+                );
+            }
 
-            let (wrong_view, wrong_projection) = original_offer(&[excluded]);
-            let wrong_support =
-                recover_fixture_compiler_support(wrong_projection, wrong_view.clone(), []).unwrap();
-            let wrong_input = OriginalCompilerInputs::from_issued_support(&wrong_support);
+            let CompilerSupportFixture::Complete(wrong_inputs) =
+                support_offer(std::slice::from_ref(&excluded))
+            else {
+                unreachable!("completed alternate native fixture")
+            };
+            let wrong_input =
+                OriginalCompilerInputs::from_issued_support(wrong_inputs.compiler_source_support());
+            let independent = original
+                .in_program_context_with_private_input(public.clone(), &wrong_input)
+                .unwrap();
+            assert_private_choices(
+                &independent,
+                &BTreeSet::from([excluded.owner().clone()]),
+                &public,
+            );
             let stable_inputs = Arc::clone(&continued.inputs.compiler);
             let stable_roles = continued.compiler_inputs().projection().roles();
             assert!(continued
                 .in_program_context_with_private_input(published.clone(), &wrong_input)
                 .is_err());
+            let wrong_view = wrong_inputs.compiler_source_support().artifacts().clone();
             assert!(recover_fixture_compiler_support(projection.clone(), wrong_view, []).is_err());
             let without_first = support_view(&selected[1..]);
             assert!(
@@ -397,42 +335,6 @@ mod program_source_support_history {
                 .in_program_context_with_private_input(published.clone(), &input)
                 .unwrap();
             assert_private_choices(&retried, &expected, &published);
-
-            // An inherited native carrier cannot borrow the generated omission.
-            let selected_id = crate::artifact_inventory::ArtifactEntry::original(
-                program_test_producer_sha256(),
-                selected[0].clone(),
-            )
-            .unwrap()
-            .descriptor
-            .id;
-            let missing_selected = full_view
-                .select_roots(
-                    full_view
-                        .descriptors()
-                        .into_iter()
-                        .filter(|descriptor| descriptor.id != selected_id)
-                        .map(|descriptor| descriptor.id)
-                        .collect(),
-                )
-                .unwrap();
-            assert!(full_input
-                .for_program_continuation(
-                    &missing_selected,
-                    std::slice::from_ref(&admission),
-                    source,
-                )
-                .is_err());
-            assert!(
-                full_selection
-                    .compiler_support_projection(
-                        &missing_selected,
-                        std::slice::from_ref(&admission)
-                    )
-                    .is_err(),
-                "a source admission may omit only its generated target"
-            );
-            assert_private_choices(&continued, &expected, &published);
         }
     }
 
