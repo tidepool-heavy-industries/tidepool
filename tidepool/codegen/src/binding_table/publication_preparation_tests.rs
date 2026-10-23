@@ -1510,10 +1510,18 @@ fn capture_counter_preflight_refuses_exhaustion_without_mutation() {
     let mut table = BindingTable::new();
     for generation in 1..=10 {
         table.validate_capture_capacity(1, true).unwrap();
+        let before_revision = table.mutation_revision().unwrap();
         let id = table
             .bind_in(scope, entry(&format!("capture{generation}"), generation))
             .unwrap();
         table.save_observation(id, &[], 8);
+        // One value insertion and one observation insertion; after the ninth
+        // value, the oldest observation and its unleased root also retire.
+        let committed_events = if generation <= 8 { 2 } else { 4 };
+        assert_eq!(
+            table.mutation_revision().unwrap() - before_revision,
+            committed_events
+        );
     }
     assert!(!visible(&table, &tree, scope)
         .iter()

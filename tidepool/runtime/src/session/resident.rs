@@ -3197,53 +3197,60 @@ impl CapturedCheckedValue {
     }
 }
 
+pub(super) struct PreparedCapturedCheckedValues {
+    payload: PreparedCapturedCheckedPayload,
+}
+
+static_assertions::assert_not_impl_any!(PreparedCapturedCheckedValues: Clone, Copy);
+
+enum PreparedCapturedCheckedPayload {
+    Empty,
+    Values {
+        bindings: super::persistent::PreparedCheckedBindings,
+        custody: Vec<RootCustody>,
+    },
+}
+
 impl CapturedCheckedValueSet {
     pub(super) fn prepare_commit(
-        &self,
-        session: &mut PersistentSession,
-        ticket: &CheckedCaptureTicket,
-    ) -> Result<Option<u64>, SessionError> {
-        match &self.payload {
-            CapturedCheckedValuePayload::Empty => Ok(None),
-            CapturedCheckedValuePayload::Values { stage, values } => session
-                .prepare_checked_private_values_in(
-                    ticket,
-                    &values.iter().map(|value| &value.entry).collect::<Vec<_>>(),
-                    stage,
-                    self.observation.is_some(),
-                )
-                .map(Some),
-        }
-    }
-
-    pub(super) fn commit(
         self,
         session: &mut PersistentSession,
-        scope: ScopeId,
-        epoch: Option<u64>,
-    ) {
-        if let CapturedCheckedValuePayload::Values { stage, values } = self.payload {
-            let mut entries = Vec::with_capacity(values.len());
-            for mut value in values {
-                value.custody.handle.take();
-                entries.push(value.entry);
+        ticket: &CheckedCaptureTicket,
+    ) -> Result<PreparedCapturedCheckedValues, SessionError> {
+        match self.payload {
+            CapturedCheckedValuePayload::Empty => Ok(PreparedCapturedCheckedValues {
+                payload: PreparedCapturedCheckedPayload::Empty,
+            }),
+            CapturedCheckedValuePayload::Values { stage, values } => {
+                let (entries, custody): (Vec<_>, Vec<_>) = values
+                    .into_iter()
+                    .map(|value| (value.entry, value.custody))
+                    .unzip();
+                let bindings = session.prepare_checked_private_values_in(
+                    ticket,
+                    entries,
+                    stage,
+                    self.provenance,
+                    self.observation,
+                )?;
+                Ok(PreparedCapturedCheckedValues {
+                    payload: PreparedCapturedCheckedPayload::Values { bindings, custody },
+                })
             }
-            let ids = entries
-                .iter()
-                .map(|entry| entry.id.raw())
-                .collect::<Vec<_>>();
-            session.commit_checked_private_values_in(
-                scope,
-                entries,
-                stage,
-                epoch.expect("prepared value epoch"),
-            );
-            for id in ids {
-                session.record_binding_provenance(id, Arc::clone(&self.provenance));
-            }
-            if let Some((id, dependencies)) = self.observation {
-                session.save_observation(id, &dependencies);
-                session.prune_binding_provenance();
+        }
+    }
+}
+
+impl PreparedCapturedCheckedValues {
+    pub(super) fn commit(self, session: &mut PersistentSession) {
+        if let PreparedCapturedCheckedPayload::Values {
+            bindings,
+            mut custody,
+        } = self.payload
+        {
+            session.commit_checked_private_values_in(bindings);
+            for root in &mut custody {
+                root.handle.take();
             }
         }
     }

@@ -188,6 +188,19 @@ pub struct DurablePublicBootstrap {
 
 /// The exact checked interface prepared before a host value enters the heap.
 /// Dropping an uncommitted token reaps only the file this staging operation created.
+/// Complete checked binding publication prepared by this session owner.
+/// Fields stay private so a caller cannot replace its entries, row or epoch.
+pub(super) struct PreparedCheckedBindings {
+    scope: ScopeId,
+    entries: Vec<BindingEntry>,
+    stage: super::resident::CheckedCaptureStage,
+    epoch: u64,
+    provenance: Arc<super::resident::ProgramProvenance>,
+    observation: Option<(SessionVarId, Vec<VarId>)>,
+}
+
+static_assertions::assert_not_impl_any!(PreparedCheckedBindings: Clone, Copy);
+
 pub(super) struct StagedCheckedValueInterface {
     interface: Arc<tidepool_toolchain::checked_cell::CheckedValueArtifact>,
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
@@ -4678,19 +4691,15 @@ impl PersistentSession {
         Ok(MaterializationSetCommit { bindings })
     }
 
-    /// A sealed checked native item overlays Value heads in its exact private
-    /// scope. Its original declaration module remains available by qualification.
-    #[allow(
-        clippy::expect_used,
-        reason = "the complete sealed set is preflighted under the exclusive session checkout"
-    )]
+    /// Prepare the sealed item's complete private overlay before publication.
     pub(super) fn prepare_checked_private_values_in(
         &mut self,
         ticket: &super::admission::CheckedCaptureTicket,
-        entries: &[&BindingEntry],
-        stage: &super::resident::CheckedCaptureStage,
-        observation: bool,
-    ) -> Result<u64, SessionError> {
+        entries: Vec<BindingEntry>,
+        stage: super::resident::CheckedCaptureStage,
+        provenance: Arc<super::resident::ProgramProvenance>,
+        observation: Option<(SessionVarId, Vec<VarId>)>,
+    ) -> Result<PreparedCheckedBindings, SessionError> {
         let scope = ticket.scope();
         self.admit_source_work_in(scope)?;
         stage.validate(self, ticket)?;
@@ -4722,7 +4731,7 @@ impl PersistentSession {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let mut ids = std::collections::HashSet::new();
-        for entry in entries {
+        for entry in &entries {
             if !ids.insert(entry.id) || self.bindings.get(entry.id).is_some() {
                 return Err(
                     tidepool_codegen::binding_table::BindingIdentityError { id: entry.id }.into(),
@@ -4731,29 +4740,44 @@ impl PersistentSession {
             self.bindings.validate_bind_in(scope, entry)?;
         }
         self.bindings
-            .validate_capture_capacity(entries.len(), observation)
+            .validate_capture_capacity(entries.len(), observation.is_some())
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        self.prepare_public_visibility_advance(scope)
+        let epoch = self.prepare_public_visibility_advance(scope)?;
+        Ok(PreparedCheckedBindings {
+            scope,
+            entries,
+            stage,
+            epoch,
+            provenance,
+            observation,
+        })
     }
 
     /// The complete set was checked under exclusive checkout. Source admission
     /// is held by the capture commit, so insertion must not reacquire that gate.
-    pub(super) fn commit_checked_private_values_in(
-        &mut self,
-        scope: ScopeId,
-        entries: Vec<BindingEntry>,
-        stage: super::resident::CheckedCaptureStage,
-        epoch: u64,
-    ) {
+    pub(super) fn commit_checked_private_values_in(&mut self, prepared: PreparedCheckedBindings) {
+        let PreparedCheckedBindings {
+            scope,
+            entries,
+            stage,
+            epoch,
+            provenance,
+            observation,
+        } = prepared;
         for entry in entries {
             let record = BindRecord::of(&entry);
+            let id = entry.id.raw();
             self.bindings
                 .bind_in(scope, entry)
                 .expect("prepared checked binding identity");
             self.binding_index.on_bind_record(&record);
+            self.record_binding_provenance(id, Arc::clone(&provenance));
         }
         stage.commit(self);
         self.commit_public_visibility_advance(scope, epoch);
+        if let Some((id, dependencies)) = observation {
+            self.save_observation(id, &dependencies);
+        }
     }
 
     fn validate_binding_set_in(
