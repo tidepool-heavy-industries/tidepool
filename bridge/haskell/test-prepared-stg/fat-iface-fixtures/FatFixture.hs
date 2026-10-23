@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -O0 -fwrite-if-simplified-core -fomit-interface-pragmas -fno-expose-all-unfoldings #-}
+{-# OPTIONS_GHC -fwrite-interface -O0 -fwrite-if-simplified-core -fomit-interface-pragmas -fno-expose-all-unfoldings #-}
 -- Defining Core keeps the private top without externalizing it through unfoldings.
 module FatFixture (fatIdentity, recA, recB, privateCaller, privateSecond, privateDiamond, foreignAbs) where
 
