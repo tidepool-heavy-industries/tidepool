@@ -4125,14 +4125,16 @@ impl PartialEq for ExactCheckedItem {
 impl Eq for ExactCheckedItem {}
 
 impl ExactCheckedItem {
-    pub fn world_selected_dependency_terminals(
+    pub fn world_stage_dependencies(
         &self,
-    ) -> Result<Vec<crate::compiler_world::SelectedDependencyTerminal>, CompileError> {
+    ) -> Option<&Arc<crate::compiler_world::SealedStageDependencies>> {
         match &self.cell.specification {
-            CheckedCellSpecification::World { program, .. } => {
-                program.selected_dependency_terminals(self.index)
-            }
-            CheckedCellSpecification::Finite(_) => Ok(Vec::new()),
+            CheckedCellSpecification::World { program, .. } => Some(
+                program.item(self.index)
+                    .expect("exact checked World item belongs to its program")
+                    .proof().stage().dependencies(),
+            ),
+            CheckedCellSpecification::Finite(_) => None,
         }
     }
 
