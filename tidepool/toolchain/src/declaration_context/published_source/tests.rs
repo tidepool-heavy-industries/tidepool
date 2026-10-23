@@ -1515,6 +1515,10 @@ impl ExactDeclarationContext {
                 ),
                 "an equal-fact custody acquisition replaced the selected compiler owner"
             );
+            assert!(matches!(
+                support.compiler_roles().native_decision(owner),
+                crate::artifact_inventory::InputNativeDecision::UnissuedPolicy,
+            ), "publication and continuation cannot issue a native choice from retained availability");
         };
         let context = self
             .published_context_for_root(owner, expected.descriptor.id)
