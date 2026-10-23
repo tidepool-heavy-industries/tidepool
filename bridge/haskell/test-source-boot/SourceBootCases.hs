@@ -1815,14 +1815,27 @@ generatedScaffoldImports = withTiming $ withScratch $ \work -> do
     requireHiddenSource "fresh helper importing hidden home support" $
       compile (PreparedProducts Nothing) Set.empty
         (GeneratedScaffoldCompile helperRecipe GeneralCompile) (Just hiddenSession) target [] Nothing
-    let lineSource = "{-# LINE 100 \"authored.hs\" #-}\n" ++ protectedSource
-    writeFile target lineSource
-    lineRecipe <- generatedScaffoldRecipe parserFlags templateImports lineSource lineSource target "Expr"
-      >>= either fail pure
-    requireSourceSelectionInput "logical LINE import location differs from protected occurrence"
-      "generated scaffold package import occurrence differs from its protected recipe" $
-      compile (PreparedProducts Nothing) Set.empty
-        (GeneratedScaffoldCompile lineRecipe GeneralCompile) (Just hiddenSession) target [] Nothing
+    let multilineSource = T.unpack (T.replace (T.pack protectedImport)
+          "import GeneratedScaffoldHomeSupport\n  hiding (irrelevant)" (T.pack protectedSource))
+    forM_
+      [ ("LINE", "{-# LINE 100 \"authored.hs\" #-}\n" ++ protectedSource)
+      , ("Unicode", "-- λ 界 before the generated root\n" ++ protectedSource)
+      , ("multiline", multilineSource)
+      ] $ \(label,rendered) -> do
+        writeFile target rendered
+        capturedRecipe <- generatedScaffoldRecipe parserFlags templateImports
+          rendered rendered target "Expr" >>= either fail pure
+        completed <- compile (PreparedProducts Nothing) Set.empty
+          (GeneratedScaffoldCompile capturedRecipe (CheckedItemCompile [] Nothing []))
+          (Just hiddenSession) target [] Nothing
+        requireRetainedAnswer (label ++ " actual driver preserves protected original") completed
+        receipt <- maybe (fail (label ++ " actual driver omitted its source owner")) pure
+          (preparedExactCompilation completed)
+        unless (snd (sourceImportsSnapshot (compilationSourceImports receipt))
+              == SHA.hash (TE.encodeUtf8 (T.pack rendered))
+            && [mask | ("none","GeneratedScaffoldHomeSupport",False,"main",mask) <-
+                sourceImportsHomeRoles (compilationSourceImports receipt)] == [4]) $
+          fail (label ++ " actual driver changed captured bytes or protected HOME decision")
     duplicateProtected <- either fail pure $ replaceTemplateMarker preambleImportMarker
       (protectedImport ++ "\n" ++ preambleImportMarker) protectedSource
     protectedOccurrences <- either fail pure (captureProtectedTemplateImports parserFlags duplicateProtected)
