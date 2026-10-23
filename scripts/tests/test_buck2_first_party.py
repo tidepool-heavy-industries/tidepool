@@ -1649,7 +1649,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                          "$(location //bridge/haskell:facade_embedded_sources)/actors")
         self.assertIn("//bridge/haskell:facade_embedded_sources", unit["resources"])
         self.assertEqual(set(unit["resource_env"]), {
-            "TIDEPOOL_CELL_TEST_EXTRACT", "TIDEPOOL_COMPILER_DEPLOYMENT",
+            "TIDEPOOL_COMPILER_DEPLOYMENT",
             "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT", "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
             "TIDEPOOL_EXTRACT", "TIDEPOOL_EXTRACT_WORKER",
             "TIDEPOOL_FREER_RESUME_FIXTURE_DIR", "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
@@ -1675,11 +1675,7 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
             self.assertIs(checked["haskell_worker"], True)
             self.assertEqual(checked["resource_env"]["TIDEPOOL_COMPILER_DEPLOYMENT"], "$(location //build/package:compiler_deployment)")
             self.assertEqual(checked["resource_env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
-        fixture = self.rule("tidepool/runtime", "runtime_compiled_cell_fixture_test", "tidepool_rust_test_cases")
-        self.assertEqual(fixture["expected_count"], 8)
-        self.assertEqual(fixture["resource_env"]["TIDEPOOL_CELL_TEST_EXTRACT"], "$(exe //tidepool/extract-cmd:tidepool-extract)")
-        self.assertEqual(fixture["resource_env"]["TIDEPOOL_COMPILER_DEPLOYMENT"], "$(location //build/package:compiler_deployment)")
-        self.assertIn("//build/package:compiler_deployment", fixture["resources"])
+        self.assertNotIn("runtime_compiled_cell_fixture_test", runtime)
         for name, (kind, arguments) in runtime.items():
             if kind == "tidepool_rust_test_cases" and arguments.get("haskell_worker"):
                 self.assertIn("TIDEPOOL_PRELUDE_DIR", arguments["resource_env"], name)

@@ -346,7 +346,6 @@ rust_filegroup(
         "src/session/fixtures/activation-preview-retained-prefix.hs": "tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs",
         "src/session/fixtures/activation-preview-retained-request.hs": "tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs",
         "src/session/fixtures/activation-selected-site-segment.hs": "tidepool/runtime/src/session/fixtures/activation-selected-site-segment.hs",
-        "src/session/fixtures/checked-cell-template.hs": "tidepool/runtime/src/session/fixtures/checked-cell-template.hs",
         "src/session/fixtures/checked-expression-history.hs": "tidepool/runtime/src/session/fixtures/checked-expression-history.hs",
         "src/session/fixtures/checked-home-relay.hs": "tidepool/runtime/src/session/fixtures/checked-home-relay.hs",
         "src/session/fixtures/checked-home-value.hs": "tidepool/runtime/src/session/fixtures/checked-home-value.hs",
@@ -621,7 +620,6 @@ rust_filegroup(
         "src/session/fixtures/activation-preview-retained-prefix.hs": "tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs",
         "src/session/fixtures/activation-preview-retained-request.hs": "tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs",
         "src/session/fixtures/activation-selected-site-segment.hs": "tidepool/runtime/src/session/fixtures/activation-selected-site-segment.hs",
-        "src/session/fixtures/checked-cell-template.hs": "tidepool/runtime/src/session/fixtures/checked-cell-template.hs",
         "src/session/fixtures/checked-expression-history.hs": "tidepool/runtime/src/session/fixtures/checked-expression-history.hs",
         "src/session/fixtures/checked-home-relay.hs": "tidepool/runtime/src/session/fixtures/checked-home-relay.hs",
         "src/session/fixtures/checked-home-value.hs": "tidepool/runtime/src/session/fixtures/checked-home-value.hs",
@@ -931,7 +929,6 @@ tidepool_rust_test_cases(
         "//build/package:compiler_service_deployment",
     ],
     resource_env = {
-        "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
         "TIDEPOOL_COMPILER_SERVICE_DEPLOYMENT": "$(location //build/package:compiler_service_deployment)/compiler-deployment.json",
         "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG": "$(location //build/package:compiler_service_deployment)/compiler-service-source.bin",
@@ -1479,44 +1476,6 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
-    name = "runtime_compiled_cell_fixture_test",
-    binary = ":tidepool_runtime_unit_tests",
-    exact_tests = [
-        "session::turn::tests::compiled_cell_fixture_rejects_a_missing_worker",
-        "session::turn::tests::whole_cell_check_harvests_downstream_fixed_local_type",
-        "session::turn::tests::whole_cell_check_harvests_same_cell_nominal_type",
-        "session::turn::tests::checked_handler_pin_carries_qualified_type_imports",
-        "session::turn::tests::whole_cell_check_reports_missing_record_fields_without_rejecting_declaration",
-        "session::turn::tests::checked_expression_plans_cover_pure_and_effectful_values",
-        "session::turn::tests::a_final_pure_cell_is_accepted_as_effectful",
-        "session::turn::tests::a_genuinely_pure_final_expression_still_takes_the_pure_path",
-    ],
-    expected_count = 8,
-    jobs = 1,
-    timeout = 600,
-    test_rule_timeout_ms = 660000,
-    env = {
-        "TIDEPOOL_KEEP_TEST_LOGS": "1",
-    },
-    resources = [
-        "//bridge/haskell:facade_embedded_sources",
-        "//build/package:compiler_deployment",
-        "//build/package:tidepool_extract_runtime_libraries",
-    ],
-    resource_env = {
-        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
-        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
-        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
-        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
-    },
-    haskell_worker = True,
-    visibility = ["PUBLIC"],
-)
-
-tidepool_rust_test_cases(
     name = "runtime_world_publication_histories",
     binary = ":tidepool_runtime_unit_tests",
     exact_tests = [
@@ -1950,7 +1909,6 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/activation-preview-retained-prefix.hs": "src/session/fixtures/activation-preview-retained-prefix.hs",
         "tidepool/runtime/src/session/fixtures/activation-preview-retained-request.hs": "src/session/fixtures/activation-preview-retained-request.hs",
         "tidepool/runtime/src/session/fixtures/activation-selected-site-segment.hs": "src/session/fixtures/activation-selected-site-segment.hs",
-        "tidepool/runtime/src/session/fixtures/checked-cell-template.hs": "src/session/fixtures/checked-cell-template.hs",
         "tidepool/runtime/src/session/fixtures/checked-expression-history.hs": "src/session/fixtures/checked-expression-history.hs",
         "tidepool/runtime/src/session/fixtures/checked-home-relay.hs": "src/session/fixtures/checked-home-relay.hs",
         "tidepool/runtime/src/session/fixtures/checked-home-value.hs": "src/session/fixtures/checked-home-value.hs",

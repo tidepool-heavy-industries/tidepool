@@ -934,7 +934,6 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "RUSTFMT",
     "TIDEPOOL_CATALOG_TEST_PYTHON",
     "TIDEPOOL_CATALOG_QUALIFICATION_SCRIPT",
-    "TIDEPOOL_CELL_TEST_EXTRACT",
     "TIDEPOOL_COMPILER_DEPLOYMENT",
     "TIDEPOOL_COMPILER_SERVICE_SOURCE_CONFIG",
     "TIDEPOOL_COMPILER_MODULES",
@@ -1536,29 +1535,6 @@ def runtime_test_cases(binary):
             compiler_arguments,
             '    visibility = ["PUBLIC"],', ")", "",
         ]))
-    fixture_tests = ["session::turn::tests::" + name for name in (
-        "compiled_cell_fixture_rejects_a_missing_worker",
-        "whole_cell_check_harvests_downstream_fixed_local_type",
-        "whole_cell_check_harvests_same_cell_nominal_type",
-        "checked_handler_pin_carries_qualified_type_imports",
-        "whole_cell_check_reports_missing_record_fields_without_rejecting_declaration",
-        "checked_expression_plans_cover_pure_and_effectful_values",
-        "a_final_pure_cell_is_accepted_as_effectful",
-        "a_genuinely_pure_final_expression_still_takes_the_pure_path",
-    )]
-    rules.append("\n".join([
-        "tidepool_rust_test_cases(",
-        '    name = "runtime_compiled_cell_fixture_test",',
-        f"    binary = {json.dumps(':' + binary)},",
-        "    exact_tests = [", render_strings(fixture_tests, 8), "    ],",
-        f"    expected_count = {len(fixture_tests)},", "    jobs = 1,", "    timeout = 600,",
-        "    test_rule_timeout_ms = 660000,",
-        runtime_arguments(
-            {**compiler_env, "TIDEPOOL_CELL_TEST_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)"},
-            compiler_resources, worker,
-        ),
-        '    visibility = ["PUBLIC"],', ")", "",
-    ]))
     return "\n".join(rules)
 
 
@@ -2065,8 +2041,6 @@ tidepool_buildscript_run(
         shared = package_name in {"exomonad-host", "tidepool-runtime", "exomonad-actor"}
         if package_name in {"tidepool-runtime", "exomonad-actor"}:
             env, resources, worker = compiler_service_test_inputs(package_name, unit_target["name"], mixed=True)
-            if package_name == "tidepool-runtime":
-                env["TIDEPOOL_CELL_TEST_EXTRACT"] = "$(exe //tidepool/extract-cmd:tidepool-extract)"
             rules.append("\n".join(["tidepool_rust_test_cases(", f"    name = {json.dumps(unit_target['name'] + '_all')},", f"    binary = {json.dumps(':' + unit_target['name'])},", "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 14400000,", runtime_arguments(env, resources, worker),
                 *(['    case_compiler_modes = {' + ", ".join(
                     json.dumps(name) + ': "owned-resident"'
