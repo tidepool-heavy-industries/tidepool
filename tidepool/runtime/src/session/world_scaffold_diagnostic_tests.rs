@@ -32,7 +32,17 @@ fn prepare(
     tidepool_testing::with_settlement(|settlement| {
         compile_cell_program_admitted(admission, settlement)
     })
-    .map_err(|failure| failure.error)
+    .map_err(|failure| {
+        assert!(failure.source_admission.is_none(), "{failure:?}");
+        assert!(
+            failure
+                .compiler_close
+                .as_ref()
+                .is_some_and(|close| close.resources_retired()),
+            "a GHC refusal must retain its confirmed outer close: {failure:?}"
+        );
+        failure.error
+    })
 }
 
 #[test]
