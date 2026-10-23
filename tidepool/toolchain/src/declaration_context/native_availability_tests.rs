@@ -4122,6 +4122,61 @@ fn native_availability_snapshot_facts_follow_changed_rows_without_hot_census() {
     assert!(!restored[0].rows().next().unwrap().contributions[0]
         .offer()
         .same_issuance(restored[1].rows().next().unwrap().contributions[0].offer()));
+    for (receiving, incoming) in [(0, 1), (1, 0)] {
+        let receiving = &restored[receiving];
+        let incoming = &restored[incoming];
+        let receiving_row = receiving.rows().next().unwrap();
+        let incoming_row = incoming.rows().next().unwrap();
+        assert_eq!(receiving_row.contributions.len(), 1);
+        assert_eq!(incoming_row.contributions.len(), 1);
+        assert!(receiving_row.contributions[0].same_recorded_facts(&incoming_row.contributions[0]));
+        let before = NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get);
+        let NativeAvailabilityMerge::Changed(merged) = receiving.merge(incoming).unwrap() else {
+            panic!("equal recorded identities cannot discard an independent live acquisition");
+        };
+        let merged_row = merged.rows().next().unwrap();
+        assert!(Arc::ptr_eq(&merged_row.original, &receiving_row.original));
+        assert_eq!(merged_row.contributions.len(), 2);
+        for source in [receiving_row, incoming_row] {
+            let source_contribution = &source.contributions[0];
+            assert_eq!(
+                merged_row
+                    .contributions
+                    .iter()
+                    .filter(|contribution| contribution
+                        .offer()
+                        .same_issuance(source_contribution.offer()))
+                    .count(),
+                1,
+                "both exact offer issuances must survive their shared fact identity"
+            );
+            assert!(merged_row
+                .contributions
+                .iter()
+                .any(|contribution| contribution.same_acquisition(source_contribution)));
+        }
+        assert!(merged.same_recorded_facts(receiving));
+        assert!(merged.same_recorded_facts(incoming));
+        assert!(facts.ptr_eq(&merged.snapshot_facts().unwrap()));
+        assert_eq!(
+            NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+            before,
+            "an acquisition-only merge must preserve the maintained fact index"
+        );
+        for repeated in [receiving, incoming, &merged] {
+            let NativeAvailabilityMerge::Unchanged(unchanged) = merged.merge(repeated).unwrap()
+            else {
+                panic!("repeating the same issued alternatives must preserve the merged owner");
+            };
+            assert!(unchanged.same_acquisition(&merged));
+            assert!(facts.ptr_eq(&unchanged.snapshot_facts().unwrap()));
+        }
+        assert_eq!(
+            NATIVE_AVAILABILITY_FACT_WORK.with(std::cell::Cell::get),
+            before,
+            "repeated acquisitions must not edit recorded facts"
+        );
+    }
     drop(context);
     drop(acquired_again);
     drop(restored.remove(0));
