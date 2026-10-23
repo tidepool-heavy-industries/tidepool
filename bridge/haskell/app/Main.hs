@@ -549,10 +549,6 @@ runTurnMode bound path = do
   lastAttempt <- newIORef Nothing
   res <- timePhase timing "total" $ trySynchronous $ do
     turnSrc   <- readFile path
-    checkedImports <- case (admitted, exact) of
-      (Nothing, _) -> pure Nothing
-      (Just item, Just scope) -> Just <$> either fail pure (checkedItemImportRendering scope item)
-      (Just _, Nothing) -> fail "checked item imports lack their exact scope"
     let templates = requestTurnTemplates args
     mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
     -- The parse emits no phases of its own. This mode times it as the single
@@ -653,6 +649,10 @@ compileClassifiedTurnKeeping
   -> IORef (Maybe (FilePath, String)) -> TurnParseContext -> Maybe ExactScope -> IO CompiledTurnOutput
 compileClassifiedTurnKeeping bound timing outDir turnSrc sb bindersStr admitted lastAttempt parseContext exact = do
     let args = boundWorkerRequest bound
+    checkedImports <- case (admitted, exact) of
+      (Nothing, _) -> pure Nothing
+      (Just item, Just scope) -> Just <$> either fail pure (checkedItemImportRendering scope item)
+      (Just _, Nothing) -> fail "checked item imports lack their exact scope"
     let (parserFlags, prologue) = case parseContext of
           StandaloneTurnParse flags -> (flags, Nothing)
           PlannedTurnParse flags authored -> (flags, Just authored)
