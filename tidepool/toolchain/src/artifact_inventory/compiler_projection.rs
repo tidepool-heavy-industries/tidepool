@@ -1362,7 +1362,7 @@ pub(crate) struct CompilerSourceSupport {
     native_offer_facts: imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>,
     native_availability: crate::declaration_context::RequestNativeAvailability,
     selected: Arc<SelectedCompilerRows>,
-    input_decisions: IssuedInputNativeDecisions,
+    input_decisions: RecordedInputNativeDecisions,
 }
 
 /// Assembly-only state for one compiler support. Incomplete assembly never
@@ -1380,7 +1380,7 @@ struct SupportDraft {
     native_offer_facts: imbl::OrdMap<[u8; 32], crate::exact_context::NativeOfferSnapshotFacts>,
     native_availability: crate::declaration_context::RequestNativeAvailability,
     selected: Arc<SelectedCompilerRows>,
-    input_decisions: IssuedInputNativeDecisions,
+    input_decisions: RecordedInputNativeDecisions,
 }
 
 impl SupportDraft {
@@ -1603,7 +1603,7 @@ pub(crate) struct RecordedInputNativeDecision {
 /// Presence includes an explicitly empty choice. Absence leaves the original
 /// under its existing input policy; neither case advertises native availability.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IssuedInputNativeDecisions {
+pub(crate) struct RecordedInputNativeDecisions {
     pub(super) facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
 }
 
@@ -1667,7 +1667,7 @@ pub(crate) enum InputNativeDecision<'a> {
     IssuedChoices(&'a imbl::OrdMap<u32, NativeGroupBinding>),
 }
 
-impl IssuedInputNativeDecisions {
+impl RecordedInputNativeDecisions {
     fn with_recorded_facts(
         &self,
         facts: imbl::OrdMap<ExactModuleIdentity, RecordedInputNativeDecision>,
@@ -1980,7 +1980,7 @@ pub(super) struct ResolvedCompilerInputs {
     pub(super) artifacts: ArtifactView,
     pub(super) projection: CompilerInputProjection,
     pub(super) selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
-    pub(super) input_decisions: IssuedInputNativeDecisions,
+    pub(super) input_decisions: RecordedInputNativeDecisions,
 }
 
 #[derive(Clone, Copy)]
@@ -2263,8 +2263,8 @@ impl SelectedCompilerRows {
         AdmittedCompilerRoles { selected: self }
     }
 
-    fn decision_facts(&self) -> IssuedInputNativeDecisions {
-        IssuedInputNativeDecisions {
+    fn decision_facts(&self) -> RecordedInputNativeDecisions {
+        RecordedInputNativeDecisions {
             facts: self
                 .rows
                 .iter()
@@ -2492,7 +2492,7 @@ impl SelectedCompilerInterfaces<'_> {
             native_offer_facts: Default::default(),
             native_closures: AcquiredNativeClosures::default(),
             selected: Arc::new(SelectedCompilerRows::from_admitted(selected)),
-            input_decisions: IssuedInputNativeDecisions::default(),
+            input_decisions: RecordedInputNativeDecisions::default(),
         }
         .close()
     }
@@ -2933,7 +2933,7 @@ impl CompilerSourceSupport {
             }
         }
         let input_decisions =
-            IssuedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
+            RecordedInputNativeDecisions::from_certified_continuation(selection, &projection)?;
         let mut timing = crate::timing::InvocationTiming::start_scoped(
             "exact.compiler_support.output_fragment",
             "retain_issuance",
@@ -3637,7 +3637,7 @@ impl CompilerSourceSupport {
             selected,
             native_offers,
             native_availability,
-            IssuedInputNativeDecisions::default(),
+            RecordedInputNativeDecisions::default(),
             None,
             AcquiredNativeClosures::default(),
         )
@@ -3649,7 +3649,7 @@ impl CompilerSourceSupport {
         selected: BTreeMap<ExactModuleIdentity, ResolvedCompilerRole>,
         native_offers: impl IntoIterator<Item = IssuedNativeOffer>,
         native_availability: crate::declaration_context::RequestNativeAvailability,
-        input_decisions: IssuedInputNativeDecisions,
+        input_decisions: RecordedInputNativeDecisions,
         prior: Option<&Arc<crate::exact_context::PublicationNativeFacts>>,
         native_closures: AcquiredNativeClosures,
     ) -> Result<Self, CompileError> {
@@ -3962,9 +3962,18 @@ impl CompilerSourceSupport {
         artifacts: ArtifactView,
     ) -> Result<Self, CompileError> {
         projection.validate(&artifacts)?;
+        if projection
+            .roles
+            .values()
+            .any(CompilerInputRole::is_published_source_original)
+        {
+            return Err(failure(
+                "published compiler inputs require an actual selected birth",
+            ));
+        }
         let mut selected = projection.resolve_associations(&artifacts)?;
         let mut offers = Vec::new();
-        let mut input_decisions = IssuedInputNativeDecisions::default();
+        let mut input_decisions = RecordedInputNativeDecisions::default();
         for (owner, role) in projection.snapshot_roles() {
             if let Some(original) = role.original() {
                 let proof = NativeOriginalRequirement::from_role(role.clone())
@@ -4680,7 +4689,7 @@ impl CompilerSourceSupport {
         }
     }
 
-    pub(crate) fn input_decisions(&self) -> &IssuedInputNativeDecisions {
+    pub(crate) fn input_decisions(&self) -> &RecordedInputNativeDecisions {
         &self.input_decisions
     }
 
@@ -4892,7 +4901,7 @@ impl CompilerSourceSupport {
             crate::declaration_context::RecoveredCompilerIssuance::CheckedInput => {
                 let support = Self::from_selected_issuance(projection, artifacts)?;
                 let mut draft = support.reopen();
-                draft.input_decisions = IssuedInputNativeDecisions::default()
+                draft.input_decisions = RecordedInputNativeDecisions::default()
                     .with_recorded_facts(draft.input_decisions.facts.clone());
                 draft.close()
             }
@@ -5407,7 +5416,7 @@ impl CompilerSourceSupport {
                 .issued_native_availability()
                 .flat_map(|row| row.offers().cloned()),
             availability,
-            IssuedInputNativeDecisions::default(),
+            RecordedInputNativeDecisions::default(),
             selection.native_fact_base(),
             selection.acquired_native_closures(),
         )?;
@@ -6242,11 +6251,12 @@ impl CompilerInputProjection {
     /// Narrow one issued namespace to authenticated source owners and their
     /// exact required type closure. Reuse remains restricted to source owners;
     /// other dependencies keep interface roles and their existing graph only.
-    pub(crate) fn source_support(
+    #[cfg(test)]
+    fn source_support_facts(
         &self,
         view: &ArtifactView,
         source_owners: &BTreeSet<ExactModuleIdentity>,
-    ) -> Result<CompilerSourceSupport, CompileError> {
+    ) -> Result<(CompilerInputProjection, ArtifactView), CompileError> {
         let metadata = view.metadata_snapshot();
         let mut projection = Self::default();
         let mut pending = source_owners
@@ -6278,7 +6288,7 @@ impl CompilerInputProjection {
             projection.admit_role(owner, role)?;
         }
         let artifacts = view.select_compiler_support(&projection)?;
-        CompilerSourceSupport::new(projection, artifacts, [], Default::default())
+        Ok((projection, artifacts))
     }
 
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
@@ -7917,10 +7927,10 @@ mod tests {
             let source = support.source_support(&owners).unwrap();
             let recomputed = support
                 .projection
-                .source_support(&support.artifacts, &owners)
+                .source_support_facts(&support.artifacts, &owners)
                 .unwrap();
             let recomputed = support
-                .rebuild_narrowed(recomputed.projection, recomputed.artifacts, [])
+                .rebuild_narrowed(recomputed.0, recomputed.1, [])
                 .unwrap();
             assert_eq!(source.projection, recomputed.projection);
             assert!(source.selected.same_recorded_facts(&recomputed.selected));
@@ -8139,14 +8149,10 @@ mod tests {
             let narrowed = reusable.source_support(&owners).unwrap();
             let legacy = reusable
                 .projection
-                .source_support(&reusable.artifacts, &owners)
+                .source_support_facts(&reusable.artifacts, &owners)
                 .unwrap();
             let legacy = reusable
-                .rebuild_narrowed(
-                    legacy.projection,
-                    legacy.artifacts,
-                    reusable.native_offers.iter().cloned(),
-                )
+                .rebuild_narrowed(legacy.0, legacy.1, reusable.native_offers.iter().cloned())
                 .unwrap();
             assert!(narrowed.selected.same_recorded_facts(&legacy.selected));
             assert_eq!(narrowed.projection, legacy.projection);

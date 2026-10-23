@@ -22,7 +22,7 @@ mod native_availability;
 pub(crate) use compiler_projection::RecordedCompilerRole;
 pub(crate) use compiler_projection::{
     AcquiredNativeClosures, CompilerPrimaryInput, CompilerSourceSupport, DemandCompilerProjection,
-    InputNativeDecision, IssuedInputNativeDecisions,
+    InputNativeDecision, RecordedInputNativeDecisions,
 };
 pub use compiler_projection::{
     AdmittedCompilerRoles, AssemblyRoleView, CompilerInputProjection, CompilerInputRole,
@@ -1410,14 +1410,10 @@ struct AdmittedCompilerRowMerge<'a> {
 enum CompilerNativeDemand<'a> {
     RoleIssuer,
     SourceSelections {
-        left: Option<&'a compiler_projection::IssuedInputNativeDecisions>,
-        right: Option<&'a compiler_projection::IssuedInputNativeDecisions>,
+        left: Option<&'a compiler_projection::RecordedInputNativeDecisions>,
+        right: Option<&'a compiler_projection::RecordedInputNativeDecisions>,
     },
     ExtendInterfaces,
-    SelectedOriginals {
-        originals: &'a crate::certified_products::SelectedOriginalClosure,
-        inherited: &'a compiler_projection::IssuedInputNativeDecisions,
-    },
 }
 
 enum ArtifactRootIntent<'a> {
@@ -8845,7 +8841,7 @@ impl ArtifactView {
         (
             Self,
             CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
+            compiler_projection::RecordedInputNativeDecisions,
         ),
         CompileError,
     > {
@@ -8855,115 +8851,6 @@ impl ArtifactView {
             incoming,
             CompilerNativeDemand::RoleIssuer,
             CompilerInputValidation::Closed,
-        )
-    }
-
-    fn merge_compiler_interfaces(
-        &self,
-        projection: &CompilerInputProjection,
-        interfaces: &compiler_projection::SelectedCompilerInterfaces<'_>,
-    ) -> Result<
-        (
-            Self,
-            CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
-        ),
-        CompileError,
-    > {
-        let incoming = interfaces
-            .support_for_owners(interfaces.iter().map(|(owner, _)| owner.clone()).collect())?;
-        self.merge_compiler_inputs_with_demand(
-            projection,
-            incoming.artifacts(),
-            incoming.projection(),
-            CompilerNativeDemand::ExtendInterfaces,
-            CompilerInputValidation::Closed,
-        )
-    }
-
-    /// Authored certification carries its complete demand separately from
-    /// published role policy. Historical same-role demand remains custody.
-    pub(crate) fn merge_selected_original_closure(
-        &self,
-        projection: &CompilerInputProjection,
-        originals: &crate::certified_products::SelectedOriginalClosure,
-        decisions: &compiler_projection::IssuedInputNativeDecisions,
-    ) -> Result<
-        (
-            Self,
-            CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
-        ),
-        CompileError,
-    > {
-        let compiled = originals.native_closure();
-        let owners = originals
-            .products()
-            .iter()
-            .map(|product| ExactModuleIdentity {
-                unit: product.owner().unit.clone(),
-                module: product.owner().module.clone(),
-            })
-            .collect();
-        // Persistent published policy survives missing custody in within_view.
-        // Incoming roles instead belong to this closure's selected originals;
-        // required external owners contribute types and retain baseline policy.
-        let incoming = projection.source_support(compiled, &owners)?;
-        compiled.merge_compiler_inputs_with_demand(
-            incoming.projection(),
-            self,
-            projection,
-            CompilerNativeDemand::SelectedOriginals {
-                originals,
-                inherited: decisions,
-            },
-            CompilerInputValidation::Closed,
-        )
-    }
-
-    fn receive_original_fragment(
-        baseline: &compiler_projection::CompilerSourceSupport,
-        fragment: &crate::declaration_context::OriginalCompilerInputs,
-    ) -> Result<
-        (
-            Self,
-            CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
-        ),
-        CompileError,
-    > {
-        baseline.artifacts().merge_compiler_inputs_with_demand(
-            baseline.projection(),
-            fragment.issued_artifacts(),
-            fragment.role_projection(),
-            CompilerNativeDemand::SourceSelections {
-                left: Some(baseline.input_decisions()),
-                right: fragment.issued_input_decisions(),
-            },
-            CompilerInputValidation::ReceivedFragment,
-        )
-    }
-
-    pub(crate) fn merge_original_fragments(
-        left: &crate::declaration_context::OriginalCompilerInputs,
-        right: &crate::declaration_context::OriginalCompilerInputs,
-    ) -> Result<
-        (
-            Self,
-            CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
-        ),
-        CompileError,
-    > {
-        left.issued_artifacts().merge_compiler_inputs_with_demand(
-            left.role_projection(),
-            right.issued_artifacts(),
-            right.role_projection(),
-            CompilerNativeDemand::SourceSelections {
-                left: left.issued_input_decisions(),
-                right: right.issued_input_decisions(),
-            },
-            CompilerInputValidation::FragmentPair,
         )
     }
 
@@ -8978,7 +8865,7 @@ impl ArtifactView {
         (
             Self,
             CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
+            compiler_projection::RecordedInputNativeDecisions,
         ),
         CompileError,
     > {
@@ -9048,7 +8935,7 @@ impl ArtifactView {
         (
             Self,
             CompilerInputProjection,
-            compiler_projection::IssuedInputNativeDecisions,
+            compiler_projection::RecordedInputNativeDecisions,
         ),
         CompileError,
     > {
@@ -9080,7 +8967,7 @@ impl ArtifactView {
         timing.advance("resolve_namespace_and_native_choices");
         let mut namespace = BTreeMap::new();
         let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
-        let mut input_decisions = compiler_projection::IssuedInputNativeDecisions::default();
+        let mut input_decisions = compiler_projection::RecordedInputNativeDecisions::default();
         for selected_role in selected_roles {
             let selected_role = selected_role?;
             selected.retain_role_selection(&selected_role);
@@ -9118,14 +9005,6 @@ impl ArtifactView {
             let Some(original) = role.original() else {
                 continue;
             };
-            let closure = match &demand {
-                CompilerNativeDemand::SelectedOriginals { originals, .. }
-                    if originals.contains_original(original) =>
-                {
-                    Some(*originals)
-                }
-                _ => None,
-            };
             let selected_sources = match &demand {
                 CompilerNativeDemand::SourceSelections { left, right } => match issuer {
                     compiler_projection::CompilerRoleIssuer::Receiving => {
@@ -9135,10 +9014,6 @@ impl ArtifactView {
                         right.iter().copied().collect()
                     }
                 },
-                CompilerNativeDemand::SelectedOriginals {
-                    originals,
-                    inherited,
-                } if !originals.contains_original(original) => vec![*inherited],
                 _ => Vec::new(),
             };
             let selected_choices = selected_sources
@@ -9163,21 +9038,12 @@ impl ArtifactView {
                 // exact winning role, independently of every other owner.
                 selected_choices.into_iter().flatten().collect::<Vec<_>>()
             } else {
-                let requirements = if let Some(originals) = closure {
-                    NativeOriginalRequirement::from_selected_view(
-                        original,
-                        originals.native_closure(),
-                    )?
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                } else {
-                    match NativeOriginalRequirement::from_role(role.clone()) {
-                        Some(issued) => Some(issued),
-                        None => NativeOriginalRequirement::from_selected_view(original, source)?,
-                    }
-                    .into_iter()
-                    .collect()
-                };
+                let requirements = match NativeOriginalRequirement::from_role(role.clone()) {
+                    Some(issued) => Some(issued),
+                    None => NativeOriginalRequirement::from_selected_view(original, source)?,
+                }
+                .into_iter()
+                .collect::<Vec<_>>();
                 requirements
                     .into_iter()
                     .flat_map(|requirement| {
@@ -19958,9 +19824,11 @@ mod tests {
         let old_projection = CompilerInputProjection::from_issued_entries(&old.entries()).unwrap();
         let new_projection = CompilerInputProjection::from_issued_entries(&new.entries()).unwrap();
         let owner = native.descriptor.owner.clone();
-        let support = new_projection
-            .source_support(&new, &BTreeSet::from([owner.clone()]))
-            .unwrap();
+        let support =
+            crate::declaration_context::issue_fixture_compiler_support(new_projection, new.clone())
+                .unwrap()
+                .source_support(&BTreeSet::from([owner.clone()]))
+                .unwrap();
         let context = ExactDeclarationContext::retained_execution_fixture(
             producer_sha256,
             &old,
