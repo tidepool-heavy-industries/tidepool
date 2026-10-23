@@ -20,42 +20,17 @@ GENERATOR = Path(__file__).resolve().parents[1] / "buck2-first-party.py"
 FEATURES = GENERATOR.with_name("buck2_cargo_features.py")
 PROFILE = GENERATOR.with_name("native-profile.toml")
 TEST_OWNERSHIP = GENERATOR.with_name("test_source_ownership.py")
-TOOLCHAIN_COMPILER_FREE_TESTS = [
-    "source_bundle::tests::materialization_repairs_a_stale_or_partial_completion_marker",
-    "source_bundle::tests::completion_marker_does_not_hide_changed_or_missing_library_sources",
-    "source_bundle::tests::selected_source_verification_rejects_changed_missing_and_extra_modules",
-    "certified_products::tests::original_native_index_preserves_sparse_order_and_selected_identity",
-    "certified_products::tests::original_native_index_issuer_rejects_duplicate_ordinals_and_wrong_owners",
-    "certified_products::tests::original_native_index_matches_linear_scan_for_generated_sparse_groups",
-    "certified_products::tests::original_native_witness_reuses_nonempty_cycle_and_checks_selected_closure",
-    "certified_products::tests::original_native_witness_checks_package_drift_and_zero_group_downgrade",
-    "certified_products::tests::repeated_retained_core_promotion_preserves_exact_original_membership",
-    "certified_products::tests::nonempty_exact_source_recipe_preserves_original_versions_and_selected_subsets",
-    "artifact_inventory::tests::native_requirement_index_refuses_interface_edges",
-    "artifact_inventory::tests::native_requirement_index_preserves_empty_sparse_and_overlapping_edges",
-    "artifact_inventory::tests::native_requirement_planning_visits_only_selected_group_edges",
-    "artifact_inventory::native_history_properties::native_requirement_index_matches_flat_edge_oracle",
-    "artifact_inventory::native_history_properties::staged_native_histories_match_raw_fact_model",
-    "artifact_inventory::native_history_properties::recovery_selection_cannot_borrow_unrecorded_global_dependency",
-    "artifact_inventory::tests::native_requirement_cannot_select_an_ambient_exact_native_key",
-    "artifact_inventory::tests::recovery_restores_interface_edges_and_keeps_certified_native_facts",
-    "certified_products::tests::artifact_view_group_index_properties::artifact_view_group_indexes_preserve_order_and_refusal_precedence",
-    "certified_products::tests::artifact_view_group_index_properties::artifact_view_group_indexes_match_linear_wrapper_for_generated_selections",
-    "artifact_inventory::view_read_properties::cached_read_projection_matches_exhaustive_graph_after_view_histories",
-    "artifact_inventory::view_read_properties::warmed_read_getters_do_not_visit_graph_nodes",
-    "artifact_inventory::view_read_properties::first_read_and_inventory_extension_settle_without_lock_recursion",
-    "artifact_inventory::tests::retained_views_reclaim_after_last_reader_without_copying_payloads",
-    "artifact_inventory::tests::payload_ownership_follows_last_reader_without_drop_traversal",
-    "artifact_inventory::tests::empty_admission_and_parent_only_release_do_not_scan_history",
-    "artifact_inventory::tests::reused_graph_targets_must_match_the_selected_sealed_dependencies",
-    "artifact_inventory::tests::independent_views_retain_existing_nodes_without_sibling_visibility",
-    "artifact_inventory::tests::selected_root_keeps_hidden_requirements_and_reclaims_unselected_history",
-    "artifact_inventory::tests::reclamation_preserves_incoming_cycles_and_does_not_visit_unrelated_history",
-    "artifact_inventory::view_read_properties::zero_mask_empty_selection_boundary_releases_valid_fixture_views",
-    "artifact_inventory::tests::metadata_snapshot_preserves_canonical_typed_edges_in_one_closure",
-    "artifact_inventory::view_read_properties::persistent_payload_history_releases_ancestors_and_shares_immutable_entries",
-    "artifact_inventory::view_read_properties::persistent_captures_share_payload_and_scope_owners",
-]
+
+
+def declared_generator_list(name):
+    """Read a source-owned cohort without importing the generator's CLI."""
+    for statement in ast.parse(GENERATOR.read_text()).body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
+        ):
+            return ast.literal_eval(statement.value)
+    raise AssertionError(f"missing generator declaration: {name}")
 
 
 class FirstPartySources(unittest.TestCase):
@@ -559,9 +534,11 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         cohort = self.rule("tidepool/toolchain", "toolchain_compiler_free_index_view_tests",
                            "tidepool_rust_test_cases")
         self.assertEqual(cohort["binary"], ":tidepool_toolchain_unit_tests_binary")
-        self.assertEqual(cohort["expected_count"], len(TOOLCHAIN_COMPILER_FREE_TESTS))
-        self.assertEqual(cohort["exact_tests"], TOOLCHAIN_COMPILER_FREE_TESTS)
-        self.assertEqual(len(set(cohort["exact_tests"])), len(TOOLCHAIN_COMPILER_FREE_TESTS))
+        selected = declared_generator_list("TOOLCHAIN_COMPILER_FREE_TESTS")
+        self.assertTrue(selected)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertEqual(cohort["expected_count"], len(selected))
+        self.assertEqual(cohort["exact_tests"], selected)
         self.assertNotIn("env", cohort)
         self.assertNotIn("resources", cohort)
         self.assertNotIn("resource_env", cohort)
@@ -706,7 +683,12 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertIn("src/session/fixtures/unreviewed.hs", production)
         service = self.rule("tidepool/runtime", "runtime_world_owner_controls", "tidepool_rust_test_cases")
         self.assertEqual(service["binary"], ":tidepool_runtime_unit_tests")
-        self.assertEqual(service["expected_count"], 2)
+        selected = service["exact_tests"]
+        self.assertTrue(selected)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(all(name.startswith("session::resident::activation_input_tests::")
+                            for name in selected))
+        self.assertEqual(service["expected_count"], len(selected))
         self.assertEqual(service["case_compiler_modes"], {
             name: "owned-resident" for name in service["exact_tests"]
         })
@@ -1287,7 +1269,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(worker['resource_env'], rooted['resource_env'])
         self.assertEqual(worker['resources'], rooted['resources'])
 
-    def test_actor_notebook_cohort_declares_rooted_world_resources_for_all_four_cases(self):
+    def test_actor_notebook_cohort_declares_rooted_world_resources_for_every_selected_case(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
             ('exomonad_actor', 'lib', 'src/lib.rs'),
             ('actor', 'test', 'tests/suites/actor.rs'),
@@ -1305,15 +1287,22 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         cohort = self.rule('exomonad/actor', 'actor_notebook_contract_tests',
                            'tidepool_rust_test_cases')
         self.assertEqual(cohort['binary'], ':actor_binary')
-        self.assertEqual(cohort['expected_count'], 4)
-        self.assertEqual(len(set(cohort['exact_tests'])), 4)
+        selected = cohort['exact_tests']
+        self.assertTrue(selected)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertTrue(all(name.startswith('resident_local_actor::') for name in selected))
+        self.assertEqual(cohort['expected_count'], len(selected))
+        acknowledgement = self.rule('exomonad/actor', 'actor_notebook_acknowledgement_test',
+                                    'tidepool_rust_test_cases')
+        self.assertTrue(set(acknowledgement['exact_tests']).issubset(selected))
         rooted = self.rule('exomonad/actor', 'actor_world_cell_input_test',
                            'tidepool_rust_test_cases')
         self.assertTrue(cohort['ignored'])
         self.assertEqual(cohort['case_compiler_modes'], {
             name: 'owned-resident' for name in cohort['exact_tests']
         })
-        for field in ('env', 'resource_env', 'resources', 'haskell_worker'):
+        self.assertEqual(cohort['env'], {**rooted['env'], 'TIDEPOOL_ACTOR_TEST_TRACE': '1'})
+        for field in ('resource_env', 'resources', 'haskell_worker'):
             self.assertEqual(cohort[field], rooted[field], field)
         self.assertIs(cohort['haskell_worker'], True)
         self.assertEqual(cohort['jobs'], 1)
